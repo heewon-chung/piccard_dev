@@ -1,0 +1,16 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      accuracy
+  Security:  STD128
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.25 avg_error=0.0103687
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.75 avg_error=0.0693548
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0

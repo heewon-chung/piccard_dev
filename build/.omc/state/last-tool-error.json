@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cmake --build build --target bench_dynamic --target bench_threshold -j$(sysctl -n hw.ncpu) 2>&1\",\"timeout\":120000,\"description\":\"Rebuild with error handling\"}",
+  "error": "Exit code 1\nError: /Users/heewonchung/Documents/04-Dev/01-research/active/jaccard_fhe/build/build is not a directory\n\nError: /Users/heewonchung/Documents/04-Dev/01-research/active/jaccard_fhe/build/build is not a directory",
+  "timestamp": "2026-02-27T04:42:53.551Z",
+  "retry_count": 1
+}

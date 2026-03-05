@@ -1,0 +1,17 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      accuracy
+  Security:  STD128
+  Universe: 10000
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.25 piccard_err=0.107143 baseline_err=0
+  overlap=0.5 piccard_err=0.061828 baseline_err=0
+  overlap=0.75 piccard_err=0.0209677 baseline_err=0
+  overlap=0.9 piccard_err=0.0601173 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0

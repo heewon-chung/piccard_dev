@@ -1,0 +1,1001 @@
+============================================================
+  Piccard Benchmark Suite
+  Fri Feb 27 14:00:42 KST 2026
+  Security: STD128 STD192
+  Timing trials:   10
+  Accuracy trials: 50
+  Tag: paper
+  Output: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper
+============================================================
+
+Date:     2026-02-27T05:00:42Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.6.4.2)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128 STD192
+Timing trials:   10
+Accuracy trials: 50
+
+
+============================================================
+  Security level: STD128
+============================================================
+
+------------------------------------------------------------
+  Running: Piccard timing (STD128)
+  Command: bench_piccard --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=8192 time=19.4655ms (mul=3.1416 rot=10.3686) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=8192 time=18.7298ms (mul=2.97154 rot=9.95502) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=8192 time=18.8776ms (mul=2.96515 rot=10.0145) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=34.6642ms (mul=4.78229 rot=18.4785) ct=525155B J_hat=0.306452 err=0.0268817
+  k=1024 N=32768 time=67.0183ms (mul=8.55835 rot=36.1558) ct=1049443B J_hat=0.3125 err=0.0208333
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=8192 time=18.7758ms (mul=2.93792 rot=10.0098) ct=263011B err=0
+  m=32 N=8192 time=19.5734ms (mul=3.09202 rot=10.5064) ct=263011B err=0.0134409
+  m=64 N=8192 time=19.4574ms (mul=3.08033 rot=10.4429) ct=263011B err=0
+  m=128 N=16384 time=35.3181ms (mul=5.00437 rot=18.9942) ct=525155B err=0.00262467
+  m=256 N=32768 time=68.7987ms (mul=8.90808 rot=37.562) ct=1049443B err=0.00784314
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 time=20.171ms (minhash=0.493834 enc=5.59831 mul=3.14365 rot=10.5722) err=0.0134409
+  size=10000 time=24.4915ms (minhash=4.96927 enc=5.59617 mul=3.11688 rot=10.463) err=0.0537634
+  size=50000 time=44.6452ms (minhash=24.9588 enc=5.70504 mul=3.10317 rot=10.5667) err=0.0134409
+  size=100000 time=69.7098ms (minhash=49.8685 enc=5.72429 mul=3.14092 rot=10.6006) err=0.110215
+  size=500000 time=263.917ms (minhash=243.801 enc=6.04021 mul=3.23869 rot=10.3484) err=0.00537634
+  size=1000000 time=519.44ms (minhash=499.38 enc=5.79083 mul=3.15088 rot=10.6512) err=0.0134409
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)
+  Done in 14s -> piccard_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Piccard accuracy (STD128)
+  Command: bench_piccard --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+
+=== Accuracy (fixed k=128) ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+
+=== Accuracy vs k (MinHash convergence) ===
+  k=64 avg_error=0.0421069
+  k=128 avg_error=0.0267206
+  k=256 avg_error=0.0270872
+  k=512 avg_error=0.0106471
+  k=1024 avg_error=0.0102663
+  Done in 100s -> piccard_accuracy_STD128.csv
+
+------------------------------------------------------------
+  Running: Comparison timing (STD128)
+  Command: bench_comparison --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+  Universe: 262144
+
+=== Vary universe size (median of 10 trials) ===
+  U=1024 piccard: N=8192 total=19.1996ms err=0.061828
+  U=1024 baseline: N=8192 cts=1 total=18.8616ms err=0
+  U=4096 piccard: N=8192 total=19.1352ms err=0.061828
+  U=4096 baseline: N=8192 cts=1 total=18.8444ms err=0
+  U=16384 piccard: N=8192 total=19.0055ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=34.4254ms err=0
+  U=65536 piccard: N=8192 total=19.0134ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=135.359ms err=0
+  U=262144 piccard: N=8192 total=18.991ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=623.577ms err=0
+  U=524288 piccard: N=8192 total=24.4006ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1301.92ms err=0
+  U=1048576 piccard: N=8192 total=21.2504ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2741.37ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=100 piccard: total=21.0214ms err=0.0456989
+  size=100 baseline: total=606.907ms err=0
+  size=500 piccard: total=21.1747ms err=0.061828
+  size=500 baseline: total=606.505ms err=0
+  size=1000 piccard: total=21.4681ms err=0.00537634
+  size=1000 baseline: total=606.809ms err=0
+  size=5000 piccard: total=23.502ms err=0.061828
+  size=5000 baseline: total=606.695ms err=0
+  size=10000 piccard: total=25.7786ms err=0.0134409
+  size=10000 baseline: total=606.975ms err=0
+  size=50000 piccard: total=43.0682ms err=0.0134409
+  size=50000 baseline: total=600.98ms err=0
+  size=100000 piccard: total=67.1985ms err=0.134409
+  size=100000 baseline: total=600.215ms err=0
+  Done in 110s -> comparison_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Comparison accuracy (STD128)
+  Command: bench_comparison --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+  Universe: 262144
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.2 piccard_err=0.0824373 baseline_err=0
+  overlap=0.3 piccard_err=0.113852 baseline_err=0
+  overlap=0.4 piccard_err=0.0887097 baseline_err=0
+  overlap=0.5 piccard_err=0.061828 baseline_err=0
+  overlap=0.6 piccard_err=0.0391705 baseline_err=0
+  overlap=0.7 piccard_err=0.0260546 baseline_err=0
+  overlap=0.8 piccard_err=0.00268817 baseline_err=0
+  overlap=0.9 piccard_err=0.0601173 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0
+  Done in 359s -> comparison_accuracy_STD128.csv
+
+------------------------------------------------------------
+  Running: Dynamic timing (STD128)
+  Command: bench_dynamic --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+  Depth:     5
+
+=== Varying k (median of 10 trials) ===
+  k=64 d=5 init=3.88056ms ins=5.12821e+06 ops/s del=3.62529e+06 ops/s total=22.8013ms
+  k=128 d=5 init=7.57981ms ins=2.72725e+06 ops/s del=1.91847e+06 ops/s total=26.9052ms
+  k=256 d=5 init=14.1326ms ins=1.46789e+06 ops/s del=985630 ops/s total=33.133ms
+  k=512 d=5 init=27.9228ms ins=730151 ops/s del=497822 ops/s total=62.812ms
+  k=1024 d=5 init=56.8475ms ins=369004 ops/s del=252154 ops/s total=124.515ms
+
+=== Varying depth (median of 10 trials) ===
+  d=3 init=7.47127ms ins=2.74597e+06 ops/s del=1.83348e+06 ops/s total=26.312ms
+  d=5 init=7.57065ms ins=2.74914e+06 ops/s del=1.82232e+06 ops/s total=26.5339ms
+  d=10 init=7.88629ms ins=2.67852e+06 ops/s del=1.5625e+06 ops/s total=26.9356ms
+  d=20 init=8.46867ms ins=2.7027e+06 ops/s del=1.28548e+06 ops/s total=27.3895ms
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 init=0.907791ms total=19.9534ms
+  size=10000 init=7.57608ms total=26.7008ms
+  size=50000 init=36.8916ms total=55.9163ms
+  size=100000 init=73.6772ms total=92.7618ms
+  size=500000 init=367.372ms total=387.829ms
+  size=1000000 init=736.396ms total=755.896ms
+
+=== Dynamic vs Basic (median of 10 trials) ===
+  k=64 dynamic=22.8281ms basic=20.9931ms overhead=1.09x
+  k=128 dynamic=26.86ms basic=23.62ms overhead=1.14x
+  k=256 dynamic=33.32ms basic=28.27ms overhead=1.18x
+  k=512 dynamic=62.92ms basic=53.20ms overhead=1.18x
+  k=1024 dynamic=124.02ms basic=109.56ms overhead=1.13x
+  Done in 23s -> dynamic_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Dynamic accuracy (STD128)
+  Command: bench_dynamic --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+  Depth:     5
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+  Done in 11s -> dynamic_accuracy_STD128.csv
+
+------------------------------------------------------------
+  Running: Threshold timing (STD128)
+  Command: bench_threshold --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+  Max k:     128
+
+=== Varying k (median of 10 trials) ===
+  k=16 tau=8 depth=7 N=16384 poly_eval=62.4621ms total=129.052ms
+  k=32 tau=16 depth=9 N=16384 poly_eval=111.452ms total=192.325ms
+  k=64 tau=32 depth=12 N=32768 poly_eval=419.802ms total=627.691ms
+  k=128 tau=64 depth=15 N=32768 poly_eval=903.384ms total=1247.02ms
+
+=== Varying tau (median of 10 trials) ===
+  tau=1 poly_eval=399.25ms total=600.668ms correct=1
+  tau=16 poly_eval=408.198ms total=612.637ms correct=1
+  tau=32 poly_eval=439.932ms total=693.995ms correct=1
+  tau=48 poly_eval=480.351ms total=748.657ms correct=1
+  tau=64 poly_eval=479.048ms total=748.036ms correct=1
+
+=== Threshold vs Basic ===
+  k=16 threshold=135.802ms basic=19.9332ms overhead=6.8x
+  k=32 threshold=214.7ms basic=19.3ms overhead=11.1x
+  k=64 threshold=599.1ms basic=19.4ms overhead=30.9x
+  k=128 threshold=1226.3ms basic=19.3ms overhead=63.6x
+  Done in 92s -> threshold_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Threshold accuracy (STD128)
+  Command: bench_threshold --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+  Max k:     128
+
+=== Threshold Accuracy ===
+  tau=32 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  tau=64 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  tau=96 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  Done in 2613s -> threshold_accuracy_STD128.csv
+
+
+============================================================
+  Security level: STD192
+============================================================
+
+------------------------------------------------------------
+  Running: Piccard timing (STD192)
+  Command: bench_piccard --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=16384 time=18.9288ms (mul=2.94946 rot=10.0799) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=16384 time=19.2082ms (mul=3.04929 rot=10.2304) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=16384 time=19.344ms (mul=3.13429 rot=10.2752) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=35.176ms (mul=4.9126 rot=18.7411) ct=525155B J_hat=0.306452 err=0.0268817
+  k=1024 N=32768 time=67.9944ms (mul=8.66192 rot=36.9577) ct=1049443B J_hat=0.3125 err=0.0208333
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=16384 time=19.4798ms (mul=3.10115 rot=10.3258) ct=263011B err=0
+  m=32 N=16384 time=19.4681ms (mul=3.09542 rot=10.3912) ct=263011B err=0.0134409
+  m=64 N=16384 time=19.0738ms (mul=3.00702 rot=10.0835) ct=263011B err=0
+  m=128 N=16384 time=34.7063ms (mul=4.85906 rot=18.6138) ct=525155B err=0.00262467
+  m=256 N=32768 time=67.0721ms (mul=8.70148 rot=36.1837) ct=1049443B err=0.00784314
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 time=19.2327ms (minhash=0.480229 enc=5.46692 mul=2.91902 rot=10.032) err=0.0134409
+  size=10000 time=23.8547ms (minhash=4.92719 enc=5.49662 mul=2.92881 rot=10.1072) err=0.0537634
+  size=50000 time=43.024ms (minhash=24.0921 enc=5.55063 mul=2.913 rot=10.0305) err=0.0134409
+  size=100000 time=67.7186ms (minhash=48.8295 enc=5.58854 mul=2.9439 rot=10.0652) err=0.110215
+  size=500000 time=264.387ms (minhash=244.524 enc=5.7136 mul=3.07481 rot=10.3026) err=0.00537634
+  size=1000000 time=510.915ms (minhash=490.767 enc=5.88556 mul=3.16854 rot=10.3139) err=0.0134409
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)
+  Done in 14s -> piccard_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Piccard accuracy (STD192)
+  Command: bench_piccard --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+
+=== Accuracy (fixed k=128) ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+
+=== Accuracy vs k (MinHash convergence) ===
+  k=64 avg_error=0.0421069
+  k=128 avg_error=0.0267206
+  k=256 avg_error=0.0270872
+  k=512 avg_error=0.0106471
+  k=1024 avg_error=0.0102663
+  Done in 100s -> piccard_accuracy_STD192.csv
+
+------------------------------------------------------------
+  Running: Comparison timing (STD192)
+  Command: bench_comparison --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Universe: 262144
+
+=== Vary universe size (median of 10 trials) ===
+  U=1024 piccard: N=8192 total=19.9415ms err=0.061828
+  U=1024 baseline: N=16384 cts=1 total=36.0136ms err=0
+  U=4096 piccard: N=8192 total=19.9636ms err=0.061828
+  U=4096 baseline: N=16384 cts=1 total=36.98ms err=0
+  U=16384 piccard: N=8192 total=19.608ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=35.9879ms err=0
+  U=65536 piccard: N=8192 total=19.9758ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=141.113ms err=0
+  U=262144 piccard: N=8192 total=21.1624ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=631.286ms err=0
+  U=524288 piccard: N=8192 total=23.5177ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1363.99ms err=0
+  U=1048576 piccard: N=8192 total=27.5969ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2800.56ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=100 piccard: total=19.2674ms err=0.0456989
+  size=100 baseline: total=627.508ms err=0
+  size=500 piccard: total=27.5765ms err=0.061828
+  size=500 baseline: total=607.921ms err=0
+  size=1000 piccard: total=26.7532ms err=0.00537634
+  size=1000 baseline: total=631.407ms err=0
+  size=5000 piccard: total=29.9027ms err=0.061828
+  size=5000 baseline: total=610.189ms err=0
+  size=10000 piccard: total=25.7625ms err=0.0134409
+  size=10000 baseline: total=607.238ms err=0
+  size=50000 piccard: total=44.5191ms err=0.0134409
+  size=50000 baseline: total=627.262ms err=0
+  size=100000 piccard: total=69.9277ms err=0.134409
+  size=100000 baseline: total=609.58ms err=0
+  Done in 112s -> comparison_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Comparison accuracy (STD192)
+  Command: bench_comparison --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+  Universe: 262144
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.2 piccard_err=0.0824373 baseline_err=0
+  overlap=0.3 piccard_err=0.113852 baseline_err=0
+  overlap=0.4 piccard_err=0.0887097 baseline_err=0
+  overlap=0.5 piccard_err=0.061828 baseline_err=0
+  overlap=0.6 piccard_err=0.0391705 baseline_err=0
+  overlap=0.7 piccard_err=0.0260546 baseline_err=0
+  overlap=0.8 piccard_err=0.00268817 baseline_err=0
+  overlap=0.9 piccard_err=0.0601173 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0
+  Done in 347s -> comparison_accuracy_STD192.csv
+
+------------------------------------------------------------
+  Running: Dynamic timing (STD192)
+  Command: bench_dynamic --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Depth:     5
+
+=== Varying k (median of 10 trials) ===
+  k=64 d=5 init=3.85546ms ins=5.19481e+06 ops/s del=3.67525e+06 ops/s total=22.7454ms
+  k=128 d=5 init=7.54806ms ins=2.72109e+06 ops/s del=1.92001e+06 ops/s total=26.5207ms
+  k=256 d=5 init=14.138ms ins=1.46699e+06 ops/s del=985222 ops/s total=33.2429ms
+  k=512 d=5 init=27.9784ms ins=738007 ops/s del=497822 ops/s total=62.5339ms
+  k=1024 d=5 init=56.5602ms ins=357674 ops/s del=242547 ops/s total=124.703ms
+
+=== Varying depth (median of 10 trials) ===
+  d=3 init=7.444ms ins=2.74288e+06 ops/s del=1.92463e+06 ops/s total=26.3899ms
+  d=5 init=7.54752ms ins=2.74281e+06 ops/s del=1.92615e+06 ops/s total=26.4671ms
+  d=10 init=7.867ms ins=2.7057e+06 ops/s del=1.5554e+06 ops/s total=26.7679ms
+  d=20 init=8.45435ms ins=2.7027e+06 ops/s del=1.28687e+06 ops/s total=27.3991ms
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 init=0.898834ms total=19.8354ms
+  size=10000 init=7.57254ms total=26.5861ms
+  size=50000 init=36.9019ms total=55.8568ms
+  size=100000 init=73.4876ms total=92.5231ms
+  size=500000 init=366.451ms total=387.242ms
+  size=1000000 init=732.793ms total=753.762ms
+
+=== Dynamic vs Basic (median of 10 trials) ===
+  k=64 dynamic=22.7204ms basic=21.1543ms overhead=1.07x
+  k=128 dynamic=26.51ms basic=23.63ms overhead=1.12x
+  k=256 dynamic=33.15ms basic=28.51ms overhead=1.16x
+  k=512 dynamic=62.47ms basic=57.16ms overhead=1.09x
+  k=1024 dynamic=123.88ms basic=106.06ms overhead=1.17x
+  Done in 23s -> dynamic_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Dynamic accuracy (STD192)
+  Command: bench_dynamic --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+  Depth:     5
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+  Done in 10s -> dynamic_accuracy_STD192.csv
+
+------------------------------------------------------------
+  Running: Threshold timing (STD192)
+  Command: bench_threshold --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Max k:     64
+
+=== Varying k (median of 10 trials) ===
+  k=16 tau=8 depth=7 N=16384 poly_eval=62.5226ms total=129.499ms
+  k=32 tau=16 depth=9 N=32768 poly_eval=225.312ms total=401.086ms
+  k=64 tau=32 depth=12 N=32768 poly_eval=397.658ms total=601.603ms
+
+=== Varying tau (median of 10 trials) ===
+  tau=1 poly_eval=400.56ms total=602.144ms correct=1
+  tau=16 poly_eval=425.583ms total=666.083ms correct=1
+  tau=32 poly_eval=424.204ms total=669.848ms correct=1
+  tau=48 poly_eval=487.777ms total=762.204ms correct=1
+  tau=64 poly_eval=487.811ms total=762.013ms correct=1
+
+=== Threshold vs Basic ===
+  k=16 threshold=136.878ms basic=22.0968ms overhead=6.2x
+  k=32 threshold=479.4ms basic=21.2ms overhead=22.6x
+  k=64 threshold=762.9ms basic=21.4ms overhead=35.7x
+  Done in 72s -> threshold_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Threshold accuracy (STD192)
+  Command: bench_threshold --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+  Max k:     64
+
+=== Threshold Accuracy ===
+  tau=16 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  tau=32 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  tau=48 accuracy=100.0% FP=0.0% FN=0.0% (550/550)
+  Done in 1596s -> threshold_accuracy_STD192.csv
+
+============================================================
+  All benchmarks complete.
+  Results: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper
+
+  Files:
+    comparison_accuracy_STD128.csv  (    1101 lines)
+    comparison_accuracy_STD192.csv  (    1101 lines)
+    comparison_timing_STD128.csv  (      29 lines)
+    comparison_timing_STD192.csv  (      29 lines)
+    dynamic_accuracy_STD128.csv  (     551 lines)
+    dynamic_accuracy_STD192.csv  (     551 lines)
+    dynamic_timing_STD128.csv  (      26 lines)
+    dynamic_timing_STD192.csv  (      26 lines)
+    piccard_accuracy_STD128.csv  (    3301 lines)
+    piccard_accuracy_STD192.csv  (    3301 lines)
+    piccard_timing_STD128.csv  (      17 lines)
+    piccard_timing_STD192.csv  (      17 lines)
+    threshold_accuracy_STD128.csv  (    1651 lines)
+    threshold_accuracy_STD192.csv  (    1651 lines)
+    threshold_timing_STD128.csv  (      14 lines)
+    threshold_timing_STD192.csv  (      12 lines)
+
+  System info: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper/system_info.txt
+  Full log:    /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper/run.log
+============================================================
+
+============================================================
+  Generating summary tables...
+============================================================
+
+======================================================================
+  System Information
+======================================================================
+Date:     2026-02-27T05:00:42Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.6.4.2)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128 STD192
+Timing trials:   10
+Accuracy trials: 50
+
+
+======================================================================
+  Security level: STD128
+======================================================================
+
+======================================================================
+  Table 1: Piccard Timing — Parameter Sensitivity
+======================================================================
+              Label     k    m      N  MinHash  Encode  Encrypt  Multiply  RotSum  Decrypt  Total (ms)   CT Size
+----------------------------------------------------------------------------------------------------------------
+          vary_k_64    64   32   8192    0.025   0.002      5.6       3.1    10.4    0.344        19.5  256.8 KB
+         vary_k_128   128   32   8192    0.048   0.002      5.4       3.0    10.0    0.333        18.7  256.8 KB
+         vary_k_256   256   32   8192    0.095   0.004      5.5       3.0    10.0    0.331        18.9  256.8 KB
+         vary_k_512   512   32  16384    0.191   0.006     10.6       4.8    18.5    0.583        34.7  512.8 KB
+        vary_k_1024  1024   32  32768    0.380   0.011     20.8       8.6    36.2      1.1        67.0    1.0 MB
+          vary_m_16   128   16   8192    0.048   0.002      5.4       2.9    10.0    0.330        18.8  256.8 KB
+          vary_m_32   128   32   8192    0.050   0.002      5.6       3.1    10.5    0.357        19.6  256.8 KB
+          vary_m_64   128   64   8192    0.049   0.002      5.5       3.1    10.4    0.346        19.5  256.8 KB
+         vary_m_128   128  128  16384    0.048   0.003     10.7       5.0    19.0    0.575        35.3  512.8 KB
+         vary_m_256   128  256  32768    0.050   0.006     21.3       8.9    37.6      1.1        68.8    1.0 MB
+     vary_size_1000   128   32   8192    0.494   0.002      5.6       3.1    10.6    0.350        20.2  256.8 KB
+    vary_size_10000   128   32   8192      5.0   0.004      5.6       3.1    10.5    0.347        24.5  256.8 KB
+    vary_size_50000   128   32   8192     25.0   0.004      5.7       3.1    10.6    0.352        44.6  256.8 KB
+   vary_size_100000   128   32   8192     49.9   0.005      5.7       3.1    10.6    0.351        69.7  256.8 KB
+   vary_size_500000   128   32   8192    243.8   0.007      6.0       3.2    10.3    0.342       263.9  256.8 KB
+  vary_size_1000000   128   32   8192    499.4   0.007      5.8       3.2    10.7    0.361       519.4  256.8 KB
+
+======================================================================
+  Table 2: Piccard vs Baseline — Varying Universe Size
+======================================================================
+    U_set    Method        N  #CTs  Encode  Encrypt  Compute  Decrypt  Total (ms)   CT Size      Error  Speedup
+---------------------------------------------------------------------------------------------------------------
+     1024   Piccard     8192     1   0.249      5.5     13.1    0.343        19.2  256.8 KB     0.0618         
+           Baseline     8192     1   0.034      5.5     13.0    0.340        18.9  256.8 KB  0 (exact)     1.0x
+     4096   Piccard     8192     1   0.244      5.5     13.0    0.338        19.1  256.8 KB     0.0618         
+           Baseline     8192     1   0.034      5.5     13.0    0.344        18.8  256.8 KB  0 (exact)     1.0x
+    16384   Piccard     8192     1   0.245      5.5     12.9    0.335        19.0  256.8 KB     0.0618         
+           Baseline    16384     1   0.062     10.6     23.3    0.572        34.4  512.8 KB  0 (exact)     1.8x
+    65536   Piccard     8192     1   0.242      5.5     12.9    0.336        19.0  256.8 KB     0.0618         
+           Baseline    65536     1   0.092     41.7     91.3      2.2       135.4    2.0 MB  0 (exact)     7.1x
+   262144   Piccard     8192     1   0.245      5.5     12.9    0.333        19.0  256.8 KB     0.0618         
+           Baseline   262144     1   0.220    178.1    436.0      9.0       623.6    8.0 MB  0 (exact)    32.8x
+   524288   Piccard     8192     1   0.246      6.1     17.6    0.436        24.4  256.8 KB     0.0618         
+           Baseline   524288     1   0.382    358.3    921.0     21.7      1301.9   16.0 MB  0 (exact)    53.4x
+  1048576   Piccard     8192     1   0.245      5.6     15.0    0.373        21.2  256.8 KB     0.0618         
+           Baseline  1048576     1   0.728    738.3   1965.1     37.7      2741.4   32.0 MB  0 (exact)   129.0x
+
+======================================================================
+  Table 3: Piccard vs Baseline — Varying Set Size
+======================================================================
+     |S|    Method  Encode  Encrypt  Compute  Decrypt  Total (ms)      Error  Speedup
+-------------------------------------------------------------------------------------
+     100   Piccard   0.050      5.6     15.0    0.387        21.0     0.0457         
+          Baseline   0.213    174.0    423.8      8.8       606.9  0 (exact)    28.9x
+     500   Piccard   0.242      5.6     15.0    0.385        21.2     0.0618         
+          Baseline   0.212    173.8    423.7      8.9       606.5  0 (exact)    28.6x
+    1000   Piccard   0.484      5.6     15.0    0.385        21.5     0.0054         
+          Baseline   0.212    173.7    424.2      8.9       606.8  0 (exact)    28.3x
+    5000   Piccard     2.4      5.6     15.1    0.382        23.5     0.0618         
+          Baseline   0.203    174.0    423.6      8.9       606.7  0 (exact)    25.8x
+   10000   Piccard     4.8      5.6     15.0    0.385        25.8     0.0134         
+          Baseline   0.191    174.0    423.8      8.9       607.0  0 (exact)    23.5x
+   50000   Piccard    24.1      5.5     13.1    0.339        43.1     0.0134         
+          Baseline   0.228    174.0    418.2      8.6       601.0  0 (exact)    14.0x
+  100000   Piccard    48.2      5.6     13.1    0.337        67.2     0.1344         
+          Baseline   0.295    173.9    417.3      8.6       600.2  0 (exact)     8.9x
+
+======================================================================
+  Table 4: Accuracy — Piccard vs Baseline
+======================================================================
+   Overlap  J_true  Piccard J  Piccard Err  Baseline J  Baseline Err
+--------------------------------------------------------------------
+  0.000000  0.0000     0.0000    0 (exact)      0.0000     0 (exact)
+  0.100000  0.0526     0.0968       0.0441      0.0526     0 (exact)
+  0.200000  0.1111     0.1935       0.0824      0.1111     0 (exact)
+  0.300000  0.1765     0.2903       0.1139      0.1765     0 (exact)
+  0.400000  0.2500     0.3387       0.0887      0.2500     0 (exact)
+  0.500000  0.3333     0.3952       0.0618      0.3333     0 (exact)
+  0.600000  0.4286     0.4677       0.0392      0.4286     0 (exact)
+  0.700000  0.5385     0.5645       0.0261      0.5385     0 (exact)
+  0.800000  0.6667     0.6694       0.0027      0.6667     0 (exact)
+  0.900000  0.8182     0.7581       0.0601      0.8182     0 (exact)
+  1.000000  1.0000     1.0000    0 (exact)      1.0000     0 (exact)
+
+======================================================================
+  Table 5: Piccard Accuracy Across Similarity Levels
+======================================================================
+   Overlap    k   m  J_true  J_hat (avg)  Avg Error
+---------------------------------------------------
+  0.000000  128  32  0.0000       0.0000  0 (exact)
+  0.100000  128  32  0.0526       0.0887     0.0361
+  0.200000  128  32  0.1111       0.1210     0.0099
+  0.300000  128  32  0.1765       0.1855     0.0090
+  0.400000  128  32  0.2500       0.2500  0 (exact)
+  0.500000  128  32  0.3333       0.3468     0.0134
+  0.600000  128  32  0.4286       0.5161     0.0876
+  0.700000  128  32  0.5385       0.6048     0.0664
+  0.800000  128  32  0.6667       0.7258     0.0591
+  0.900000  128  32  0.8182       0.8306     0.0125
+  1.000000  128  32  1.0000       1.0000  0 (exact)
+
+======================================================================
+  Table 6: Dynamic Protocol Timing
+======================================================================
+                           Label     k   m   d  Init (ms)  Insert (ops/s)  Delete (ops/s)  Compute (ms)  Total (ms)   CT Size
+-----------------------------------------------------------------------------------------------------------------------------
+                       vary_k_64    64  32   5        3.9            5.1M            3.6M          18.9        22.8  256.8 KB
+                      vary_k_128   128  32   5        7.6            2.7M            1.9M          19.2        26.9  256.8 KB
+                      vary_k_256   256  32   5       14.1            1.5M          985.6K          18.8        33.1  256.8 KB
+                      vary_k_512   512  32   5       27.9          730.2K          497.8K          34.5        62.8  512.8 KB
+                     vary_k_1024  1024  32   5       56.8          369.0K          252.2K          66.9       124.5    1.0 MB
+                    vary_depth_3   128  32   3        7.5            2.7M            1.8M          18.7        26.3  256.8 KB
+                    vary_depth_5   128  32   5        7.6            2.7M            1.8M          18.9        26.5  256.8 KB
+                   vary_depth_10   128  32  10        7.9            2.7M            1.6M          18.9        26.9  256.8 KB
+                   vary_depth_20   128  32  20        8.5            2.7M            1.3M          18.8        27.4  256.8 KB
+                  vary_size_1000   128  32   5      0.908            2.0M            1.8M          18.9        20.0  256.8 KB
+                 vary_size_10000   128  32   5        7.6            2.7M            1.9M          19.0        26.7  256.8 KB
+                 vary_size_50000   128  32   5       36.9            2.7M            1.9M          18.9        55.9  256.8 KB
+                vary_size_100000   128  32   5       73.7            2.7M            1.9M          18.8        92.8  256.8 KB
+                vary_size_500000   128  32   5      367.4            2.7M            1.9M          20.6       387.8  256.8 KB
+               vary_size_1000000   128  32   5      736.4            2.6M            1.9M          20.4       755.9  256.8 KB
+    dynamic_vs_basic_k64_dynamic    64  32   5        3.9            5.1M            3.6M          18.9        22.8  256.8 KB
+      dynamic_vs_basic_k64_basic    64  32   0        2.4               -               -          18.6        21.0  256.8 KB
+   dynamic_vs_basic_k128_dynamic   128  32   5        7.6            2.7M            1.9M          19.0        26.9  256.8 KB
+     dynamic_vs_basic_k128_basic   128  32   0        4.8               -               -          18.8        23.6  256.8 KB
+   dynamic_vs_basic_k256_dynamic   256  32   5       14.1            1.5M          986.0K          18.9        33.3  256.8 KB
+     dynamic_vs_basic_k256_basic   256  32   0        9.6               -               -          18.7        28.3  256.8 KB
+   dynamic_vs_basic_k512_dynamic   512  32   5       28.0          736.6K          498.7K          34.5        62.9  512.8 KB
+     dynamic_vs_basic_k512_basic   512  32   0       19.1               -               -          34.1        53.2  512.8 KB
+  dynamic_vs_basic_k1024_dynamic  1024  32   5       56.5          360.3K          250.4K          66.9       124.0    1.0 MB
+    dynamic_vs_basic_k1024_basic  1024  32   0       39.9               -               -          69.7       109.6    1.0 MB
+
+======================================================================
+  Table 7: Threshold Protocol Timing
+======================================================================
+          Label    k  tau  Depth      N  Encrypt   Mul  RotSum   Mask  PolyEval  Decrypt  Total (ms)  CT Size  Note
+-------------------------------------------------------------------------------------------------------------------
+      vary_k_16   16    8      7  16384     14.9   8.6    41.9  0.684      62.5    0.750       129.1   1.3 MB      
+      vary_k_32   32   16      9  16384     16.6  10.0    52.7  0.764     111.5    0.810       192.3   1.5 MB      
+      vary_k_64   64   32     12  32768     40.9  25.1   143.1    1.6     419.8      1.8       627.7   4.0 MB      
+     vary_k_128  128   64     15  32768     48.5  38.3   252.7    2.0     903.4      2.1      1247.0   5.0 MB      
+     vary_tau_1   64    1     12  32768     38.7  23.5   135.2    1.5     399.2      1.6       600.7   4.0 MB      
+    vary_tau_16   64   16     12  32768     39.0  23.8   138.5    1.6     408.2      1.7       612.6   4.0 MB      
+    vary_tau_32   64   32     12  32768     38.9  28.9   182.0    1.6     439.9      1.6       694.0   4.0 MB      
+    vary_tau_48   64   48     12  32768     40.9  31.0   193.1    1.9     480.4      1.9       748.7   4.0 MB      
+    vary_tau_64   64   64     12  32768     40.9  31.1   192.6    1.8     479.0      1.9       748.0   4.0 MB      
+   vs_basic_k16   16    8      7  16384     14.9   9.1    43.8  0.698      66.4    0.801       135.8   1.3 MB      
+   vs_basic_k32   32   16      9  16384     16.5  11.9    66.9  0.777     117.9    0.874       214.7   1.5 MB      
+   vs_basic_k64   64   32     12  32768     38.7  23.7   136.2    1.6     397.5      1.6       599.1   4.0 MB      
+  vs_basic_k128  128   64     15  32768     48.7  37.8   249.7    2.0     886.3      2.1      1226.3   5.0 MB      
+
+======================================================================
+  Table 8: Threshold Accuracy
+======================================================================
+  tau  Trials  Correct  Accuracy (%)  FP Rate (%)  FN Rate (%)
+--------------------------------------------------------------
+   32     550      550         100.0          0.0          0.0
+   64     550      550         100.0          0.0          0.0
+   96     550      550         100.0          0.0          0.0
+
+======================================================================
+  Table 9: Communication Cost — Piccard vs Baseline
+======================================================================
+      |U|  Piccard N  Piccard #CTs  Piccard CT Size  Baseline N  Baseline #CTs  Baseline CT Size  Size Ratio
+------------------------------------------------------------------------------------------------------------
+     1024       8192             1         256.8 KB        8192              1          256.8 KB        1.0x
+     4096       8192             1         256.8 KB        8192              1          256.8 KB        1.0x
+    16384       8192             1         256.8 KB       16384              1          512.8 KB        2.0x
+    65536       8192             1         256.8 KB       65536              1            2.0 MB        8.0x
+   262144       8192             1         256.8 KB      262144              1            8.0 MB       31.9x
+   524288       8192             1         256.8 KB      524288              1           16.0 MB       63.8x
+  1048576       8192             1         256.8 KB     1048576              1           32.0 MB      127.6x
+
+======================================================================
+  Table 10: Accuracy vs k — MinHash Convergence
+======================================================================
+     k  Trials  Mean |err|  Max |err|    RMSE  Std Dev  1/sqrt(k)
+-----------------------------------------------------------------
+    64     550      0.0421     0.0914  0.0548   0.0350     0.1250
+   128     550      0.0267     0.0876  0.0398   0.0294     0.0884
+   256     550      0.0271     0.0906  0.0391   0.0282     0.0625
+   512     550      0.0106     0.0269  0.0136   0.0084     0.0442
+  1024     550      0.0103     0.0311  0.0140   0.0095     0.0312
+
+======================================================================
+  Security level: STD192
+======================================================================
+
+======================================================================
+  Table 1: Piccard Timing — Parameter Sensitivity
+======================================================================
+              Label     k    m      N  MinHash  Encode  Encrypt  Multiply  RotSum  Decrypt  Total (ms)   CT Size
+----------------------------------------------------------------------------------------------------------------
+          vary_k_64    64   32   8192    0.024   0.002      5.5       2.9    10.1    0.338        18.9  256.8 KB
+         vary_k_128   128   32   8192    0.049   0.002      5.5       3.0    10.2    0.331        19.2  256.8 KB
+         vary_k_256   256   32   8192    0.099   0.003      5.6       3.1    10.3    0.332        19.3  256.8 KB
+         vary_k_512   512   32  16384    0.191   0.006     10.6       4.9    18.7    0.607        35.2  512.8 KB
+        vary_k_1024  1024   32  32768    0.388   0.010     21.0       8.7    37.0      1.1        68.0    1.0 MB
+          vary_m_16   128   16   8192    0.049   0.003      5.6       3.1    10.3    0.352        19.5  256.8 KB
+          vary_m_32   128   32   8192    0.050   0.002      5.5       3.1    10.4    0.341        19.5  256.8 KB
+          vary_m_64   128   64   8192    0.050   0.002      5.6       3.0    10.1    0.345        19.1  256.8 KB
+         vary_m_128   128  128  16384    0.049   0.004     10.5       4.9    18.6    0.579        34.7  512.8 KB
+         vary_m_256   128  256  32768    0.049   0.007     20.8       8.7    36.2      1.1        67.1    1.0 MB
+     vary_size_1000   128   32   8192    0.480   0.002      5.5       2.9    10.0    0.343        19.2  256.8 KB
+    vary_size_10000   128   32   8192      4.9   0.003      5.5       2.9    10.1    0.344        23.9  256.8 KB
+    vary_size_50000   128   32   8192     24.1   0.005      5.6       2.9    10.0    0.340        43.0  256.8 KB
+   vary_size_100000   128   32   8192     48.8   0.006      5.6       2.9    10.1    0.340        67.7  256.8 KB
+   vary_size_500000   128   32   8192    244.5   0.007      5.7       3.1    10.3    0.341       264.4  256.8 KB
+  vary_size_1000000   128   32   8192    490.8   0.009      5.9       3.2    10.3    0.342       510.9  256.8 KB
+
+======================================================================
+  Table 2: Piccard vs Baseline — Varying Universe Size
+======================================================================
+    U_set    Method        N  #CTs  Encode  Encrypt  Compute  Decrypt  Total (ms)   CT Size      Error  Speedup
+---------------------------------------------------------------------------------------------------------------
+     1024   Piccard     8192     1   0.250      5.5     13.8    0.347        19.9  256.8 KB     0.0618         
+           Baseline    16384     1   0.064     11.0     24.4    0.605        36.0  512.8 KB  0 (exact)     1.8x
+     4096   Piccard     8192     1   0.253      5.6     13.8    0.348        20.0  256.8 KB     0.0618         
+           Baseline    16384     1   0.064     11.2     25.1    0.635        37.0  512.8 KB  0 (exact)     1.9x
+    16384   Piccard     8192     1   0.251      5.6     13.4    0.341        19.6  256.8 KB     0.0618         
+           Baseline    16384     1   0.063     10.9     24.5    0.601        36.0  512.8 KB  0 (exact)     1.8x
+    65536   Piccard     8192     1   0.250      5.7     13.7    0.355        20.0  256.8 KB     0.0618         
+           Baseline    65536     1   0.094     43.1     96.0      2.3       141.1    2.0 MB  0 (exact)     7.1x
+   262144   Piccard     8192     1   0.250      5.9     14.6    0.381        21.2  256.8 KB     0.0618         
+           Baseline   262144     1   0.210    176.2    444.3      9.3       631.3    8.0 MB  0 (exact)    29.8x
+   524288   Piccard     8192     1   0.245      5.7     16.8    0.396        23.5  256.8 KB     0.0618         
+           Baseline   524288     1   0.408    371.3    968.9     22.9      1364.0   16.0 MB  0 (exact)    58.0x
+  1048576   Piccard     8192     1   0.250      6.6     20.3    0.517        27.6  256.8 KB     0.0618         
+           Baseline  1048576     1   0.727    747.5   2014.2     38.4      2800.6   32.0 MB  0 (exact)   101.5x
+
+======================================================================
+  Table 3: Piccard vs Baseline — Varying Set Size
+======================================================================
+     |S|    Method  Encode  Encrypt  Compute  Decrypt  Total (ms)      Error  Speedup
+-------------------------------------------------------------------------------------
+     100   Piccard   0.052      5.5     13.2    0.346        19.3     0.0457         
+          Baseline   0.224    177.6    438.6      9.1       627.5  0 (exact)    32.6x
+     500   Piccard   0.250      6.5     20.3    0.526        27.6     0.0618         
+          Baseline   0.213    175.1    424.2      8.7       607.9  0 (exact)    22.0x
+    1000   Piccard   0.504      6.5     19.2    0.485        26.8     0.0054         
+          Baseline   0.221    178.4    443.1      9.0       631.4  0 (exact)    23.6x
+    5000   Piccard     2.5      6.6     20.3    0.523        29.9     0.0618         
+          Baseline   0.206    176.1    426.5      8.6       610.2  0 (exact)    20.4x
+   10000   Piccard     4.8      5.6     15.0    0.385        25.8     0.0134         
+          Baseline   0.198    175.2    423.3      8.7       607.2  0 (exact)    23.6x
+   50000   Piccard    24.6      5.6     13.3    0.345        44.5     0.0134         
+          Baseline   0.232    179.6    439.1      9.1       627.3  0 (exact)    14.1x
+  100000   Piccard    50.4      5.7     13.3    0.362        69.9     0.1344         
+          Baseline   0.297    174.4    425.1      8.8       609.6  0 (exact)     8.7x
+
+======================================================================
+  Table 4: Accuracy — Piccard vs Baseline
+======================================================================
+   Overlap  J_true  Piccard J  Piccard Err  Baseline J  Baseline Err
+--------------------------------------------------------------------
+  0.000000  0.0000     0.0000    0 (exact)      0.0000     0 (exact)
+  0.100000  0.0526     0.0968       0.0441      0.0526     0 (exact)
+  0.200000  0.1111     0.1935       0.0824      0.1111     0 (exact)
+  0.300000  0.1765     0.2903       0.1139      0.1765     0 (exact)
+  0.400000  0.2500     0.3387       0.0887      0.2500     0 (exact)
+  0.500000  0.3333     0.3952       0.0618      0.3333     0 (exact)
+  0.600000  0.4286     0.4677       0.0392      0.4286     0 (exact)
+  0.700000  0.5385     0.5645       0.0261      0.5385     0 (exact)
+  0.800000  0.6667     0.6694       0.0027      0.6667     0 (exact)
+  0.900000  0.8182     0.7581       0.0601      0.8182     0 (exact)
+  1.000000  1.0000     1.0000    0 (exact)      1.0000     0 (exact)
+
+======================================================================
+  Table 5: Piccard Accuracy Across Similarity Levels
+======================================================================
+   Overlap    k   m  J_true  J_hat (avg)  Avg Error
+---------------------------------------------------
+  0.000000  128  32  0.0000       0.0000  0 (exact)
+  0.100000  128  32  0.0526       0.0887     0.0361
+  0.200000  128  32  0.1111       0.1210     0.0099
+  0.300000  128  32  0.1765       0.1855     0.0090
+  0.400000  128  32  0.2500       0.2500  0 (exact)
+  0.500000  128  32  0.3333       0.3468     0.0134
+  0.600000  128  32  0.4286       0.5161     0.0876
+  0.700000  128  32  0.5385       0.6048     0.0664
+  0.800000  128  32  0.6667       0.7258     0.0591
+  0.900000  128  32  0.8182       0.8306     0.0125
+  1.000000  128  32  1.0000       1.0000  0 (exact)
+
+======================================================================
+  Table 6: Dynamic Protocol Timing
+======================================================================
+                           Label     k   m   d  Init (ms)  Insert (ops/s)  Delete (ops/s)  Compute (ms)  Total (ms)   CT Size
+-----------------------------------------------------------------------------------------------------------------------------
+                       vary_k_64    64  32   5        3.9            5.2M            3.7M          18.8        22.7  256.8 KB
+                      vary_k_128   128  32   5        7.5            2.7M            1.9M          18.9        26.5  256.8 KB
+                      vary_k_256   256  32   5       14.1            1.5M          985.2K          19.0        33.2  256.8 KB
+                      vary_k_512   512  32   5       28.0          738.0K          497.8K          34.3        62.5  512.8 KB
+                     vary_k_1024  1024  32   5       56.6          357.7K          242.5K          67.5       124.7    1.0 MB
+                    vary_depth_3   128  32   3        7.4            2.7M            1.9M          18.8        26.4  256.8 KB
+                    vary_depth_5   128  32   5        7.5            2.7M            1.9M          18.8        26.5  256.8 KB
+                   vary_depth_10   128  32  10        7.9            2.7M            1.6M          18.8        26.8  256.8 KB
+                   vary_depth_20   128  32  20        8.5            2.7M            1.3M          18.8        27.4  256.8 KB
+                  vary_size_1000   128  32   5      0.899            2.7M            1.9M          18.9        19.8  256.8 KB
+                 vary_size_10000   128  32   5        7.6            2.7M            1.9M          18.9        26.6  256.8 KB
+                 vary_size_50000   128  32   5       36.9            2.7M            1.9M          18.9        55.9  256.8 KB
+                vary_size_100000   128  32   5       73.5            2.7M            1.9M          18.9        92.5  256.8 KB
+                vary_size_500000   128  32   5      366.5            2.7M            1.9M          20.6       387.2  256.8 KB
+               vary_size_1000000   128  32   5      732.8            2.6M            1.9M          20.7       753.8  256.8 KB
+    dynamic_vs_basic_k64_dynamic    64  32   5        3.8            5.2M            3.7M          18.8        22.7  256.8 KB
+      dynamic_vs_basic_k64_basic    64  32   0        2.4               -               -          18.8        21.2  256.8 KB
+   dynamic_vs_basic_k128_dynamic   128  32   5        7.6            2.7M            1.9M          18.8        26.5  256.8 KB
+     dynamic_vs_basic_k128_basic   128  32   0        4.8               -               -          18.8        23.6  256.8 KB
+   dynamic_vs_basic_k256_dynamic   256  32   5       14.1            1.5M          984.0K          18.9        33.2  256.8 KB
+     dynamic_vs_basic_k256_basic   256  32   0        9.6               -               -          19.0        28.5  256.8 KB
+   dynamic_vs_basic_k512_dynamic   512  32   5       27.8          741.2K          498.2K          34.3        62.5  512.8 KB
+     dynamic_vs_basic_k512_basic   512  32   0       19.9               -               -          37.2        57.2  512.8 KB
+  dynamic_vs_basic_k1024_dynamic  1024  32   5       56.5          368.7K          252.1K          66.7       123.9    1.0 MB
+    dynamic_vs_basic_k1024_basic  1024  32   0       39.2               -               -          66.9       106.1    1.0 MB
+
+======================================================================
+  Table 7: Threshold Protocol Timing
+======================================================================
+         Label   k  tau  Depth      N  Encrypt   Mul  RotSum   Mask  PolyEval  Decrypt  Total (ms)  CT Size  Note
+-----------------------------------------------------------------------------------------------------------------
+     vary_k_16  16    8      7  16384     15.0   8.6    42.1  0.701      62.5    0.761       129.5   1.3 MB      
+     vary_k_32  32   16      9  32768     35.9  20.2   116.6    1.5     225.3      1.5       401.1   3.5 MB      
+     vary_k_64  64   32     12  32768     38.9  23.7   135.0    1.6     397.7      1.6       601.6   4.0 MB      
+    vary_tau_1  64    1     12  32768     38.8  23.7   135.0    1.6     400.6      1.7       602.1   4.0 MB      
+   vary_tau_16  64   16     12  32768     39.0  29.0   169.7    1.6     425.6      1.7       666.1   4.0 MB      
+   vary_tau_32  64   32     12  32768     38.9  29.1   174.2    1.6     424.2      1.6       669.8   4.0 MB      
+   vary_tau_48  64   48     12  32768     41.7  31.3   197.3    1.9     487.8      1.9       762.2   4.0 MB      
+   vary_tau_64  64   64     12  32768     41.6  31.4   197.8    1.9     487.8      1.9       762.0   4.0 MB      
+  vs_basic_k16  16    8      7  16384     14.9   9.2    43.5  0.689      67.7    0.775       136.9   1.3 MB      
+  vs_basic_k32  32   16      9  32768     36.1  25.5   159.1    1.5     256.2      1.6       479.4   3.5 MB      
+  vs_basic_k64  64   32     12  32768     41.7  31.5   197.5    1.9     490.6      1.9       762.9   4.0 MB      
+
+======================================================================
+  Table 8: Threshold Accuracy
+======================================================================
+  tau  Trials  Correct  Accuracy (%)  FP Rate (%)  FN Rate (%)
+--------------------------------------------------------------
+   16     550      550         100.0          0.0          0.0
+   32     550      550         100.0          0.0          0.0
+   48     550      550         100.0          0.0          0.0
+
+======================================================================
+  Table 9: Communication Cost — Piccard vs Baseline
+======================================================================
+      |U|  Piccard N  Piccard #CTs  Piccard CT Size  Baseline N  Baseline #CTs  Baseline CT Size  Size Ratio
+------------------------------------------------------------------------------------------------------------
+     1024       8192             1         256.8 KB       16384              1          512.8 KB        2.0x
+     4096       8192             1         256.8 KB       16384              1          512.8 KB        2.0x
+    16384       8192             1         256.8 KB       16384              1          512.8 KB        2.0x
+    65536       8192             1         256.8 KB       65536              1            2.0 MB        8.0x
+   262144       8192             1         256.8 KB      262144              1            8.0 MB       31.9x
+   524288       8192             1         256.8 KB      524288              1           16.0 MB       63.8x
+  1048576       8192             1         256.8 KB     1048576              1           32.0 MB      127.6x
+
+======================================================================
+  Table 10: Accuracy vs k — MinHash Convergence
+======================================================================
+     k  Trials  Mean |err|  Max |err|    RMSE  Std Dev  1/sqrt(k)
+-----------------------------------------------------------------
+    64     550      0.0421     0.0914  0.0548   0.0350     0.1250
+   128     550      0.0267     0.0876  0.0398   0.0294     0.0884
+   256     550      0.0271     0.0906  0.0391   0.0282     0.0625
+   512     550      0.0106     0.0269  0.0136   0.0084     0.0442
+  1024     550      0.0103     0.0311  0.0140   0.0095     0.0312
+
+  Saved 20 table files to /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper/
+    table10_accuracy_vs_k_STD128.txt
+    table10_accuracy_vs_k_STD192.txt
+    table1_piccard_timing_STD128.txt
+    table1_piccard_timing_STD192.txt
+    table2_comparison_universe_STD128.txt
+    table2_comparison_universe_STD192.txt
+    table3_comparison_setsize_STD128.txt
+    table3_comparison_setsize_STD192.txt
+    table4_accuracy_STD128.txt
+    table4_accuracy_STD192.txt
+    table5_piccard_accuracy_STD128.txt
+    table5_piccard_accuracy_STD192.txt
+    table6_dynamic_timing_STD128.txt
+    table6_dynamic_timing_STD192.txt
+    table7_threshold_timing_STD128.txt
+    table7_threshold_timing_STD192.txt
+    table8_threshold_accuracy_STD128.txt
+    table8_threshold_accuracy_STD192.txt
+    table9_communication_cost_STD128.txt
+    table9_communication_cost_STD192.txt
+
+
+  Summary saved: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper/summary.txt
+
+------------------------------------------------------------
+  Generating LaTeX tables...
+------------------------------------------------------------
+  LaTeX saved: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_140042_paper/tables_latex.tex

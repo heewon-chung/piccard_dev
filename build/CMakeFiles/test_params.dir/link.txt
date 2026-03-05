@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -O0 -Wall -Wextra -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_params.dir/tests/unit/test_params.cpp.o -o test_params   -L/usr/local/lib  -L/opt/homebrew/opt/libomp/lib  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/opt/homebrew/opt/libomp/lib libpiccard_core.a libtest_main.a /opt/homebrew/lib/libgtest.a

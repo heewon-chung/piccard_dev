@@ -1,0 +1,348 @@
+============================================================
+  Piccard Benchmark Suite
+  Fri Feb 27 12:20:43 KST 2026
+  Security: STD128 STD192
+  Timing trials:   10
+  Accuracy trials: 50
+  Tag: paper
+  Output: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_122043_paper
+============================================================
+
+Date:     2026-02-27T03:20:43Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.0.13.5)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128 STD192
+Timing trials:   10
+Accuracy trials: 50
+
+
+============================================================
+  Security level: STD128
+============================================================
+
+------------------------------------------------------------
+  Running: Piccard timing (STD128)
+  Command: bench_piccard --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=8192 time=18.8826ms (mul=2.91644 rot=10.1131) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=8192 time=19.0238ms (mul=2.944 rot=10.2006) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=8192 time=18.8786ms (mul=2.90938 rot=10.0555) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=35.1339ms (mul=4.87635 rot=18.6776) ct=525155B J_hat=0.306452 err=0.0268817
+  k=1024 N=32768 time=67.0416ms (mul=8.48321 rot=36.1566) ct=1049443B J_hat=0.3125 err=0.0208333
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=8192 time=18.8447ms (mul=2.90381 rot=10.0674) ct=263011B err=0
+  m=32 N=8192 time=18.8447ms (mul=2.89404 rot=10.0576) ct=263011B err=0.0134409
+  m=64 N=8192 time=18.8499ms (mul=2.91875 rot=10.0515) ct=263011B err=0
+  m=128 N=16384 time=34.4805ms (mul=4.84238 rot=18.5401) ct=525155B err=0.00262467
+  m=256 N=32768 time=66.6879ms (mul=8.50242 rot=36.1734) ct=1049443B err=0.00784314
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 time=19.2132ms (minhash=0.479625 enc=5.48683 mul=2.89331 rot=10.0375) err=0.0134409
+  size=10000 time=23.5984ms (minhash=4.8209 enc=5.49281 mul=2.87713 rot=10.0125) err=0.0537634
+  size=50000 time=43.0105ms (minhash=24.0806 enc=5.57677 mul=2.9469 rot=10.0557) err=0.0134409
+  size=100000 time=69.0692ms (minhash=50.1571 enc=5.59427 mul=2.91781 rot=10.1199) err=0.110215
+  size=500000 time=262.22ms (minhash=241.555 enc=6.09631 mul=3.53365 rot=10.5194) err=0.00537634
+  size=1000000 time=506.08ms (minhash=484.999 enc=6.18521 mul=3.57185 rot=10.6254) err=0.0134409
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)
+  Done in 14s -> piccard_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Piccard accuracy (STD128)
+  Command: bench_piccard --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+  Done in 11s -> piccard_accuracy_STD128.csv
+
+------------------------------------------------------------
+  Running: Comparison timing (STD128)
+  Command: bench_comparison --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+  Universe: 262144
+
+=== Vary universe size (median of 10 trials) ===
+  U=1024 piccard: N=8192 total=19.016ms err=0.061828
+  U=1024 baseline: N=8192 cts=1 total=19.6341ms err=0
+  U=4096 piccard: N=8192 total=19.0381ms err=0.061828
+  U=4096 baseline: N=8192 cts=1 total=18.8796ms err=0
+  U=16384 piccard: N=8192 total=19.098ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=34.5336ms err=0
+  U=65536 piccard: N=8192 total=19.0723ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=136.055ms err=0
+  U=262144 piccard: N=8192 total=19.0137ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=604.095ms err=0
+  U=524288 piccard: N=8192 total=23.4714ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1300.11ms err=0
+  U=1048576 piccard: N=8192 total=21.2339ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2739.47ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=100 piccard: total=21.602ms err=0.0456989
+  size=100 baseline: total=597.94ms err=0
+  size=500 piccard: total=21.745ms err=0.061828
+  size=500 baseline: total=598.688ms err=0
+  size=1000 piccard: total=22.5265ms err=0.00537634
+  size=1000 baseline: total=602.142ms err=0
+  size=5000 piccard: total=24.254ms err=0.061828
+  size=5000 baseline: total=650.815ms err=0
+  size=10000 piccard: total=26.5007ms err=0.0134409
+  size=10000 baseline: total=628.15ms err=0
+  size=50000 piccard: total=46.8829ms err=0.0134409
+  size=50000 baseline: total=641.35ms err=0
+  size=100000 piccard: total=68.136ms err=0.134409
+  size=100000 baseline: total=601.768ms err=0
+  Done in 111s -> comparison_timing_STD128.csv
+
+------------------------------------------------------------
+  Running: Comparison accuracy (STD128)
+  Command: bench_comparison --mode=accuracy --security=STD128 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+  Universe: 262144
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.2 piccard_err=0.0824373 baseline_err=0
+  overlap=0.3 piccard_err=0.113852 baseline_err=0
+  overlap=0.4 piccard_err=0.0887097 baseline_err=0
+  overlap=0.5 piccard_err=0.061828 baseline_err=0
+  overlap=0.6 piccard_err=0.0391705 baseline_err=0
+  overlap=0.7 piccard_err=0.0260546 baseline_err=0
+  overlap=0.8 piccard_err=0.00268817 baseline_err=0
+  overlap=0.9 piccard_err=0.0601173 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0
+  Done in 348s -> comparison_accuracy_STD128.csv
+
+
+============================================================
+  Security level: STD192
+============================================================
+
+------------------------------------------------------------
+  Running: Piccard timing (STD192)
+  Command: bench_piccard --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=16384 time=18.8048ms (mul=2.9261 rot=10.0237) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=16384 time=18.887ms (mul=2.91133 rot=10.0873) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=16384 time=20.0509ms (mul=3.12952 rot=10.7172) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=34.4893ms (mul=4.80196 rot=18.3722) ct=525155B J_hat=0.306452 err=0.0268817
+  k=1024 N=32768 time=67.1792ms (mul=8.53373 rot=36.2717) ct=1049443B J_hat=0.3125 err=0.0208333
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=16384 time=19.5102ms (mul=3.05002 rot=10.4107) ct=263011B err=0
+  m=32 N=16384 time=19.2617ms (mul=3.05088 rot=10.2624) ct=263011B err=0.0134409
+  m=64 N=16384 time=18.9126ms (mul=2.92485 rot=10.1414) ct=263011B err=0
+  m=128 N=16384 time=34.1893ms (mul=4.81277 rot=18.28) ct=525155B err=0.00262467
+  m=256 N=32768 time=66.7208ms (mul=8.47108 rot=36.1333) ct=1049443B err=0.00784314
+
+=== Varying set size (median of 10 trials) ===
+  size=1000 time=19.3484ms (minhash=0.479209 enc=5.48515 mul=2.91954 rot=10.0812) err=0.0134409
+  size=10000 time=23.5775ms (minhash=4.80431 enc=5.48854 mul=2.91723 rot=10.0256) err=0.0537634
+  size=50000 time=42.9339ms (minhash=24.0799 enc=5.54375 mul=2.89673 rot=10.0746) err=0.0134409
+  size=100000 time=67.2251ms (minhash=48.2361 enc=5.55556 mul=2.90637 rot=10.1455) err=0.110215
+  size=500000 time=262.145ms (minhash=241.592 enc=6.04683 mul=3.43115 rot=10.44) err=0.00537634
+  size=1000000 time=503.731ms (minhash=483.1 enc=5.7531 mul=3.08733 rot=10.3237) err=0.0134409
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)
+  Done in 14s -> piccard_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Piccard accuracy (STD192)
+  Command: bench_piccard --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+  Done in 10s -> piccard_accuracy_STD192.csv
+
+------------------------------------------------------------
+  Running: Comparison timing (STD192)
+  Command: bench_comparison --mode=timing --security=STD192 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Universe: 262144
+
+=== Vary universe size (median of 10 trials) ===
+  U=1024 piccard: N=8192 total=18.9432ms err=0.061828
+  U=1024 baseline: N=16384 cts=1 total=34.4012ms err=0
+  U=4096 piccard: N=8192 total=18.9717ms err=0.061828
+  U=4096 baseline: N=16384 cts=1 total=34.3245ms err=0
+  U=16384 piccard: N=8192 total=19.0413ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=34.3797ms err=0
+  U=65536 piccard: N=8192 total=18.956ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=135.25ms err=0
+  U=262144 piccard: N=8192 total=18.9682ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=606.824ms err=0
+  U=524288 piccard: N=8192 total=21.8919ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1298.99ms err=0
+  U=1048576 piccard: N=8192 total=21.3174ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2735.23ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=100 piccard: total=21.0872ms err=0.0456989
+  size=100 baseline: total=599.629ms err=0
+  size=500 piccard: total=21.3689ms err=0.061828
+  size=500 baseline: total=599.301ms err=0
+  size=1000 piccard: total=21.5129ms err=0.00537634
+  size=1000 baseline: total=598.596ms err=0
+  size=5000 piccard: total=23.5135ms err=0.061828
+  size=5000 baseline: total=598.547ms err=0
+  size=10000 piccard: total=25.7852ms err=0.0134409
+  size=10000 baseline: total=599.449ms err=0
+  size=50000 piccard: total=43.1513ms err=0.0134409
+  size=50000 baseline: total=595.342ms err=0
+  size=100000 piccard: total=67.2196ms err=0.134409
+  size=100000 baseline: total=599.241ms err=0
+  Done in 109s -> comparison_timing_STD192.csv
+
+------------------------------------------------------------
+  Running: Comparison accuracy (STD192)
+  Command: bench_comparison --mode=accuracy --security=STD192 --trials=50
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD192
+  Universe: 262144
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.2 piccard_err=0.0824373 baseline_err=0
+  overlap=0.3 piccard_err=0.113852 baseline_err=0
+  overlap=0.4 piccard_err=0.0887097 baseline_err=0
+  overlap=0.5 piccard_err=0.061828 baseline_err=0
+  overlap=0.6 piccard_err=0.0391705 baseline_err=0
+  overlap=0.7 piccard_err=0.0260546 baseline_err=0
+  overlap=0.8 piccard_err=0.00268817 baseline_err=0
+  overlap=0.9 piccard_err=0.0601173 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0
+  Done in 344s -> comparison_accuracy_STD192.csv
+
+============================================================
+  All benchmarks complete.
+  Results: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_122043_paper
+
+  Files:
+    comparison_accuracy_STD128.csv  (    1101 lines)
+    comparison_accuracy_STD192.csv  (    1101 lines)
+    comparison_timing_STD128.csv  (      29 lines)
+    comparison_timing_STD192.csv  (      29 lines)
+    piccard_accuracy_STD128.csv  (     551 lines)
+    piccard_accuracy_STD192.csv  (     551 lines)
+    piccard_timing_STD128.csv  (      17 lines)
+    piccard_timing_STD192.csv  (      17 lines)
+
+  System info: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_122043_paper/system_info.txt
+  Full log:    /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_122043_paper/run.log
+============================================================
+
+============================================================
+  Generating summary tables...
+============================================================
+
+======================================================================
+  System Information
+======================================================================
+Date:     2026-02-27T03:20:43Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.0.13.5)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128 STD192
+Timing trials:   10
+Accuracy trials: 50
+
+
+
+  Summary saved: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_122043_paper/summary.txt

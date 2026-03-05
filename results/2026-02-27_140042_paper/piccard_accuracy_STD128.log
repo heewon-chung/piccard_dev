@@ -1,0 +1,27 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    50
+  Mode:      accuracy
+  Security:  STD128
+
+=== Accuracy (fixed k=128) ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.2 avg_error=0.00985663
+  overlap=0.3 avg_error=0.00901328
+  overlap=0.4 avg_error=0
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.6 avg_error=0.0875576
+  overlap=0.7 avg_error=0.0663772
+  overlap=0.8 avg_error=0.0591398
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+
+=== Accuracy vs k (MinHash convergence) ===
+  k=64 avg_error=0.0421069
+  k=128 avg_error=0.0267206
+  k=256 avg_error=0.0270872
+  k=512 avg_error=0.0106471
+  k=1024 avg_error=0.0102663

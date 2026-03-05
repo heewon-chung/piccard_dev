@@ -1,0 +1,27 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=8192 time=18.7494ms (mul=2.93417 rot=10.0097) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=8192 time=18.837ms (mul=2.96779 rot=9.98546) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=8192 time=18.9061ms (mul=2.91894 rot=10.0292) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=34.5913ms (mul=4.84215 rot=18.481) ct=525155B J_hat=0.306452 err=0.0268817
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=8192 time=18.7685ms (mul=2.91981 rot=9.97996) ct=263011B err=0
+  m=32 N=8192 time=18.7226ms (mul=2.88696 rot=9.98337) ct=263011B err=0.0134409
+  m=64 N=8192 time=18.825ms (mul=2.9026 rot=10.0392) ct=263011B err=0
+  m=128 N=16384 time=34.5497ms (mul=4.86677 rot=18.4893) ct=525155B err=0.00262467
+
+=== Varying set size (median of 10 trials) ===
+  size=100 time=18.8087ms (minhash=0.0482085 enc=5.46663 mul=2.92442 rot=10.0251) err=0.0134409
+  size=1000 time=19.2269ms (minhash=0.480208 enc=5.44998 mul=2.89785 rot=10.0446) err=0.0134409
+  size=10000 time=23.6208ms (minhash=4.80506 enc=5.50719 mul=2.93012 rot=10.0221) err=0.0537634
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)

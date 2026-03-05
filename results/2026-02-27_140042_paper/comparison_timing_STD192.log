@@ -1,0 +1,40 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Universe: 262144
+
+=== Vary universe size (median of 10 trials) ===
+  U=1024 piccard: N=8192 total=19.9415ms err=0.061828
+  U=1024 baseline: N=16384 cts=1 total=36.0136ms err=0
+  U=4096 piccard: N=8192 total=19.9636ms err=0.061828
+  U=4096 baseline: N=16384 cts=1 total=36.98ms err=0
+  U=16384 piccard: N=8192 total=19.608ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=35.9879ms err=0
+  U=65536 piccard: N=8192 total=19.9758ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=141.113ms err=0
+  U=262144 piccard: N=8192 total=21.1624ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=631.286ms err=0
+  U=524288 piccard: N=8192 total=23.5177ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1363.99ms err=0
+  U=1048576 piccard: N=8192 total=27.5969ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2800.56ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=100 piccard: total=19.2674ms err=0.0456989
+  size=100 baseline: total=627.508ms err=0
+  size=500 piccard: total=27.5765ms err=0.061828
+  size=500 baseline: total=607.921ms err=0
+  size=1000 piccard: total=26.7532ms err=0.00537634
+  size=1000 baseline: total=631.407ms err=0
+  size=5000 piccard: total=29.9027ms err=0.061828
+  size=5000 baseline: total=610.189ms err=0
+  size=10000 piccard: total=25.7625ms err=0.0134409
+  size=10000 baseline: total=607.238ms err=0
+  size=50000 piccard: total=44.5191ms err=0.0134409
+  size=50000 baseline: total=627.262ms err=0
+  size=100000 piccard: total=69.9277ms err=0.134409
+  size=100000 baseline: total=609.58ms err=0

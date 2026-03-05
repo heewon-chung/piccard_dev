@@ -1,0 +1,818 @@
+Start testing: Mar 06 00:44 KST
+----------------------------------------------------------
+1/10 Testing: Params
+1/10 Test: Params
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_params"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"Params" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 13 tests from 4 test suites.
+[----------] Global test environment set-up.
+[----------] 1 test from NextPowerOf2
+[ RUN      ] NextPowerOf2.EdgeCases
+    IN  input_0: 1
+    IN  input_1: 1
+    IN  input_2: 2
+    IN  input_3: 4
+    IN  input_4: 4
+    IN  input_5: 8
+    IN  input_1023: 1024
+    IN  input_1024: 1024
+    IN  input_1025: 2048
+    IN  input_4096: 4096
+[       OK ] NextPowerOf2.EdgeCases (0 ms)
+[----------] 1 test from NextPowerOf2 (0 ms total)
+
+[----------] 1 test from IsPrime
+[ RUN      ] IsPrime.Basic
+[       OK ] IsPrime.Basic (0 ms)
+[----------] 1 test from IsPrime (0 ms total)
+
+[----------] 2 tests from FindPlaintextModulus
+[ RUN      ] FindPlaintextModulus.CongruenceAndPrimality
+    IN  input_N: 4096
+    IN  input_min_val: 128
+    OUT output_p: 40961
+    OUT output_p_mod_2N: 1
+    OUT output_is_prime: true
+[       OK ] FindPlaintextModulus.CongruenceAndPrimality (0 ms)
+[ RUN      ] FindPlaintextModulus.SmallValues
+    IN  input_min_val: 10
+    IN  input_modulus: 16
+    OUT output_p: 17
+    OUT output_p_mod_16: 1
+[       OK ] FindPlaintextModulus.SmallValues (0 ms)
+[----------] 2 tests from FindPlaintextModulus (0 ms total)
+
+[----------] 9 tests from PiccardParams
+[ RUN      ] PiccardParams.DefaultValidation
+    IN  input_k: 128
+    IN  input_m: 64
+    IN  input_security: STD128
+    OUT output_feature_dim: 8192
+    OUT output_ring_dim: 8192
+    OUT output_plaintext_mod: 65537
+    OUT output_mult_depth: 1
+[       OK ] PiccardParams.DefaultValidation (0 ms)
+[ RUN      ] PiccardParams.ToySecuritySmallRing
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_security: TOY
+    OUT output_feature_dim: 128
+    OUT output_ring_dim: 1024
+    OUT output_plaintext_mod: 12289
+[       OK ] PiccardParams.ToySecuritySmallRing (0 ms)
+[ RUN      ] PiccardParams.LargeKM
+    IN  input_k: 256
+    IN  input_m: 64
+    IN  input_security: STD128
+    OUT output_feature_dim: 16384
+    OUT output_ring_dim: 16384
+    OUT output_plaintext_mod: 65537
+[       OK ] PiccardParams.LargeKM (0 ms)
+[ RUN      ] PiccardParams.InvalidK
+    IN  input_k: 0
+    IN  expected_outcome: throws std::invalid_argument
+[       OK ] PiccardParams.InvalidK (0 ms)
+[ RUN      ] PiccardParams.InvalidM
+    IN  input_m: 1
+    IN  expected_outcome: throws std::invalid_argument
+[       OK ] PiccardParams.InvalidM (0 ms)
+[ RUN      ] PiccardParams.ThresholdMultDepth
+[       OK ] PiccardParams.ThresholdMultDepth (0 ms)
+[ RUN      ] PiccardParams.NonThresholdMultDepthIsOne
+    IN  input_threshold_mode: false
+    IN  expected_mult_depth: 1
+[       OK ] PiccardParams.NonThresholdMultDepthIsOne (0 ms)
+[ RUN      ] PiccardParams.ThresholdPlaintextModStillValid
+    IN  input_threshold_mode: true
+[       OK ] PiccardParams.ThresholdPlaintextModStillValid (0 ms)
+[ RUN      ] PiccardParams.FeatureDimAndRingDimConsistency
+[       OK ] PiccardParams.FeatureDimAndRingDimConsistency (0 ms)
+[----------] 9 tests from PiccardParams (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 13 tests from 4 test suites ran. (0 ms total)
+[  PASSED  ] 13 tests.
+<end of output>
+Test time =   0.61 sec
+----------------------------------------------------------
+Test Passed.
+"Params" end time: Mar 06 00:44 KST
+"Params" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/10 Testing: MinHash
+2/10 Test: MinHash
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_minhash"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"MinHash" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 13 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 13 tests from MinHasher
+[ RUN      ] MinHasher.Determinism
+    IN  input_k: 64
+    IN  input_seed: 123
+    IN  input_set: {1, 2, 3, 4, 5}
+    OUT output_sig1_0: 1058464522723823214
+    OUT output_sig2_0: 1058464522723823214
+    OUT output_match: true
+[       OK ] MinHasher.Determinism (0 ms)
+[ RUN      ] MinHasher.IdenticalSets
+    IN  input_k: 256
+    IN  input_set: {10, 20, 30, 40, 50}
+    OUT output_jaccard: 1.000000
+[       OK ] MinHasher.IdenticalSets (0 ms)
+[ RUN      ] MinHasher.DisjointSets
+    IN  input_k: 1000
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {1000..1099}
+    OUT output_jaccard: 0.000000
+    IN  expected_jaccard: 0.0
+[       OK ] MinHasher.DisjointSets (3 ms)
+[ RUN      ] MinHasher.KnownOverlap
+    IN  input_k: 2000
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {50..149}
+    IN  expected_jaccard: 0.333333 (1/3)
+    OUT output_jaccard: 0.275500
+    OUT output_error: 0.057833
+[       OK ] MinHasher.KnownOverlap (6 ms)
+[ RUN      ] MinHasher.SignatureLength
+    IN  input_k: 128
+    IN  input_set: {1, 2, 3}
+    OUT output_sig_length: 128
+[       OK ] MinHasher.SignatureLength (0 ms)
+[ RUN      ] MinHasher.EmptySetThrows
+    IN  input_set: {}
+    IN  expected_outcome: throws std::invalid_argument
+[       OK ] MinHasher.EmptySetThrows (0 ms)
+[ RUN      ] MinHasher.MismatchedSignaturesThrow
+    IN  input_sig_a_length: 3
+    IN  input_sig_b_length: 2
+    IN  expected_outcome: throws std::invalid_argument
+[       OK ] MinHasher.MismatchedSignaturesThrow (0 ms)
+[ RUN      ] MinHasher.ComputeElementHashesLength
+    IN  input_k: 64
+    IN  input_element: 12345
+    OUT output_hashes_length: 64
+[       OK ] MinHasher.ComputeElementHashesLength (0 ms)
+[ RUN      ] MinHasher.ComputeElementHashesDeterminism
+    IN  input_k: 64
+    IN  input_seed: 42
+    IN  input_element: 999
+    OUT output_match: true
+[       OK ] MinHasher.ComputeElementHashesDeterminism (0 ms)
+[ RUN      ] MinHasher.ComputeElementHashesMatchesSingleElementSignature
+    IN  input_k: 64
+    IN  input_element: 42
+    OUT output_hashes_eq_sig: true
+[       OK ] MinHasher.ComputeElementHashesMatchesSingleElementSignature (0 ms)
+[ RUN      ] MinHasher.SubsetSimilarity
+    IN  input_k: 2000
+    IN  input_set_a: {0..99}
+    IN  input_set_aub: {0..149}
+    IN  expected_jaccard: 0.667 (100/150)
+    OUT output_jaccard: 0.622500
+    OUT output_error: 0.044167
+[       OK ] MinHasher.SubsetSimilarity (7 ms)
+[ RUN      ] MinHasher.BoundedHashRange
+    IN  input_k: 128
+    IN  input_hash_range: 1000
+    IN  input_set: {0..49}
+    OUT output_sig_in_range: true
+    OUT output_hashes_in_range: true
+[       OK ] MinHasher.BoundedHashRange (0 ms)
+[ RUN      ] MinHasher.Symmetry
+    IN  input_k: 500
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {60..179}
+    OUT output_J(A,B): 0.198000
+    OUT output_J(B,A): 0.198000
+[       OK ] MinHasher.Symmetry (1 ms)
+[----------] 13 tests from MinHasher (19 ms total)
+
+[----------] Global test environment tear-down
+[==========] 13 tests from 1 test suite ran. (19 ms total)
+[  PASSED  ] 13 tests.
+<end of output>
+Test time =   0.40 sec
+----------------------------------------------------------
+Test Passed.
+"MinHash" end time: Mar 06 00:44 KST
+"MinHash" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/10 Testing: OneHotEncoder
+3/10 Test: OneHotEncoder
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_onehot_encoder"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"OneHotEncoder" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 9 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 9 tests from OneHotEncoderTest
+[ RUN      ] OneHotEncoderTest.ExactlyKOnes
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_sig_pattern: i * 3 for i in [0, k)
+    OUT output_ones_count: 16
+    OUT output_feature_length: 1024
+[       OK ] OneHotEncoderTest.ExactlyKOnes (0 ms)
+[ RUN      ] OneHotEncoderTest.CorrectPositions
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_sig_pattern: i * 5 + 2 for i in [0, k)
+    OUT output_hot_positions: 2, 15, 20, 25, 38, 43, 48, 61, 66, 79, 84, 89, 102, 107, 112, 125
+[       OK ] OneHotEncoderTest.CorrectPositions (0 ms)
+[ RUN      ] OneHotEncoderTest.ZeroPadding
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_feature_dim: 128
+    IN  input_ring_dim: 1024
+    OUT output_feature_length: 1024
+    OUT output_padding_sum: 0
+[       OK ] OneHotEncoderTest.ZeroPadding (0 ms)
+[ RUN      ] OneHotEncoderTest.EncodeDecodeRoundTrip
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_sig_pattern: i * 7 + 3 for i in [0, k)
+    OUT output_round_trip_match: true
+[       OK ] OneHotEncoderTest.EncodeDecodeRoundTrip (0 ms)
+[ RUN      ] OneHotEncoderTest.WrongSignatureLengthThrows
+    IN  input_sig_length: 17
+    IN  expected_k: 16
+    IN  expected_outcome: throws std::invalid_argument
+[       OK ] OneHotEncoderTest.WrongSignatureLengthThrows (0 ms)
+[ RUN      ] OneHotEncoderTest.VectorLengthIsRingDim
+    IN  input_ring_dim: 1024
+    OUT output_feature_length: 1024
+[       OK ] OneHotEncoderTest.VectorLengthIsRingDim (0 ms)
+[ RUN      ] OneHotEncoderTest.MutualExclusivity
+    IN  input_k: 16
+    IN  input_m: 8
+    IN  input_sig_pattern: i * 13 + 7 for i in [0, k)
+    IN  expected: exactly one 1 per block of m
+[       OK ] OneHotEncoderTest.MutualExclusivity (0 ms)
+[ RUN      ] OneHotEncoderTest.DifferentSignaturesProduceDifferentFeatures
+    IN  input_sig_a_pattern: all zeros
+    IN  input_sig_b_pattern: all ones
+    OUT output_differing_positions: 32
+[       OK ] OneHotEncoderTest.DifferentSignaturesProduceDifferentFeatures (0 ms)
+[ RUN      ] OneHotEncoderTest.MatchCountFromDotProduct
+    IN  input_k: 16
+    IN  input_m: 8
+    OUT output_self_dot_product: 16
+    IN  expected_self_dot: 16
+[       OK ] OneHotEncoderTest.MatchCountFromDotProduct (0 ms)
+[----------] 9 tests from OneHotEncoderTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 9 tests.
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"OneHotEncoder" end time: Mar 06 00:44 KST
+"OneHotEncoder" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/10 Testing: BottomStructure
+4/10 Test: BottomStructure
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_bottom_structure"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"BottomStructure" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 11 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 11 tests from BottomStructureTest
+[ RUN      ] BottomStructureTest.InitializeMatchesMinHash
+[       OK ] BottomStructureTest.InitializeMatchesMinHash (0 ms)
+[ RUN      ] BottomStructureTest.DepthLimit
+[       OK ] BottomStructureTest.DepthLimit (1 ms)
+[ RUN      ] BottomStructureTest.BottomIsSorted
+[       OK ] BottomStructureTest.BottomIsSorted (0 ms)
+[ RUN      ] BottomStructureTest.InsertSmallerUpdatesSignature
+[       OK ] BottomStructureTest.InsertSmallerUpdatesSignature (0 ms)
+[ RUN      ] BottomStructureTest.InsertLargerDoesNotChangeSignature
+[       OK ] BottomStructureTest.InsertLargerDoesNotChangeSignature (0 ms)
+[ RUN      ] BottomStructureTest.DeleteNonMinimumPreservesSignature
+[       OK ] BottomStructureTest.DeleteNonMinimumPreservesSignature (0 ms)
+[ RUN      ] BottomStructureTest.DeleteMinimumPromotesNext
+[       OK ] BottomStructureTest.DeleteMinimumPromotesNext (0 ms)
+[ RUN      ] BottomStructureTest.EmptySetThrows
+[       OK ] BottomStructureTest.EmptySetThrows (0 ms)
+[ RUN      ] BottomStructureTest.InitPlusInsertMatchesFullInit
+    IN  input_init_set: {1..50}
+    IN  input_inserts: {51..100}
+    IN  input_full_set: {1..100}
+    OUT output_matching_signatures: 64
+    OUT output_total: 64
+[       OK ] BottomStructureTest.InitPlusInsertMatchesFullInit (0 ms)
+[ RUN      ] BottomStructureTest.InsertDeleteCycleRestoresSignature
+    IN  input_set: {1..100}
+    IN  input_insert_then_delete: 999
+    OUT output_matching_after_cycle: 64
+[       OK ] BottomStructureTest.InsertDeleteCycleRestoresSignature (0 ms)
+[ RUN      ] BottomStructureTest.ManyInsertsRespectDepth
+    IN  input_initial_set: {1..10}
+    IN  input_inserts: {11..500}
+    IN  input_depth: 5
+[       OK ] BottomStructureTest.ManyInsertsRespectDepth (1 ms)
+[----------] 11 tests from BottomStructureTest (6 ms total)
+
+[----------] Global test environment tear-down
+[==========] 11 tests from 1 test suite ran. (6 ms total)
+[  PASSED  ] 11 tests.
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"BottomStructure" end time: Mar 06 00:44 KST
+"BottomStructure" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/10 Testing: ThresholdPoly
+5/10 Test: ThresholdPoly
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_threshold_poly"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"ThresholdPoly" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 12 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 12 tests from ThresholdPolyTest
+[ RUN      ] ThresholdPolyTest.ModInverseBasic
+[       OK ] ThresholdPolyTest.ModInverseBasic (0 ms)
+[ RUN      ] ThresholdPolyTest.ModInverseAllNonzero
+[       OK ] ThresholdPolyTest.ModInverseAllNonzero (0 ms)
+[ RUN      ] ThresholdPolyTest.EvalPolyPlaintextConstant
+[       OK ] ThresholdPolyTest.EvalPolyPlaintextConstant (0 ms)
+[ RUN      ] ThresholdPolyTest.EvalPolyPlaintextLinear
+[       OK ] ThresholdPolyTest.EvalPolyPlaintextLinear (0 ms)
+[ RUN      ] ThresholdPolyTest.ThresholdPolySmall
+[       OK ] ThresholdPolyTest.ThresholdPolySmall (0 ms)
+[ RUN      ] ThresholdPolyTest.ThresholdPolyTauZero
+[       OK ] ThresholdPolyTest.ThresholdPolyTauZero (0 ms)
+[ RUN      ] ThresholdPolyTest.ThresholdPolyTauMax
+[       OK ] ThresholdPolyTest.ThresholdPolyTauMax (0 ms)
+[ RUN      ] ThresholdPolyTest.ThresholdPolyTauExceedsMax
+[       OK ] ThresholdPolyTest.ThresholdPolyTauExceedsMax (0 ms)
+[ RUN      ] ThresholdPolyTest.ThresholdPolyMediumDegree
+[       OK ] ThresholdPolyTest.ThresholdPolyMediumDegree (1 ms)
+[ RUN      ] ThresholdPolyTest.StepFunctionAtBoundary
+    IN  input_max_val: 20
+    IN  input_p: 65537
+[       OK ] ThresholdPolyTest.StepFunctionAtBoundary (9 ms)
+[ RUN      ] ThresholdPolyTest.PolynomialDegreeMatchesMaxVal
+    IN  expected: coeffs.size() == max_val + 1
+[       OK ] ThresholdPolyTest.PolynomialDegreeMatchesMaxVal (2 ms)
+[ RUN      ] ThresholdPolyTest.LargePrimeModulus
+    IN  input_p: 786433
+    IN  input_tau: 5
+    IN  input_max_val: 10
+[       OK ] ThresholdPolyTest.LargePrimeModulus (0 ms)
+[----------] 12 tests from ThresholdPolyTest (13 ms total)
+
+[----------] Global test environment tear-down
+[==========] 12 tests from 1 test suite ran. (13 ms total)
+[  PASSED  ] 12 tests.
+<end of output>
+Test time =   0.41 sec
+----------------------------------------------------------
+Test Passed.
+"ThresholdPoly" end time: Mar 06 00:44 KST
+"ThresholdPoly" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/10 Testing: BFVContext
+6/10 Test: BFVContext
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_bfv_context"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"BFVContext" start time: Mar 06 00:44 KST
+Output:
+----------------------------------------------------------
+[==========] Running 14 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 10 tests from BFVContextTest
+[ RUN      ] BFVContextTest.EncryptDecryptRoundTrip
+    IN  input_slots_0_4: [1, 0, 1, 0, 1]
+    IN  input_ring_dim: 1024
+    OUT output_slots_0_4: [1, 0, 1, 0, 1]
+[       OK ] BFVContextTest.EncryptDecryptRoundTrip (4 ms)
+[ RUN      ] BFVContextTest.SlotWiseMultiply
+    IN  input_a: [1, 0, 1, ...]
+    IN  input_b: [1, 1, 0, ...]
+    OUT output_product_0_2: [1, 0, 0]
+[       OK ] BFVContextTest.SlotWiseMultiply (4 ms)
+[ RUN      ] BFVContextTest.Addition
+    IN  input_a: [3, 5, ...]
+    IN  input_b: [7, 2, ...]
+    OUT output_sum_0_1: [10, 7]
+[       OK ] BFVContextTest.Addition (3 ms)
+[ RUN      ] BFVContextTest.Rotation
+    IN  input_slots_0_3: [1, 2, 3, 4]
+    IN  input_rotation_steps: 1
+    OUT output_slots_0_2: [2, 3, 4]
+[       OK ] BFVContextTest.Rotation (3 ms)
+[ RUN      ] BFVContextTest.RotateAndSumSmall
+    IN  input_ones_count: 8
+    IN  input_ring_dim: 1024
+    OUT output_slot_0: 8
+[       OK ] BFVContextTest.RotateAndSumSmall (4 ms)
+[ RUN      ] BFVContextTest.MultiplyPlainElementWise
+    IN  input_ct: [3, 5, 7, 0, ...]
+    IN  input_pt: [2, 3, 4, 0, ...]
+    IN  expected_output: [6, 15, 28, 0, ...]
+    OUT output: [6, 15, 28]
+[       OK ] BFVContextTest.MultiplyPlainElementWise (2 ms)
+[ RUN      ] BFVContextTest.MultiplyScalarAll
+    IN  input_ct: [3, 5, 7, 0, ...]
+    IN  input_scalar: 4
+    IN  expected_output: [12, 20, 28, 0, ...]
+    OUT output: [12, 20, 28]
+[       OK ] BFVContextTest.MultiplyScalarAll (2 ms)
+[ RUN      ] BFVContextTest.AddPlainElementWise
+    IN  input_ct: [10, 20, 0, ...]
+    IN  input_pt: [3, 7, 0, ...]
+    IN  expected_output: [13, 27, 0, ...]
+    OUT output: [13, 27]
+[       OK ] BFVContextTest.AddPlainElementWise (2 ms)
+[ RUN      ] BFVContextTest.ChainedMultiplyThenAdd
+    IN  input_a: [2, 3, 0, ...]
+    IN  input_b: [5, 4, 0, ...]
+    IN  input_c: [1, 1, 0, ...]
+    IN  expected: [11, 13, 0, ...]
+    OUT output: [11, 13]
+[       OK ] BFVContextTest.ChainedMultiplyThenAdd (4 ms)
+[ RUN      ] BFVContextTest.MultiplyPlainByZero
+    IN  input_ct: [3, 5, 7, 0, ...]
+    IN  input_pt: [0, 0, 0, ...]
+    IN  expected: [0, 0, 0, ...]
+    OUT output: [0, 0, 0]
+[       OK ] BFVContextTest.MultiplyPlainByZero (2 ms)
+[----------] 10 tests from BFVContextTest (36 ms total)
+
+[----------] 4 tests from BFVContextPolyTest
+[ RUN      ] BFVContextPolyTest.EvalPolyConstant
+    IN  input_poly: P(x) = 42
+    IN  input_x: 5
+    IN  expected_output: 42
+    OUT output_slot_0: 42
+[       OK ] BFVContextPolyTest.EvalPolyConstant (8 ms)
+[ RUN      ] BFVContextPolyTest.EvalPolyLinear
+    IN  input_poly: P(x) = 3 + 2x
+    IN  input_x: 5
+    IN  expected_output: 13
+    OUT output_slot_0: 13
+[       OK ] BFVContextPolyTest.EvalPolyLinear (9 ms)
+[ RUN      ] BFVContextPolyTest.EvalPolyThreshold
+    IN  input_poly: u_{tau=2}(x), degree 4
+    IN  expected_outputs: [0, 0, 1, 1, 1]
+    OUT output_u(0): 0
+    OUT output_u(1): 0
+    OUT output_u(2): 1
+    OUT output_u(3): 1
+    OUT output_u(4): 1
+[       OK ] BFVContextPolyTest.EvalPolyThreshold (30 ms)
+[ RUN      ] BFVContextPolyTest.EvalPolyQuadratic
+    IN  input_poly: P(x) = 1 + 3x + 2x^2
+    IN  input_x: 4
+    IN  expected_output: 45
+    OUT output_slot_0: 45
+[       OK ] BFVContextPolyTest.EvalPolyQuadratic (10 ms)
+[----------] 4 tests from BFVContextPolyTest (60 ms total)
+
+[----------] Global test environment tear-down
+[==========] 14 tests from 2 test suites ran. (96 ms total)
+[  PASSED  ] 14 tests.
+<end of output>
+Test time =   0.52 sec
+----------------------------------------------------------
+Test Passed.
+"BFVContext" end time: Mar 06 00:45 KST
+"BFVContext" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/10 Testing: PiccardEngine
+7/10 Test: PiccardEngine
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_piccard_engine"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"PiccardEngine" start time: Mar 06 00:45 KST
+Output:
+----------------------------------------------------------
+[==========] Running 10 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 10 tests from PiccardEngineTest
+[ RUN      ] PiccardEngineTest.IdenticalSets
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  input_set: {0..49}
+    IN  expected_jaccard: 1.0
+    OUT output_match_count: 64
+    OUT output_jaccard_estimate: 1.000000
+[       OK ] PiccardEngineTest.IdenticalSets (7 ms)
+[ RUN      ] PiccardEngineTest.DisjointSets
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {10000..10099}
+    IN  expected_jaccard: 0.0
+    OUT output_match_count: 8
+    OUT output_jaccard_estimate: 0.066667
+    IN  expected_collision_matches: 4
+[       OK ] PiccardEngineTest.DisjointSets (6 ms)
+[ RUN      ] PiccardEngineTest.KnownOverlap
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {50..149}
+    IN  expected_jaccard: 0.333333 (1/3)
+    OUT output_match_count: 28
+    OUT output_jaccard_estimate: 0.400000
+    OUT output_error: 0.066667
+[       OK ] PiccardEngineTest.KnownOverlap (5 ms)
+[ RUN      ] PiccardEngineTest.MatchCountIsNonNegative
+    IN  input_set_a: {1, 2, 3, 4, 5}
+    IN  input_set_b: {6, 7, 8, 9, 10}
+    OUT output_match_count: 1
+    OUT output_jaccard_estimate: 0.000000
+[       OK ] PiccardEngineTest.MatchCountIsNonNegative (5 ms)
+[ RUN      ] PiccardEngineTest.BiasCorrection
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  input_set: {100, 200, 300, 400, 500}
+    IN  formula: J_hat = (v/k - 1/m) / (1 - 1/m)
+    OUT output_match_count: 64
+    OUT output_jaccard_estimate: 1.000000
+    OUT output_expected_from_formula: 1.000000
+[       OK ] PiccardEngineTest.BiasCorrection (5 ms)
+[ RUN      ] PiccardEngineTest.JaccardClampedToZero
+    IN  input_match_count: 0
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  formula: (0/64 - 1/16) / (1 - 1/16) = -0.0667
+    IN  expected_clamped: 0.0
+    OUT output_match_count: 0
+    OUT output_jaccard_estimate: 0.000000
+[       OK ] PiccardEngineTest.JaccardClampedToZero (2 ms)
+[ RUN      ] PiccardEngineTest.JaccardClampedToOne
+    IN  input_match_count: 69
+    IN  input_k: 64
+    IN  input_m: 16
+    IN  formula: (69/64 - 1/16) / (1 - 1/16) = 1.0833
+    IN  expected_clamped: 1.0
+    OUT output_match_count: 69
+    OUT output_jaccard_estimate: 1.000000
+[       OK ] PiccardEngineTest.JaccardClampedToOne (2 ms)
+[ RUN      ] PiccardEngineTest.Symmetry
+    IN  input_set_a: {0..79}
+    IN  input_set_b: {30..119}
+    OUT output_J(A,B)_match: 26
+    OUT output_J(A,B)_estimate: 0.366667
+    OUT output_J(B,A)_match: 26
+    OUT output_J(B,A)_estimate: 0.366667
+[       OK ] PiccardEngineTest.Symmetry (7 ms)
+[ RUN      ] PiccardEngineTest.MonotonicitySharingMoreIncreasesJaccard
+    IN  input_low_overlap_a: {0..99}
+    IN  input_low_overlap_b: {80..179}
+    IN  input_high_overlap_a: {0..99}
+    IN  input_high_overlap_b: {50..149}
+    OUT output_low_overlap_J: 0.150000
+    OUT output_high_overlap_J: 0.400000
+[       OK ] PiccardEngineTest.MonotonicitySharingMoreIncreasesJaccard (7 ms)
+[ RUN      ] PiccardEngineTest.SingleElementIdenticalSets
+    IN  input_set: {42}
+    IN  expected_jaccard: 1.0
+    OUT output_match_count: 64
+    OUT output_jaccard_estimate: 1.000000
+[       OK ] PiccardEngineTest.SingleElementIdenticalSets (4 ms)
+[----------] 10 tests from PiccardEngineTest (57 ms total)
+
+[----------] Global test environment tear-down
+[==========] 10 tests from 1 test suite ran. (57 ms total)
+[  PASSED  ] 10 tests.
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"PiccardEngine" end time: Mar 06 00:45 KST
+"PiccardEngine" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/10 Testing: DynamicEngine
+8/10 Test: DynamicEngine
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_dynamic_engine"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"DynamicEngine" start time: Mar 06 00:45 KST
+Output:
+----------------------------------------------------------
+[==========] Running 7 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 7 tests from DynamicEngineTest
+[ RUN      ] DynamicEngineTest.MatchesBasicProtocol
+[       OK ] DynamicEngineTest.MatchesBasicProtocol (14 ms)
+[ RUN      ] DynamicEngineTest.IdenticalSets
+[       OK ] DynamicEngineTest.IdenticalSets (7 ms)
+[ RUN      ] DynamicEngineTest.InsertIncreasesOverlap
+[       OK ] DynamicEngineTest.InsertIncreasesOverlap (10 ms)
+[ RUN      ] DynamicEngineTest.DeleteReducesOverlap
+[       OK ] DynamicEngineTest.DeleteReducesOverlap (10 ms)
+[ RUN      ] DynamicEngineTest.Symmetry
+    IN  input_set_a: {0..79}
+    IN  input_set_b: {30..119}
+    OUT output_J(A,B)_match: 26
+    OUT output_J(A,B)_estimate: 0.366667
+    OUT output_J(B,A)_match: 26
+    OUT output_J(B,A)_estimate: 0.366667
+[       OK ] DynamicEngineTest.Symmetry (8 ms)
+[ RUN      ] DynamicEngineTest.InitPlusInsertMatchesFullInit
+    IN  input_init: {1..50}
+    IN  input_inserts: {51..100}
+    IN  input_full: {1..100}
+    OUT output_matching_sigs: 64
+    OUT output_total: 64
+[       OK ] DynamicEngineTest.InitPlusInsertMatchesFullInit (3 ms)
+[ RUN      ] DynamicEngineTest.ManyMutationsStillProducesValidResult
+    IN  input_initial: {0..99}
+    IN  input_mutations: insert 100..299, delete 0..99
+    OUT output_match_count: 3
+    OUT output_jaccard_estimate: 0.000000
+[       OK ] DynamicEngineTest.ManyMutationsStillProducesValidResult (6 ms)
+[----------] 7 tests from DynamicEngineTest (60 ms total)
+
+[----------] Global test environment tear-down
+[==========] 7 tests from 1 test suite ran. (60 ms total)
+[  PASSED  ] 7 tests.
+<end of output>
+Test time =   0.48 sec
+----------------------------------------------------------
+Test Passed.
+"DynamicEngine" end time: Mar 06 00:45 KST
+"DynamicEngine" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/10 Testing: ThresholdEngine
+9/10 Test: ThresholdEngine
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_threshold_engine"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"ThresholdEngine" start time: Mar 06 00:45 KST
+Output:
+----------------------------------------------------------
+[==========] Running 8 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 8 tests from ThresholdEngineTest
+[ RUN      ] ThresholdEngineTest.IdenticalSetsAboveThreshold
+[       OK ] ThresholdEngineTest.IdenticalSetsAboveThreshold (29 ms)
+[ RUN      ] ThresholdEngineTest.DisjointSetsBelowThreshold
+[       OK ] ThresholdEngineTest.DisjointSetsBelowThreshold (24 ms)
+[ RUN      ] ThresholdEngineTest.ThresholdAtK
+[       OK ] ThresholdEngineTest.ThresholdAtK (24 ms)
+[ RUN      ] ThresholdEngineTest.TauZeroAlwaysPasses
+    IN  input_tau: 0
+    IN  input_sets: disjoint ({0..49} vs {100000..100049})
+    IN  expected: true (tau=0 always passes)
+    OUT output: true
+[       OK ] ThresholdEngineTest.TauZeroAlwaysPasses (23 ms)
+[ RUN      ] ThresholdEngineTest.TauOneWithOverlap
+    IN  input_tau: 1
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {50..149}
+    IN  input_overlap: 50/150 (J=1/3)
+    IN  expected_match_count: ~6.7
+    IN  expected: true (6.7 >= 1)
+    OUT output: true
+[       OK ] ThresholdEngineTest.TauOneWithOverlap (24 ms)
+[ RUN      ] ThresholdEngineTest.PartialOverlapAboveThreshold
+    IN  input_tau: 4
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {50..149}
+    IN  input_overlap: 50/150 (J=1/3)
+    IN  expected_match_count: ~6.7
+    IN  expected: true (6.7 >= 4)
+    OUT output: true
+[       OK ] ThresholdEngineTest.PartialOverlapAboveThreshold (25 ms)
+[ RUN      ] ThresholdEngineTest.HighThresholdRejectsPartialOverlap
+    IN  input_tau: 14
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {50..149}
+    IN  input_overlap: 50/150 (J=1/3)
+    IN  expected_match_count: ~6.7
+    IN  expected: false (6.7 < 14)
+    OUT output: false
+[       OK ] ThresholdEngineTest.HighThresholdRejectsPartialOverlap (24 ms)
+[ RUN      ] ThresholdEngineTest.SymmetryOfThreshold
+    IN  input_tau: 4
+    IN  input_set_a: {0..79}
+    IN  input_set_b: {30..119}
+    OUT output_threshold(A,B): true
+    OUT output_threshold(B,A): true
+[       OK ] ThresholdEngineTest.SymmetryOfThreshold (41 ms)
+[----------] 8 tests from ThresholdEngineTest (218 ms total)
+
+[----------] Global test environment tear-down
+[==========] 8 tests from 1 test suite ran. (218 ms total)
+[  PASSED  ] 8 tests.
+<end of output>
+Test time =   0.65 sec
+----------------------------------------------------------
+Test Passed.
+"ThresholdEngine" end time: Mar 06 00:45 KST
+"ThresholdEngine" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/10 Testing: PiccardE2E
+10/10 Test: PiccardE2E
+Command: "/Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build/test_piccard_e2e"
+Directory: /Users/heewonchung/Documents/04-Dev/01-research/active/piccard/build
+"PiccardE2E" start time: Mar 06 00:45 KST
+Output:
+----------------------------------------------------------
+[==========] Running 9 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 9 tests from PiccardE2ETest
+[ RUN      ] PiccardE2ETest.IdenticalSets
+    IN  input_k: 128
+    IN  input_m: 64
+    IN  input_set: {0..199}
+    IN  expected_jaccard: 1.0
+    OUT output_match_count: 128
+    OUT output_jaccard_estimate: 1.000000
+[       OK ] PiccardE2ETest.IdenticalSets (38 ms)
+[ RUN      ] PiccardE2ETest.DisjointSets
+    IN  input_k: 128
+    IN  input_m: 64
+    IN  input_set_a: {0..199}
+    IN  input_set_b: {100000..100199}
+    IN  expected_jaccard: 0.0
+    OUT output_match_count: 2
+    OUT output_jaccard_estimate: 0.000000
+[       OK ] PiccardE2ETest.DisjointSets (24 ms)
+[ RUN      ] PiccardE2ETest.VaryingOverlap
+    IN  input_k: 128
+    IN  input_m: 64
+    IN  input_set_size: 200
+[       OK ] PiccardE2ETest.VaryingOverlap (73 ms)
+[ RUN      ] PiccardE2ETest.LargerSets
+    IN  input_set_a: {0..999}
+    IN  input_set_b: {500..1499}
+    OUT output_match_count: 34
+    OUT output_jaccard_estimate: 0.253968
+    OUT output_error: 0.079365
+[       OK ] PiccardE2ETest.LargerSets (26 ms)
+[ RUN      ] PiccardE2ETest.MatchCountBounds
+    IN  input_set_a: {1, 2, 3, 4, 5}
+    IN  input_set_b: {6, 7, 8, 9, 10}
+    IN  expected_match_count_range: [0, 128]
+    OUT output_match_count: 2
+    OUT output_jaccard_estimate: 0.000000
+[       OK ] PiccardE2ETest.MatchCountBounds (22 ms)
+[ RUN      ] PiccardE2ETest.Symmetry
+    IN  input_set_a: {0..149}
+    IN  input_set_b: {100..299}
+    OUT output_J(A,B)_match: 21
+    OUT output_J(A,B)_estimate: 0.150794
+    OUT output_J(B,A)_match: 21
+    OUT output_J(B,A)_estimate: 0.150794
+[       OK ] PiccardE2ETest.Symmetry (35 ms)
+[ RUN      ] PiccardE2ETest.SubsetRelationship
+    IN  input_set_a: {0..99}
+    IN  input_set_b: {0..199}
+    IN  expected_jaccard: 0.5 (100/200)
+    OUT output_true_jaccard: 0.500000
+    OUT output_match_count: 72
+    OUT output_jaccard_estimate: 0.555556
+    OUT output_error: 0.055556
+[       OK ] PiccardE2ETest.SubsetRelationship (23 ms)
+[ RUN      ] PiccardE2ETest.SmallSets
+    IN  input_set_a: {1, 2, 3}
+    IN  input_set_b: {2, 3, 4}
+    IN  expected_jaccard: 0.5 (2/4)
+    OUT output_true_jaccard: 0.500000
+    OUT output_match_count: 52
+    OUT output_jaccard_estimate: 0.396825
+[       OK ] PiccardE2ETest.SmallSets (23 ms)
+[ RUN      ] PiccardE2ETest.MonotonicallyIncreasingOverlap
+    IN  input_set_size: 200
+    IN  input_overlap_steps: 0, 50, 100, 150, 200
+[       OK ] PiccardE2ETest.MonotonicallyIncreasingOverlap (74 ms)
+[----------] 9 tests from PiccardE2ETest (342 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 1 test suite ran. (342 ms total)
+[  PASSED  ] 9 tests.
+<end of output>
+Test time =   0.77 sec
+----------------------------------------------------------
+Test Passed.
+"PiccardE2E" end time: Mar 06 00:45 KST
+"PiccardE2E" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Mar 06 00:45 KST

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libpiccard_core.a CMakeFiles/piccard_core.dir/src/util/params.cpp.o CMakeFiles/piccard_core.dir/src/core/minhash.cpp.o CMakeFiles/piccard_core.dir/src/core/onehot_encoder.cpp.o CMakeFiles/piccard_core.dir/src/core/bottom_structure.cpp.o CMakeFiles/piccard_core.dir/src/core/threshold_poly.cpp.o
+/usr/bin/ranlib libpiccard_core.a

@@ -1,0 +1,245 @@
+============================================================
+  Piccard Benchmark Suite
+  Fri Feb 27 11:14:02 KST 2026
+  Security: STD128 | Trials: 10 | Tag: paper
+  Output:   /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper
+============================================================
+
+Date:     2026-02-27T02:14:02Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.0.13.5)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128
+Trials:   10
+
+------------------------------------------------------------
+  Running: Piccard timing
+  Command: bench_piccard --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+
+=== Varying k (median of 10 trials) ===
+  k=64 N=8192 time=19.1526ms (mul=3.04192 rot=10.3161) ct=263011B J_hat=0.274194 err=0.0591398
+  k=128 N=8192 time=19.3169ms (mul=3.03552 rot=10.2574) ct=263011B J_hat=0.346774 err=0.0134409
+  k=256 N=8192 time=18.985ms (mul=2.99933 rot=9.99442) ct=263011B J_hat=0.346774 err=0.0134409
+  k=512 N=16384 time=35.1326ms (mul=4.83998 rot=18.7006) ct=525155B J_hat=0.306452 err=0.0268817
+
+=== Varying m (median of 10 trials) ===
+  m=16 N=8192 time=18.6202ms (mul=2.88346 rot=9.85946) ct=263011B err=0
+  m=32 N=8192 time=18.8364ms (mul=2.91175 rot=10.004) ct=263011B err=0.0134409
+  m=64 N=8192 time=18.7873ms (mul=2.93806 rot=9.98535) ct=263011B err=0
+  m=128 N=16384 time=34.268ms (mul=4.77769 rot=18.3667) ct=525155B err=0.00262467
+
+=== Varying set size (median of 10 trials) ===
+  size=100 time=18.7081ms (minhash=0.048167 enc=5.45167 mul=2.90883 rot=9.97085) err=0.0134409
+  size=1000 time=19.1439ms (minhash=0.479687 enc=5.43708 mul=2.91635 rot=9.9829) err=0.0134409
+  size=10000 time=23.4793ms (minhash=4.80344 enc=5.46415 mul=2.95475 rot=9.96138) err=0.0537634
+
+=== ZLG+24 comparison ===
+  (No reference data configured. Fill kZLG24Data with published numbers from ZLG+24.)
+  Done in 5s -> piccard_timing.csv
+
+------------------------------------------------------------
+  Running: Piccard accuracy
+  Command: bench_piccard --mode=accuracy --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      accuracy
+  Security:  STD128
+
+=== Accuracy ===
+  overlap=0 avg_error=0
+  overlap=0.1 avg_error=0.0360781
+  overlap=0.25 avg_error=0.0103687
+  overlap=0.5 avg_error=0.0134409
+  overlap=0.75 avg_error=0.0693548
+  overlap=0.9 avg_error=0.0124633
+  overlap=1 avg_error=0
+  Done in 1s -> piccard_accuracy.csv
+
+------------------------------------------------------------
+  Running: Comparison timing (Piccard vs Baseline)
+  Command: bench_comparison --mode=timing --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD128
+  Universe: 5000
+
+=== Vary universe size (median of 10 trials) ===
+  U=1000 piccard: N=8192 total=18.6526ms err=0.0456989
+  U=1000 baseline: N=8192 cts=1 total=18.7078ms err=0
+  U=5000 piccard: N=8192 total=18.8093ms err=0.0456989
+  U=5000 baseline: N=8192 cts=1 total=18.8037ms err=0
+  U=10000 piccard: N=8192 total=18.802ms err=0.0456989
+  U=10000 baseline: N=16384 cts=1 total=34.6319ms err=0
+  U=50000 piccard: N=8192 total=18.6815ms err=0.0456989
+  U=50000 baseline: N=65536 cts=1 total=135.343ms err=0
+
+=== Vary set size (median of 10 trials) ===
+  size=50 piccard: total=18.879ms err=0.0537634
+  size=50 baseline: total=18.7918ms err=0
+  size=100 piccard: total=18.8903ms err=0.0456989
+  size=100 baseline: total=19.0582ms err=0
+  size=500 piccard: total=19.4713ms err=0.061828
+  size=500 baseline: total=18.4962ms err=0
+  size=1000 piccard: total=19.3643ms err=0.00537634
+  size=1000 baseline: total=19.6156ms err=0
+  Done in 5s -> comparison_timing.csv
+
+------------------------------------------------------------
+  Running: Comparison accuracy (Piccard vs Baseline)
+  Command: bench_comparison --mode=accuracy --security=STD128 --trials=10
+------------------------------------------------------------
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      accuracy
+  Security:  STD128
+  Universe: 5000
+
+=== Accuracy comparison ===
+  overlap=0 piccard_err=0 baseline_err=0
+  overlap=0.1 piccard_err=0.0441426 baseline_err=0
+  overlap=0.25 piccard_err=0.0345622 baseline_err=0
+  overlap=0.5 piccard_err=0.00537634 baseline_err=0
+  overlap=0.75 piccard_err=0.0193548 baseline_err=0
+  overlap=0.9 piccard_err=0.0278592 baseline_err=0
+  overlap=1 piccard_err=0 baseline_err=0
+  Done in 3s -> comparison_accuracy.csv
+
+============================================================
+  All benchmarks complete.
+  Results: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper
+
+  Files:
+    comparison_accuracy.csv  (     141 lines)
+    comparison_timing.csv  (      17 lines)
+    piccard_accuracy.csv  (      71 lines)
+    piccard_timing.csv  (      12 lines)
+
+  System info: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper/system_info.txt
+  Full log:    /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper/run.log
+============================================================
+
+============================================================
+  Generating summary tables...
+============================================================
+
+======================================================================
+  System Information
+======================================================================
+Date:     2026-02-27T02:14:02Z
+Hostname: GoM-MacStudioM1.local
+OS:       Darwin 25.3.0 arm64
+CPU:      Apple M1 Max
+Cores:    10
+RAM:      64 GB
+Compiler: Apple clang version 17.0.0 (clang-1700.0.13.5)
+OpenFHE:  unknown
+Build:    Release -O3
+Security: STD128
+Trials:   10
+
+
+======================================================================
+  Table 1: Piccard Timing — Parameter Sensitivity
+======================================================================
+            Label    k    m      N  MinHash  Encode  Encrypt  Multiply  RotSum  Decrypt  Total (ms)   CT Size
+-------------------------------------------------------------------------------------------------------------
+        vary_k_64   64   32   8192    0.025   0.002      5.5       3.0    10.3    0.330        19.2  256.8 KB
+       vary_k_128  128   32   8192    0.050   0.002      5.6       3.0    10.3    0.342        19.3  256.8 KB
+       vary_k_256  256   32   8192    0.096   0.003      5.5       3.0    10.0    0.335        19.0  256.8 KB
+       vary_k_512  512   32  16384    0.198   0.006     10.8       4.8    18.7    0.596        35.1  512.8 KB
+        vary_m_16  128   16   8192    0.051   0.002      5.5       2.9     9.9    0.328        18.6  256.8 KB
+        vary_m_32  128   32   8192    0.048   0.002      5.5       2.9    10.0    0.333        18.8  256.8 KB
+        vary_m_64  128   64   8192    0.048   0.002      5.5       2.9    10.0    0.339        18.8  256.8 KB
+       vary_m_128  128  128  16384    0.048   0.006     10.5       4.8    18.4    0.577        34.3  512.8 KB
+    vary_size_100  128   32   8192    0.048   0.002      5.5       2.9    10.0    0.344        18.7  256.8 KB
+   vary_size_1000  128   32   8192    0.480   0.005      5.4       2.9    10.0    0.343        19.1  256.8 KB
+  vary_size_10000  128   32   8192      4.8   0.002      5.5       3.0    10.0    0.335        23.5  256.8 KB
+
+======================================================================
+  Table 2: Piccard vs Baseline — Varying Universe Size
+======================================================================
+  U_set    Method      N  #CTs  Encode  Encrypt  Compute  Decrypt  Total (ms)   CT Size      Error  Speedup
+-----------------------------------------------------------------------------------------------------------
+   1000   Piccard   8192     1   0.051      5.4     12.9    0.330        18.7  256.8 KB     0.0457         
+         Baseline   8192     1   0.034      5.4     12.9    0.337        18.7  256.8 KB  0 (exact)     1.0x
+   5000   Piccard   8192     1   0.052      5.4     13.0    0.335        18.8  256.8 KB     0.0457         
+         Baseline   8192     1   0.035      5.5     12.9    0.338        18.8  256.8 KB  0 (exact)     1.0x
+  10000   Piccard   8192     1   0.051      5.5     12.9    0.335        18.8  256.8 KB     0.0457         
+         Baseline  16384     1   0.063     10.6     23.4    0.598        34.6  512.8 KB  0 (exact)     1.8x
+  50000   Piccard   8192     1   0.051      5.4     12.9    0.333        18.7  256.8 KB     0.0457         
+         Baseline  65536     1   0.094     41.7     91.3      2.2       135.3    2.0 MB  0 (exact)     7.2x
+
+======================================================================
+  Table 3: Piccard vs Baseline — Varying Set Size
+======================================================================
+   |S|    Method  Encode  Encrypt  Compute  Decrypt  Total (ms)      Error
+--------------------------------------------------------------------------
+    50   Piccard   0.029      5.5     13.0    0.339        18.9     0.0538
+        Baseline   0.034      5.5     13.0    0.345        18.8  0 (exact)
+   100   Piccard   0.051      5.5     13.0    0.336        18.9     0.0457
+        Baseline   0.034      5.6     13.1    0.340        19.1  0 (exact)
+   500   Piccard   0.250      5.6     13.3    0.342        19.5     0.0618
+        Baseline   0.035      5.5     12.7    0.333        18.5  0 (exact)
+  1000   Piccard   0.503      5.5     13.0    0.324        19.4     0.0054
+        Baseline   0.037      5.6     13.3    0.337        19.6  0 (exact)
+
+======================================================================
+  Table 4: Accuracy — Piccard vs Baseline
+======================================================================
+   Overlap  J_true  Piccard J  Piccard Err  Baseline J  Baseline Err
+--------------------------------------------------------------------
+  0.000000  0.0000     0.0000    0 (exact)      0.0000     0 (exact)
+  0.100000  0.0526     0.0968       0.0441      0.0526     0 (exact)
+  0.250000  0.1429     0.1774       0.0346      0.1429     0 (exact)
+  0.500000  0.3333     0.3387       0.0054      0.3333     0 (exact)
+  0.750000  0.6000     0.5806       0.0194      0.6000     0 (exact)
+  0.900000  0.8182     0.7903       0.0279      0.8182     0 (exact)
+  1.000000  1.0000     1.0000    0 (exact)      1.0000     0 (exact)
+
+======================================================================
+  Table 5: Piccard Accuracy Across Similarity Levels
+======================================================================
+   Overlap    k   m  J_true  J_hat (avg)  Avg Error
+---------------------------------------------------
+  0.000000  128  32  0.0000       0.0000  0 (exact)
+  0.100000  128  32  0.0526       0.0887     0.0361
+  0.250000  128  32  0.1429       0.1532     0.0104
+  0.500000  128  32  0.3333       0.3468     0.0134
+  0.750000  128  32  0.6000       0.6694     0.0694
+  0.900000  128  32  0.8182       0.8306     0.0125
+  1.000000  128  32  1.0000       1.0000  0 (exact)
+
+  Saved 5 table files to /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper/
+    table1_piccard_timing.txt
+    table2_comparison_universe.txt
+    table3_comparison_setsize.txt
+    table4_accuracy.txt
+    table5_piccard_accuracy.txt
+
+
+  Summary saved: /Users/heewonchung/Documents/00-Research/active/Private Jaccard with FHE/Dev/results/2026-02-27_111402_paper/summary.txt

@@ -1,0 +1,31 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  500
+  Trials:    2
+  Mode:      timing
+  Security:  TOY
+  Universe: 262144
+
+=== Vary universe size (median of 2 trials) ===
+  U=1024 piccard: N=4096 total=10.5625ms err=0.061828
+  U=1024 baseline: N=1024 cts=1 total=5.68719ms err=0
+  U=4096 piccard: N=4096 total=11.3766ms err=0.061828
+  U=4096 baseline: N=4096 cts=1 total=11.1473ms err=0
+  U=16384 piccard: N=4096 total=11.7964ms err=0.061828
+  U=16384 baseline: N=16384 cts=1 total=35.1735ms err=0
+  U=65536 piccard: N=4096 total=11.3826ms err=0.061828
+  U=65536 baseline: N=65536 cts=1 total=137.414ms err=0
+  U=262144 piccard: N=4096 total=11.2245ms err=0.061828
+  U=262144 baseline: N=262144 cts=1 total=625.247ms err=0
+  U=524288 piccard: N=4096 total=14.3493ms err=0.061828
+  U=524288 baseline: N=524288 cts=1 total=1336.12ms err=0
+  U=1048576 piccard: N=4096 total=17.6821ms err=0.061828
+  U=1048576 baseline: N=1048576 cts=1 total=2814.24ms err=0
+
+=== Vary set size (median of 2 trials) ===
+  size=100 piccard: total=14.1906ms err=0.0456989
+  size=100 baseline: total=613.771ms err=0
+  size=500 piccard: total=14.2737ms err=0.061828
+  size=500 baseline: total=610.883ms err=0
+  size=1000 piccard: total=14.4069ms err=0.00537634

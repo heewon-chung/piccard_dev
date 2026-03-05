@@ -1,0 +1,25 @@
+Benchmark Configuration:
+  k:         128
+  m:         32
+  Set size:  100
+  Trials:    10
+  Mode:      timing
+  Security:  STD192
+  Max k:     64
+
+=== Varying k (median of 10 trials) ===
+  k=16 tau=8 depth=7 N=16384 poly_eval=62.5226ms total=129.499ms
+  k=32 tau=16 depth=9 N=32768 poly_eval=225.312ms total=401.086ms
+  k=64 tau=32 depth=12 N=32768 poly_eval=397.658ms total=601.603ms
+
+=== Varying tau (median of 10 trials) ===
+  tau=1 poly_eval=400.56ms total=602.144ms correct=1
+  tau=16 poly_eval=425.583ms total=666.083ms correct=1
+  tau=32 poly_eval=424.204ms total=669.848ms correct=1
+  tau=48 poly_eval=487.777ms total=762.204ms correct=1
+  tau=64 poly_eval=487.811ms total=762.013ms correct=1
+
+=== Threshold vs Basic ===
+  k=16 threshold=136.878ms basic=22.0968ms overhead=6.2x
+  k=32 threshold=479.4ms basic=21.2ms overhead=22.6x
+  k=64 threshold=762.9ms basic=21.4ms overhead=35.7x
