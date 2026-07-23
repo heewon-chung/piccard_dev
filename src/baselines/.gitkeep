@@ -1,0 +1,3 @@
+# Comparison baseline implementations.
+# Each protocol lands here as its own .cpp implementing include/baselines/pjs_baseline.h.
+# Picked up automatically by the file(GLOB) in CMakeLists.txt.

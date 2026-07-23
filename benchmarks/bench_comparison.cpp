@@ -114,12 +114,24 @@ struct ComparisonResult {
 // CSV output for ComparisonResult
 // ============================================================================
 
+/// Security class of each protocol, emitted next to its cost so the comparison
+/// table can separate "same security class" from "vs. a weaker baseline".
+/// Mirrors piccard::baselines::SecurityClass; kept as a lookup on the method
+/// name so adding a protocol touches exactly one place.
+static const char* SecurityClassOf(const std::string& method) {
+    if (method == "piccard" || method == "piccard_sqrt") return "CPA/no-leakage";
+    if (method == "baseline") return "KPA/leakage";  // ZLG+24
+    if (method == "bcg12" || method == "sj16") return "AHE/no-leakage";
+    return "unknown";
+}
+
 class ComparisonCSVWriter {
 public:
     ComparisonCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "scenario,method,universe_size,set_size,k,m,ring_dim,num_cts,mult_depth,"
+        *out_ << "scenario,method,security_class,"
+              << "universe_size,set_size,k,m,ring_dim,num_cts,mult_depth,"
               << "phase_encode_ms,phase_encrypt_ms,phase_compute_ms,"
               << "phase_decrypt_ms,total_ms,"
               << "memory_bytes,ct_size_bytes,comm_bytes,"
@@ -129,6 +141,7 @@ public:
     void WriteRow(const ComparisonResult& r) {
         *out_ << r.scenario << ","
               << r.method << ","
+              << SecurityClassOf(r.method) << ","
               << r.universe_size << ","
               << r.set_size << ","
               << r.k << ","

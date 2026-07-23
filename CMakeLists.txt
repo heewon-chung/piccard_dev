@@ -52,6 +52,19 @@ else()
     message(STATUS "OpenFHE not found - FHE features disabled")
 endif()
 
+# Find GMP (used by the AHE/DH-based comparison baselines: BCG12, SJ16).
+# No standard FindGMP module ships with CMake, so locate it by hand.
+find_path(GMP_INCLUDE_DIR gmp.h HINTS /opt/homebrew/include /usr/local/include)
+find_library(GMP_LIBRARY NAMES gmp HINTS /opt/homebrew/lib /usr/local/lib)
+if(GMP_INCLUDE_DIR AND GMP_LIBRARY)
+    message(STATUS "Found GMP: ${GMP_LIBRARY}")
+    set(GMP_FOUND TRUE)
+    add_compile_definitions(HAVE_GMP)
+else()
+    message(STATUS "GMP not found - AHE-based baselines (BCG12, SJ16) disabled")
+    set(GMP_FOUND FALSE)
+endif()
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 if(OpenFHE_FOUND)
@@ -114,6 +127,28 @@ if(OpenFHE_FOUND)
     set(HAVE_PICCARD_FHE TRUE)
 else()
     set(HAVE_PICCARD_FHE FALSE)
+endif()
+
+# =============================================================================
+# Comparison baselines (BCG12, SJ16)
+# =============================================================================
+# Each baseline lands as its own translation unit under src/baselines/ and
+# implements include/baselines/pjs_baseline.h. The glob keeps this target
+# valid while the directory is still empty.
+
+file(GLOB PICCARD_BASELINE_SOURCES ${CMAKE_SOURCE_DIR}/src/baselines/*.cpp)
+
+if(PICCARD_BASELINE_SOURCES AND GMP_FOUND AND HAVE_PICCARD_FHE)
+    add_library(piccard_baselines ${PICCARD_BASELINE_SOURCES})
+    target_link_libraries(piccard_baselines PUBLIC piccard_fhe ${GMP_LIBRARY})
+    target_include_directories(piccard_baselines PUBLIC ${GMP_INCLUDE_DIR})
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(piccard_baselines PUBLIC OpenMP::OpenMP_CXX)
+    endif()
+    set(HAVE_PICCARD_BASELINES TRUE)
+    message(STATUS "Comparison baselines enabled")
+else()
+    set(HAVE_PICCARD_BASELINES FALSE)
 endif()
 
 # =============================================================================
