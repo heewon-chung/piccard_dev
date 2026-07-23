@@ -1,0 +1,17 @@
+*.o
+*.a
+*.so
+*.d
+
+.cache
+.gemini
+.claude
+.omc
+
+
+build
+results
+
+.DS_Store
+.agent
+.codex
