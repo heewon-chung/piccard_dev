@@ -1,6 +1,6 @@
 #pragma once
 
-#include "piccard/util/params.h"
+#include "util/params.h"
 
 #include <cstdint>
 #include <vector>

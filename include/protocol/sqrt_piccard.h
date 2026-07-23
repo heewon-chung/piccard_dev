@@ -1,32 +1,21 @@
 #pragma once
 
-#include "piccard/util/params.h"
-#include "piccard/core/minhash.h"
-#include "piccard/core/onehot_encoder.h"
-#include "piccard/fhe/bfv_context.h"
+#include "protocol/piccard.h"      // JaccardResult, BFVContext
+#include "core/minhash.h"
+#include "core/sqrt_encoder.h"
 
-#include <cstdint>
 #include <memory>
 #include <vector>
 
 namespace piccard {
 
-struct JaccardResult {
-    int64_t match_count;        // Raw slot-0 value after rotate-and-sum
-    double jaccard_estimate;    // Bias-corrected: (v/k - 1/m) / (1 - 1/m)
-};
-
-// Backward-compatible alias
-using PiccardResult = JaccardResult;
-
-class Piccard {
+class SqrtPiccard {
 public:
-    explicit Piccard(const PiccardParams& params);
-
-    // ── High-level protocol API (paper-aligned) ─────────────────
+    explicit SqrtPiccard(const PiccardParams& params);
 
     void KeyGen();
 
+    // High-level protocol API (same shape as Piccard)
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     Encrypt(const std::vector<uint64_t>& set) const;
 
@@ -39,22 +28,20 @@ public:
     JaccardResult Run(const std::vector<uint64_t>& set_x,
                       const std::vector<uint64_t>& set_y) const;
 
-    // ── Advanced/benchmarking API (public, documented) ──────────
-
+    // Advanced/benchmarking API
     std::vector<uint64_t> ComputeSignature(const std::vector<uint64_t>& set) const;
     std::vector<int64_t>  EncodeSignature(const std::vector<uint64_t>& sig) const;
-
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     EncryptFeature(const std::vector<int64_t>& feature) const;
 
     const PiccardParams& GetParams() const { return params_; }
     const BFVContext& GetBFVContext() const { return *bfv_; }
 
-protected:
+private:
     PiccardParams params_;
     std::unique_ptr<BFVContext> bfv_;
     std::unique_ptr<MinHasher> hasher_;
-    std::unique_ptr<OneHotEncoder> encoder_;
+    std::unique_ptr<SqrtEncoder> encoder_;
 };
 
 } // namespace piccard

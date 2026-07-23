@@ -1,5 +1,5 @@
-#include "piccard/protocol/threshold_piccard.h"
-#include "piccard/core/threshold_poly.h"
+#include "protocol/threshold_piccard.h"
+#include "core/threshold_poly.h"
 
 namespace piccard {
 

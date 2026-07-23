@@ -32,7 +32,12 @@ struct PiccardParams {
     uint64_t plaintext_mod = 0;                // Prime p > k, p ≡ 1 mod 2N
     uint32_t mult_depth = 1;                   // 1 for basic/dynamic, higher for threshold
 
+    // Derived by ValidateSqrt() — base-√m encoding
+    uint32_t sqrt_base = 0;                    // √m (power of 2)
+    uint32_t sqrt_feature_dim = 0;             // k * 2 * √m
+
     void Validate();
+    void ValidateSqrt();
 };
 
 // Smallest power of 2 >= n (returns 1 for n <= 1)

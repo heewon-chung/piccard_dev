@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/core/threshold_poly.h"
+#include "core/threshold_poly.h"
 
 using namespace piccard;
 

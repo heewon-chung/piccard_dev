@@ -15,8 +15,8 @@
  * larger ring_dim, making all BFV operations more expensive.
  */
 
-#include "piccard/util/params.h"
-#include "piccard/fhe/bfv_context.h"
+#include "util/params.h"
+#include "fhe/bfv_context.h"
 
 #include <cassert>
 #include <cstdint>

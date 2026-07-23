@@ -1,6 +1,6 @@
 #include "benchmark_utils.h"
-#include "piccard/protocol/dynamic_piccard.h"
-#include "piccard/core/bottom_structure.h"
+#include "protocol/dynamic_piccard.h"
+#include "core/bottom_structure.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -68,6 +68,7 @@ struct DynamicResult {
     std::string label;
     uint32_t k = 0;
     uint32_t m = 0;
+    size_t set_size = 0;
     uint32_t ring_dim = 0;
     uint32_t depth = 0;
 
@@ -87,6 +88,7 @@ struct DynamicResult {
     double jaccard_computed = 0.0;
     double jaccard_expected = 0.0;
     double jaccard_error = 0.0;
+    double jaccard_rel_error = 0.0;  // |J_hat - J_true| / J_true (-1 if J_true=0)
 
     double ops_insert_per_sec = 0.0;
     double ops_delete_per_sec = 0.0;
@@ -98,18 +100,18 @@ public:
     DynamicCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "label,k,m,ring_dim,depth,"
+        *out_ << "label,k,m,set_size,ring_dim,depth,"
               << "phase_init_ms,phase_insert_ms,phase_delete_ms,"
               << "phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
               << "phase_compute_ms,phase_decrypt_ms,total_ms,"
               << "memory_bytes,ct_size_bytes,"
-              << "jaccard_computed,jaccard_expected,jaccard_error,"
+              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
               << "ops_insert_per_sec,ops_delete_per_sec\n";
     }
 
     void WriteRow(const DynamicResult& r) {
         *out_ << r.label << ","
-              << r.k << "," << r.m << "," << r.ring_dim << "," << r.depth << ","
+              << r.k << "," << r.m << "," << r.set_size << "," << r.ring_dim << "," << r.depth << ","
               << std::fixed << std::setprecision(3)
               << r.phase_init_ms << "," << r.phase_insert_ms << ","
               << r.phase_delete_ms << "," << r.phase_signature_ms << ","
@@ -119,7 +121,7 @@ public:
               << r.memory_bytes << "," << r.ct_size_bytes << ","
               << std::fixed << std::setprecision(6)
               << r.jaccard_computed << "," << r.jaccard_expected << ","
-              << r.jaccard_error << ","
+              << r.jaccard_error << "," << r.jaccard_rel_error << ","
               << std::fixed << std::setprecision(1)
               << r.ops_insert_per_sec << "," << r.ops_delete_per_sec << "\n";
     }
@@ -142,6 +144,7 @@ static DynamicResult RunTimedDynamic(
     dr.label = label;
     dr.k = engine.GetParams().k;
     dr.m = engine.GetParams().m;
+    dr.set_size = set_x.size();
     dr.ring_dim = engine.GetParams().ring_dim;
     dr.depth = depth;
 
@@ -219,6 +222,7 @@ static DynamicResult RunTimedDynamic(
     dr.jaccard_computed = j_hat;
     dr.jaccard_expected = j_true;
     dr.jaccard_error = std::abs(j_hat - j_true);
+    dr.jaccard_rel_error = (j_true > 0.0) ? (dr.jaccard_error / j_true) : -1.0;
 
     return dr;
 }
@@ -267,6 +271,7 @@ static DynamicResult RunMultiTrialDynamic(
     med.label = label;
     med.k = engine.GetParams().k;
     med.m = engine.GetParams().m;
+    med.set_size = set_x.size();
     med.ring_dim = engine.GetParams().ring_dim;
     med.depth = depth;
     med.total_ms = Median(v_total);
@@ -295,7 +300,7 @@ static DynamicResult RunMultiTrialDynamic(
 
 static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
                        DynamicCSVWriter& csv) {
-    std::vector<uint32_t> k_values = {64, 128, 256, 512, 1024};
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
     // BottomStructure requires set_size >> k to populate all hash buckets
     size_t effective_size = std::max(config.set_size, size_t{10000});
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
@@ -330,41 +335,40 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
 }
 
 // ============================================================================
-// Scenario 2: Varying depth d
+// Scenario 2: Varying m
 // ============================================================================
 
-static void BenchVaryDepth(const BenchmarkConfig& config,
-                           DynamicCSVWriter& csv) {
-    std::vector<uint32_t> depths = {3, 5, 10, 20};
-    // BottomStructure requires set_size >> k to populate all hash buckets
+static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
+                       DynamicCSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
     size_t effective_size = std::max(config.set_size, size_t{10000});
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
 
-    for (uint32_t d : depths) {
+    for (uint32_t m : m_values) {
         try {
             PiccardParams params;
             params.k = config.k;
-            params.m = config.m;
-            params.bottom_depth = d;
+            params.m = m;
+            params.bottom_depth = depth;
             params.security = config.security_level;
             params.Validate();
 
             DynamicPiccard engine(params);
             engine.KeyGen();
 
-            std::string label = "vary_depth_" + std::to_string(d);
-            auto dr = RunMultiTrialDynamic(engine, sa, sb, j_true, d, label,
+            std::string label = "vary_m_" + std::to_string(m);
+            auto dr = RunMultiTrialDynamic(engine, sa, sb, j_true, depth, label,
                                            config.trials);
             csv.WriteRow(dr);
 
-            std::cerr << "  d=" << d
+            std::cerr << "  m=" << m << " d=" << depth
                       << " init=" << dr.phase_init_ms << "ms"
                       << " ins=" << dr.ops_insert_per_sec << " ops/s"
                       << " del=" << dr.ops_delete_per_sec << " ops/s"
                       << " total=" << dr.total_ms << "ms\n";
         } catch (const std::exception& e) {
-            std::cerr << "  WARNING: Skipped d=" << d << ": " << e.what() << "\n";
+            std::cerr << "  WARNING: Skipped m=" << m << ": " << e.what() << "\n";
         }
     }
 }
@@ -375,7 +379,7 @@ static void BenchVaryDepth(const BenchmarkConfig& config,
 
 static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
                              DynamicCSVWriter& csv) {
-    std::vector<size_t> sizes = {1000, 10000, 50000, 100000, 500000, 1000000};
+    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
 
     PiccardParams params;
     params.k = config.k;
@@ -407,16 +411,14 @@ static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
 }
 
 // ============================================================================
-// Scenario 4: Dynamic vs Basic comparison
+// Accuracy: varying k
 // ============================================================================
 
-static void BenchDynamicVsBasic(const BenchmarkConfig& config, uint32_t depth,
+static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                                 DynamicCSVWriter& csv) {
-    std::vector<uint32_t> k_values = {64, 128, 256, 512, 1024};
-    // BottomStructure requires set_size >> k to populate all hash buckets
-    size_t effective_size = std::max(config.set_size, size_t{10000});
-    auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
-    double j_true = ExactJaccard(sa, sb);
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                                    0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t k : k_values) {
         try {
@@ -430,72 +432,42 @@ static void BenchDynamicVsBasic(const BenchmarkConfig& config, uint32_t depth,
             DynamicPiccard engine(params);
             engine.KeyGen();
 
-            // Dynamic protocol
-            std::string dyn_label = "dynamic_vs_basic_k" + std::to_string(k) + "_dynamic";
-            auto dr = RunMultiTrialDynamic(engine, sa, sb, j_true, depth, dyn_label,
-                                           config.trials);
-            csv.WriteRow(dr);
+            double total_error_all = 0;
+            size_t count_all = 0;
 
-            // Basic protocol (for comparison)
-            Timer timer;
-            timer.Start();
-            auto sig_x = engine.ComputeSignature(sa);
-            auto sig_y = engine.ComputeSignature(sb);
-            double minhash_ms = timer.ElapsedMs();
+            for (double frac : overlaps) {
+                for (size_t t = 0; t < config.trials; t++) {
+                    std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                        config.set_size, frac, rng);
+                    double j_true = ExactJaccard(sa, sb);
 
-            DynamicResult basic;
-            basic.label = "dynamic_vs_basic_k" + std::to_string(k) + "_basic";
-            basic.k = engine.GetParams().k;
-            basic.m = engine.GetParams().m;
-            basic.ring_dim = engine.GetParams().ring_dim;
-            basic.depth = 0;
-            basic.phase_init_ms = minhash_ms;
+                    auto bottom_x = engine.InitSet(sa);
+                    auto bottom_y = engine.InitSet(sb);
+                    auto result = engine.Run(*bottom_x, *bottom_y);
+                    double err = std::abs(result.jaccard_estimate - j_true);
+                    total_error_all += err;
+                    count_all++;
 
-            timer.Start();
-            auto feat_x = engine.EncodeSignature(sig_x);
-            auto feat_y = engine.EncodeSignature(sig_y);
-            basic.phase_encode_ms = timer.ElapsedMs();
-
-            timer.Start();
-            auto ct_x = engine.EncryptFeature(feat_x);
-            auto ct_y = engine.EncryptFeature(feat_y);
-            basic.phase_encrypt_ms = timer.ElapsedMs();
-            basic.ct_size_bytes = CiphertextSizer::GetSerializedSize(ct_x);
-
-            const auto& bfv = engine.GetBFVContext();
-            timer.Start();
-            auto product = bfv.Multiply(ct_x, ct_y);
-            auto result = product;
-            for (uint32_t step = 1; step < engine.GetParams().ring_dim; step *= 2) {
-                auto rotated = bfv.Rotate(result, static_cast<int>(step));
-                result = bfv.Add(result, rotated);
+                    DynamicResult dr;
+                    dr.label = "accuracy_k" + std::to_string(k) +
+                               "_" + std::to_string(frac) +
+                               "_t" + std::to_string(t);
+                    dr.k = params.k;
+                    dr.m = params.m;
+                    dr.set_size = config.set_size;
+                    dr.ring_dim = engine.GetParams().ring_dim;
+                    dr.depth = depth;
+                    dr.jaccard_computed = result.jaccard_estimate;
+                    dr.jaccard_expected = j_true;
+                    dr.jaccard_error = err;
+                    dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    csv.WriteRow(dr);
+                }
             }
-            basic.phase_compute_ms = timer.ElapsedMs();
 
-            timer.Start();
-            auto values = bfv.Decrypt(result);
-            int64_t v = values[0];
-            double kd = static_cast<double>(engine.GetParams().k);
-            double md = static_cast<double>(engine.GetParams().m);
-            double j_hat = (static_cast<double>(v) / kd - 1.0 / md) / (1.0 - 1.0 / md);
-            j_hat = std::max(0.0, std::min(1.0, j_hat));
-            basic.phase_decrypt_ms = timer.ElapsedMs();
-
-            basic.total_ms = basic.phase_init_ms + basic.phase_encode_ms +
-                             basic.phase_encrypt_ms + basic.phase_compute_ms +
-                             basic.phase_decrypt_ms;
-            basic.memory_bytes = MemoryTracker::GetPeakRSS();
-            basic.jaccard_computed = j_hat;
-            basic.jaccard_expected = j_true;
-            basic.jaccard_error = std::abs(j_hat - j_true);
-            csv.WriteRow(basic);
-
-            double overhead = (basic.total_ms > 0) ? dr.total_ms / basic.total_ms : 0.0;
-            std::cerr << "  k=" << k
-                      << " dynamic=" << dr.total_ms << "ms"
-                      << " basic=" << basic.total_ms << "ms"
-                      << " overhead=" << std::fixed << std::setprecision(2)
-                      << overhead << "x\n";
+            double avg_error = total_error_all / static_cast<double>(count_all);
+            std::cerr << "  k=" << k << " avg_error=" << avg_error << "\n";
         } catch (const std::exception& e) {
             std::cerr << "  WARNING: Skipped k=" << k << ": " << e.what() << "\n";
         }
@@ -503,49 +475,129 @@ static void BenchDynamicVsBasic(const BenchmarkConfig& config, uint32_t depth,
 }
 
 // ============================================================================
-// Accuracy across similarity levels
+// Accuracy: varying m
 // ============================================================================
 
-static void BenchAccuracy(const BenchmarkConfig& config, uint32_t depth,
-                          DynamicCSVWriter& csv) {
+static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
+                                DynamicCSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
-    PiccardParams params;
-    params.k = config.k;
-    params.m = config.m;
-    params.bottom_depth = depth;
-    params.security = config.security_level;
-    params.Validate();
+    for (uint32_t m : m_values) {
+        try {
+            PiccardParams params;
+            params.k = config.k;
+            params.m = m;
+            params.bottom_depth = depth;
+            params.security = config.security_level;
+            params.Validate();
 
-    DynamicPiccard engine(params);
-    engine.KeyGen();
+            DynamicPiccard engine(params);
+            engine.KeyGen();
 
-    for (double frac : overlaps) {
-        double total_error = 0;
-        for (size_t t = 0; t < config.trials; t++) {
-            auto [sa, sb] = MakeSetsWithOverlap(config.set_size, frac);
-            double j_true = ExactJaccard(sa, sb);
+            double total_error_all = 0;
+            size_t count_all = 0;
 
-            auto bottom_x = engine.InitSet(sa);
-            auto bottom_y = engine.InitSet(sb);
-            auto result = engine.Run(*bottom_x, *bottom_y);
-            total_error += std::abs(result.jaccard_estimate - j_true);
+            for (double frac : overlaps) {
+                for (size_t t = 0; t < config.trials; t++) {
+                    std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                        config.set_size, frac, rng);
+                    double j_true = ExactJaccard(sa, sb);
 
-            DynamicResult dr;
-            dr.label = "accuracy_" + std::to_string(frac) + "_t" + std::to_string(t);
-            dr.k = params.k;
-            dr.m = params.m;
-            dr.ring_dim = engine.GetParams().ring_dim;
-            dr.depth = depth;
-            dr.jaccard_computed = result.jaccard_estimate;
-            dr.jaccard_expected = j_true;
-            dr.jaccard_error = std::abs(result.jaccard_estimate - j_true);
-            csv.WriteRow(dr);
+                    auto bottom_x = engine.InitSet(sa);
+                    auto bottom_y = engine.InitSet(sb);
+                    auto result = engine.Run(*bottom_x, *bottom_y);
+                    double err = std::abs(result.jaccard_estimate - j_true);
+                    total_error_all += err;
+                    count_all++;
+
+                    DynamicResult dr;
+                    dr.label = "accuracy_m" + std::to_string(m) +
+                               "_" + std::to_string(frac) +
+                               "_t" + std::to_string(t);
+                    dr.k = params.k;
+                    dr.m = params.m;
+                    dr.set_size = config.set_size;
+                    dr.ring_dim = engine.GetParams().ring_dim;
+                    dr.depth = depth;
+                    dr.jaccard_computed = result.jaccard_estimate;
+                    dr.jaccard_expected = j_true;
+                    dr.jaccard_error = err;
+                    dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    csv.WriteRow(dr);
+                }
+            }
+
+            double avg_error = total_error_all / static_cast<double>(count_all);
+            std::cerr << "  m=" << m << " avg_error=" << avg_error << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "  WARNING: Skipped m=" << m << ": " << e.what() << "\n";
         }
-        double avg_error = total_error / static_cast<double>(config.trials);
-        std::cerr << "  overlap=" << frac
-                  << " avg_error=" << avg_error << "\n";
+    }
+}
+
+// ============================================================================
+// Accuracy: varying set size
+// ============================================================================
+
+static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t depth,
+                                      DynamicCSVWriter& csv) {
+    std::vector<size_t> sizes = {100, 1000, 10000};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                                    0.6, 0.7, 0.8, 0.9, 1.0};
+
+    for (size_t sz : sizes) {
+        try {
+            PiccardParams params;
+            params.k = config.k;
+            params.m = config.m;
+            params.bottom_depth = depth;
+            params.security = config.security_level;
+            params.Validate();
+
+            DynamicPiccard engine(params);
+            engine.KeyGen();
+
+            double total_error_all = 0;
+            size_t count_all = 0;
+
+            for (double frac : overlaps) {
+                for (size_t t = 0; t < config.trials; t++) {
+                    std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(sz, frac, rng);
+                    double j_true = ExactJaccard(sa, sb);
+
+                    auto bottom_x = engine.InitSet(sa);
+                    auto bottom_y = engine.InitSet(sb);
+                    auto result = engine.Run(*bottom_x, *bottom_y);
+                    double err = std::abs(result.jaccard_estimate - j_true);
+                    total_error_all += err;
+                    count_all++;
+
+                    DynamicResult dr;
+                    dr.label = "accuracy_size" + std::to_string(sz) +
+                               "_" + std::to_string(frac) +
+                               "_t" + std::to_string(t);
+                    dr.k = params.k;
+                    dr.m = params.m;
+                    dr.set_size = sz;
+                    dr.ring_dim = engine.GetParams().ring_dim;
+                    dr.depth = depth;
+                    dr.jaccard_computed = result.jaccard_estimate;
+                    dr.jaccard_expected = j_true;
+                    dr.jaccard_error = err;
+                    dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    csv.WriteRow(dr);
+                }
+            }
+
+            double avg_error = total_error_all / static_cast<double>(count_all);
+            std::cerr << "  size=" << sz << " avg_error=" << avg_error << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "  WARNING: Skipped size=" << sz << ": " << e.what() << "\n";
+        }
     }
 }
 
@@ -588,17 +640,20 @@ int main(int argc, char** argv) {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";
         BenchVaryK(config, depth, csv);
 
-        std::cerr << "\n=== Varying depth (median of " << config.trials << " trials) ===\n";
-        BenchVaryDepth(config, csv);
+        std::cerr << "\n=== Varying m (median of " << config.trials << " trials) ===\n";
+        BenchVaryM(config, depth, csv);
 
         std::cerr << "\n=== Varying set size (median of " << config.trials << " trials) ===\n";
         BenchVarySetSize(config, depth, csv);
-
-        std::cerr << "\n=== Dynamic vs Basic (median of " << config.trials << " trials) ===\n";
-        BenchDynamicVsBasic(config, depth, csv);
     } else if (config.mode == "accuracy") {
-        std::cerr << "\n=== Accuracy ===\n";
-        BenchAccuracy(config, depth, csv);
+        std::cerr << "\n=== Accuracy vs k ===\n";
+        BenchAccuracyVaryK(config, depth, csv);
+
+        std::cerr << "\n=== Accuracy vs m ===\n";
+        BenchAccuracyVaryM(config, depth, csv);
+
+        std::cerr << "\n=== Accuracy vs set size ===\n";
+        BenchAccuracyVarySetSize(config, depth, csv);
     }
 
     return 0;

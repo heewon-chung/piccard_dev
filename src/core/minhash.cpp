@@ -1,9 +1,13 @@
-#include "piccard/core/minhash.h"
+#include "core/minhash.h"
 
 #include <algorithm>
 #include <limits>
 #include <random>
 #include <stdexcept>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace piccard {
 
@@ -43,9 +47,33 @@ std::vector<uint64_t> MinHasher::ComputeSignature(const std::vector<uint64_t>& s
 
     std::vector<uint64_t> signature(k_, std::numeric_limits<uint64_t>::max());
 
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+        std::vector<uint64_t> local_sig(k_, std::numeric_limits<uint64_t>::max());
+
+        #pragma omp for nowait
+        for (size_t e = 0; e < set.size(); e++) {
+            uint64_t elem = set[e];
+            for (uint32_t i = 0; i < k_; i++) {
+                uint64_t h = ModMersenne(MulModMersenne(a_[i], elem) + b_[i]);
+                if (hash_range_ != std::numeric_limits<uint64_t>::max()) {
+                    h = h % hash_range_;
+                }
+                local_sig[i] = std::min(local_sig[i], h);
+            }
+        }
+
+        #pragma omp critical
+        {
+            for (uint32_t i = 0; i < k_; i++) {
+                signature[i] = std::min(signature[i], local_sig[i]);
+            }
+        }
+    }
+#else
     for (uint64_t elem : set) {
         for (uint32_t i = 0; i < k_; i++) {
-            // h_i(x) = ((a_i * x + b_i) mod P) mod R
             uint64_t h = ModMersenne(MulModMersenne(a_[i], elem) + b_[i]);
             if (hash_range_ != std::numeric_limits<uint64_t>::max()) {
                 h = h % hash_range_;
@@ -53,6 +81,7 @@ std::vector<uint64_t> MinHasher::ComputeSignature(const std::vector<uint64_t>& s
             signature[i] = std::min(signature[i], h);
         }
     }
+#endif
 
     return signature;
 }

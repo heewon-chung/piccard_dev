@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "piccard/core/bottom_structure.h"
-#include "piccard/core/minhash.h"
+#include "core/bottom_structure.h"
+#include "core/minhash.h"
 
 using namespace piccard;
 

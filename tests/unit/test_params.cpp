@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/util/params.h"
+#include "util/params.h"
 
 #include <string>
 

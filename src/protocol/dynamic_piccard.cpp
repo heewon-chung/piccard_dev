@@ -1,4 +1,4 @@
-#include "piccard/protocol/dynamic_piccard.h"
+#include "protocol/dynamic_piccard.h"
 
 namespace piccard {
 

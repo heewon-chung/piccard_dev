@@ -1,6 +1,6 @@
 #include "benchmark_utils.h"
-#include "piccard/protocol/threshold_piccard.h"
-#include "piccard/protocol/piccard.h"
+#include "protocol/threshold_piccard.h"
+#include "protocol/piccard.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -69,6 +69,7 @@ struct ThresholdResult {
     std::string label;
     uint32_t k = 0;
     uint32_t m = 0;
+    size_t set_size = 0;
     uint32_t ring_dim = 0;
     uint32_t tau = 0;
     uint32_t mult_depth = 0;
@@ -90,6 +91,11 @@ struct ThresholdResult {
     int threshold_expected = -1;
     int threshold_correct = -1;
 
+    double jaccard_computed = 0.0;
+    double jaccard_expected = 0.0;
+    double jaccard_error = -1.0;
+    double jaccard_rel_error = -1.0;
+
     std::string note;
 };
 
@@ -99,18 +105,19 @@ public:
     ThresholdCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "label,k,m,ring_dim,tau,mult_depth,"
+        *out_ << "label,k,m,set_size,ring_dim,tau,mult_depth,"
               << "phase_minhash_ms,phase_encode_ms,phase_encrypt_ms,"
               << "phase_multiply_ms,phase_rotate_sum_ms,phase_mask_ms,"
               << "phase_poly_eval_ms,phase_decrypt_ms,total_ms,"
               << "memory_bytes,ct_size_bytes,"
               << "threshold_result,threshold_expected,threshold_correct,"
+              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
               << "note\n";
     }
 
     void WriteRow(const ThresholdResult& r) {
         *out_ << r.label << ","
-              << r.k << "," << r.m << "," << r.ring_dim << ","
+              << r.k << "," << r.m << "," << r.set_size << "," << r.ring_dim << ","
               << r.tau << "," << r.mult_depth << ","
               << std::fixed << std::setprecision(3)
               << r.phase_minhash_ms << "," << r.phase_encode_ms << ","
@@ -121,6 +128,9 @@ public:
               << r.memory_bytes << "," << r.ct_size_bytes << ","
               << r.threshold_result << "," << r.threshold_expected << ","
               << r.threshold_correct << ","
+              << std::fixed << std::setprecision(6)
+              << r.jaccard_computed << "," << r.jaccard_expected << ","
+              << r.jaccard_error << "," << r.jaccard_rel_error << ","
               << r.note << "\n";
     }
 };
@@ -181,6 +191,7 @@ static ThresholdResult RunTimedThreshold(
     tr.label = label;
     tr.k = engine.GetParams().k;
     tr.m = engine.GetParams().m;
+    tr.set_size = set_x.size();
     tr.ring_dim = engine.GetParams().ring_dim;
     tr.tau = engine.GetParams().threshold_tau;
     tr.mult_depth = engine.GetParams().mult_depth;
@@ -292,6 +303,7 @@ static ThresholdResult RunMultiTrialThreshold(
     med.label = label;
     med.k = engine.GetParams().k;
     med.m = engine.GetParams().m;
+    med.set_size = set_x.size();
     med.ring_dim = engine.GetParams().ring_dim;
     med.tau = engine.GetParams().threshold_tau;
     med.mult_depth = engine.GetParams().mult_depth;
@@ -313,20 +325,6 @@ static ThresholdResult RunMultiTrialThreshold(
     return med;
 }
 
-// Default maximum k based on security level
-static uint32_t DefaultMaxK(SecurityLevel sec) {
-    switch (sec) {
-        case SecurityLevel::TOY:
-        case SecurityLevel::STD128:
-            return 128;
-        case SecurityLevel::STD192:
-        case SecurityLevel::STD256:
-            return 64;
-        default:
-            return 64;
-    }
-}
-
 // Try to create and initialize a threshold engine; returns nullptr on failure
 static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
     uint32_t k, uint32_t m, uint32_t tau, SecurityLevel security,
@@ -344,6 +342,35 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
     } catch (const std::exception& e) {
         out_error = e.what();
         return nullptr;
+    } catch (...) {
+        out_error = "unknown exception during Validate()";
+        return nullptr;
+    }
+
+    // Pre-check: plaintext modulus must satisfy p ≡ 1 (mod 2N).
+    // OpenFHE may require a larger ring_dim than Validate() computed
+    // (based on mult_depth + security level). If the computed ring_dim
+    // already violates the plaintext constraint, skip.
+    // For p = 65537 (2^16+1), max ring_dim is 32768 (cyclotomic 65536).
+    // Higher mult_depth at STD128 needs ring_dim > 32768, which fails.
+    {
+        uint64_t p = out_params.plaintext_mod;
+        uint64_t two_n = 2ULL * out_params.ring_dim;
+        if ((p - 1) % two_n != 0) {
+            out_error = "ring_dim " + std::to_string(out_params.ring_dim) +
+                        " incompatible with plaintext_mod " + std::to_string(p) +
+                        " (mult_depth=" + std::to_string(out_params.mult_depth) + ")";
+            return nullptr;
+        }
+        // Also reject if mult_depth is so high that OpenFHE will internally
+        // expand ring_dim beyond what the plaintext modulus supports.
+        // Conservative limit: if mult_depth > 21 at STD128, ring_dim
+        // will be 65536+ which exceeds p=65537's constraint.
+        if (out_params.mult_depth > 21 && security == SecurityLevel::STD128) {
+            out_error = "mult_depth " + std::to_string(out_params.mult_depth) +
+                        " too high for STD128 (max supported: 21)";
+            return nullptr;
+        }
     }
 
     try {
@@ -355,6 +382,9 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
     } catch (const std::exception& e) {
         out_error = e.what();
         return nullptr;
+    } catch (...) {
+        out_error = "unknown exception during engine construction";
+        return nullptr;
     }
 }
 
@@ -362,16 +392,14 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
 // Scenario 1: Varying k
 // ============================================================================
 
-static void BenchVaryK(const BenchmarkConfig& config, uint32_t max_k,
+static void BenchVaryK(const BenchmarkConfig& config,
                        ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> all_k = {16, 32, 64, 128};
+    std::vector<uint32_t> all_k = {16, 32, 64, 128, 256, 512};
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
 
     for (uint32_t k : all_k) {
-        if (k > max_k) break;
-
-        uint32_t tau = k / 2;
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
         PiccardParams params;
         std::string error;
         auto engine = TryCreateThresholdEngine(k, config.m, tau,
@@ -386,193 +414,335 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t max_k,
             continue;
         }
 
-        // Compute expected threshold using basic protocol
-        auto basic_result = engine->GetPiccard().Run(sa, sb);
-        bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+        try {
+            // Compute expected threshold using basic protocol
+            auto basic_result = engine->GetPiccard().Run(sa, sb);
+            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
 
-        std::string label = "vary_k_" + std::to_string(k);
-        auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
-                                         config.trials);
-        csv.WriteRow(tr);
+            std::string label = "vary_k_" + std::to_string(k);
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+                                             config.trials);
+            csv.WriteRow(tr);
 
-        std::cerr << "  k=" << k << " tau=" << tau
-                  << " depth=" << tr.mult_depth
-                  << " N=" << tr.ring_dim
-                  << " poly_eval=" << tr.phase_poly_eval_ms << "ms"
-                  << " total=" << tr.total_ms << "ms\n";
+            std::cerr << "  k=" << k << " tau=" << tau
+                      << " depth=" << tr.mult_depth
+                      << " N=" << tr.ring_dim
+                      << " poly_eval=" << tr.phase_poly_eval_ms << "ms"
+                      << " total=" << tr.total_ms << "ms\n";
+        } catch (const std::exception& e) {
+            std::cerr << "  WARNING: k=" << k << " failed: " << e.what() << "\n";
+            auto skipped = MakeSkippedRow(
+                "SKIPPED_k" + std::to_string(k), k, config.m, tau,
+                params.mult_depth, e.what());
+            csv.WriteRow(skipped);
+        } catch (...) {
+            std::cerr << "  WARNING: k=" << k << " failed (unknown)\n";
+            auto skipped = MakeSkippedRow(
+                "SKIPPED_k" + std::to_string(k), k, config.m, tau,
+                params.mult_depth, "unknown exception");
+            csv.WriteRow(skipped);
+        }
     }
 }
 
 // ============================================================================
-// Scenario 2: Varying tau (fixed k=64)
+// Scenario 2: Varying m
 // ============================================================================
 
-static void BenchVaryTau(const BenchmarkConfig& config,
-                         ThresholdCSVWriter& csv) {
-    uint32_t k = 64;
-    std::vector<uint32_t> taus = {1, k / 4, k / 2, 3 * k / 4, k};
+static void BenchVaryM(const BenchmarkConfig& config,
+                       ThresholdCSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
+    double j_true = ExactJaccard(sa, sb);
 
-    for (uint32_t tau : taus) {
+    for (uint32_t m : m_values) {
         PiccardParams params;
         std::string error;
-        auto engine = TryCreateThresholdEngine(k, config.m, tau,
+        auto engine = TryCreateThresholdEngine(config.k, m, tau,
                                                 config.security_level,
                                                 params, error);
         if (!engine) {
-            std::cerr << "  WARNING: Skipped tau=" << tau << ": " << error << "\n";
+            std::cerr << "  WARNING: Skipped m=" << m << ": " << error << "\n";
             auto skipped = MakeSkippedRow(
-                "SKIPPED_tau" + std::to_string(tau), k, config.m, tau,
+                "SKIPPED_m" + std::to_string(m), config.k, m, tau,
                 params.mult_depth, error);
             csv.WriteRow(skipped);
             continue;
         }
 
-        auto basic_result = engine->GetPiccard().Run(sa, sb);
-        bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+        try {
+            auto basic_result = engine->GetPiccard().Run(sa, sb);
+            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
 
-        std::string label = "vary_tau_" + std::to_string(tau);
-        auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
-                                         config.trials);
-        csv.WriteRow(tr);
+            std::string label = "vary_m_" + std::to_string(m);
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+                                             config.trials);
+            csv.WriteRow(tr);
 
-        std::cerr << "  tau=" << tau
-                  << " poly_eval=" << tr.phase_poly_eval_ms << "ms"
-                  << " total=" << tr.total_ms << "ms"
-                  << " correct=" << tr.threshold_correct << "\n";
-    }
-}
-
-// ============================================================================
-// Scenario 3: Threshold vs basic timing comparison
-// ============================================================================
-
-static void BenchThresholdVsBasic(const BenchmarkConfig& config, uint32_t max_k,
-                                   ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> all_k = {16, 32, 64, 128};
-    auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
-
-    for (uint32_t k : all_k) {
-        if (k > max_k) break;
-
-        // Basic protocol timing
-        PiccardParams basic_params;
-        basic_params.k = k;
-        basic_params.m = config.m;
-        basic_params.security = config.security_level;
-        basic_params.Validate();
-
-        Piccard basic_engine(basic_params);
-        basic_engine.KeyGen();
-
-        Timer timer;
-        timer.Start();
-        auto basic_result = basic_engine.Run(sa, sb);
-        double basic_total = timer.ElapsedMs();
-
-        // Threshold protocol
-        uint32_t tau = k / 2;
-        PiccardParams params;
-        std::string error;
-        auto engine = TryCreateThresholdEngine(k, config.m, tau,
-                                                config.security_level,
-                                                params, error);
-        if (!engine) {
+            std::cerr << "  m=" << m
+                      << " poly_eval=" << tr.phase_poly_eval_ms << "ms"
+                      << " total=" << tr.total_ms << "ms"
+                      << " correct=" << tr.threshold_correct << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "  WARNING: m=" << m << " failed: " << e.what() << "\n";
             auto skipped = MakeSkippedRow(
-                "SKIPPED_vs_basic_k" + std::to_string(k), k, config.m, tau,
-                params.mult_depth, error);
+                "SKIPPED_m" + std::to_string(m), config.k, m, tau,
+                params.mult_depth, e.what());
             csv.WriteRow(skipped);
-            continue;
+        } catch (...) {
+            std::cerr << "  WARNING: m=" << m << " failed (unknown)\n";
+            auto skipped = MakeSkippedRow(
+                "SKIPPED_m" + std::to_string(m), config.k, m, tau,
+                params.mult_depth, "unknown exception");
+            csv.WriteRow(skipped);
         }
-
-        bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
-        std::string label = "vs_basic_k" + std::to_string(k);
-        auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
-                                         config.trials);
-        csv.WriteRow(tr);
-
-        double overhead = (basic_total > 0) ? tr.total_ms / basic_total : 0.0;
-        std::cerr << "  k=" << k
-                  << " threshold=" << tr.total_ms << "ms"
-                  << " basic=" << basic_total << "ms"
-                  << " overhead=" << std::fixed << std::setprecision(1)
-                  << overhead << "x\n";
     }
 }
 
 // ============================================================================
-// Accuracy: threshold decision correctness
+// Scenario 3: Varying set size
 // ============================================================================
 
-static void BenchAccuracy(const BenchmarkConfig& config, uint32_t max_k,
-                          ThresholdCSVWriter& csv) {
+static void BenchVarySetSize(const BenchmarkConfig& config,
+                              ThresholdCSVWriter& csv) {
+    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
+
+    PiccardParams params;
+    std::string error;
+    auto engine = TryCreateThresholdEngine(config.k, config.m, tau,
+                                            config.security_level,
+                                            params, error);
+    if (!engine) {
+        std::cerr << "  WARNING: Cannot create engine: " << error << "\n";
+        return;
+    }
+
+    for (size_t sz : sizes) {
+        auto [sa, sb] = MakeSetsWithOverlap(sz, 0.5);
+        double j_true = ExactJaccard(sa, sb);
+
+        try {
+            auto basic_result = engine->GetPiccard().Run(sa, sb);
+            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+
+            std::string label = "vary_size_" + std::to_string(sz);
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+                                             config.trials);
+            csv.WriteRow(tr);
+
+            std::cerr << "  size=" << sz
+                      << " total=" << tr.total_ms << "ms"
+                      << " correct=" << tr.threshold_correct << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "  WARNING: size=" << sz << " failed: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "  WARNING: size=" << sz << " failed (unknown)\n";
+        }
+    }
+}
+
+// ============================================================================
+// Accuracy: threshold decision correctness with error/rel_error
+// ============================================================================
+
+static void BenchAccuracyVaryK(const BenchmarkConfig& config,
+                                ThresholdCSVWriter& csv) {
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
-    uint32_t k = std::min(config.k, max_k);
-    std::vector<uint32_t> taus = {k / 4, k / 2, 3 * k / 4};
-
-    for (uint32_t tau : taus) {
+    for (uint32_t k : k_values) {
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
         PiccardParams params;
         std::string error;
         auto engine = TryCreateThresholdEngine(k, config.m, tau,
                                                 config.security_level,
                                                 params, error);
         if (!engine) {
-            std::cerr << "  WARNING: Skipped tau=" << tau << ": " << error << "\n";
+            std::cerr << "  WARNING: Skipped k=" << k << ": " << error << "\n";
             continue;
         }
 
         size_t total_correct = 0;
         size_t total_count = 0;
-        size_t false_pos = 0;
-        size_t false_neg = 0;
 
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
-                auto [sa, sb] = MakeSetsWithOverlap(config.set_size, frac);
+                std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                    config.set_size, frac, rng);
+                double j_true = ExactJaccard(sa, sb);
 
-                // Expected decision from basic protocol
                 auto basic = engine->GetPiccard().Run(sa, sb);
                 bool expected = basic.match_count >= static_cast<int64_t>(tau);
+                double j_hat = basic.jaccard_estimate;
 
-                // Threshold protocol decision
                 bool result = engine->Run(sa, sb);
                 bool correct = (result == expected);
-
                 if (correct) total_correct++;
-                if (result && !expected) false_pos++;
-                if (!result && expected) false_neg++;
                 total_count++;
 
                 ThresholdResult tr;
-                tr.label = "accuracy_tau" + std::to_string(tau) +
+                tr.label = "accuracy_k" + std::to_string(k) +
                            "_" + std::to_string(frac) +
                            "_t" + std::to_string(t);
                 tr.k = k;
                 tr.m = config.m;
+                tr.set_size = config.set_size;
                 tr.ring_dim = engine->GetParams().ring_dim;
                 tr.tau = tau;
                 tr.mult_depth = engine->GetParams().mult_depth;
                 tr.threshold_result = result ? 1 : 0;
                 tr.threshold_expected = expected ? 1 : 0;
                 tr.threshold_correct = correct ? 1 : 0;
+                tr.jaccard_computed = j_hat;
+                tr.jaccard_expected = j_true;
+                tr.jaccard_error = std::abs(j_hat - j_true);
+                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
                 csv.WriteRow(tr);
             }
         }
 
         double accuracy = (total_count > 0)
             ? 100.0 * total_correct / total_count : 0.0;
-        double fp_rate = (total_count > 0)
-            ? 100.0 * false_pos / total_count : 0.0;
-        double fn_rate = (total_count > 0)
-            ? 100.0 * false_neg / total_count : 0.0;
-
-        std::cerr << "  tau=" << tau
+        std::cerr << "  k=" << k << " tau=" << tau
                   << " accuracy=" << std::fixed << std::setprecision(1)
                   << accuracy << "%"
-                  << " FP=" << fp_rate << "%"
-                  << " FN=" << fn_rate << "%"
+                  << " (" << total_correct << "/" << total_count << ")\n";
+    }
+}
+
+static void BenchAccuracyVaryM(const BenchmarkConfig& config,
+                                ThresholdCSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                                    0.6, 0.7, 0.8, 0.9, 1.0};
+    uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
+
+    for (uint32_t m : m_values) {
+        PiccardParams params;
+        std::string error;
+        auto engine = TryCreateThresholdEngine(config.k, m, tau,
+                                                config.security_level,
+                                                params, error);
+        if (!engine) {
+            std::cerr << "  WARNING: Skipped m=" << m << ": " << error << "\n";
+            continue;
+        }
+
+        size_t total_correct = 0;
+        size_t total_count = 0;
+
+        for (double frac : overlaps) {
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                    config.set_size, frac, rng);
+                double j_true = ExactJaccard(sa, sb);
+
+                auto basic = engine->GetPiccard().Run(sa, sb);
+                bool expected = basic.match_count >= static_cast<int64_t>(tau);
+                double j_hat = basic.jaccard_estimate;
+
+                bool result = engine->Run(sa, sb);
+                bool correct = (result == expected);
+                if (correct) total_correct++;
+                total_count++;
+
+                ThresholdResult tr;
+                tr.label = "accuracy_m" + std::to_string(m) +
+                           "_" + std::to_string(frac) +
+                           "_t" + std::to_string(t);
+                tr.k = config.k;
+                tr.m = m;
+                tr.set_size = config.set_size;
+                tr.ring_dim = engine->GetParams().ring_dim;
+                tr.tau = tau;
+                tr.mult_depth = engine->GetParams().mult_depth;
+                tr.threshold_result = result ? 1 : 0;
+                tr.threshold_expected = expected ? 1 : 0;
+                tr.threshold_correct = correct ? 1 : 0;
+                tr.jaccard_computed = j_hat;
+                tr.jaccard_expected = j_true;
+                tr.jaccard_error = std::abs(j_hat - j_true);
+                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                csv.WriteRow(tr);
+            }
+        }
+
+        double accuracy = (total_count > 0)
+            ? 100.0 * total_correct / total_count : 0.0;
+        std::cerr << "  m=" << m
+                  << " accuracy=" << std::fixed << std::setprecision(1)
+                  << accuracy << "%"
+                  << " (" << total_correct << "/" << total_count << ")\n";
+    }
+}
+
+static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
+                                      ThresholdCSVWriter& csv) {
+    std::vector<size_t> sizes = {100, 1000, 10000};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                                    0.6, 0.7, 0.8, 0.9, 1.0};
+    uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
+
+    PiccardParams params;
+    std::string error;
+    auto engine = TryCreateThresholdEngine(config.k, config.m, tau,
+                                            config.security_level,
+                                            params, error);
+    if (!engine) {
+        std::cerr << "  WARNING: Cannot create engine: " << error << "\n";
+        return;
+    }
+
+    for (size_t sz : sizes) {
+        size_t total_correct = 0;
+        size_t total_count = 0;
+
+        for (double frac : overlaps) {
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(sz, frac, rng);
+                double j_true = ExactJaccard(sa, sb);
+
+                auto basic = engine->GetPiccard().Run(sa, sb);
+                bool expected = basic.match_count >= static_cast<int64_t>(tau);
+                double j_hat = basic.jaccard_estimate;
+
+                bool result = engine->Run(sa, sb);
+                bool correct = (result == expected);
+                if (correct) total_correct++;
+                total_count++;
+
+                ThresholdResult tr;
+                tr.label = "accuracy_size" + std::to_string(sz) +
+                           "_" + std::to_string(frac) +
+                           "_t" + std::to_string(t);
+                tr.k = config.k;
+                tr.m = config.m;
+                tr.set_size = sz;
+                tr.ring_dim = engine->GetParams().ring_dim;
+                tr.tau = tau;
+                tr.mult_depth = engine->GetParams().mult_depth;
+                tr.threshold_result = result ? 1 : 0;
+                tr.threshold_expected = expected ? 1 : 0;
+                tr.threshold_correct = correct ? 1 : 0;
+                tr.jaccard_computed = j_hat;
+                tr.jaccard_expected = j_true;
+                tr.jaccard_error = std::abs(j_hat - j_true);
+                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                csv.WriteRow(tr);
+            }
+        }
+
+        double accuracy = (total_count > 0)
+            ? 100.0 * total_correct / total_count : 0.0;
+        std::cerr << "  size=" << sz
+                  << " accuracy=" << std::fixed << std::setprecision(1)
+                  << accuracy << "%"
                   << " (" << total_correct << "/" << total_count << ")\n";
     }
 }
@@ -588,8 +758,6 @@ int main(int argc, char** argv) {
                   << "  --k=N              Number of MinHash functions (default: 128)\n"
                   << "  --m=N              One-hot bucket size (default: 64)\n"
                   << "  --set_size=N       Size of each party's set (default: 100)\n"
-                  << "  --tau=T            Threshold value (default: k/2)\n"
-                  << "  --max_k=K          Maximum k to attempt (default: per security)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
                   << "  --mode=MODE        'accuracy' or 'timing' (default: timing)\n"
                   << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
@@ -597,36 +765,29 @@ int main(int argc, char** argv) {
     }
 
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-
-    // Parse additional flags not in BenchmarkConfig
-    uint32_t max_k = DefaultMaxK(config.security_level);
-    for (int i = 1; i < argc; i++) {
-        std::string arg(argv[i]);
-        if (arg.find("--tau=") == 0) {
-            // tau is per-scenario; this is just noted
-        } else if (arg.find("--max_k=") == 0) {
-            max_k = static_cast<uint32_t>(std::stoul(arg.substr(8)));
-        }
-    }
-
     config.Print();
-    std::cerr << "  Max k:     " << max_k << "\n";
 
     ThresholdCSVWriter csv;
     csv.WriteHeader();
 
     if (config.mode == "timing") {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";
-        BenchVaryK(config, max_k, csv);
+        BenchVaryK(config, csv);
 
-        std::cerr << "\n=== Varying tau (median of " << config.trials << " trials) ===\n";
-        BenchVaryTau(config, csv);
+        std::cerr << "\n=== Varying m (median of " << config.trials << " trials) ===\n";
+        BenchVaryM(config, csv);
 
-        std::cerr << "\n=== Threshold vs Basic ===\n";
-        BenchThresholdVsBasic(config, max_k, csv);
+        std::cerr << "\n=== Varying set size (median of " << config.trials << " trials) ===\n";
+        BenchVarySetSize(config, csv);
     } else if (config.mode == "accuracy") {
-        std::cerr << "\n=== Threshold Accuracy ===\n";
-        BenchAccuracy(config, max_k, csv);
+        std::cerr << "\n=== Accuracy vs k ===\n";
+        BenchAccuracyVaryK(config, csv);
+
+        std::cerr << "\n=== Accuracy vs m ===\n";
+        BenchAccuracyVaryM(config, csv);
+
+        std::cerr << "\n=== Accuracy vs set size ===\n";
+        BenchAccuracyVarySetSize(config, csv);
     }
 
     return 0;

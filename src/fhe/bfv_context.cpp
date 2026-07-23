@@ -1,4 +1,4 @@
-#include "piccard/fhe/bfv_context.h"
+#include "fhe/bfv_context.h"
 
 #include <algorithm>
 #include <cmath>

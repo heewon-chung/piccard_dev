@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-summarize_results.py — Parse benchmark CSVs and produce comparison tables.
+summarize_results.py — Parse benchmark CSVs and produce 26 comparison tables.
 
 Usage:
-    python3 scripts/summarize_results.py results/2026-02-27_100243_quick
-    python3 scripts/summarize_results.py results/2026-02-27_100243_quick --latex
+    python3 scripts/summarize_results.py results/<dir>/csv
+    python3 scripts/summarize_results.py results/<dir>/csv --latex
+    python3 scripts/summarize_results.py results/<dir>/csv --save-dir results/<dir>/tables
 """
 
 import argparse
@@ -12,8 +13,9 @@ import contextlib
 import csv
 import io
 import math
-import os
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 
@@ -24,20 +26,16 @@ def log2(x):
 # ── CSV readers ─────────────────────────────────────────────────────
 
 def read_csv(path):
-    """Read a CSV file, return list of dicts. Skip empty files."""
+    """Read a CSV file, return list of dicts. Skip empty/missing files."""
     if not path.exists():
         return []
     with open(path) as f:
-        # The CSV mixes stdout (CSV data) and stderr (progress) in the
-        # same file because the benchmark script captures both.  Filter
-        # to only lines that look like CSV rows (contain commas and
-        # don't start with common stderr prefixes).
         lines = []
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            # Skip stderr lines
+            # Skip stderr lines that may be mixed in
             if line.startswith(("Benchmark", "===", "  ", "(No", "---")):
                 continue
             lines.append(line)
@@ -50,7 +48,7 @@ def read_csv(path):
 # ── Formatting helpers ──────────────────────────────────────────────
 
 def fmt_ms(val):
-    """Format milliseconds: show 1 decimal for >1ms, 3 for sub-ms."""
+    """Format milliseconds: show 1 decimal for >=1ms, 3 for sub-ms."""
     v = float(val)
     if v >= 1.0:
         return f"{v:.1f}"
@@ -75,6 +73,15 @@ def fmt_err(val):
     return f"{v:.4f}"
 
 
+def fmt_rel_err(val):
+    v = float(val)
+    if v < 0:
+        return "N/A"
+    if v == 0:
+        return "0 (exact)"
+    return f"{v:.4f}"
+
+
 def print_table(headers, rows, col_widths=None):
     """Print a formatted ASCII table."""
     if col_widths is None:
@@ -82,17 +89,16 @@ def print_table(headers, rows, col_widths=None):
         for i, h in enumerate(headers):
             w = len(h)
             for row in rows:
-                w = max(w, len(str(row[i])))
+                if i < len(row):
+                    w = max(w, len(str(row[i])))
             col_widths.append(w + 2)
 
-    # Header
     header_line = ""
     for h, w in zip(headers, col_widths):
         header_line += str(h).rjust(w)
     print(header_line)
     print("-" * sum(col_widths))
 
-    # Rows
     for row in rows:
         line = ""
         for val, w in zip(row, col_widths):
@@ -120,484 +126,464 @@ def print_latex_table(caption, label, headers, rows):
     print()
 
 
-# ── Table 1: Piccard parameter sensitivity ──────────────────────────
+# ── Filter helper ───────────────────────────────────────────────────
 
-def table_piccard_timing(data, latex=False):
-    if not data:
+def filter_rows(data, key, prefix):
+    """Filter rows where data[key] starts with prefix."""
+    return [r for r in data if r.get(key, "").startswith(prefix)]
+
+
+# ── T1–T3: Piccard Timing ──────────────────────────────────────────
+
+def table_piccard_timing(data, scenario, tnum, title, latex=False):
+    """Piccard timing table filtered by scenario prefix (vary_k_, vary_m_, vary_size_)."""
+    rows_data = filter_rows(data, "label", scenario)
+    if not rows_data:
         return
 
-    print("\n" + "=" * 70)
-    print("  Table 1: Piccard Timing — Parameter Sensitivity")
-    print("=" * 70)
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
 
-    headers = ["Label", "k", "m", "N", "MinHash", "Encode", "Encrypt",
+    headers = ["Label", "k", "m", "n", "N", "MinHash", "Encode", "Encrypt",
                "Multiply", "RotSum", "Decrypt", "Total (ms)", "CT Size"]
     rows = []
-    for r in data:
-        label = r.get("label", "")
-        # Only timing rows (vary_k, vary_m, vary_size)
-        if not any(label.startswith(p) for p in ("vary_k", "vary_m", "vary_size")):
-            continue
+    for r in rows_data:
         rows.append([
-            label,
-            r["k"],
-            r["m"],
-            r["ring_dim"],
-            fmt_ms(r["phase_minhash_ms"]),
-            fmt_ms(r["phase_encode_ms"]),
-            fmt_ms(r["phase_encrypt_ms"]),
-            fmt_ms(r["phase_multiply_ms"]),
-            fmt_ms(r["phase_rotate_sum_ms"]),
-            fmt_ms(r["phase_decrypt_ms"]),
-            fmt_ms(r["time_ms"]),
-            fmt_bytes(r["ct_size_bytes"]),
-        ])
-
-    if not rows:
-        print("  (no timing data)")
-        return
-
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        # Match paper Table 4 format: n, k, m, N, MinHash, Encrypt, Compute, Decrypt, Total
-        latex_headers = ["$n$", "$k$", "$m$", "$N$",
-                         "MinHash", "Encrypt", "Compute", "Decrypt",
-                         "Total (ms)"]
-        latex_rows = []
-        for r in data:
-            label = r.get("label", "")
-            if not any(label.startswith(p) for p in ("vary_k", "vary_m", "vary_size")):
-                continue
-            # Extract set size from label (vary_size_1000 -> 1000)
-            n_str = "-"
-            if label.startswith("vary_size_"):
-                n_str = f"{int(label.split('_')[-1]):,}"
-            else:
-                # For vary_k/vary_m, set_size comes from config default (500)
-                n_str = "500"
-            minhash = float(r["phase_minhash_ms"]) + float(r["phase_encode_ms"])
-            compute = float(r["phase_multiply_ms"]) + float(r["phase_rotate_sum_ms"])
-            decrypt = float(r["phase_decrypt_ms"]) + float(r["phase_bias_correction_ms"])
-            latex_rows.append([
-                n_str, r["k"], r["m"], r["ring_dim"],
-                fmt_ms(str(minhash)),
-                fmt_ms(r["phase_encrypt_ms"]),
-                fmt_ms(str(compute)),
-                fmt_ms(str(decrypt)),
-                fmt_ms(r["time_ms"]),
-            ])
-        print_latex_table(
-            "Running time of Piccard with varying parameters, where $n$ denotes the set size, "
-            "$k$ the number of hash functions, $m$ the hash range, and $N$ the ring dimension.",
-            "tab:piccard-params", latex_headers, latex_rows)
-
-
-# ── Table 2: Piccard vs Baseline — vary universe ────────────────────
-
-def table_comparison_universe(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 2: Piccard vs Baseline — Varying Universe Size")
-    print("=" * 70)
-
-    # Group by scenario
-    scenarios = {}
-    for r in data:
-        scen = r.get("scenario", "")
-        if not scen.startswith("vary_universe"):
-            continue
-        scenarios.setdefault(scen, {})[r["method"]] = r
-
-    headers = ["U_set", "Method", "N", "#CTs", "Encode", "Encrypt",
-               "Compute", "Decrypt", "Total (ms)", "CT Size", "Error", "Speedup"]
-    rows = []
-    for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-        pair = scenarios[scen]
-        p = pair.get("piccard")
-        b = pair.get("baseline")
-        if not p or not b:
-            continue
-        u = p["universe_size"]
-        p_total = float(p["total_ms"])
-        b_total = float(b["total_ms"])
-        speedup = b_total / p_total if p_total > 0 else 0
-
-        rows.append([
-            u, "Piccard", p["ring_dim"], p["num_cts"],
-            fmt_ms(p["phase_encode_ms"]), fmt_ms(p["phase_encrypt_ms"]),
-            fmt_ms(p["phase_compute_ms"]), fmt_ms(p["phase_decrypt_ms"]),
-            fmt_ms(p["total_ms"]), fmt_bytes(p["ct_size_bytes"]),
-            fmt_err(p["jaccard_error"]), "",
-        ])
-        rows.append([
-            "", "Baseline", b["ring_dim"], b["num_cts"],
-            fmt_ms(b["phase_encode_ms"]), fmt_ms(b["phase_encrypt_ms"]),
-            fmt_ms(b["phase_compute_ms"]), fmt_ms(b["phase_decrypt_ms"]),
-            fmt_ms(b["total_ms"]), fmt_bytes(b["ct_size_bytes"]),
-            fmt_err(b["jaccard_error"]), f"{speedup:.1f}x",
-        ])
-
-    if not rows:
-        print("  (no data)")
-        return
-
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        # Full per-phase breakdown (Table 4-style)
-        lh = ["$|\\mathcal{U}|$", "Method", "$N$", "\\#CTs",
-              "Encode", "Encrypt", "Compute", "Decrypt",
-              "Total (ms)", "CT Size", "Speedup"]
-        lr = []
-        for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-            pair = scenarios[scen]
-            p, b = pair.get("piccard"), pair.get("baseline")
-            if not p or not b:
-                continue
-            p_total = float(p["total_ms"])
-            b_total = float(b["total_ms"])
-            speedup = b_total / p_total if p_total > 0 else 0
-            u = int(p["universe_size"])
-            u_str = f"$2^{{{int(round(log2(u)))}}}$" if u > 0 and (u & (u-1)) == 0 else f"{u:,}"
-            ct_ratio = f"{float(b['ct_size_bytes'])/float(p['ct_size_bytes']):.1f}$\\times$" if float(p['ct_size_bytes']) > 0 else "-"
-            lr.append([u_str, "Piccard", p["ring_dim"], p["num_cts"],
-                        fmt_ms(p["phase_encode_ms"]),
-                        fmt_ms(p["phase_encrypt_ms"]),
-                        fmt_ms(p["phase_compute_ms"]),
-                        fmt_ms(p["phase_decrypt_ms"]),
-                        fmt_ms(p["total_ms"]),
-                        fmt_bytes(p["ct_size_bytes"]), ""])
-            lr.append(["", "Baseline", b["ring_dim"], b["num_cts"],
-                        fmt_ms(b["phase_encode_ms"]),
-                        fmt_ms(b["phase_encrypt_ms"]),
-                        fmt_ms(b["phase_compute_ms"]),
-                        fmt_ms(b["phase_decrypt_ms"]),
-                        fmt_ms(b["total_ms"]),
-                        fmt_bytes(b["ct_size_bytes"]),
-                        f"{speedup:.1f}$\\times$"])
-        print_latex_table(
-            "Running time comparison: Piccard vs.\\ baseline~\\cite{{zlg24}} with varying universe size ($n = 500$, STD128).",
-            "tab:comparison-universe", lh, lr)
-
-
-# ── Table 3: Piccard vs Baseline — vary set size ────────────────────
-
-def table_comparison_setsize(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 3: Piccard vs Baseline — Varying Set Size")
-    print("=" * 70)
-
-    scenarios = {}
-    for r in data:
-        scen = r.get("scenario", "")
-        if not scen.startswith("vary_setsize"):
-            continue
-        scenarios.setdefault(scen, {})[r["method"]] = r
-
-    headers = ["|S|", "Method", "Encode", "Encrypt", "Compute",
-               "Decrypt", "Total (ms)", "Error", "Speedup"]
-    rows = []
-    for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-        pair = scenarios[scen]
-        p = pair.get("piccard")
-        b = pair.get("baseline")
-        if not p or not b:
-            continue
-        p_total = float(p["total_ms"])
-        b_total = float(b["total_ms"])
-        speedup = b_total / p_total if p_total > 0 else 0
-        rows.append([
-            p["set_size"], "Piccard",
-            fmt_ms(p["phase_encode_ms"]), fmt_ms(p["phase_encrypt_ms"]),
-            fmt_ms(p["phase_compute_ms"]), fmt_ms(p["phase_decrypt_ms"]),
-            fmt_ms(p["total_ms"]), fmt_err(p["jaccard_error"]), "",
-        ])
-        rows.append([
-            "", "Baseline",
-            fmt_ms(b["phase_encode_ms"]), fmt_ms(b["phase_encrypt_ms"]),
-            fmt_ms(b["phase_compute_ms"]), fmt_ms(b["phase_decrypt_ms"]),
-            fmt_ms(b["total_ms"]), fmt_err(b["jaccard_error"]),
-            f"{speedup:.1f}x",
-        ])
-
-    if not rows:
-        print("  (no data)")
-        return
-
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        lh = ["$n$", "Method",
-              "Encode", "Encrypt", "Compute", "Decrypt",
-              "Total (ms)", "Speedup"]
-        lr = []
-        for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-            pair = scenarios[scen]
-            p, b = pair.get("piccard"), pair.get("baseline")
-            if not p or not b:
-                continue
-            p_total = float(p["total_ms"])
-            b_total = float(b["total_ms"])
-            speedup = b_total / p_total if p_total > 0 else 0
-            n = f"{int(p['set_size']):,}"
-            lr.append([n, "Piccard",
-                        fmt_ms(p["phase_encode_ms"]),
-                        fmt_ms(p["phase_encrypt_ms"]),
-                        fmt_ms(p["phase_compute_ms"]),
-                        fmt_ms(p["phase_decrypt_ms"]),
-                        fmt_ms(p["total_ms"]), ""])
-            lr.append(["", "Baseline",
-                        fmt_ms(b["phase_encode_ms"]),
-                        fmt_ms(b["phase_encrypt_ms"]),
-                        fmt_ms(b["phase_compute_ms"]),
-                        fmt_ms(b["phase_decrypt_ms"]),
-                        fmt_ms(b["total_ms"]),
-                        f"{speedup:.1f}$\\times$"])
-        print_latex_table(
-            "Running time comparison: Piccard vs.\\ baseline~\\cite{{zlg24}} with varying set size ($|\\mathcal{{U}}| = 2^{{18}}$, STD128).",
-            "tab:comparison-setsize", lh, lr)
-
-
-# ── Table 4: Accuracy comparison ────────────────────────────────────
-
-def table_accuracy(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 4: Accuracy — Piccard vs Baseline")
-    print("=" * 70)
-
-    # Group by overlap level, then average across trials
-    from collections import defaultdict
-    groups = defaultdict(lambda: {"piccard": [], "baseline": []})
-
-    for r in data:
-        scen = r.get("scenario", "")
-        if not scen.startswith("accuracy"):
-            continue
-        method = r["method"]
-        groups[scen][method].append(r)
-
-    headers = ["Overlap", "J_true", "Piccard J", "Piccard Err",
-               "Baseline J", "Baseline Err"]
-    rows = []
-
-    for scen in sorted(groups.keys()):
-        g = groups[scen]
-        p_list = g["piccard"]
-        b_list = g["baseline"]
-        if not p_list or not b_list:
-            continue
-
-        j_true = float(p_list[0]["jaccard_expected"])
-        p_j = sum(float(r["jaccard_computed"]) for r in p_list) / len(p_list)
-        p_err = sum(float(r["jaccard_error"]) for r in p_list) / len(p_list)
-        b_j = sum(float(r["jaccard_computed"]) for r in b_list) / len(b_list)
-        b_err = sum(float(r["jaccard_error"]) for r in b_list) / len(b_list)
-
-        # Extract overlap from scenario name
-        overlap = scen.replace("accuracy_", "")
-
-        rows.append([
-            overlap,
-            f"{j_true:.4f}",
-            f"{p_j:.4f}",
-            fmt_err(str(p_err)),
-            f"{b_j:.4f}",
-            fmt_err(str(b_err)),
-        ])
-
-    if not rows:
-        print("  (no data)")
-        return
-
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        lh = ["Overlap", "$J_{\\text{true}}$",
-              "Piccard $\\hat{J}$", "Piccard $|\\epsilon|$",
-              "Baseline $\\hat{J}$", "Baseline $|\\epsilon|$"]
-        print_latex_table(
-            "Accuracy comparison: Piccard (approximate) vs.\\ baseline (exact).",
-            "tab:accuracy", lh, rows)
-
-
-# ── Piccard accuracy (standalone) ───────────────────────────────────
-
-def table_piccard_accuracy(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 5: Piccard Accuracy Across Similarity Levels")
-    print("=" * 70)
-
-    from collections import defaultdict
-    # Group by overlap fraction (extracted from label like "accuracy_0.5_t0")
-    groups = defaultdict(list)
-    for r in data:
-        label = r.get("label", "")
-        if not label.startswith("accuracy_"):
-            continue
-        # Skip accuracy_k* rows (those belong to Table 10: accuracy vs k)
-        if label.startswith("accuracy_k"):
-            continue
-        # Parse overlap from "accuracy_0.500000_t0"
-        parts = label.split("_")
-        if len(parts) >= 2:
-            overlap = parts[1]
-            groups[overlap].append(r)
-
-    headers = ["Overlap", "k", "m", "J_true", "J_hat (avg)", "Avg Error"]
-    rows = []
-    for overlap in sorted(groups.keys(), key=float):
-        trials = groups[overlap]
-        j_true = float(trials[0]["jaccard_expected"])
-        avg_j = sum(float(r["jaccard_computed"]) for r in trials) / len(trials)
-        avg_err = sum(float(r["jaccard_error"]) for r in trials) / len(trials)
-        rows.append([
-            overlap,
-            trials[0]["k"],
-            trials[0]["m"],
-            f"{j_true:.4f}",
-            f"{avg_j:.4f}",
-            fmt_err(str(avg_err)),
-        ])
-
-    if not rows:
-        print("  (no data)")
-        return
-
-    print_table(headers, rows)
-
-
-# ── Table 6: Dynamic protocol timing ─────────────────────────────────
-
-def is_skipped(r, field="total_ms"):
-    """Check if a row is a SKIPPED configuration (timing = -1)."""
-    return float(r.get(field, "0")) < 0
-
-
-def fmt_ops(val):
-    """Format ops/sec with commas."""
-    v = float(val)
-    if v <= 0:
-        return "-"
-    if v >= 1000000:
-        return f"{v/1000000:.1f}M"
-    if v >= 1000:
-        return f"{v/1000:.1f}K"
-    return f"{v:.0f}"
-
-
-def table_dynamic_timing(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 6: Dynamic Protocol Timing")
-    print("=" * 70)
-
-    headers = ["Label", "k", "m", "d", "Init (ms)", "Insert (ops/s)",
-               "Delete (ops/s)", "Compute (ms)", "Total (ms)", "CT Size"]
-    rows = []
-    for r in data:
-        label = r.get("label", "")
-        if label.startswith("accuracy_"):
-            continue
-        compute = float(r.get("phase_encode_ms", "0")) + \
-                  float(r.get("phase_encrypt_ms", "0")) + \
-                  float(r.get("phase_compute_ms", "0")) + \
-                  float(r.get("phase_decrypt_ms", "0"))
-        rows.append([
-            label,
+            r.get("label", ""),
             r.get("k", ""),
             r.get("m", ""),
+            r.get("set_size", ""),
+            r.get("ring_dim", ""),
+            fmt_ms(r.get("phase_minhash_ms", "0")),
+            fmt_ms(r.get("phase_encode_ms", "0")),
+            fmt_ms(r.get("phase_encrypt_ms", "0")),
+            fmt_ms(r.get("phase_multiply_ms", "0")),
+            fmt_ms(r.get("phase_rotate_sum_ms", "0")),
+            fmt_ms(r.get("phase_decrypt_ms", "0")),
+            fmt_ms(r.get("time_ms", "0")),
+            fmt_bytes(r.get("ct_size_bytes", "0")),
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
+        param_label = param_map.get(scenario, "Param")
+        lh = [param_label, "$n$", "$N$", "MinHash", "Encode", "Encrypt",
+              "Multiply", "RotSum", "Decrypt", "Total (ms)", "CT Size"]
+        lr = []
+        for r in rows_data:
+            pval = r.get("label", "").split("_")[-1]
+            if scenario == "vary_size_":
+                pval = f"{int(pval):,}"
+            lr.append([
+                pval, r.get("set_size", ""), r.get("ring_dim", ""),
+                fmt_ms(r.get("phase_minhash_ms", "0")),
+                fmt_ms(r.get("phase_encode_ms", "0")),
+                fmt_ms(r.get("phase_encrypt_ms", "0")),
+                fmt_ms(r.get("phase_multiply_ms", "0")),
+                fmt_ms(r.get("phase_rotate_sum_ms", "0")),
+                fmt_ms(r.get("phase_decrypt_ms", "0")),
+                fmt_ms(r.get("time_ms", "0")),
+                fmt_bytes(r.get("ct_size_bytes", "0")),
+            ])
+        tab_id = scenario.rstrip("_").replace("_", "-")
+        print_latex_table(title, f"tab:piccard-timing-{tab_id}", lh, lr)
+
+
+# ── T4–T6: Piccard Accuracy ────────────────────────────────────────
+
+def table_accuracy_stats(data, param_prefix, param_name, tnum, title, latex=False):
+    """Generic accuracy table: group by parameter, compute error statistics.
+
+    Works for piccard accuracy (accuracy_k, accuracy_m, accuracy_size)
+    and dynamic accuracy (same label patterns).
+    """
+    filtered = [r for r in data if r.get("label", "").startswith(param_prefix)]
+    if not filtered:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    # Group by parameter value from labels like "accuracy_k64_0.5_t0" → "64"
+    groups = defaultdict(list)
+    prefix_len = len(param_prefix)
+    for r in filtered:
+        label = r.get("label", "")
+        rest = label[prefix_len:]
+        param_val = rest.split("_")[0]
+        groups[param_val].append(r)
+
+    if not groups:
+        return
+
+    show_theoretical = (param_prefix == "accuracy_k")
+    headers = [param_name, "Trials", "Mean |err|", "Max |err|", "RMSE",
+               "Std Dev", "1/sqrt(k)" if show_theoretical else "Mean Rel Err"]
+
+    rows = []
+    for pval in sorted(groups.keys(), key=lambda s: float(s)):
+        trials = groups[pval]
+        errors = [abs(float(r.get("jaccard_error", "0"))) for r in trials]
+        n = len(errors)
+        mean_err = sum(errors) / n
+        max_err = max(errors)
+        rmse = (sum(e ** 2 for e in errors) / n) ** 0.5
+        std_dev = (sum((e - mean_err) ** 2 for e in errors) / n) ** 0.5
+
+        if show_theoretical:
+            k_val = int(float(pval))
+            last_col = f"{1.0 / (k_val ** 0.5):.4f}"
+        else:
+            rel_errs = [float(r.get("jaccard_rel_error", "-1")) for r in trials]
+            valid_rel = [e for e in rel_errs if e >= 0]
+            last_col = f"{sum(valid_rel) / len(valid_rel):.4f}" if valid_rel else "N/A"
+
+        rows.append([
+            pval, str(n),
+            f"{mean_err:.4f}", f"{max_err:.4f}",
+            f"{rmse:.4f}", f"{std_dev:.4f}",
+            last_col,
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        pn = f"${param_name}$" if len(param_name) <= 2 else param_name
+        lh = [pn, "Trials", "Mean $|\\epsilon|$", "Max $|\\epsilon|$",
+              "RMSE", "Std Dev",
+              "$1/\\sqrt{k}$" if show_theoretical else "Mean Rel Err"]
+        tab_id = param_prefix.replace("accuracy_", "")
+        print_latex_table(title, f"tab:accuracy-{tab_id}", lh, rows)
+
+
+# ── T7–T9: Piccard Combined ────────────────────────────────────────
+
+def table_piccard_combined(data, scenario, tnum, title, latex=False):
+    """Piccard combined timing + accuracy table."""
+    rows_data = filter_rows(data, "label", scenario)
+    if not rows_data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    headers = ["Label", "k", "m", "n", "N", "Time (ms)",
+               "Median Err", "P25", "P75", "P95", "Max Err"]
+    rows = []
+    for r in rows_data:
+        rows.append([
+            r.get("label", ""),
+            r.get("k", ""),
+            r.get("m", ""),
+            r.get("set_size", ""),
+            r.get("ring_dim", ""),
+            fmt_ms(r.get("time_ms", "0")),
+            fmt_err(r.get("accuracy_median", "0")),
+            fmt_err(r.get("accuracy_p25", "0")),
+            fmt_err(r.get("accuracy_p75", "0")),
+            fmt_err(r.get("accuracy_p95", "0")),
+            fmt_err(r.get("accuracy_max", "0")),
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
+        param_label = param_map.get(scenario, "Param")
+        lh = [param_label, "$n$", "$N$", "Time (ms)",
+              "Median Err", "P25", "P75", "P95", "Max Err"]
+        lr = []
+        for r in rows_data:
+            pval = r.get("label", "").split("_")[-1]
+            if scenario == "vary_size_":
+                pval = f"{int(pval):,}"
+            lr.append([
+                pval, r.get("set_size", ""), r.get("ring_dim", ""),
+                fmt_ms(r.get("time_ms", "0")),
+                fmt_err(r.get("accuracy_median", "0")),
+                fmt_err(r.get("accuracy_p25", "0")),
+                fmt_err(r.get("accuracy_p75", "0")),
+                fmt_err(r.get("accuracy_p95", "0")),
+                fmt_err(r.get("accuracy_max", "0")),
+            ])
+        tab_id = scenario.rstrip("_").replace("_", "-")
+        print_latex_table(title, f"tab:combined-{tab_id}", lh, lr)
+
+
+# ── T10–T13: Comparison Timing ─────────────────────────────────────
+
+def table_comparison_timing(data, scenario, tnum, title, latex=False):
+    """Comparison timing: Piccard vs Baseline side by side."""
+    rows_data = filter_rows(data, "scenario", scenario)
+    if not rows_data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    # Group by scenario value, then by method
+    groups = {}
+    order = []
+    for r in rows_data:
+        scen = r.get("scenario", "")
+        if scen not in groups:
+            groups[scen] = {}
+            order.append(scen)
+        method = r.get("method", "")
+        groups[scen][method] = r
+
+    headers = ["Scenario", "k", "m", "n", "|U|", "N_p", "N_b",
+               "Piccard (ms)", "Baseline (ms)", "Speedup",
+               "Piccard CT", "Baseline CT", "Comm P", "Comm B"]
+    rows = []
+    for scen in order:
+        methods = groups[scen]
+        p = methods.get("piccard", {})
+        b = methods.get("baseline", {})
+
+        p_time = float(p.get("total_ms", "0"))
+        b_time = float(b.get("total_ms", "0"))
+        speedup = f"{b_time / p_time:.1f}x" if p_time > 0 else "-"
+
+        rows.append([
+            scen,
+            p.get("k", b.get("k", "")),
+            p.get("m", b.get("m", "")),
+            p.get("set_size", b.get("set_size", "")),
+            p.get("universe_size", b.get("universe_size", "")),
+            p.get("ring_dim", ""),
+            b.get("ring_dim", ""),
+            fmt_ms(p.get("total_ms", "0")),
+            fmt_ms(b.get("total_ms", "0")),
+            speedup,
+            fmt_bytes(p.get("ct_size_bytes", "0")),
+            fmt_bytes(b.get("ct_size_bytes", "0")),
+            fmt_bytes(p.get("comm_bytes", "0")),
+            fmt_bytes(b.get("comm_bytes", "0")),
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        param_map = {"vary_k_": "$k$", "vary_m_": "$m$",
+                     "vary_size_": "$n$", "vary_universe_": "$|U|$"}
+        param_label = param_map.get(scenario, "Param")
+        lh = [param_label, "$N_P$", "$N_B$",
+              "Piccard (ms)", "Baseline (ms)", "Speedup", "Comm P", "Comm B"]
+        lr = []
+        for scen in order:
+            methods = groups[scen]
+            p = methods.get("piccard", {})
+            b = methods.get("baseline", {})
+            pval = scen.split("_")[-1]
+            if scenario in ("vary_size_", "vary_universe_"):
+                pval = f"{int(pval):,}"
+            p_time = float(p.get("total_ms", "0"))
+            b_time = float(b.get("total_ms", "0"))
+            speedup = f"{b_time / p_time:.1f}$\\times$" if p_time > 0 else "-"
+            lr.append([
+                pval, p.get("ring_dim", ""), b.get("ring_dim", ""),
+                fmt_ms(p.get("total_ms", "0")), fmt_ms(b.get("total_ms", "0")),
+                speedup, fmt_bytes(p.get("comm_bytes", "0")),
+                fmt_bytes(b.get("comm_bytes", "0")),
+            ])
+        tab_id = scenario.rstrip("_").replace("_", "-")
+        print_latex_table(title, f"tab:comparison-{tab_id}", lh, lr)
+
+
+# ── T14: Communication Cost ────────────────────────────────────────
+
+def table_communication_cost(data, tnum, latex=False):
+    """Communication cost comparison across all scenarios."""
+    if not data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: Communication Cost — Piccard vs Baseline")
+    print(f"{'=' * 70}")
+
+    # Group by scenario, then method
+    groups = {}
+    order = []
+    for r in data:
+        scen = r.get("scenario", "")
+        if scen not in groups:
+            groups[scen] = {}
+            order.append(scen)
+        method = r.get("method", "")
+        groups[scen][method] = r
+
+    headers = ["Scenario", "k", "|U|", "n",
+               "Piccard CTs", "Piccard Comm",
+               "Baseline CTs", "Baseline Comm", "Ratio"]
+    rows = []
+    for scen in order:
+        methods = groups[scen]
+        p = methods.get("piccard", {})
+        b = methods.get("baseline", {})
+
+        p_comm = int(p.get("comm_bytes", "0"))
+        b_comm = int(b.get("comm_bytes", "0"))
+        ratio = f"{b_comm / p_comm:.1f}x" if p_comm > 0 else "-"
+
+        rows.append([
+            scen,
+            p.get("k", ""),
+            p.get("universe_size", ""),
+            p.get("set_size", ""),
+            p.get("num_cts", ""),
+            fmt_bytes(p_comm),
+            b.get("num_cts", ""),
+            fmt_bytes(b_comm),
+            ratio,
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        lh = ["Scenario", "$k$", "$|U|$", "$n$",
+              "P CTs", "P Comm", "B CTs", "B Comm", "Ratio"]
+        print_latex_table("Communication cost: Piccard vs.\\ baseline.",
+                          "tab:communication-cost", lh, rows)
+
+
+# ── T15–T17: Dynamic Timing ────────────────────────────────────────
+
+def table_dynamic_timing(data, scenario, tnum, title, latex=False):
+    """Dynamic benchmark timing table."""
+    rows_data = filter_rows(data, "label", scenario)
+    if not rows_data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    headers = ["Label", "k", "m", "n", "N", "Depth",
+               "Init", "Insert", "Delete", "Compute", "Decrypt",
+               "Total (ms)", "CT Size", "Ins/s", "Del/s"]
+    rows = []
+    for r in rows_data:
+        rows.append([
+            r.get("label", ""),
+            r.get("k", ""),
+            r.get("m", ""),
+            r.get("set_size", ""),
+            r.get("ring_dim", ""),
             r.get("depth", ""),
             fmt_ms(r.get("phase_init_ms", "0")),
-            fmt_ops(r.get("ops_insert_per_sec", "0")),
-            fmt_ops(r.get("ops_delete_per_sec", "0")),
-            fmt_ms(str(compute)),
+            fmt_ms(r.get("phase_insert_ms", "0")),
+            fmt_ms(r.get("phase_delete_ms", "0")),
+            fmt_ms(r.get("phase_compute_ms", "0")),
+            fmt_ms(r.get("phase_decrypt_ms", "0")),
+            fmt_ms(r.get("total_ms", "0")),
+            fmt_bytes(r.get("ct_size_bytes", "0")),
+            r.get("ops_insert_per_sec", ""),
+            r.get("ops_delete_per_sec", ""),
+        ])
+
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
+        param_label = param_map.get(scenario, "Param")
+        lh = [param_label, "$n$", "$N$", "Depth",
+              "Init", "Insert", "Delete", "Compute", "Decrypt",
+              "Total (ms)", "CT Size"]
+        lr = []
+        for r in rows_data:
+            pval = r.get("label", "").split("_")[-1]
+            if scenario == "vary_size_":
+                pval = f"{int(pval):,}"
+            lr.append([
+                pval, r.get("set_size", ""), r.get("ring_dim", ""), r.get("depth", ""),
+                fmt_ms(r.get("phase_init_ms", "0")),
+                fmt_ms(r.get("phase_insert_ms", "0")),
+                fmt_ms(r.get("phase_delete_ms", "0")),
+                fmt_ms(r.get("phase_compute_ms", "0")),
+                fmt_ms(r.get("phase_decrypt_ms", "0")),
+                fmt_ms(r.get("total_ms", "0")),
+                fmt_bytes(r.get("ct_size_bytes", "0")),
+            ])
+        tab_id = scenario.rstrip("_").replace("_", "-")
+        print_latex_table(title, f"tab:dynamic-{tab_id}", lh, lr)
+
+
+# ── T18–T20: Dynamic Accuracy ──────────────────────────────────────
+# Reuses table_accuracy_stats with dynamic_accuracy data and
+# label prefixes: "accuracy_k", "accuracy_m", "accuracy_size"
+
+
+# ── T21–T23: Threshold Timing ──────────────────────────────────────
+
+def table_threshold_timing(data, scenario, tnum, title, latex=False):
+    """Threshold benchmark timing table."""
+    rows_data = filter_rows(data, "label", scenario)
+    if not rows_data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    headers = ["Label", "k", "m", "n", "N", "tau", "Depth",
+               "MinHash", "Encode", "Encrypt", "Multiply",
+               "RotSum", "Mask", "PolyEval", "Decrypt",
+               "Total (ms)", "CT Size"]
+    rows = []
+    for r in rows_data:
+        rows.append([
+            r.get("label", ""),
+            r.get("k", ""),
+            r.get("m", ""),
+            r.get("set_size", ""),
+            r.get("ring_dim", ""),
+            r.get("tau", ""),
+            r.get("mult_depth", ""),
+            fmt_ms(r.get("phase_minhash_ms", "0")),
+            fmt_ms(r.get("phase_encode_ms", "0")),
+            fmt_ms(r.get("phase_encrypt_ms", "0")),
+            fmt_ms(r.get("phase_multiply_ms", "0")),
+            fmt_ms(r.get("phase_rotate_sum_ms", "0")),
+            fmt_ms(r.get("phase_mask_ms", "0")),
+            fmt_ms(r.get("phase_poly_eval_ms", "0")),
+            fmt_ms(r.get("phase_decrypt_ms", "0")),
             fmt_ms(r.get("total_ms", "0")),
             fmt_bytes(r.get("ct_size_bytes", "0")),
         ])
 
-    if not rows:
-        print("  (no data)")
-        return
-
     print_table(headers, rows)
 
     if latex:
         print()
-        lh = ["Config", "$k$", "$d$", "Init (ms)",
-              "Insert (ops/s)", "Delete (ops/s)",
-              "FHE (ms)", "Total (ms)"]
+        param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
+        param_label = param_map.get(scenario, "Param")
+        lh = [param_label, "$n$", "$N$", "$\\tau$", "Depth",
+              "MinHash", "Encode", "Encrypt", "Multiply",
+              "RotSum", "Mask", "PolyEval", "Decrypt",
+              "Total (ms)", "CT Size"]
         lr = []
-        for r in data:
-            label = r.get("label", "")
-            if not label.startswith("dynamic_vs_basic"):
-                continue
-            fhe = float(r.get("phase_encode_ms", "0")) + \
-                  float(r.get("phase_encrypt_ms", "0")) + \
-                  float(r.get("phase_compute_ms", "0")) + \
-                  float(r.get("phase_decrypt_ms", "0"))
+        for r in rows_data:
+            pval = r.get("label", "").split("_")[-1]
+            if scenario == "vary_size_":
+                pval = f"{int(pval):,}"
             lr.append([
-                label.replace("_", "\\_"),
-                r.get("k", ""), r.get("depth", ""),
-                fmt_ms(r.get("phase_init_ms", "0")),
-                fmt_ops(r.get("ops_insert_per_sec", "0")),
-                fmt_ops(r.get("ops_delete_per_sec", "0")),
-                fmt_ms(str(fhe)),
-                fmt_ms(r.get("total_ms", "0")),
-            ])
-        if lr:
-            print_latex_table(
-                "Dynamic variant timing: BottomStructure operations and end-to-end protocol.",
-                "tab:dynamic-timing", lh, lr)
-
-
-# ── Table 7: Threshold protocol timing ───────────────────────────────
-
-def table_threshold_timing(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 7: Threshold Protocol Timing")
-    print("=" * 70)
-
-    headers = ["Label", "k", "tau", "Depth", "N", "Encrypt",
-               "Mul", "RotSum", "Mask", "PolyEval", "Decrypt",
-               "Total (ms)", "CT Size", "Note"]
-    rows = []
-    for r in data:
-        label = r.get("label", "")
-        if label.startswith("accuracy_"):
-            continue
-        if is_skipped(r):
-            rows.append([
-                label, r.get("k", ""), r.get("tau", ""),
-                r.get("mult_depth", ""), "N/A",
-                "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
-                "N/A", "-", r.get("note", ""),
-            ])
-        else:
-            rows.append([
-                label,
-                r.get("k", ""), r.get("tau", ""),
-                r.get("mult_depth", ""), r.get("ring_dim", ""),
+                pval, r.get("set_size", ""), r.get("ring_dim", ""),
+                r.get("tau", ""), r.get("mult_depth", ""),
+                fmt_ms(r.get("phase_minhash_ms", "0")),
+                fmt_ms(r.get("phase_encode_ms", "0")),
                 fmt_ms(r.get("phase_encrypt_ms", "0")),
                 fmt_ms(r.get("phase_multiply_ms", "0")),
                 fmt_ms(r.get("phase_rotate_sum_ms", "0")),
@@ -606,253 +592,76 @@ def table_threshold_timing(data, latex=False):
                 fmt_ms(r.get("phase_decrypt_ms", "0")),
                 fmt_ms(r.get("total_ms", "0")),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
-                r.get("note", ""),
             ])
+        tab_id = scenario.rstrip("_").replace("_", "-")
+        print_latex_table(title, f"tab:threshold-{tab_id}", lh, lr)
 
-    if not rows:
-        print("  (no data)")
+
+# ── T24–T26: Threshold Accuracy ────────────────────────────────────
+
+def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=False):
+    """Threshold accuracy: group by parameter, show threshold correctness + Jaccard error."""
+    filtered = [r for r in data if r.get("label", "").startswith(param_prefix)]
+    if not filtered:
         return
 
-    print_table(headers, rows)
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
 
-    if latex:
-        print()
-        lh = ["$k$", "$\\tau$", "Depth", "$N$",
-              "Encrypt", "Compute", "PolyEval",
-              "Total (ms)", "CT Size"]
-        lr = []
-        for r in data:
-            label = r.get("label", "")
-            if not label.startswith("vary_k_"):
-                continue
-            if is_skipped(r):
-                lr.append([r.get("k", ""), r.get("tau", ""),
-                           r.get("mult_depth", ""), "---",
-                           "---", "---", "---", "---", "---"])
-            else:
-                compute = float(r.get("phase_multiply_ms", "0")) + \
-                          float(r.get("phase_rotate_sum_ms", "0")) + \
-                          float(r.get("phase_mask_ms", "0"))
-                lr.append([
-                    r.get("k", ""), r.get("tau", ""),
-                    r.get("mult_depth", ""), r.get("ring_dim", ""),
-                    fmt_ms(r.get("phase_encrypt_ms", "0")),
-                    fmt_ms(str(compute)),
-                    fmt_ms(r.get("phase_poly_eval_ms", "0")),
-                    fmt_ms(r.get("total_ms", "0")),
-                    fmt_bytes(r.get("ct_size_bytes", "0")),
-                ])
-        if lr:
-            print_latex_table(
-                "Threshold variant timing: polynomial evaluation dominates at higher $k$.",
-                "tab:threshold-timing", lh, lr)
-
-
-# ── Table 8: Threshold accuracy ──────────────────────────────────────
-
-def table_threshold_accuracy(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 8: Threshold Accuracy")
-    print("=" * 70)
-
-    from collections import defaultdict
-
-    # Group by tau, then aggregate correctness
-    tau_groups = defaultdict(lambda: {"correct": 0, "total": 0, "fp": 0, "fn": 0})
-
-    for r in data:
+    # Group by parameter value
+    groups = defaultdict(list)
+    prefix_len = len(param_prefix)
+    for r in filtered:
         label = r.get("label", "")
-        if not label.startswith("accuracy_"):
-            continue
-        # Skip SKIPPED rows
-        if r.get("threshold_correct", "-1") == "-1":
-            continue
+        rest = label[prefix_len:]
+        param_val = rest.split("_")[0]
+        groups[param_val].append(r)
 
-        tau = r.get("tau", "0")
-        correct = int(r.get("threshold_correct", "0"))
-        result = int(r.get("threshold_result", "0"))
-        expected = int(r.get("threshold_expected", "0"))
+    if not groups:
+        return
 
-        g = tau_groups[tau]
-        g["total"] += 1
-        g["correct"] += correct
-        if result == 1 and expected == 0:
-            g["fp"] += 1
-        if result == 0 and expected == 1:
-            g["fn"] += 1
-
-    headers = ["tau", "Trials", "Correct", "Accuracy (%)", "FP Rate (%)", "FN Rate (%)"]
+    headers = [param_name, "Trials", "Thresh Acc",
+               "Mean |J err|", "Max |J err|", "RMSE J",
+               "Mean Rel Err"]
     rows = []
-    for tau in sorted(tau_groups.keys(), key=lambda t: int(t)):
-        g = tau_groups[tau]
-        total = g["total"]
-        if total == 0:
-            continue
-        accuracy = 100.0 * g["correct"] / total
-        fp_rate = 100.0 * g["fp"] / total
-        fn_rate = 100.0 * g["fn"] / total
-        rows.append([
-            tau,
-            str(total),
-            str(g["correct"]),
-            f"{accuracy:.1f}",
-            f"{fp_rate:.1f}",
-            f"{fn_rate:.1f}",
-        ])
+    for pval in sorted(groups.keys(), key=lambda s: float(s)):
+        trials = groups[pval]
+        n = len(trials)
 
-    if not rows:
-        print("  (no data)")
-        return
+        # Threshold correctness
+        correct = sum(1 for r in trials if r.get("threshold_correct", "0") == "1")
+        thresh_acc = f"{correct / n:.3f}" if n > 0 else "N/A"
 
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        lh = ["$\\tau$", "Trials", "Correct", "Accuracy (\\%)",
-              "FP Rate (\\%)", "FN Rate (\\%)"]
-        print_latex_table(
-            "Threshold variant accuracy: decision correctness across threshold values.",
-            "tab:threshold-accuracy", lh, rows)
-
-
-# ── Table 9: Communication cost comparison ──────────────────────────────
-
-def table_communication_cost(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 9: Communication Cost — Piccard vs Baseline")
-    print("=" * 70)
-
-    # Group by scenario (vary_universe_*), then compare ct_size
-    scenarios = {}
-    for r in data:
-        scen = r.get("scenario", "")
-        if not scen.startswith("vary_universe"):
-            continue
-        scenarios.setdefault(scen, {})[r["method"]] = r
-
-    headers = ["|U|", "Piccard N", "Piccard #CTs", "Piccard CT Size",
-               "Baseline N", "Baseline #CTs", "Baseline CT Size", "Size Ratio"]
-    rows = []
-    for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-        pair = scenarios[scen]
-        p = pair.get("piccard")
-        b = pair.get("baseline")
-        if not p or not b:
-            continue
-        u = p["universe_size"]
-        p_ct = int(p.get("ct_size_bytes", "0"))
-        b_ct = int(b.get("ct_size_bytes", "0"))
-        ratio = b_ct / p_ct if p_ct > 0 else 0
-        rows.append([
-            u,
-            p["ring_dim"], p["num_cts"], fmt_bytes(str(p_ct)),
-            b["ring_dim"], b["num_cts"], fmt_bytes(str(b_ct)),
-            f"{ratio:.1f}x",
-        ])
-
-    if not rows:
-        print("  (no data)")
-        return
-
-    print_table(headers, rows)
-
-    if latex:
-        print()
-        lh = ["$|\\mathcal{U}|$", "\\multicolumn{2}{c}{Piccard}", "CT Size",
-              "\\multicolumn{2}{c}{Baseline}", "CT Size", "Ratio"]
-        # Simplified LaTeX with clear columns
-        lh2 = ["$|\\mathcal{U}|$", "$N_P$", "\\#CTs",
-               "Size (P)", "$N_B$", "\\#CTs", "Size (B)", "Ratio"]
-        lr = []
-        for scen in sorted(scenarios.keys(), key=lambda s: int(s.split("_")[-1])):
-            pair = scenarios[scen]
-            p, b = pair.get("piccard"), pair.get("baseline")
-            if not p or not b:
-                continue
-            u = int(p["universe_size"])
-            u_str = f"$2^{{{int(round(log2(u)))}}}$" if u > 0 and (u & (u-1)) == 0 else f"{u:,}"
-            p_ct = int(p.get("ct_size_bytes", "0"))
-            b_ct = int(b.get("ct_size_bytes", "0"))
-            ratio = b_ct / p_ct if p_ct > 0 else 0
-            lr.append([
-                u_str, p["ring_dim"], p["num_cts"], fmt_bytes(str(p_ct)),
-                b["ring_dim"], b["num_cts"], fmt_bytes(str(b_ct)),
-                f"{ratio:.1f}$\\times$",
-            ])
-        if lr:
-            print_latex_table(
-                "Communication cost: Piccard (constant) vs.\\ baseline (grows with $|\\mathcal{U}|$). "
-                "Size is per-party ciphertext payload.",
-                "tab:communication-cost", lh2, lr)
-
-
-# ── Table 10: Accuracy vs k (MinHash convergence) ──────────────────────
-
-def table_accuracy_vary_k(data, latex=False):
-    if not data:
-        return
-
-    print("\n" + "=" * 70)
-    print("  Table 10: Accuracy vs k — MinHash Convergence")
-    print("=" * 70)
-
-    from collections import defaultdict
-
-    # Group by k (from labels like "accuracy_k64_0.500000_t0")
-    k_groups = defaultdict(list)
-    for r in data:
-        label = r.get("label", "")
-        if not label.startswith("accuracy_k"):
-            continue
-        # Parse k from "accuracy_k64_0.500000_t0"
-        parts = label.split("_")
-        if len(parts) >= 2:
-            k_str = parts[1]  # "k64"
-            k_groups[k_str].append(r)
-
-    if not k_groups:
-        print("  (no accuracy_k* data)")
-        return
-
-    headers = ["k", "Trials", "Mean |err|", "Max |err|", "RMSE",
-               "Std Dev", "1/sqrt(k)"]
-    rows = []
-    for k_str in sorted(k_groups.keys(), key=lambda s: int(s[1:])):
-        trials = k_groups[k_str]
-        k_val = int(k_str[1:])
-        errors = [float(r["jaccard_error"]) for r in trials]
-        n = len(errors)
+        # Jaccard error stats
+        errors = [abs(float(r.get("jaccard_error", "0"))) for r in trials]
         mean_err = sum(errors) / n
         max_err = max(errors)
-        rmse = (sum(e**2 for e in errors) / n) ** 0.5
-        std_dev = (sum((e - mean_err)**2 for e in errors) / n) ** 0.5
-        theoretical = 1.0 / (k_val ** 0.5)
+        rmse = (sum(e ** 2 for e in errors) / n) ** 0.5
+
+        rel_errs = [float(r.get("jaccard_rel_error", "-1")) for r in trials]
+        valid_rel = [e for e in rel_errs if e >= 0]
+        mean_rel = f"{sum(valid_rel) / len(valid_rel):.4f}" if valid_rel else "N/A"
+
         rows.append([
-            str(k_val), str(n),
+            pval, str(n), thresh_acc,
             f"{mean_err:.4f}", f"{max_err:.4f}",
-            f"{rmse:.4f}", f"{std_dev:.4f}",
-            f"{theoretical:.4f}",
+            f"{rmse:.4f}", mean_rel,
         ])
 
     print_table(headers, rows)
 
     if latex:
         print()
-        lh = ["$k$", "Trials", "Mean $|\\epsilon|$", "Max $|\\epsilon|$",
-              "RMSE", "Std Dev", "$1/\\sqrt{k}$"]
-        print_latex_table(
-            "Estimation error decreases with $k$: MinHash convergence "
-            "at rate $O(1/\\sqrt{k})$.",
-            "tab:accuracy-vs-k", lh, rows)
+        pn = f"${param_name}$" if len(param_name) <= 2 else param_name
+        tab_id = param_prefix.replace("accuracy_", "")
+        lh = [pn, "Trials", "Thresh Acc",
+              "Mean $|\\epsilon_J|$", "Max $|\\epsilon_J|$", "RMSE",
+              "Mean Rel Err"]
+        print_latex_table(title, f"tab:threshold-accuracy-{tab_id}", lh, rows)
 
 
-# ── Save helper ──────────────────────────────────────────────────────────
+# ── Save helper ──────────────────────────────────────────────────────
 
 def run_and_save(func, save_path, *args, **kwargs):
     """Run a table function. Print to stdout and save to file if path given."""
@@ -873,13 +682,13 @@ def run_and_save(func, save_path, *args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Summarize Piccard benchmark results.")
+        description="Summarize Piccard benchmark results (26 tables).")
     parser.add_argument("results_dir",
-                        help="Path to results directory")
+                        help="Path to CSV results directory")
     parser.add_argument("--latex", action="store_true",
                         help="Also emit LaTeX table fragments")
     parser.add_argument("--save-dir",
-                        help="Save each table as a separate .txt file in this directory")
+                        help="Save each table as a separate .txt file")
     args = parser.parse_args()
 
     d = Path(args.results_dir)
@@ -891,92 +700,154 @@ def main():
     if sd:
         sd.mkdir(parents=True, exist_ok=True)
 
-    # Print system info if available
-    sys_info = d / "system_info.txt"
-    if sys_info.exists():
-        print("=" * 70)
-        print("  System Information")
-        print("=" * 70)
-        print(sys_info.read_text())
-
-    # Detect security levels from CSV filenames.
-    # New convention: piccard_timing_STD128.csv, piccard_timing_STD192.csv, ...
-    # Old convention: piccard_timing.csv (no suffix)
-    security_levels = []
-    for f in sorted(d.glob("piccard_timing_*.csv")):
-        # Extract security level from e.g. "piccard_timing_STD128.csv"
-        stem = f.stem  # "piccard_timing_STD128"
-        sec = stem.replace("piccard_timing_", "")
-        if sec:
-            security_levels.append(sec)
-
-    if not security_levels:
-        # Fall back to old naming convention (no suffix)
-        security_levels = [None]
-
-    for sec in security_levels:
-        suffix = f"_{sec}" if sec else ""
-        sec_label = f" ({sec})" if sec else ""
-
-        if sec:
-            print("\n" + "=" * 70)
-            print(f"  Security level: {sec}")
+    # Print system info if available (check both parent dir and current dir)
+    for candidate in [d.parent / "system_info.txt", d / "system_info.txt"]:
+        if candidate.exists():
             print("=" * 70)
+            print("  System Information")
+            print("=" * 70)
+            print(candidate.read_text())
+            break
 
-        # Read CSVs for this security level
+    # Detect security levels from CSV filenames (security-only, no k-suffix)
+    configs = []
+    seen = set()
+    for f in sorted(d.glob("piccard_timing_*.csv")):
+        stem = f.stem
+        rest = stem.replace("piccard_timing_", "")
+        m = re.match(r"(STD\d+|TOY)$", rest)
+        if m:
+            sec = m.group(1)
+            if sec not in seen:
+                seen.add(sec)
+                configs.append(sec)
+
+    if not configs:
+        # Fall back: no suffix
+        configs = [None]
+
+    for sec in configs:
+        suffix = f"_{sec}" if sec else ""
+
+        if sec:
+            print(f"\n{'=' * 70}")
+            print(f"  Security Level: {sec}")
+            print(f"{'=' * 70}")
+
+        # ── Read all CSVs ─────────────────────────────────────────
         piccard_timing = read_csv(d / f"piccard_timing{suffix}.csv")
         piccard_accuracy = read_csv(d / f"piccard_accuracy{suffix}.csv")
+        piccard_combined = read_csv(d / f"piccard_combined{suffix}.csv")
         comparison_timing = read_csv(d / f"comparison_timing{suffix}.csv")
-        comparison_accuracy = read_csv(d / f"comparison_accuracy{suffix}.csv")
-
-        # File suffix for saved tables
-        file_suffix = f"_{sec}" if sec else ""
-
-        # Generate tables (print to stdout + save individually)
-        run_and_save(table_piccard_timing,
-                     sd / f"table1_piccard_timing{file_suffix}.txt" if sd else None,
-                     piccard_timing, latex=args.latex)
-        run_and_save(table_comparison_universe,
-                     sd / f"table2_comparison_universe{file_suffix}.txt" if sd else None,
-                     comparison_timing, latex=args.latex)
-        run_and_save(table_comparison_setsize,
-                     sd / f"table3_comparison_setsize{file_suffix}.txt" if sd else None,
-                     comparison_timing, latex=args.latex)
-        run_and_save(table_accuracy,
-                     sd / f"table4_accuracy{file_suffix}.txt" if sd else None,
-                     comparison_accuracy, latex=args.latex)
-        run_and_save(table_piccard_accuracy,
-                     sd / f"table5_piccard_accuracy{file_suffix}.txt" if sd else None,
-                     piccard_accuracy, latex=args.latex)
-
-        # Dynamic and threshold benchmark CSVs
         dynamic_timing = read_csv(d / f"dynamic_timing{suffix}.csv")
         dynamic_accuracy = read_csv(d / f"dynamic_accuracy{suffix}.csv")
         threshold_timing = read_csv(d / f"threshold_timing{suffix}.csv")
         threshold_accuracy = read_csv(d / f"threshold_accuracy{suffix}.csv")
 
-        run_and_save(table_dynamic_timing,
-                     sd / f"table6_dynamic_timing{file_suffix}.txt" if sd else None,
-                     dynamic_timing, latex=args.latex)
-        run_and_save(table_threshold_timing,
-                     sd / f"table7_threshold_timing{file_suffix}.txt" if sd else None,
-                     threshold_timing, latex=args.latex)
-        run_and_save(table_threshold_accuracy,
-                     sd / f"table8_threshold_accuracy{file_suffix}.txt" if sd else None,
-                     threshold_accuracy, latex=args.latex)
+        fs = suffix  # file suffix for saved tables
+        lx = args.latex
 
-        # Communication cost (from comparison timing data)
-        run_and_save(table_communication_cost,
-                     sd / f"table9_communication_cost{file_suffix}.txt" if sd else None,
-                     comparison_timing, latex=args.latex)
+        def sp(name):
+            """Build save path or None."""
+            return sd / f"{name}{fs}.txt" if sd else None
 
-        # Accuracy vs k (from piccard accuracy data)
-        run_and_save(table_accuracy_vary_k,
-                     sd / f"table10_accuracy_vs_k{file_suffix}.txt" if sd else None,
-                     piccard_accuracy, latex=args.latex)
+        # ── T1–T3: Piccard Timing ─────────────────────────────────
+        run_and_save(table_piccard_timing, sp("T01_piccard_timing_vary_k"),
+                     piccard_timing, "vary_k_", 1,
+                     "Piccard Timing — Varying k", latex=lx)
+        run_and_save(table_piccard_timing, sp("T02_piccard_timing_vary_m"),
+                     piccard_timing, "vary_m_", 2,
+                     "Piccard Timing — Varying m", latex=lx)
+        run_and_save(table_piccard_timing, sp("T03_piccard_timing_vary_n"),
+                     piccard_timing, "vary_size_", 3,
+                     "Piccard Timing — Varying n", latex=lx)
+
+        # ── T4–T6: Piccard Accuracy ───────────────────────────────
+        run_and_save(table_accuracy_stats, sp("T04_piccard_accuracy_vary_k"),
+                     piccard_accuracy, "accuracy_k", "k", 4,
+                     "Piccard Accuracy — Varying k", latex=lx)
+        run_and_save(table_accuracy_stats, sp("T05_piccard_accuracy_vary_m"),
+                     piccard_accuracy, "accuracy_m", "m", 5,
+                     "Piccard Accuracy — Varying m", latex=lx)
+        run_and_save(table_accuracy_stats, sp("T06_piccard_accuracy_vary_n"),
+                     piccard_accuracy, "accuracy_size", "n", 6,
+                     "Piccard Accuracy — Varying n", latex=lx)
+
+        # ── T7–T9: Piccard Combined ───────────────────────────────
+        run_and_save(table_piccard_combined, sp("T07_piccard_combined_vary_k"),
+                     piccard_combined, "vary_k_", 7,
+                     "Piccard Combined — Varying k", latex=lx)
+        run_and_save(table_piccard_combined, sp("T08_piccard_combined_vary_m"),
+                     piccard_combined, "vary_m_", 8,
+                     "Piccard Combined — Varying m", latex=lx)
+        run_and_save(table_piccard_combined, sp("T09_piccard_combined_vary_n"),
+                     piccard_combined, "vary_size_", 9,
+                     "Piccard Combined — Varying n", latex=lx)
+
+        # ── T10–T13: Comparison Timing ────────────────────────────
+        run_and_save(table_comparison_timing, sp("T10_comparison_vary_k"),
+                     comparison_timing, "vary_k_", 10,
+                     "Comparison — Varying k", latex=lx)
+        run_and_save(table_comparison_timing, sp("T11_comparison_vary_m"),
+                     comparison_timing, "vary_m_", 11,
+                     "Comparison — Varying m", latex=lx)
+        run_and_save(table_comparison_timing, sp("T12_comparison_vary_n"),
+                     comparison_timing, "vary_size_", 12,
+                     "Comparison — Varying n", latex=lx)
+        run_and_save(table_comparison_timing, sp("T13_comparison_vary_universe"),
+                     comparison_timing, "vary_universe_", 13,
+                     "Comparison — Varying |U|", latex=lx)
+
+        # ── T14: Communication Cost ───────────────────────────────
+        run_and_save(table_communication_cost, sp("T14_communication_cost"),
+                     comparison_timing, 14, latex=lx)
+
+        # ── T15–T17: Dynamic Timing ───────────────────────────────
+        run_and_save(table_dynamic_timing, sp("T15_dynamic_timing_vary_k"),
+                     dynamic_timing, "vary_k_", 15,
+                     "Dynamic Timing — Varying k", latex=lx)
+        run_and_save(table_dynamic_timing, sp("T16_dynamic_timing_vary_m"),
+                     dynamic_timing, "vary_m_", 16,
+                     "Dynamic Timing — Varying m", latex=lx)
+        run_and_save(table_dynamic_timing, sp("T17_dynamic_timing_vary_n"),
+                     dynamic_timing, "vary_size_", 17,
+                     "Dynamic Timing — Varying n", latex=lx)
+
+        # ── T18–T20: Dynamic Accuracy ─────────────────────────────
+        run_and_save(table_accuracy_stats, sp("T18_dynamic_accuracy_vary_k"),
+                     dynamic_accuracy, "accuracy_k", "k", 18,
+                     "Dynamic Accuracy — Varying k", latex=lx)
+        run_and_save(table_accuracy_stats, sp("T19_dynamic_accuracy_vary_m"),
+                     dynamic_accuracy, "accuracy_m", "m", 19,
+                     "Dynamic Accuracy — Varying m", latex=lx)
+        run_and_save(table_accuracy_stats, sp("T20_dynamic_accuracy_vary_n"),
+                     dynamic_accuracy, "accuracy_size", "n", 20,
+                     "Dynamic Accuracy — Varying n", latex=lx)
+
+        # ── T21–T23: Threshold Timing ─────────────────────────────
+        run_and_save(table_threshold_timing, sp("T21_threshold_timing_vary_k"),
+                     threshold_timing, "vary_k_", 21,
+                     "Threshold Timing — Varying k", latex=lx)
+        run_and_save(table_threshold_timing, sp("T22_threshold_timing_vary_m"),
+                     threshold_timing, "vary_m_", 22,
+                     "Threshold Timing — Varying m", latex=lx)
+        run_and_save(table_threshold_timing, sp("T23_threshold_timing_vary_n"),
+                     threshold_timing, "vary_size_", 23,
+                     "Threshold Timing — Varying n", latex=lx)
+
+        # ── T24–T26: Threshold Accuracy ───────────────────────────
+        run_and_save(table_threshold_accuracy, sp("T24_threshold_accuracy_vary_k"),
+                     threshold_accuracy, "accuracy_k", "k", 24,
+                     "Threshold Accuracy — Varying k", latex=lx)
+        run_and_save(table_threshold_accuracy, sp("T25_threshold_accuracy_vary_m"),
+                     threshold_accuracy, "accuracy_m", "m", 25,
+                     "Threshold Accuracy — Varying m", latex=lx)
+        run_and_save(table_threshold_accuracy, sp("T26_threshold_accuracy_vary_n"),
+                     threshold_accuracy, "accuracy_size", "n", 26,
+                     "Threshold Accuracy — Varying n", latex=lx)
 
     if sd:
-        saved = [f.name for f in sorted(sd.glob("table*.txt"))]
+        saved = [f.name for f in sorted(sd.glob("T*.txt"))]
         if saved:
             print(f"\n  Saved {len(saved)} table files to {sd}/")
             for name in saved:

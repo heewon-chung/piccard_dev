@@ -1,5 +1,5 @@
 #include "benchmark_utils.h"
-#include "piccard/protocol/piccard.h"
+#include "protocol/piccard.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -68,6 +68,7 @@ static BenchmarkResult RunTimedProtocol(
     br.label = label;
     br.param_k = engine.GetParams().k;
     br.param_m = engine.GetParams().m;
+    br.param_set_size = set_x.size();
     br.param_ring_dim = engine.GetParams().ring_dim;
 
     // Phase 1: MinHash
@@ -131,6 +132,7 @@ static BenchmarkResult RunTimedProtocol(
     br.jaccard_computed = j_hat;
     br.jaccard_expected = j_true;
     br.jaccard_error = std::abs(j_hat - j_true);
+    br.jaccard_rel_error = (j_true > 0.0) ? (br.jaccard_error / j_true) : -1.0;
 
     return br;
 }
@@ -183,6 +185,7 @@ static BenchmarkResult RunMultiTrial(
     median.label = label;
     median.param_k = engine.GetParams().k;
     median.param_m = engine.GetParams().m;
+    median.param_set_size = set_x.size();
     median.param_ring_dim = engine.GetParams().ring_dim;
     median.time_ms = Median(v_total);
     median.phase_minhash_ms = Median(v_minhash);
@@ -197,6 +200,7 @@ static BenchmarkResult RunMultiTrial(
     median.jaccard_computed = last_j_hat;
     median.jaccard_expected = j_true;
     median.jaccard_error = total_error / static_cast<double>(trials);
+    median.jaccard_rel_error = (j_true > 0.0) ? (median.jaccard_error / j_true) : -1.0;
 
     return median;
 }
@@ -205,9 +209,7 @@ static BenchmarkResult RunMultiTrial(
 // Scenario 1: Varying k
 // ============================================================================
 static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> k_values = {64, 128, 256, 512, 1024};
-    auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(set_a, set_b);
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
 
     for (uint32_t k : k_values) {
         PiccardParams params;
@@ -219,19 +221,73 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         Piccard engine(params);
         engine.KeyGen();
 
-        std::string label = "vary_k_" + std::to_string(k);
-        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label,
-                                config.trials);
-        csv.WriteRow(br);
+        // Warmup with deterministic sets
+        {
+            auto [wa, wb] = MakeSetsWithOverlap(config.set_size, 0.5);
+            double wj = ExactJaccard(wa, wb);
+            RunTimedProtocol(engine, wa, wb, wj, "warmup");
+        }
+
+        std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
+        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        size_t ct_size = 0;
+        double last_j_hat = 0.0;
+        double total_error = 0.0;
+        double last_j_true = 0.0;
+
+        for (size_t t = 0; t < config.trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
+            auto [set_a, set_b] = MakeRandomSetsWithOverlap(config.set_size, 0.5, rng);
+            double j_true = ExactJaccard(set_a, set_b);
+
+            std::string label = "vary_k_" + std::to_string(k);
+            auto br = RunTimedProtocol(engine, set_a, set_b, j_true, label);
+            v_total.push_back(br.time_ms);
+            v_minhash.push_back(br.phase_minhash_ms);
+            v_encode.push_back(br.phase_encode_ms);
+            v_encrypt.push_back(br.phase_encrypt_ms);
+            v_multiply.push_back(br.phase_multiply_ms);
+            v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_decrypt.push_back(br.phase_decrypt_ms);
+            v_bias.push_back(br.phase_bias_correction_ms);
+            ct_size = br.ct_size_bytes;
+            last_j_hat = br.jaccard_computed;
+            last_j_true = j_true;
+            total_error += br.jaccard_error;
+        }
+
+        BenchmarkResult median;
+        median.label = "vary_k_" + std::to_string(k);
+        median.param_k = params.k;
+        median.param_m = params.m;
+        median.param_set_size = config.set_size;
+        median.param_ring_dim = params.ring_dim;
+        median.time_ms = Median(v_total);
+        median.phase_minhash_ms = Median(v_minhash);
+        median.phase_encode_ms = Median(v_encode);
+        median.phase_encrypt_ms = Median(v_encrypt);
+        median.phase_multiply_ms = Median(v_multiply);
+        median.phase_rotate_sum_ms = Median(v_rotate);
+        median.phase_decrypt_ms = Median(v_decrypt);
+        median.phase_bias_correction_ms = Median(v_bias);
+        median.memory_bytes = MemoryTracker::GetPeakRSS();
+        median.ct_size_bytes = ct_size;
+        median.jaccard_computed = last_j_hat;
+        median.jaccard_expected = last_j_true;
+        median.jaccard_error = total_error / static_cast<double>(config.trials);
+        median.jaccard_rel_error = (last_j_true > 0.0)
+            ? (median.jaccard_error / last_j_true) : -1.0;
+
+        csv.WriteRow(median);
 
         std::cerr << "  k=" << k
                   << " N=" << params.ring_dim
-                  << " time=" << br.time_ms << "ms"
-                  << " (mul=" << br.phase_multiply_ms
-                  << " rot=" << br.phase_rotate_sum_ms << ")"
-                  << " ct=" << br.ct_size_bytes << "B"
-                  << " J_hat=" << br.jaccard_computed
-                  << " err=" << br.jaccard_error << "\n";
+                  << " time=" << median.time_ms << "ms"
+                  << " (mul=" << median.phase_multiply_ms
+                  << " rot=" << median.phase_rotate_sum_ms << ")"
+                  << " ct=" << median.ct_size_bytes << "B"
+                  << " J_hat=" << median.jaccard_computed
+                  << " err=" << median.jaccard_error << "\n";
     }
 }
 
@@ -240,8 +296,6 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
 // ============================================================================
 static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
     std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
-    auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(set_a, set_b);
 
     for (uint32_t m : m_values) {
         PiccardParams params;
@@ -253,18 +307,72 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         Piccard engine(params);
         engine.KeyGen();
 
-        std::string label = "vary_m_" + std::to_string(m);
-        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label,
-                                config.trials);
-        csv.WriteRow(br);
+        // Warmup with deterministic sets
+        {
+            auto [wa, wb] = MakeSetsWithOverlap(config.set_size, 0.5);
+            double wj = ExactJaccard(wa, wb);
+            RunTimedProtocol(engine, wa, wb, wj, "warmup");
+        }
+
+        std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
+        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        size_t ct_size = 0;
+        double last_j_hat = 0.0;
+        double total_error = 0.0;
+        double last_j_true = 0.0;
+
+        for (size_t t = 0; t < config.trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
+            auto [set_a, set_b] = MakeRandomSetsWithOverlap(config.set_size, 0.5, rng);
+            double j_true = ExactJaccard(set_a, set_b);
+
+            std::string label = "vary_m_" + std::to_string(m);
+            auto br = RunTimedProtocol(engine, set_a, set_b, j_true, label);
+            v_total.push_back(br.time_ms);
+            v_minhash.push_back(br.phase_minhash_ms);
+            v_encode.push_back(br.phase_encode_ms);
+            v_encrypt.push_back(br.phase_encrypt_ms);
+            v_multiply.push_back(br.phase_multiply_ms);
+            v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_decrypt.push_back(br.phase_decrypt_ms);
+            v_bias.push_back(br.phase_bias_correction_ms);
+            ct_size = br.ct_size_bytes;
+            last_j_hat = br.jaccard_computed;
+            last_j_true = j_true;
+            total_error += br.jaccard_error;
+        }
+
+        BenchmarkResult median;
+        median.label = "vary_m_" + std::to_string(m);
+        median.param_k = params.k;
+        median.param_m = params.m;
+        median.param_set_size = config.set_size;
+        median.param_ring_dim = params.ring_dim;
+        median.time_ms = Median(v_total);
+        median.phase_minhash_ms = Median(v_minhash);
+        median.phase_encode_ms = Median(v_encode);
+        median.phase_encrypt_ms = Median(v_encrypt);
+        median.phase_multiply_ms = Median(v_multiply);
+        median.phase_rotate_sum_ms = Median(v_rotate);
+        median.phase_decrypt_ms = Median(v_decrypt);
+        median.phase_bias_correction_ms = Median(v_bias);
+        median.memory_bytes = MemoryTracker::GetPeakRSS();
+        median.ct_size_bytes = ct_size;
+        median.jaccard_computed = last_j_hat;
+        median.jaccard_expected = last_j_true;
+        median.jaccard_error = total_error / static_cast<double>(config.trials);
+        median.jaccard_rel_error = (last_j_true > 0.0)
+            ? (median.jaccard_error / last_j_true) : -1.0;
+
+        csv.WriteRow(median);
 
         std::cerr << "  m=" << m
                   << " N=" << params.ring_dim
-                  << " time=" << br.time_ms << "ms"
-                  << " (mul=" << br.phase_multiply_ms
-                  << " rot=" << br.phase_rotate_sum_ms << ")"
-                  << " ct=" << br.ct_size_bytes << "B"
-                  << " err=" << br.jaccard_error << "\n";
+                  << " time=" << median.time_ms << "ms"
+                  << " (mul=" << median.phase_multiply_ms
+                  << " rot=" << median.phase_rotate_sum_ms << ")"
+                  << " ct=" << median.ct_size_bytes << "B"
+                  << " err=" << median.jaccard_error << "\n";
     }
 }
 
@@ -272,7 +380,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
 // Scenario 3: Varying set size
 // ============================================================================
 static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<size_t> sizes = {1000, 10000, 50000, 100000, 500000, 1000000};
+    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
 
     PiccardParams params;
     params.k = config.k;
@@ -284,68 +392,80 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
     engine.KeyGen();
 
     for (size_t sz : sizes) {
-        auto [set_a, set_b] = MakeSetsWithOverlap(sz, 0.5);
-        double j_true = ExactJaccard(set_a, set_b);
+        // Warmup with deterministic sets
+        {
+            auto [wa, wb] = MakeSetsWithOverlap(sz, 0.5);
+            double wj = ExactJaccard(wa, wb);
+            RunTimedProtocol(engine, wa, wb, wj, "warmup");
+        }
 
-        std::string label = "vary_size_" + std::to_string(sz);
-        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label,
-                                config.trials);
-        csv.WriteRow(br);
+        std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
+        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        size_t ct_size = 0;
+        double last_j_hat = 0.0;
+        double total_error = 0.0;
+        double last_j_true = 0.0;
+
+        for (size_t t = 0; t < config.trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
+            auto [set_a, set_b] = MakeRandomSetsWithOverlap(sz, 0.5, rng);
+            double j_true = ExactJaccard(set_a, set_b);
+
+            std::string label = "vary_size_" + std::to_string(sz);
+            auto br = RunTimedProtocol(engine, set_a, set_b, j_true, label);
+            v_total.push_back(br.time_ms);
+            v_minhash.push_back(br.phase_minhash_ms);
+            v_encode.push_back(br.phase_encode_ms);
+            v_encrypt.push_back(br.phase_encrypt_ms);
+            v_multiply.push_back(br.phase_multiply_ms);
+            v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_decrypt.push_back(br.phase_decrypt_ms);
+            v_bias.push_back(br.phase_bias_correction_ms);
+            ct_size = br.ct_size_bytes;
+            last_j_hat = br.jaccard_computed;
+            last_j_true = j_true;
+            total_error += br.jaccard_error;
+        }
+
+        BenchmarkResult median;
+        median.label = "vary_size_" + std::to_string(sz);
+        median.param_k = params.k;
+        median.param_m = params.m;
+        median.param_set_size = sz;
+        median.param_ring_dim = params.ring_dim;
+        median.time_ms = Median(v_total);
+        median.phase_minhash_ms = Median(v_minhash);
+        median.phase_encode_ms = Median(v_encode);
+        median.phase_encrypt_ms = Median(v_encrypt);
+        median.phase_multiply_ms = Median(v_multiply);
+        median.phase_rotate_sum_ms = Median(v_rotate);
+        median.phase_decrypt_ms = Median(v_decrypt);
+        median.phase_bias_correction_ms = Median(v_bias);
+        median.memory_bytes = MemoryTracker::GetPeakRSS();
+        median.ct_size_bytes = ct_size;
+        median.jaccard_computed = last_j_hat;
+        median.jaccard_expected = last_j_true;
+        median.jaccard_error = total_error / static_cast<double>(config.trials);
+        median.jaccard_rel_error = (last_j_true > 0.0)
+            ? (median.jaccard_error / last_j_true) : -1.0;
+
+        csv.WriteRow(median);
 
         std::cerr << "  size=" << sz
-                  << " time=" << br.time_ms << "ms"
-                  << " (minhash=" << br.phase_minhash_ms
-                  << " enc=" << br.phase_encrypt_ms
-                  << " mul=" << br.phase_multiply_ms
-                  << " rot=" << br.phase_rotate_sum_ms << ")"
-                  << " err=" << br.jaccard_error << "\n";
+                  << " time=" << median.time_ms << "ms"
+                  << " (minhash=" << median.phase_minhash_ms
+                  << " enc=" << median.phase_encrypt_ms
+                  << " mul=" << median.phase_multiply_ms
+                  << " rot=" << median.phase_rotate_sum_ms << ")"
+                  << " err=" << median.jaccard_error << "\n";
     }
 }
 
 // ============================================================================
-// Scenario 4: Accuracy across similarity levels
-// ============================================================================
-static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
-
-    PiccardParams params;
-    params.k = config.k;
-    params.m = config.m;
-    params.security = config.security_level;
-    params.Validate();
-
-    Piccard engine(params);
-    engine.KeyGen();
-
-    for (double frac : overlaps) {
-        double total_error = 0;
-        for (size_t t = 0; t < config.trials; t++) {
-            auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, frac);
-            double j_true = ExactJaccard(set_a, set_b);
-            auto result = engine.Run(set_a, set_b);
-            total_error += std::abs(result.jaccard_estimate - j_true);
-
-            BenchmarkResult br;
-            br.label = "accuracy_" + std::to_string(frac) + "_t" + std::to_string(t);
-            br.param_k = params.k;
-            br.param_m = params.m;
-            br.param_ring_dim = params.ring_dim;
-            br.jaccard_computed = result.jaccard_estimate;
-            br.jaccard_expected = j_true;
-            br.jaccard_error = std::abs(result.jaccard_estimate - j_true);
-            csv.WriteRow(br);
-        }
-        double avg_error = total_error / static_cast<double>(config.trials);
-        std::cerr << "  overlap=" << frac
-                  << " avg_error=" << avg_error << "\n";
-    }
-}
-
-// ============================================================================
-// Scenario 5: Accuracy across k values (MinHash convergence)
+// Accuracy across k values (MinHash convergence)
 // ============================================================================
 static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> k_values = {64, 128, 256, 512, 1024};
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t k : k_values) {
@@ -364,7 +484,9 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
         for (double frac : overlaps) {
             double total_error = 0;
             for (size_t t = 0; t < config.trials; t++) {
-                auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, frac);
+                std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+                    config.set_size, frac, rng);
                 double j_true = ExactJaccard(set_a, set_b);
                 auto result = engine.Run(set_a, set_b);
                 double err = std::abs(result.jaccard_estimate - j_true);
@@ -378,16 +500,123 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                            "_t" + std::to_string(t);
                 br.param_k = params.k;
                 br.param_m = params.m;
+                br.param_set_size = config.set_size;
                 br.param_ring_dim = params.ring_dim;
                 br.jaccard_computed = result.jaccard_estimate;
                 br.jaccard_expected = j_true;
                 br.jaccard_error = err;
+                br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
                 csv.WriteRow(br);
             }
         }
 
         double avg_error = total_error_all / static_cast<double>(count_all);
         std::cerr << "  k=" << k
+                  << " avg_error=" << avg_error << "\n";
+    }
+}
+
+// ============================================================================
+// Accuracy across m values
+// ============================================================================
+static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+
+    for (uint32_t m : m_values) {
+        PiccardParams params;
+        params.k = config.k;
+        params.m = m;
+        params.security = config.security_level;
+        params.Validate();
+
+        Piccard engine(params);
+        engine.KeyGen();
+
+        double total_error_all = 0;
+        size_t count_all = 0;
+
+        for (double frac : overlaps) {
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+                    config.set_size, frac, rng);
+                double j_true = ExactJaccard(set_a, set_b);
+                auto result = engine.Run(set_a, set_b);
+                double err = std::abs(result.jaccard_estimate - j_true);
+                total_error_all += err;
+                count_all++;
+
+                BenchmarkResult br;
+                br.label = "accuracy_m" + std::to_string(m) +
+                           "_" + std::to_string(frac) +
+                           "_t" + std::to_string(t);
+                br.param_k = params.k;
+                br.param_m = params.m;
+                br.param_set_size = config.set_size;
+                br.param_ring_dim = params.ring_dim;
+                br.jaccard_computed = result.jaccard_estimate;
+                br.jaccard_expected = j_true;
+                br.jaccard_error = err;
+                br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                csv.WriteRow(br);
+            }
+        }
+
+        double avg_error = total_error_all / static_cast<double>(count_all);
+        std::cerr << "  m=" << m
+                  << " avg_error=" << avg_error << "\n";
+    }
+}
+
+// ============================================================================
+// Accuracy across set sizes
+// ============================================================================
+static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& csv) {
+    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+
+    PiccardParams params;
+    params.k = config.k;
+    params.m = config.m;
+    params.security = config.security_level;
+    params.Validate();
+
+    Piccard engine(params);
+    engine.KeyGen();
+
+    for (size_t sz : sizes) {
+        double total_error_all = 0;
+        size_t count_all = 0;
+
+        for (double frac : overlaps) {
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                auto [set_a, set_b] = MakeRandomSetsWithOverlap(sz, frac, rng);
+                double j_true = ExactJaccard(set_a, set_b);
+                auto result = engine.Run(set_a, set_b);
+                double err = std::abs(result.jaccard_estimate - j_true);
+                total_error_all += err;
+                count_all++;
+
+                BenchmarkResult br;
+                br.label = "accuracy_size" + std::to_string(sz) +
+                           "_" + std::to_string(frac) +
+                           "_t" + std::to_string(t);
+                br.param_k = params.k;
+                br.param_m = params.m;
+                br.param_set_size = sz;
+                br.param_ring_dim = params.ring_dim;
+                br.jaccard_computed = result.jaccard_estimate;
+                br.jaccard_expected = j_true;
+                br.jaccard_error = err;
+                br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                csv.WriteRow(br);
+            }
+        }
+
+        double avg_error = total_error_all / static_cast<double>(count_all);
+        std::cerr << "  size=" << sz
                   << " avg_error=" << avg_error << "\n";
     }
 }
@@ -449,6 +678,135 @@ static void PrintComparison(const std::vector<BenchmarkResult>& results) {
 }
 
 // ============================================================================
+// Combined mode: timing + accuracy for each parameter config
+// ============================================================================
+
+static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
+    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+
+    for (uint32_t k : k_values) {
+        PiccardParams params;
+        params.k = k;
+        params.m = config.m;
+        params.security = config.security_level;
+        params.Validate();
+
+        Piccard engine(params);
+        engine.KeyGen();
+
+        // Timing phase: fixed sets, median of config.trials runs
+        auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, config.overlap);
+        double j_true = ExactJaccard(set_a, set_b);
+        std::string label = "vary_k_" + std::to_string(k);
+        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
+
+        // Accuracy phase: random sets per trial
+        std::vector<std::pair<double, double>> estimates;
+        for (size_t t = 0; t < config.accuracy_trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            auto [sa, sb] = MakeRandomSetsWithOverlap(config.set_size, config.overlap, rng);
+            double jt = ExactJaccard(sa, sb);
+            auto result = engine.Run(sa, sb);
+            estimates.emplace_back(result.jaccard_estimate, jt);
+        }
+        auto stats = ComputeAccuracyStats(estimates);
+        br.accuracy_median = stats.median;
+        br.accuracy_p25 = stats.p25;
+        br.accuracy_p75 = stats.p75;
+        br.accuracy_p95 = stats.p95;
+        br.accuracy_max = stats.max_error;
+
+        csv.WriteRow(br);
+        std::cerr << "  k=" << k
+                  << " time=" << br.time_ms << "ms"
+                  << " median_err=" << stats.median
+                  << " P95=" << stats.p95 << "\n";
+    }
+}
+
+static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
+    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+
+    for (uint32_t m : m_values) {
+        PiccardParams params;
+        params.k = config.k;
+        params.m = m;
+        params.security = config.security_level;
+        params.Validate();
+
+        Piccard engine(params);
+        engine.KeyGen();
+
+        auto [set_a, set_b] = MakeSetsWithOverlap(config.set_size, config.overlap);
+        double j_true = ExactJaccard(set_a, set_b);
+        std::string label = "vary_m_" + std::to_string(m);
+        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
+
+        std::vector<std::pair<double, double>> estimates;
+        for (size_t t = 0; t < config.accuracy_trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            auto [sa, sb] = MakeRandomSetsWithOverlap(config.set_size, config.overlap, rng);
+            double jt = ExactJaccard(sa, sb);
+            auto result = engine.Run(sa, sb);
+            estimates.emplace_back(result.jaccard_estimate, jt);
+        }
+        auto stats = ComputeAccuracyStats(estimates);
+        br.accuracy_median = stats.median;
+        br.accuracy_p25 = stats.p25;
+        br.accuracy_p75 = stats.p75;
+        br.accuracy_p95 = stats.p95;
+        br.accuracy_max = stats.max_error;
+
+        csv.WriteRow(br);
+        std::cerr << "  m=" << m
+                  << " time=" << br.time_ms << "ms"
+                  << " median_err=" << stats.median
+                  << " P95=" << stats.p95 << "\n";
+    }
+}
+
+static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
+    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+
+    PiccardParams params;
+    params.k = config.k;
+    params.m = config.m;
+    params.security = config.security_level;
+    params.Validate();
+
+    Piccard engine(params);
+    engine.KeyGen();
+
+    for (size_t sz : sizes) {
+        auto [set_a, set_b] = MakeSetsWithOverlap(sz, config.overlap);
+        double j_true = ExactJaccard(set_a, set_b);
+        std::string label = "vary_size_" + std::to_string(sz);
+        auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
+
+        std::vector<std::pair<double, double>> estimates;
+        for (size_t t = 0; t < config.accuracy_trials; t++) {
+            std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            auto [sa, sb] = MakeRandomSetsWithOverlap(sz, config.overlap, rng);
+            double jt = ExactJaccard(sa, sb);
+            auto result = engine.Run(sa, sb);
+            estimates.emplace_back(result.jaccard_estimate, jt);
+        }
+        auto stats = ComputeAccuracyStats(estimates);
+        br.accuracy_median = stats.median;
+        br.accuracy_p25 = stats.p25;
+        br.accuracy_p75 = stats.p75;
+        br.accuracy_p95 = stats.p95;
+        br.accuracy_max = stats.max_error;
+
+        csv.WriteRow(br);
+        std::cerr << "  size=" << sz
+                  << " time=" << br.time_ms << "ms"
+                  << " median_err=" << stats.median
+                  << " P95=" << stats.p95 << "\n";
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -477,12 +835,24 @@ int main(int argc, char** argv) {
         BenchVaryingSetSize(config, csv);
 
         PrintComparison(all_results);
-    } else if (config.mode == "accuracy") {
-        std::cerr << "\n=== Accuracy (fixed k=" << config.k << ") ===\n";
-        BenchAccuracy(config, csv);
+    } else if (config.mode == "combined") {
+        std::cerr << "\n=== Combined: Varying k (timing + accuracy) ===\n";
+        BenchCombinedVaryingK(config, csv);
 
+        std::cerr << "\n=== Combined: Varying m (timing + accuracy) ===\n";
+        BenchCombinedVaryingM(config, csv);
+
+        std::cerr << "\n=== Combined: Varying set size (timing + accuracy) ===\n";
+        BenchCombinedVaryingSetSize(config, csv);
+    } else if (config.mode == "accuracy") {
         std::cerr << "\n=== Accuracy vs k (MinHash convergence) ===\n";
         BenchAccuracyVaryK(config, csv);
+
+        std::cerr << "\n=== Accuracy vs m ===\n";
+        BenchAccuracyVaryM(config, csv);
+
+        std::cerr << "\n=== Accuracy vs set size ===\n";
+        BenchAccuracyVarySetSize(config, csv);
     }
 
     return 0;

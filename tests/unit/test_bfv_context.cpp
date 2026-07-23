@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "piccard/fhe/bfv_context.h"
-#include "piccard/util/params.h"
-#include "piccard/core/threshold_poly.h"
+#include "fhe/bfv_context.h"
+#include "util/params.h"
+#include "core/threshold_poly.h"
 
 #include <string>
 

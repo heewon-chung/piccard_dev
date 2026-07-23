@@ -1,9 +1,8 @@
-#include "piccard/protocol/piccard_engine.h"
-#include "piccard/core/threshold_poly.h"
+#include "protocol/piccard_engine.h"
+#include "core/threshold_poly.h"
 
 #include <algorithm>
 #include <cmath>
-#include <stdexcept>
 
 namespace piccard {
 

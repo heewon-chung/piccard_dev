@@ -1,10 +1,10 @@
 #pragma once
 
-#include "piccard/util/params.h"
-#include "piccard/core/minhash.h"
-#include "piccard/core/onehot_encoder.h"
-#include "piccard/fhe/bfv_context.h"
-#include "piccard/core/bottom_structure.h"
+#include "util/params.h"
+#include "core/minhash.h"
+#include "core/onehot_encoder.h"
+#include "fhe/bfv_context.h"
+#include "core/bottom_structure.h"
 
 #include <cstdint>
 #include <memory>

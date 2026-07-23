@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/protocol/piccard.h"
+#include "protocol/piccard.h"
 
 #include <cmath>
 #include <string>

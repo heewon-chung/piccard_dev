@@ -1,7 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/protocol/dynamic_piccard.h"
-
-#include <cmath>
+#include "protocol/dynamic_piccard.h"
 
 using namespace piccard;
 

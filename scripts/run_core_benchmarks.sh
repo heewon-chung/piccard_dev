@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# run_benchmarks.sh — Run all Piccard benchmarks and save results.
+# run_core_benchmarks.sh — Run core Piccard benchmarks only (no Dynamic/Threshold).
 #
 # Usage:
-#   ./scripts/run_benchmarks.sh              # Full paper-grade run (STD128, 10/50 timing/accuracy trials)
-#   ./scripts/run_benchmarks.sh --quick      # Quick smoke test   (TOY, 2 trials)
+#   ./scripts/run_core_benchmarks.sh              # Full paper-grade run (STD128, 10/50 timing/accuracy trials)
+#   ./scripts/run_core_benchmarks.sh --quick      # Quick smoke test   (TOY, 2 trials)
 #
 # Output:
 #   results/YYYY-MM-DD_HHMMSS_TAG/
@@ -13,10 +13,6 @@
 #       piccard_accuracy_STD128.csv
 #       piccard_combined_STD128.csv
 #       comparison_timing_STD128.csv
-#       dynamic_timing_STD128.csv
-#       dynamic_accuracy_STD128.csv
-#       threshold_timing_STD128.csv
-#       threshold_accuracy_STD128.csv
 #     tables/
 #       summary.txt
 #       tables_latex.tex
@@ -43,12 +39,6 @@ if [[ "${1:-}" == "--quick" ]]; then
     shift
 fi
 
-# ── Quick-mode extra flags for new benchmarks ─────────────────────
-DYNAMIC_EXTRA_FLAGS=""
-if [[ "$TAG" == "quick" ]]; then
-    DYNAMIC_EXTRA_FLAGS="--depth=5 --set_size=1000"
-fi
-
 # ── Verify binaries ─────────────────────────────────────────────────
 if [[ ! -x "$BUILD_DIR/bench_piccard" ]] || [[ ! -x "$BUILD_DIR/bench_comparison" ]]; then
     echo "Building benchmarks..."
@@ -68,7 +58,7 @@ LOG="$OUT_DIR/run.log"
 exec > >(tee -a "$LOG") 2>&1
 
 echo "============================================================"
-echo "  Piccard Benchmark Suite"
+echo "  Piccard Core Benchmark Suite"
 echo "  $(date)"
 echo "  Security: ${SECURITY_LEVELS[*]}"
 echo "  Timing trials:   $TIMING_TRIALS"
@@ -139,7 +129,7 @@ run_bench() {
     return $rc
 }
 
-# ── Run benchmarks for each security level ─────────────────────────
+# ── Run core benchmarks for each security level ─────────────────────
 for SECURITY in "${SECURITY_LEVELS[@]}"; do
     echo ""
     echo "============================================================"
@@ -172,43 +162,11 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         "$BUILD_DIR/bench_comparison" \
         "$CSV_DIR/comparison_timing_${SECURITY}.csv" \
         --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
-
-    # ── 5. bench_dynamic: timing (optional) ─────────────────────────
-    if [[ -x "$BUILD_DIR/bench_dynamic" ]]; then
-        run_bench "Dynamic timing ($SECURITY)" \
-            "$BUILD_DIR/bench_dynamic" \
-            "$CSV_DIR/dynamic_timing_${SECURITY}.csv" \
-            --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 $DYNAMIC_EXTRA_FLAGS
-
-        # ── 6. bench_dynamic: accuracy ──────────────────────────────
-        run_bench "Dynamic accuracy ($SECURITY)" \
-            "$BUILD_DIR/bench_dynamic" \
-            "$CSV_DIR/dynamic_accuracy_${SECURITY}.csv" \
-            --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000 $DYNAMIC_EXTRA_FLAGS
-    else
-        echo "  (bench_dynamic not built, skipping)"
-    fi
-
-    # ── 7. bench_threshold: timing (optional) ───────────────────────
-    if [[ -x "$BUILD_DIR/bench_threshold" ]]; then
-        run_bench "Threshold timing ($SECURITY)" \
-            "$BUILD_DIR/bench_threshold" \
-            "$CSV_DIR/threshold_timing_${SECURITY}.csv" \
-            --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
-
-        # ── 8. bench_threshold: accuracy ────────────────────────────
-        run_bench "Threshold accuracy ($SECURITY)" \
-            "$BUILD_DIR/bench_threshold" \
-            "$CSV_DIR/threshold_accuracy_${SECURITY}.csv" \
-            --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000
-    else
-        echo "  (bench_threshold not built, skipping)"
-    fi
 done
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo "============================================================"
-echo "  All benchmarks complete."
+echo "  All core benchmarks complete."
 echo "  Results: $OUT_DIR"
 echo ""
 echo "  CSV files:"

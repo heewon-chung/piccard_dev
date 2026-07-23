@@ -1,7 +1,7 @@
 #pragma once
 
-#include "piccard/protocol/piccard.h"
-#include "piccard/core/bottom_structure.h"
+#include "protocol/piccard.h"
+#include "core/bottom_structure.h"
 
 #include <cstdint>
 #include <memory>

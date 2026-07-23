@@ -14,6 +14,33 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
+# Find OpenMP (for parallel loops and OpenFHE internal parallelism)
+# On macOS with Homebrew libomp, help CMake locate the installation
+if(APPLE AND NOT DEFINED OpenMP_CXX_FLAGS)
+    execute_process(
+        COMMAND brew --prefix libomp
+        OUTPUT_VARIABLE HOMEBREW_LIBOMP_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(HOMEBREW_LIBOMP_PREFIX)
+        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include")
+        set(OpenMP_CXX_LIB_NAMES "omp")
+        set(OpenMP_omp_LIBRARY "${HOMEBREW_LIBOMP_PREFIX}/lib/libomp.dylib")
+    endif()
+endif()
+
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "Found OpenMP: ${OpenMP_CXX_FLAGS}")
+    # Ensure linker can find libomp (needed by both our code and OpenFHE)
+    if(HOMEBREW_LIBOMP_PREFIX)
+        link_directories(${HOMEBREW_LIBOMP_PREFIX}/lib)
+    endif()
+else()
+    message(STATUS "OpenMP not found - parallel execution disabled")
+endif()
+
 # Find OpenFHE (required for FHE operations)
 find_package(OpenFHE QUIET)
 if(OpenFHE_FOUND)
@@ -36,10 +63,6 @@ if(OpenFHE_FOUND)
         ${OpenFHE_INCLUDE}/binfhe
     )
     link_directories(${OpenFHE_LIBDIR})
-
-    if(OPENMP_LIBRARIES)
-        link_directories(${OPENMP_LIBRARIES})
-    endif()
 endif()
 
 # =============================================================================
@@ -50,12 +73,16 @@ set(PICCARD_CORE_SOURCES
     src/util/params.cpp
     src/core/minhash.cpp
     src/core/onehot_encoder.cpp
+    src/core/sqrt_encoder.cpp
     src/core/bottom_structure.cpp
     src/core/threshold_poly.cpp
 )
 
 add_library(piccard_core ${PICCARD_CORE_SOURCES})
 target_include_directories(piccard_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # =============================================================================
 # piccard_fhe: BFV context + engine (requires OpenFHE)
@@ -64,10 +91,10 @@ target_include_directories(piccard_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 if(OpenFHE_FOUND)
     set(PICCARD_FHE_SOURCES
         src/fhe/bfv_context.cpp
-        src/protocol/piccard_engine.cpp
         src/protocol/piccard.cpp
         src/protocol/dynamic_piccard.cpp
         src/protocol/threshold_piccard.cpp
+        src/protocol/sqrt_piccard.cpp
     )
 
     add_library(piccard_fhe ${PICCARD_FHE_SOURCES})
@@ -119,6 +146,10 @@ if(BUILD_TESTS)
         target_link_libraries(test_onehot_encoder piccard_core test_main)
         add_test(NAME OneHotEncoder COMMAND test_onehot_encoder)
 
+        add_executable(test_sqrt_encoder tests/unit/test_sqrt_encoder.cpp)
+        target_link_libraries(test_sqrt_encoder piccard_core test_main)
+        add_test(NAME SqrtEncoder COMMAND test_sqrt_encoder)
+
         add_executable(test_bottom_structure tests/unit/test_bottom_structure.cpp)
         target_link_libraries(test_bottom_structure piccard_core test_main)
         add_test(NAME BottomStructure COMMAND test_bottom_structure)
@@ -144,6 +175,10 @@ if(BUILD_TESTS)
             add_executable(test_threshold_engine tests/unit/test_threshold_engine.cpp)
             target_link_libraries(test_threshold_engine piccard_fhe test_main)
             add_test(NAME ThresholdEngine COMMAND test_threshold_engine)
+
+            add_executable(test_sqrt_piccard tests/unit/test_sqrt_piccard.cpp)
+            target_link_libraries(test_sqrt_piccard piccard_fhe test_main)
+            add_test(NAME SqrtPiccard COMMAND test_sqrt_piccard)
 
             # Integration test
             add_executable(test_piccard_e2e tests/integration/test_piccard_e2e.cpp)
@@ -177,6 +212,18 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     add_executable(bench_threshold benchmarks/bench_threshold.cpp)
     target_link_libraries(bench_threshold piccard_fhe)
     target_include_directories(bench_threshold PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    add_executable(bench_sqrt_comparison benchmarks/bench_sqrt_comparison.cpp)
+    target_link_libraries(bench_sqrt_comparison piccard_fhe)
+    target_include_directories(bench_sqrt_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    add_executable(bench_onehot_sqrt benchmarks/bench_onehot_sqrt.cpp)
+    target_link_libraries(bench_onehot_sqrt piccard_fhe)
+    target_include_directories(bench_onehot_sqrt PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    add_executable(bench_crossover benchmarks/bench_crossover.cpp)
+    target_link_libraries(bench_crossover piccard_fhe)
+    target_include_directories(bench_crossover PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 endif()
 
 # =============================================================================

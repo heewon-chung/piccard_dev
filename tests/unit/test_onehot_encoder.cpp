@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "piccard/core/onehot_encoder.h"
-#include "piccard/util/params.h"
+#include "core/onehot_encoder.h"
+#include "util/params.h"
 
 #include <string>
 

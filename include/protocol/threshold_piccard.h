@@ -1,6 +1,6 @@
 #pragma once
 
-#include "piccard/protocol/piccard.h"
+#include "protocol/piccard.h"
 
 #include <cstdint>
 #include <vector>

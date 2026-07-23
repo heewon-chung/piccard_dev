@@ -8,18 +8,23 @@
  * for performance benchmarks. Header-only utilities for simplicity.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <sys/resource.h>
 #include <string>
 #include <vector>
 #include <fstream>
 #include <iostream>
+#include <numeric>
+#include <random>
 #include <sstream>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <iomanip>
+#include <unordered_map>
 
-#include "piccard/util/params.h"
+#include "util/params.h"
 #include "openfhe.h"
 
 namespace piccard {
@@ -84,6 +89,7 @@ struct BenchmarkResult {
     // Parameters
     uint32_t param_k = 0;
     uint32_t param_m = 0;
+    size_t param_set_size = 0;
     uint32_t param_ring_dim = 0;
 
     // Total and per-phase timing (ms)
@@ -104,7 +110,71 @@ struct BenchmarkResult {
     double jaccard_computed = 0.0;
     double jaccard_expected = 0.0;
     double jaccard_error = 0.0;
+    double jaccard_rel_error = 0.0;  // |J_hat - J_true| / J_true (-1 if J_true=0)
+
+    // Combined-mode accuracy statistics (percentile-based)
+    double accuracy_median = 0.0;
+    double accuracy_p25 = 0.0;
+    double accuracy_p75 = 0.0;
+    double accuracy_p95 = 0.0;
+    double accuracy_max = 0.0;
+
+    // Encoding comparison fields (added for sqrt integration)
+    std::string encoding;              // "onehot", "sqrt", or "" (legacy)
+    uint32_t param_mult_depth = 0;
+    uint32_t param_num_cts = 0;
+    size_t comm_bytes = 0;
+
+    // Sqrt-specific sub-phase timing (0.0 for one-hot)
+    double phase_intra_digit_rotate_ms = 0.0;
+    double phase_digit_and_ms = 0.0;
+    double phase_cross_k_sum_ms = 0.0;
 };
+
+// ============================================================================
+// AccuracyStats - Compute accuracy statistics from (j_hat, j_true) pairs
+// ============================================================================
+
+struct AccuracyStats {
+    double median = 0.0;
+    double p25 = 0.0;
+    double p75 = 0.0;
+    double p95 = 0.0;
+    double max_error = 0.0;
+    size_t num_trials = 0;
+};
+
+inline AccuracyStats ComputeAccuracyStats(
+    const std::vector<std::pair<double, double>>& estimates) {
+    AccuracyStats stats;
+    size_t n = estimates.size();
+    if (n == 0) return stats;
+    stats.num_trials = n;
+
+    std::vector<double> abs_errors;
+    abs_errors.reserve(n);
+    for (const auto& [j_hat, j_true] : estimates) {
+        abs_errors.push_back(std::abs(j_hat - j_true));
+    }
+    std::sort(abs_errors.begin(), abs_errors.end());
+
+    auto percentile = [&](double p) -> double {
+        double idx = p * static_cast<double>(n - 1);
+        size_t lo = static_cast<size_t>(idx);
+        size_t hi = lo + 1;
+        if (hi >= n) return abs_errors.back();
+        double frac = idx - static_cast<double>(lo);
+        return abs_errors[lo] * (1.0 - frac) + abs_errors[hi] * frac;
+    };
+
+    stats.median = percentile(0.5);
+    stats.p25 = percentile(0.25);
+    stats.p75 = percentile(0.75);
+    stats.p95 = percentile(0.95);
+    stats.max_error = abs_errors.back();
+
+    return stats;
+}
 
 // ============================================================================
 // CSVWriter - Write benchmark results to CSV
@@ -134,18 +204,22 @@ public:
     }
 
     void WriteHeader() {
-        *out_ << "label,k,m,ring_dim,"
+        *out_ << "label,k,m,set_size,ring_dim,"
               << "time_ms,phase_minhash_ms,phase_encode_ms,phase_encrypt_ms,"
               << "phase_multiply_ms,phase_rotate_sum_ms,phase_decrypt_ms,"
               << "phase_bias_correction_ms,"
               << "memory_bytes,ct_size_bytes,"
-              << "jaccard_computed,jaccard_expected,jaccard_error\n";
+              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+              << "accuracy_median,accuracy_p25,accuracy_p75,accuracy_p95,accuracy_max,"
+              << "encoding,mult_depth,num_cts,comm_bytes,"
+              << "phase_intra_digit_rotate_ms,phase_digit_and_ms,phase_cross_k_sum_ms\n";
     }
 
     void WriteRow(const BenchmarkResult& result) {
         *out_ << result.label << ","
               << result.param_k << ","
               << result.param_m << ","
+              << result.param_set_size << ","
               << result.param_ring_dim << ","
               << std::fixed << std::setprecision(3)
               << result.time_ms << ","
@@ -161,7 +235,21 @@ public:
               << std::fixed << std::setprecision(6)
               << result.jaccard_computed << ","
               << result.jaccard_expected << ","
-              << result.jaccard_error << "\n";
+              << result.jaccard_error << ","
+              << result.jaccard_rel_error << ","
+              << result.accuracy_median << ","
+              << result.accuracy_p25 << ","
+              << result.accuracy_p75 << ","
+              << result.accuracy_p95 << ","
+              << result.accuracy_max << ","
+              << result.encoding << ","
+              << result.param_mult_depth << ","
+              << result.param_num_cts << ","
+              << result.comm_bytes << ","
+              << std::fixed << std::setprecision(3)
+              << result.phase_intra_digit_rotate_ms << ","
+              << result.phase_digit_and_ms << ","
+              << result.phase_cross_k_sum_ms << "\n";
     }
 };
 
@@ -174,16 +262,22 @@ struct BenchmarkConfig {
     uint32_t m;                    // One-hot bucket size
     size_t set_size;               // Size of each party's set
     size_t trials;                 // Number of trials to run
-    std::string mode;              // "accuracy" or "timing"
+    std::string mode;              // "accuracy", "timing", or "combined"
     SecurityLevel security_level;
+    uint64_t seed;                 // RNG seed for accuracy trials (0 = random)
+    double overlap;                // Overlap fraction for combined mode
+    size_t accuracy_trials;        // Number of accuracy trials in combined mode
 
     BenchmarkConfig()
         : k(128),
           m(64),
-          set_size(100),
+          set_size(1000),
           trials(10),
           mode("timing"),
-          security_level(SecurityLevel::STD128) {}
+          security_level(SecurityLevel::STD128),
+          seed(0),
+          overlap(0.3),
+          accuracy_trials(100) {}
 
     // Parse known flags, ignoring unrecognized ones (so callers can
     // layer additional flags on top without triggering errors).
@@ -203,7 +297,7 @@ struct BenchmarkConfig {
                 config.trials = std::stoull(arg.substr(9));
             } else if (arg.find("--mode=") == 0) {
                 config.mode = arg.substr(7);
-                if (config.mode != "accuracy" && config.mode != "timing") {
+                if (config.mode != "accuracy" && config.mode != "timing" && config.mode != "combined") {
                     throw std::invalid_argument("Invalid mode: " + config.mode);
                 }
             } else if (arg.find("--security=") == 0) {
@@ -219,10 +313,21 @@ struct BenchmarkConfig {
                 } else {
                     throw std::invalid_argument("Invalid security level: " + sec);
                 }
+            } else if (arg.find("--seed=") == 0) {
+                config.seed = std::stoull(arg.substr(7));
+            } else if (arg.find("--overlap=") == 0) {
+                config.overlap = std::stod(arg.substr(10));
+            } else if (arg.find("--accuracy_trials=") == 0) {
+                config.accuracy_trials = std::stoull(arg.substr(18));
             } else if (arg == "--help" || arg == "-h") {
                 // Handled by caller
             }
             // Silently ignore unrecognized flags (e.g. --universe=)
+        }
+
+        // If no seed specified, generate one from random_device
+        if (config.seed == 0) {
+            config.seed = std::random_device{}();
         }
 
         return config;
@@ -235,8 +340,11 @@ struct BenchmarkConfig {
                   << "  --m=N              One-hot bucket size (default: 64)\n"
                   << "  --set_size=N       Size of each party's set (default: 100)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
-                  << "  --mode=MODE        'accuracy' or 'timing' (default: timing)\n"
+                  << "  --mode=MODE        'accuracy', 'timing', or 'combined' (default: timing)\n"
                   << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256' (default: STD128)\n"
+                  << "  --seed=N           RNG seed for accuracy trials (default: random)\n"
+                  << "  --overlap=F        Overlap fraction for combined mode (default: 0.3)\n"
+                  << "  --accuracy_trials=N  Accuracy trials in combined mode (default: 100)\n"
                   << "  --help, -h         Print this help message\n";
     }
 
@@ -250,9 +358,88 @@ struct BenchmarkConfig {
                   << "  Security:  "
                   << (security_level == SecurityLevel::TOY    ? "TOY" :
                       security_level == SecurityLevel::STD128 ? "STD128" :
-                      security_level == SecurityLevel::STD192 ? "STD192" : "STD256") << "\n";
+                      security_level == SecurityLevel::STD192 ? "STD192" : "STD256") << "\n"
+                  << "  Seed:      " << seed << "\n"
+                  << "  Overlap:   " << overlap << "\n"
+                  << "  Acc trials:" << accuracy_trials << "\n";
     }
 };
+
+// ============================================================================
+// MakeRandomSetsWithOverlap - Randomized test data for accuracy benchmarks
+// ============================================================================
+
+/// Generate two sets with target overlap using randomized element selection.
+/// Elements are sampled without replacement from [0, universe_max).
+/// The overlap fraction is exact: |A ∩ B| = floor(overlap_fraction * set_size).
+/// Deterministic given the same rng state.
+inline std::pair<std::vector<uint64_t>, std::vector<uint64_t>>
+MakeRandomSetsWithOverlap(size_t set_size, double overlap_fraction,
+                           std::mt19937_64& rng,
+                           uint64_t universe_max = 10'000'000) {
+    size_t overlap = static_cast<size_t>(overlap_fraction * set_size);
+    size_t unique_a = set_size - overlap;
+    size_t unique_b = set_size - overlap;
+    size_t total_needed = overlap + unique_a + unique_b;
+
+    if (total_needed > universe_max) {
+        throw std::runtime_error(
+            "Universe too small: need " + std::to_string(total_needed) +
+            " distinct elements but universe_max=" + std::to_string(universe_max));
+    }
+
+    // Generate total_needed distinct elements via partial Fisher-Yates shuffle
+    // on indices [1, universe_max]. We avoid allocating the full array by
+    // using a map to track swapped positions.
+    std::vector<uint64_t> sampled(total_needed);
+    std::unordered_map<uint64_t, uint64_t> swaps;
+    for (size_t i = 0; i < total_needed; i++) {
+        std::uniform_int_distribution<uint64_t> dist(i, universe_max - 1);
+        uint64_t j = dist(rng);
+
+        // Get value at position i (default: i) and j (default: j)
+        // Elements are 0-based: [0, universe_max)
+        uint64_t vi = swaps.count(i) ? swaps[i] : i;
+        uint64_t vj = swaps.count(j) ? swaps[j] : j;
+
+        sampled[i] = vj;
+        swaps[j] = vi;
+        // No need to set swaps[i] since we won't revisit index i
+    }
+
+    // Partition: first `overlap` shared, next `unique_a` for A, last `unique_b` for B
+    std::vector<uint64_t> a, b;
+    a.reserve(set_size);
+    b.reserve(set_size);
+
+    for (size_t i = 0; i < overlap; i++) {
+        a.push_back(sampled[i]);
+        b.push_back(sampled[i]);
+    }
+    for (size_t i = overlap; i < overlap + unique_a; i++) {
+        a.push_back(sampled[i]);
+    }
+    for (size_t i = overlap + unique_a; i < total_needed; i++) {
+        b.push_back(sampled[i]);
+    }
+
+    return {a, b};
+}
+
+/// Overload with explicit universe_size (for bench_comparison compatibility).
+inline std::pair<std::vector<uint64_t>, std::vector<uint64_t>>
+MakeRandomSetsWithOverlap(size_t set_size, double overlap_fraction,
+                           uint64_t universe_size,
+                           std::mt19937_64& rng) {
+    return MakeRandomSetsWithOverlap(set_size, overlap_fraction, rng,
+                                      universe_size);
+}
+
+/// Compute a per-trial seed from base seed, trial index, and overlap fraction.
+/// Ensures each (trial, overlap) pair gets a distinct but reproducible seed.
+inline uint64_t TrialSeed(uint64_t base_seed, size_t trial, double overlap) {
+    return base_seed + trial * 10007 + static_cast<uint64_t>(overlap * 1000);
+}
 
 } // namespace benchmark
 } // namespace piccard

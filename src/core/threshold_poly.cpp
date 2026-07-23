@@ -1,6 +1,10 @@
-#include "piccard/core/threshold_poly.h"
+#include "core/threshold_poly.h"
 
 #include <stdexcept>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace piccard {
 
@@ -65,30 +69,66 @@ std::vector<int64_t> BuildThresholdPoly(uint32_t tau, uint32_t max_val,
     // Lagrange interpolation: sum over points where y_i = 1 (i.e., i >= tau)
     // L(x) = sum_{i=tau}^{max_val} L_i(x)
     // where L_i(x) = product_{j!=i} (x - j) / (i - j)
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+        std::vector<int64_t> local_result(n, 0);
+
+        #pragma omp for nowait schedule(static)
+        for (uint32_t i = tau; i <= max_val; i++) {
+            std::vector<int64_t> basis(1, 1);
+
+            for (uint32_t j = 0; j <= max_val; j++) {
+                if (j == i) continue;
+
+                int64_t denom = PosMod(static_cast<int64_t>(i) - static_cast<int64_t>(j), p);
+                int64_t denom_inv = ModInverse(denom, p);
+
+                size_t old_size = basis.size();
+                std::vector<int64_t> new_basis(old_size + 1, 0);
+                int64_t neg_j = PosMod(-static_cast<int64_t>(j), p);
+
+                for (size_t idx = 0; idx < old_size; idx++) {
+                    new_basis[idx + 1] = PosMod(
+                        new_basis[idx + 1] + MulMod(basis[idx], denom_inv, p), p);
+                    new_basis[idx] = PosMod(
+                        new_basis[idx] + MulMod(MulMod(basis[idx], neg_j, p),
+                                                denom_inv, p),
+                        p);
+                }
+
+                basis = new_basis;
+            }
+
+            for (size_t idx = 0; idx < basis.size() && idx < local_result.size(); idx++) {
+                local_result[idx] = PosMod(local_result[idx] + basis[idx], p);
+            }
+        }
+
+        #pragma omp critical
+        {
+            for (size_t idx = 0; idx < n; idx++) {
+                result[idx] = PosMod(result[idx] + local_result[idx], p);
+            }
+        }
+    }
+#else
     for (uint32_t i = tau; i <= max_val; i++) {
-        // Build the i-th Lagrange basis polynomial
-        // Start with polynomial "1" (constant 1)
         std::vector<int64_t> basis(1, 1);
 
         for (uint32_t j = 0; j <= max_val; j++) {
             if (j == i) continue;
 
-            // Compute (i - j)^{-1} mod p
             int64_t denom = PosMod(static_cast<int64_t>(i) - static_cast<int64_t>(j), p);
             int64_t denom_inv = ModInverse(denom, p);
 
-            // Multiply basis polynomial by (x - j) * denom_inv
-            // (x - j) * denom_inv = denom_inv * x + (-j * denom_inv)
             size_t old_size = basis.size();
             std::vector<int64_t> new_basis(old_size + 1, 0);
-
             int64_t neg_j = PosMod(-static_cast<int64_t>(j), p);
 
             for (size_t idx = 0; idx < old_size; idx++) {
-                // x term: basis[idx] * denom_inv * x^(idx+1)
                 new_basis[idx + 1] = PosMod(
                     new_basis[idx + 1] + MulMod(basis[idx], denom_inv, p), p);
-                // constant term: basis[idx] * (-j) * denom_inv * x^idx
                 new_basis[idx] = PosMod(
                     new_basis[idx] + MulMod(MulMod(basis[idx], neg_j, p),
                                             denom_inv, p),
@@ -98,11 +138,11 @@ std::vector<int64_t> BuildThresholdPoly(uint32_t tau, uint32_t max_val,
             basis = new_basis;
         }
 
-        // Add basis polynomial to result (y_i = 1 for i >= tau)
         for (size_t idx = 0; idx < basis.size() && idx < result.size(); idx++) {
             result[idx] = PosMod(result[idx] + basis[idx], p);
         }
     }
+#endif
 
     return result;
 }

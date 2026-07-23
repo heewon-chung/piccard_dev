@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/core/minhash.h"
+#include "core/minhash.h"
 
 #include <cmath>
 #include <string>

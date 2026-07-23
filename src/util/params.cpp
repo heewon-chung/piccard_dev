@@ -1,4 +1,4 @@
-#include "piccard/util/params.h"
+#include "util/params.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -95,6 +95,40 @@ void PiccardParams::Validate() {
         // +1 for the initial ct_x * ct_y in ComputeThresholdResult
         mult_depth = 1 + baby_depth + giant_mults;
     }
+}
+
+void PiccardParams::ValidateSqrt() {
+    if (k == 0) throw std::invalid_argument("k must be > 0");
+    if (m < 4) throw std::invalid_argument("m must be >= 4 for sqrt encoding");
+
+    // m must be a power of 2
+    if ((m & (m - 1)) != 0)
+        throw std::invalid_argument("m must be a power of 2 for sqrt encoding");
+
+    // log2(m) must be even so that √m is an integer
+    uint32_t log2m = 0;
+    { uint32_t tmp = m; while (tmp > 1) { log2m++; tmp >>= 1; } }
+    if (log2m % 2 != 0)
+        throw std::invalid_argument("log2(m) must be even for sqrt encoding (m must be a perfect square power of 2)");
+
+    sqrt_base = 1u << (log2m / 2);
+    sqrt_feature_dim = k * 2 * sqrt_base;
+
+    feature_dim = sqrt_feature_dim;
+    uint32_t min_ring = MinRingDimForSecurity(security);
+    ring_dim = NextPowerOf2(sqrt_feature_dim);
+    if (ring_dim < min_ring) {
+        ring_dim = min_ring;
+    }
+
+    // Depth 2 for two ct-ct multiplications (component-wise AND, digit AND).
+    // Extra depth headroom (+1) needed because the intermediate rotate-and-sum
+    // and the large plaintext modulus requirement (p ≡ 1 mod 2N) inflate noise
+    // beyond a tight depth-2 budget.
+    mult_depth = 3;
+
+    uint32_t two_n = 2 * ring_dim;
+    plaintext_mod = FindPlaintextModulus(k, two_n);
 }
 
 } // namespace piccard

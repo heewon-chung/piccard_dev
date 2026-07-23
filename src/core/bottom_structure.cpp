@@ -1,4 +1,4 @@
-#include "piccard/core/bottom_structure.h"
+#include "core/bottom_structure.h"
 
 #include <algorithm>
 #include <stdexcept>

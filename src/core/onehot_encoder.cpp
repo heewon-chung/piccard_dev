@@ -1,4 +1,4 @@
-#include "piccard/core/onehot_encoder.h"
+#include "core/onehot_encoder.h"
 
 #include <stdexcept>
 

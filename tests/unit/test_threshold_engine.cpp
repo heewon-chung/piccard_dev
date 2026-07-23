@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "piccard/protocol/threshold_piccard.h"
+#include "protocol/threshold_piccard.h"
 
 using namespace piccard;
 
