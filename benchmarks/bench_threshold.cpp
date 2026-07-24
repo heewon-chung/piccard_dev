@@ -53,14 +53,6 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction) {
     return {a, b};
 }
 
-static double Median(std::vector<double>& v) {
-    size_t n = v.size();
-    if (n == 0) return 0.0;
-    std::sort(v.begin(), v.end());
-    if (n % 2 == 0) return (v[n / 2 - 1] + v[n / 2]) / 2.0;
-    return v[n / 2];
-}
-
 // ============================================================================
 // Threshold result struct & CSV writer
 // ============================================================================
@@ -97,6 +89,19 @@ struct ThresholdResult {
     double jaccard_rel_error = -1.0;
 
     std::string note;
+
+    // Dispersion columns (additive — sibling branches inherit)
+    size_t trials = 0;  // 0 = unmeasured/skipped sentinel
+    double total_ms_sd = -1.0;           double total_ms_median = 0.0;
+    double phase_minhash_ms_sd = -1.0;   double phase_minhash_ms_median = 0.0;
+    double phase_encode_ms_sd = -1.0;    double phase_encode_ms_median = 0.0;
+    double phase_encrypt_ms_sd = -1.0;   double phase_encrypt_ms_median = 0.0;
+    double phase_multiply_ms_sd = -1.0;  double phase_multiply_ms_median = 0.0;
+    double phase_rotate_sum_ms_sd = -1.0; double phase_rotate_sum_ms_median = 0.0;
+    double phase_mask_ms_sd = -1.0;      double phase_mask_ms_median = 0.0;
+    double phase_poly_eval_ms_sd = -1.0; double phase_poly_eval_ms_median = 0.0;
+    double phase_decrypt_ms_sd = -1.0;   double phase_decrypt_ms_median = 0.0;
+    size_t rel_error_eligible_n = 0;
 };
 
 class ThresholdCSVWriter {
@@ -112,7 +117,19 @@ public:
               << "memory_bytes,ct_size_bytes,"
               << "threshold_result,threshold_expected,threshold_correct,"
               << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-              << "note\n";
+              << "note,"
+              // dispersion columns (additive)
+              << "trials,"
+              << "total_ms_sd,total_ms_median,"
+              << "phase_minhash_ms_sd,phase_minhash_ms_median,"
+              << "phase_encode_ms_sd,phase_encode_ms_median,"
+              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+              << "phase_multiply_ms_sd,phase_multiply_ms_median,"
+              << "phase_rotate_sum_ms_sd,phase_rotate_sum_ms_median,"
+              << "phase_mask_ms_sd,phase_mask_ms_median,"
+              << "phase_poly_eval_ms_sd,phase_poly_eval_ms_median,"
+              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
+              << "rel_error_eligible_n\n";
     }
 
     void WriteRow(const ThresholdResult& r) {
@@ -131,7 +148,20 @@ public:
               << std::fixed << std::setprecision(6)
               << r.jaccard_computed << "," << r.jaccard_expected << ","
               << r.jaccard_error << "," << r.jaccard_rel_error << ","
-              << r.note << "\n";
+              << r.note << ","
+              // dispersion columns
+              << r.trials << ","
+              << std::fixed << std::setprecision(3)
+              << r.total_ms_sd << "," << r.total_ms_median << ","
+              << r.phase_minhash_ms_sd << "," << r.phase_minhash_ms_median << ","
+              << r.phase_encode_ms_sd << "," << r.phase_encode_ms_median << ","
+              << r.phase_encrypt_ms_sd << "," << r.phase_encrypt_ms_median << ","
+              << r.phase_multiply_ms_sd << "," << r.phase_multiply_ms_median << ","
+              << r.phase_rotate_sum_ms_sd << "," << r.phase_rotate_sum_ms_median << ","
+              << r.phase_mask_ms_sd << "," << r.phase_mask_ms_median << ","
+              << r.phase_poly_eval_ms_sd << "," << r.phase_poly_eval_ms_median << ","
+              << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
+              << r.rel_error_eligible_n << "\n";
     }
 };
 
@@ -299,30 +329,43 @@ static ThresholdResult RunMultiTrialThreshold(
         last_correct = tr.threshold_correct;
     }
 
-    ThresholdResult med;
-    med.label = label;
-    med.k = engine.GetParams().k;
-    med.m = engine.GetParams().m;
-    med.set_size = set_x.size();
-    med.ring_dim = engine.GetParams().ring_dim;
-    med.tau = engine.GetParams().threshold_tau;
-    med.mult_depth = engine.GetParams().mult_depth;
-    med.total_ms = Median(v_total);
-    med.phase_minhash_ms = Median(v_minhash);
-    med.phase_encode_ms = Median(v_encode);
-    med.phase_encrypt_ms = Median(v_encrypt);
-    med.phase_multiply_ms = Median(v_multiply);
-    med.phase_rotate_sum_ms = Median(v_rotate);
-    med.phase_mask_ms = Median(v_mask);
-    med.phase_poly_eval_ms = Median(v_poly);
-    med.phase_decrypt_ms = Median(v_decrypt);
-    med.memory_bytes = MemoryTracker::GetPeakRSS();
-    med.ct_size_bytes = ct_size;
-    med.threshold_result = last_result;
-    med.threshold_expected = last_expected;
-    med.threshold_correct = last_correct;
+    auto d_tot = ComputeDispersion(v_total);
+    auto d_mnh = ComputeDispersion(v_minhash);
+    auto d_enc = ComputeDispersion(v_encode);
+    auto d_cry = ComputeDispersion(v_encrypt);
+    auto d_mul = ComputeDispersion(v_multiply);
+    auto d_rot = ComputeDispersion(v_rotate);
+    auto d_msk = ComputeDispersion(v_mask);
+    auto d_pol = ComputeDispersion(v_poly);
+    auto d_dec = ComputeDispersion(v_decrypt);
 
-    return med;
+    ThresholdResult result;
+    result.label = label;
+    result.k = engine.GetParams().k;
+    result.m = engine.GetParams().m;
+    result.set_size = set_x.size();
+    result.ring_dim = engine.GetParams().ring_dim;
+    result.tau = engine.GetParams().threshold_tau;
+    result.mult_depth = engine.GetParams().mult_depth;
+    result.total_ms           = d_tot.mean; result.total_ms_sd           = d_tot.sd; result.total_ms_median           = d_tot.median;
+    result.phase_minhash_ms   = d_mnh.mean; result.phase_minhash_ms_sd   = d_mnh.sd; result.phase_minhash_ms_median   = d_mnh.median;
+    result.phase_encode_ms    = d_enc.mean; result.phase_encode_ms_sd    = d_enc.sd; result.phase_encode_ms_median    = d_enc.median;
+    result.phase_encrypt_ms   = d_cry.mean; result.phase_encrypt_ms_sd   = d_cry.sd; result.phase_encrypt_ms_median   = d_cry.median;
+    result.phase_multiply_ms  = d_mul.mean; result.phase_multiply_ms_sd  = d_mul.sd; result.phase_multiply_ms_median  = d_mul.median;
+    result.phase_rotate_sum_ms = d_rot.mean; result.phase_rotate_sum_ms_sd = d_rot.sd; result.phase_rotate_sum_ms_median = d_rot.median;
+    result.phase_mask_ms      = d_msk.mean; result.phase_mask_ms_sd      = d_msk.sd; result.phase_mask_ms_median      = d_msk.median;
+    result.phase_poly_eval_ms = d_pol.mean; result.phase_poly_eval_ms_sd = d_pol.sd; result.phase_poly_eval_ms_median = d_pol.median;
+    result.phase_decrypt_ms   = d_dec.mean; result.phase_decrypt_ms_sd   = d_dec.sd; result.phase_decrypt_ms_median   = d_dec.median;
+    result.memory_bytes = MemoryTracker::GetPeakRSS();
+    result.ct_size_bytes = ct_size;
+    result.trials = trials;
+    result.threshold_result = last_result;
+    result.threshold_expected = last_expected;
+    result.threshold_correct = last_correct;
+    // threshold benchmark has no per-trial jaccard fields in timing mode
+    result.rel_error_eligible_n = 0;
+
+    return result;
 }
 
 // Try to create and initialize a threshold engine; returns nullptr on failure
@@ -394,7 +437,7 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
 
 static void BenchVaryK(const BenchmarkConfig& config,
                        ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> all_k = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> all_k = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
 
@@ -451,7 +494,7 @@ static void BenchVaryK(const BenchmarkConfig& config,
 
 static void BenchVaryM(const BenchmarkConfig& config,
                        ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
@@ -506,7 +549,7 @@ static void BenchVaryM(const BenchmarkConfig& config,
 
 static void BenchVarySetSize(const BenchmarkConfig& config,
                               ThresholdCSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000, 100000}, config.security_level);
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
 
     PiccardParams params;
@@ -549,7 +592,7 @@ static void BenchVarySetSize(const BenchmarkConfig& config,
 
 static void BenchAccuracyVaryK(const BenchmarkConfig& config,
                                 ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
@@ -616,7 +659,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
 
 static void BenchAccuracyVaryM(const BenchmarkConfig& config,
                                 ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
@@ -683,7 +726,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config,
 
 static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
                                       ThresholdCSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);

@@ -31,6 +31,25 @@ namespace piccard {
 namespace benchmark {
 
 // ============================================================================
+// QuickSweep - Reduce a parameter sweep for fast smoke tests
+// ============================================================================
+//
+// Paper-grade runs (STD128/192/256) sweep the full parameter arrays. The TOY
+// security level is used only for quick smoke tests (./run_benchmarks.sh
+// --quick), where the goal is to exercise the full pipeline in a few minutes,
+// not to produce publication numbers. For TOY we keep only the `keep` smallest
+// (cheapest) points of each sweep; every other security level is unchanged.
+template <typename T>
+inline std::vector<T> QuickSweep(std::vector<T> full,
+                                 SecurityLevel security,
+                                 std::size_t keep = 2) {
+    if (security == SecurityLevel::TOY && full.size() > keep) {
+        full.resize(keep);
+    }
+    return full;
+}
+
+// ============================================================================
 // Timer - High-resolution timing using std::chrono
 // ============================================================================
 
@@ -129,7 +148,79 @@ struct BenchmarkResult {
     double phase_intra_digit_rotate_ms = 0.0;
     double phase_digit_and_ms = 0.0;
     double phase_cross_k_sum_ms = 0.0;
+
+    // ── Dispersion columns (added for R3-5) ──────────────────────────
+    // Authoritative count of measured trials for this row (0 = skipped/unmeasured).
+    size_t trials = 0;
+    // Bare timing columns above hold the mean across trials.
+    // _sd  = sample standard deviation (n-1); sentinel -1.0 when n < 2.
+    // _median = median across trials.
+    double time_ms_sd = -1.0;
+    double time_ms_median = 0.0;
+    double phase_minhash_ms_sd = -1.0;
+    double phase_minhash_ms_median = 0.0;
+    double phase_encode_ms_sd = -1.0;
+    double phase_encode_ms_median = 0.0;
+    double phase_encrypt_ms_sd = -1.0;
+    double phase_encrypt_ms_median = 0.0;
+    double phase_multiply_ms_sd = -1.0;
+    double phase_multiply_ms_median = 0.0;
+    double phase_rotate_sum_ms_sd = -1.0;
+    double phase_rotate_sum_ms_median = 0.0;
+    double phase_decrypt_ms_sd = -1.0;
+    double phase_decrypt_ms_median = 0.0;
+    double phase_bias_correction_ms_sd = -1.0;
+    double phase_bias_correction_ms_median = 0.0;
+    // Size of the nonzero-denominator subset backing jaccard_rel_error.
+    size_t rel_error_eligible_n = 0;
 };
+
+// ============================================================================
+// DispersionStats - Mean, sample SD (n-1), median, and n for a phase vector
+// ============================================================================
+
+/// Timing dispersion for one phase across the row's trial execution set.
+/// sd = -1.0 is the N/A sentinel when n is below 2 (reuses existing convention).
+/// trials = 0 denotes an unmeasured skipped row.
+struct DispersionStats {
+    double mean   = 0.0;
+    double sd     = -1.0;  // -1.0 sentinel: undefined when n < 2
+    double median = 0.0;
+    size_t n      = 0;
+};
+
+/// Compute mean, sample standard deviation (n-1 denominator), and median from
+/// a vector of doubles. Returns sd=-1.0 when n < 2. Takes v by value so the
+/// sort does not modify the caller's vector.
+inline DispersionStats ComputeDispersion(std::vector<double> v) {
+    DispersionStats s;
+    s.n = v.size();
+    if (s.n == 0) return s;
+
+    // Mean
+    s.mean = std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(s.n);
+
+    // Sample standard deviation (n-1 denominator)
+    if (s.n >= 2) {
+        double sum_sq = 0.0;
+        for (double x : v) {
+            double d = x - s.mean;
+            sum_sq += d * d;
+        }
+        s.sd = std::sqrt(sum_sq / static_cast<double>(s.n - 1));
+    }
+    // else s.sd stays -1.0 (N/A sentinel for n < 2)
+
+    // Median (sort copy — caller's vector is untouched)
+    std::sort(v.begin(), v.end());
+    if (s.n % 2 == 0) {
+        s.median = (v[s.n / 2 - 1] + v[s.n / 2]) / 2.0;
+    } else {
+        s.median = v[s.n / 2];
+    }
+
+    return s;
+}
 
 // ============================================================================
 // AccuracyStats - Compute accuracy statistics from (j_hat, j_true) pairs
@@ -212,7 +303,18 @@ public:
               << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
               << "accuracy_median,accuracy_p25,accuracy_p75,accuracy_p95,accuracy_max,"
               << "encoding,mult_depth,num_cts,comm_bytes,"
-              << "phase_intra_digit_rotate_ms,phase_digit_and_ms,phase_cross_k_sum_ms\n";
+              << "phase_intra_digit_rotate_ms,phase_digit_and_ms,phase_cross_k_sum_ms,"
+              // Dispersion columns (R3-5): bare columns above hold the mean.
+              << "trials,"
+              << "time_ms_sd,time_ms_median,"
+              << "phase_minhash_ms_sd,phase_minhash_ms_median,"
+              << "phase_encode_ms_sd,phase_encode_ms_median,"
+              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+              << "phase_multiply_ms_sd,phase_multiply_ms_median,"
+              << "phase_rotate_sum_ms_sd,phase_rotate_sum_ms_median,"
+              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
+              << "phase_bias_correction_ms_sd,phase_bias_correction_ms_median,"
+              << "rel_error_eligible_n\n";
     }
 
     void WriteRow(const BenchmarkResult& result) {
@@ -249,7 +351,26 @@ public:
               << std::fixed << std::setprecision(3)
               << result.phase_intra_digit_rotate_ms << ","
               << result.phase_digit_and_ms << ","
-              << result.phase_cross_k_sum_ms << "\n";
+              << result.phase_cross_k_sum_ms << ","
+              // Dispersion columns
+              << result.trials << ","
+              << result.time_ms_sd << ","
+              << result.time_ms_median << ","
+              << result.phase_minhash_ms_sd << ","
+              << result.phase_minhash_ms_median << ","
+              << result.phase_encode_ms_sd << ","
+              << result.phase_encode_ms_median << ","
+              << result.phase_encrypt_ms_sd << ","
+              << result.phase_encrypt_ms_median << ","
+              << result.phase_multiply_ms_sd << ","
+              << result.phase_multiply_ms_median << ","
+              << result.phase_rotate_sum_ms_sd << ","
+              << result.phase_rotate_sum_ms_median << ","
+              << result.phase_decrypt_ms_sd << ","
+              << result.phase_decrypt_ms_median << ","
+              << result.phase_bias_correction_ms_sd << ","
+              << result.phase_bias_correction_ms_median << ","
+              << result.rel_error_eligible_n << "\n";
     }
 };
 
