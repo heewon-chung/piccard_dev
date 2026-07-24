@@ -52,14 +52,6 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction) {
     return {a, b};
 }
 
-static double Median(std::vector<double>& v) {
-    size_t n = v.size();
-    if (n == 0) return 0.0;
-    std::sort(v.begin(), v.end());
-    if (n % 2 == 0) return (v[n / 2 - 1] + v[n / 2]) / 2.0;
-    return v[n / 2];
-}
-
 // ============================================================================
 // Dynamic result struct & CSV writer
 // ============================================================================
@@ -88,10 +80,23 @@ struct DynamicResult {
     double jaccard_computed = 0.0;
     double jaccard_expected = 0.0;
     double jaccard_error = 0.0;
-    double jaccard_rel_error = 0.0;  // |J_hat - J_true| / J_true (-1 if J_true=0)
+    double jaccard_rel_error = 0.0;  // -1 if J_true=0
 
     double ops_insert_per_sec = 0.0;
     double ops_delete_per_sec = 0.0;
+
+    // Dispersion columns (additive — sibling branches inherit)
+    size_t trials = 0;
+    double total_ms_sd = -1.0;            double total_ms_median = 0.0;
+    double phase_init_ms_sd = -1.0;       double phase_init_ms_median = 0.0;
+    double phase_insert_ms_sd = -1.0;     double phase_insert_ms_median = 0.0;
+    double phase_delete_ms_sd = -1.0;     double phase_delete_ms_median = 0.0;
+    double phase_signature_ms_sd = -1.0;  double phase_signature_ms_median = 0.0;
+    double phase_encode_ms_sd = -1.0;     double phase_encode_ms_median = 0.0;
+    double phase_encrypt_ms_sd = -1.0;    double phase_encrypt_ms_median = 0.0;
+    double phase_compute_ms_sd = -1.0;    double phase_compute_ms_median = 0.0;
+    double phase_decrypt_ms_sd = -1.0;    double phase_decrypt_ms_median = 0.0;
+    size_t rel_error_eligible_n = 0;
 };
 
 class DynamicCSVWriter {
@@ -106,7 +111,19 @@ public:
               << "phase_compute_ms,phase_decrypt_ms,total_ms,"
               << "memory_bytes,ct_size_bytes,"
               << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-              << "ops_insert_per_sec,ops_delete_per_sec\n";
+              << "ops_insert_per_sec,ops_delete_per_sec,"
+              // dispersion columns (additive)
+              << "trials,"
+              << "total_ms_sd,total_ms_median,"
+              << "phase_init_ms_sd,phase_init_ms_median,"
+              << "phase_insert_ms_sd,phase_insert_ms_median,"
+              << "phase_delete_ms_sd,phase_delete_ms_median,"
+              << "phase_signature_ms_sd,phase_signature_ms_median,"
+              << "phase_encode_ms_sd,phase_encode_ms_median,"
+              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+              << "phase_compute_ms_sd,phase_compute_ms_median,"
+              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
+              << "rel_error_eligible_n\n";
     }
 
     void WriteRow(const DynamicResult& r) {
@@ -123,7 +140,20 @@ public:
               << r.jaccard_computed << "," << r.jaccard_expected << ","
               << r.jaccard_error << "," << r.jaccard_rel_error << ","
               << std::fixed << std::setprecision(1)
-              << r.ops_insert_per_sec << "," << r.ops_delete_per_sec << "\n";
+              << r.ops_insert_per_sec << "," << r.ops_delete_per_sec << ","
+              // dispersion columns
+              << r.trials << ","
+              << std::fixed << std::setprecision(3)
+              << r.total_ms_sd << "," << r.total_ms_median << ","
+              << r.phase_init_ms_sd << "," << r.phase_init_ms_median << ","
+              << r.phase_insert_ms_sd << "," << r.phase_insert_ms_median << ","
+              << r.phase_delete_ms_sd << "," << r.phase_delete_ms_median << ","
+              << r.phase_signature_ms_sd << "," << r.phase_signature_ms_median << ","
+              << r.phase_encode_ms_sd << "," << r.phase_encode_ms_median << ","
+              << r.phase_encrypt_ms_sd << "," << r.phase_encrypt_ms_median << ","
+              << r.phase_compute_ms_sd << "," << r.phase_compute_ms_median << ","
+              << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
+              << r.rel_error_eligible_n << "\n";
     }
 };
 
@@ -246,8 +276,8 @@ static DynamicResult RunMultiTrialDynamic(
     std::vector<double> v_total, v_init, v_insert, v_delete, v_sig;
     std::vector<double> v_encode, v_encrypt, v_compute, v_decrypt;
     size_t ct_size = 0;
-    double last_j = 0.0, total_err = 0.0;
-    double last_ins = 0.0, last_del = 0.0;
+    double sum_j_hat = 0.0, total_err = 0.0;
+    double sum_ins = 0.0, sum_del = 0.0;
 
     for (size_t t = 0; t < trials; t++) {
         auto dr = RunTimedDynamic(engine, set_x, set_y, j_true, depth, label);
@@ -261,37 +291,53 @@ static DynamicResult RunMultiTrialDynamic(
         v_compute.push_back(dr.phase_compute_ms);
         v_decrypt.push_back(dr.phase_decrypt_ms);
         ct_size = dr.ct_size_bytes;
-        last_j = dr.jaccard_computed;
+        sum_j_hat += dr.jaccard_computed;
         total_err += dr.jaccard_error;
-        last_ins = dr.ops_insert_per_sec;
-        last_del = dr.ops_delete_per_sec;
+        sum_ins += dr.ops_insert_per_sec;
+        sum_del += dr.ops_delete_per_sec;
     }
 
-    DynamicResult med;
-    med.label = label;
-    med.k = engine.GetParams().k;
-    med.m = engine.GetParams().m;
-    med.set_size = set_x.size();
-    med.ring_dim = engine.GetParams().ring_dim;
-    med.depth = depth;
-    med.total_ms = Median(v_total);
-    med.phase_init_ms = Median(v_init);
-    med.phase_insert_ms = Median(v_insert);
-    med.phase_delete_ms = Median(v_delete);
-    med.phase_signature_ms = Median(v_sig);
-    med.phase_encode_ms = Median(v_encode);
-    med.phase_encrypt_ms = Median(v_encrypt);
-    med.phase_compute_ms = Median(v_compute);
-    med.phase_decrypt_ms = Median(v_decrypt);
-    med.memory_bytes = MemoryTracker::GetPeakRSS();
-    med.ct_size_bytes = ct_size;
-    med.jaccard_computed = last_j;
-    med.jaccard_expected = j_true;
-    med.jaccard_error = total_err / static_cast<double>(trials);
-    med.ops_insert_per_sec = last_ins;
-    med.ops_delete_per_sec = last_del;
+    auto d_tot = ComputeDispersion(v_total);
+    auto d_ini = ComputeDispersion(v_init);
+    auto d_ins = ComputeDispersion(v_insert);
+    auto d_del = ComputeDispersion(v_delete);
+    auto d_sig = ComputeDispersion(v_sig);
+    auto d_enc = ComputeDispersion(v_encode);
+    auto d_cry = ComputeDispersion(v_encrypt);
+    auto d_cmp = ComputeDispersion(v_compute);
+    auto d_dec = ComputeDispersion(v_decrypt);
+    double n = static_cast<double>(trials);
 
-    return med;
+    DynamicResult result;
+    result.label = label;
+    result.k = engine.GetParams().k;
+    result.m = engine.GetParams().m;
+    result.set_size = set_x.size();
+    result.ring_dim = engine.GetParams().ring_dim;
+    result.depth = depth;
+    result.total_ms        = d_tot.mean;  result.total_ms_sd        = d_tot.sd;  result.total_ms_median        = d_tot.median;
+    result.phase_init_ms   = d_ini.mean;  result.phase_init_ms_sd   = d_ini.sd;  result.phase_init_ms_median   = d_ini.median;
+    result.phase_insert_ms = d_ins.mean;  result.phase_insert_ms_sd = d_ins.sd;  result.phase_insert_ms_median = d_ins.median;
+    result.phase_delete_ms = d_del.mean;  result.phase_delete_ms_sd = d_del.sd;  result.phase_delete_ms_median = d_del.median;
+    result.phase_signature_ms = d_sig.mean; result.phase_signature_ms_sd = d_sig.sd; result.phase_signature_ms_median = d_sig.median;
+    result.phase_encode_ms  = d_enc.mean; result.phase_encode_ms_sd  = d_enc.sd; result.phase_encode_ms_median  = d_enc.median;
+    result.phase_encrypt_ms = d_cry.mean; result.phase_encrypt_ms_sd = d_cry.sd; result.phase_encrypt_ms_median = d_cry.median;
+    result.phase_compute_ms = d_cmp.mean; result.phase_compute_ms_sd = d_cmp.sd; result.phase_compute_ms_median = d_cmp.median;
+    result.phase_decrypt_ms = d_dec.mean; result.phase_decrypt_ms_sd = d_dec.sd; result.phase_decrypt_ms_median = d_dec.median;
+    result.memory_bytes = MemoryTracker::GetPeakRSS();
+    result.ct_size_bytes = ct_size;
+    result.trials = trials;
+    result.jaccard_computed = sum_j_hat / n;
+    result.jaccard_expected = j_true;
+    result.jaccard_error = total_err / n;
+    // eligible subset: j_true is constant per row — either all or none
+    size_t elig = (j_true > 0.0) ? trials : 0;
+    result.jaccard_rel_error = (elig > 0) ? (result.jaccard_error / j_true) : -1.0;
+    result.rel_error_eligible_n = elig;
+    result.ops_insert_per_sec = sum_ins / n;
+    result.ops_delete_per_sec = sum_del / n;
+
+    return result;
 }
 
 // ============================================================================
@@ -300,7 +346,7 @@ static DynamicResult RunMultiTrialDynamic(
 
 static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
                        DynamicCSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     // BottomStructure requires set_size >> k to populate all hash buckets
     size_t effective_size = std::max(config.set_size, size_t{10000});
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
@@ -340,7 +386,7 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
 
 static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
                        DynamicCSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     size_t effective_size = std::max(config.set_size, size_t{10000});
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
@@ -379,7 +425,7 @@ static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
 
 static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
                              DynamicCSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000, 100000}, config.security_level);
 
     PiccardParams params;
     params.k = config.k;
@@ -416,7 +462,7 @@ static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
 
 static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                                 DynamicCSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
@@ -462,6 +508,8 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                     dr.jaccard_expected = j_true;
                     dr.jaccard_error = err;
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    dr.trials = 1;
+                    dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
                     csv.WriteRow(dr);
                 }
             }
@@ -480,7 +528,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
 
 static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                                 DynamicCSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
@@ -526,6 +574,8 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                     dr.jaccard_expected = j_true;
                     dr.jaccard_error = err;
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    dr.trials = 1;
+                    dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
                     csv.WriteRow(dr);
                 }
             }
@@ -544,7 +594,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
 
 static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t depth,
                                       DynamicCSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
                                     0.6, 0.7, 0.8, 0.9, 1.0};
 
@@ -589,6 +639,8 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                     dr.jaccard_expected = j_true;
                     dr.jaccard_error = err;
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                    dr.trials = 1;
+                    dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
                     csv.WriteRow(dr);
                 }
             }

@@ -82,6 +82,61 @@ def fmt_rel_err(val):
     return f"{v:.4f}"
 
 
+# ── Dispersion helpers ───────────────────────────────────────────────
+
+def _t_critical_95(df):
+    """Two-sided 95% Student-t critical value; linear interpolation for df not in table."""
+    _tbl = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+            6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+            15: 2.131, 20: 2.086, 30: 2.042, 60: 2.000, 120: 1.980}
+    if df <= 0:
+        return float("nan")
+    dfs = sorted(_tbl.keys())
+    if df >= dfs[-1]:
+        return 1.960  # normal approximation
+    for i, d in enumerate(dfs):
+        if df <= d:
+            if i == 0 or d == df:
+                return _tbl[d]
+            d_lo, d_hi = dfs[i - 1], d
+            frac = (df - d_lo) / (d_hi - d_lo)
+            return _tbl[d_lo] + frac * (_tbl[d_hi] - _tbl[d_lo])
+    return 1.960
+
+
+def fmt_disp(row, col, ci=False):
+    """Format mean ± sd (or ± CI half-width under --ci).
+
+    sd=-1 sentinel (n < 2) → bare mean.
+    Missing _sd column → warn once to stderr and return bare mean.
+    """
+    sd_col = col + "_sd"
+    if sd_col not in row:
+        sys.stderr.write(f"WARNING: missing column {sd_col!r} — rendering dash\n")
+        return "-"
+    mean_val = float(row.get(col, "0"))
+    sd_val = float(row.get(sd_col, "-1"))
+    if sd_val < 0:  # n < 2 sentinel — dispersion undefined
+        return fmt_ms(str(mean_val))
+    if ci:
+        n = int(row.get("trials", "0"))
+        if n < 2:
+            return "N/A"
+        half = _t_critical_95(n - 1) * sd_val / (n ** 0.5)
+        return f"{fmt_ms(str(mean_val))}±{fmt_ms(str(half))}"
+    return f"{fmt_ms(str(mean_val))}±{fmt_ms(str(sd_val))}"
+
+
+def get_trials(row):
+    """Return trials count as string; '-' for unmeasured/skipped (0) or missing."""
+    t = row.get("trials", None)
+    if t is None:
+        sys.stderr.write("WARNING: missing required column 'trials' — rendering dash\n")
+        return "-"
+    v = int(t)
+    return "-" if v == 0 else str(v)
+
+
 def print_table(headers, rows, col_widths=None):
     """Print a formatted ASCII table."""
     if col_widths is None:
@@ -135,7 +190,7 @@ def filter_rows(data, key, prefix):
 
 # ── T1–T3: Piccard Timing ──────────────────────────────────────────
 
-def table_piccard_timing(data, scenario, tnum, title, latex=False):
+def table_piccard_timing(data, scenario, tnum, title, latex=False, ci=False):
     """Piccard timing table filtered by scenario prefix (vary_k_, vary_m_, vary_size_)."""
     rows_data = filter_rows(data, "label", scenario)
     if not rows_data:
@@ -145,23 +200,24 @@ def table_piccard_timing(data, scenario, tnum, title, latex=False):
     print(f"  Table {tnum}: {title}")
     print(f"{'=' * 70}")
 
-    headers = ["Label", "k", "m", "n", "N", "MinHash", "Encode", "Encrypt",
+    headers = ["Label", "Tri", "k", "m", "n", "N", "MinHash", "Encode", "Encrypt",
                "Multiply", "RotSum", "Decrypt", "Total (ms)", "CT Size"]
     rows = []
     for r in rows_data:
         rows.append([
             r.get("label", ""),
+            get_trials(r),
             r.get("k", ""),
             r.get("m", ""),
             r.get("set_size", ""),
             r.get("ring_dim", ""),
-            fmt_ms(r.get("phase_minhash_ms", "0")),
-            fmt_ms(r.get("phase_encode_ms", "0")),
-            fmt_ms(r.get("phase_encrypt_ms", "0")),
-            fmt_ms(r.get("phase_multiply_ms", "0")),
-            fmt_ms(r.get("phase_rotate_sum_ms", "0")),
-            fmt_ms(r.get("phase_decrypt_ms", "0")),
-            fmt_ms(r.get("time_ms", "0")),
+            fmt_disp(r, "phase_minhash_ms", ci=ci),
+            fmt_disp(r, "phase_encode_ms", ci=ci),
+            fmt_disp(r, "phase_encrypt_ms", ci=ci),
+            fmt_disp(r, "phase_multiply_ms", ci=ci),
+            fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
+            fmt_disp(r, "phase_decrypt_ms", ci=ci),
+            fmt_disp(r, "time_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
         ])
 
@@ -264,7 +320,7 @@ def table_accuracy_stats(data, param_prefix, param_name, tnum, title, latex=Fals
 
 # ── T7–T9: Piccard Combined ────────────────────────────────────────
 
-def table_piccard_combined(data, scenario, tnum, title, latex=False):
+def table_piccard_combined(data, scenario, tnum, title, latex=False, ci=False):
     """Piccard combined timing + accuracy table."""
     rows_data = filter_rows(data, "label", scenario)
     if not rows_data:
@@ -274,17 +330,18 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False):
     print(f"  Table {tnum}: {title}")
     print(f"{'=' * 70}")
 
-    headers = ["Label", "k", "m", "n", "N", "Time (ms)",
+    headers = ["Label", "Tri", "k", "m", "n", "N", "Time (ms)",
                "Median Err", "P25", "P75", "P95", "Max Err"]
     rows = []
     for r in rows_data:
         rows.append([
             r.get("label", ""),
+            get_trials(r),
             r.get("k", ""),
             r.get("m", ""),
             r.get("set_size", ""),
             r.get("ring_dim", ""),
-            fmt_ms(r.get("time_ms", "0")),
+            fmt_disp(r, "time_ms", ci=ci),
             fmt_err(r.get("accuracy_median", "0")),
             fmt_err(r.get("accuracy_p25", "0")),
             fmt_err(r.get("accuracy_p75", "0")),
@@ -320,7 +377,7 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False):
 
 # ── T10–T13: Comparison Timing ─────────────────────────────────────
 
-def table_comparison_timing(data, scenario, tnum, title, latex=False):
+def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
     """Comparison timing: Piccard vs Baseline side by side."""
     rows_data = filter_rows(data, "scenario", scenario)
     if not rows_data:
@@ -341,7 +398,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False):
         method = r.get("method", "")
         groups[scen][method] = r
 
-    headers = ["Scenario", "k", "m", "n", "|U|", "N_p", "N_b",
+    headers = ["Scenario", "Tri", "k", "m", "n", "|U|", "N_p", "N_b",
                "Piccard (ms)", "Baseline (ms)", "Speedup",
                "Piccard CT", "Baseline CT", "Comm P", "Comm B"]
     rows = []
@@ -356,14 +413,15 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False):
 
         rows.append([
             scen,
+            get_trials(p) if p else get_trials(b),
             p.get("k", b.get("k", "")),
             p.get("m", b.get("m", "")),
             p.get("set_size", b.get("set_size", "")),
             p.get("universe_size", b.get("universe_size", "")),
             p.get("ring_dim", ""),
             b.get("ring_dim", ""),
-            fmt_ms(p.get("total_ms", "0")),
-            fmt_ms(b.get("total_ms", "0")),
+            fmt_disp(p, "total_ms", ci=ci) if p else "-",
+            fmt_disp(b, "total_ms", ci=ci) if b else "-",
             speedup,
             fmt_bytes(p.get("ct_size_bytes", "0")),
             fmt_bytes(b.get("ct_size_bytes", "0")),
@@ -460,7 +518,7 @@ def table_communication_cost(data, tnum, latex=False):
 
 # ── T15–T17: Dynamic Timing ────────────────────────────────────────
 
-def table_dynamic_timing(data, scenario, tnum, title, latex=False):
+def table_dynamic_timing(data, scenario, tnum, title, latex=False, ci=False):
     """Dynamic benchmark timing table."""
     rows_data = filter_rows(data, "label", scenario)
     if not rows_data:
@@ -470,24 +528,25 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False):
     print(f"  Table {tnum}: {title}")
     print(f"{'=' * 70}")
 
-    headers = ["Label", "k", "m", "n", "N", "Depth",
+    headers = ["Label", "Tri", "k", "m", "n", "N", "Depth",
                "Init", "Insert", "Delete", "Compute", "Decrypt",
                "Total (ms)", "CT Size", "Ins/s", "Del/s"]
     rows = []
     for r in rows_data:
         rows.append([
             r.get("label", ""),
+            get_trials(r),
             r.get("k", ""),
             r.get("m", ""),
             r.get("set_size", ""),
             r.get("ring_dim", ""),
             r.get("depth", ""),
-            fmt_ms(r.get("phase_init_ms", "0")),
-            fmt_ms(r.get("phase_insert_ms", "0")),
-            fmt_ms(r.get("phase_delete_ms", "0")),
-            fmt_ms(r.get("phase_compute_ms", "0")),
-            fmt_ms(r.get("phase_decrypt_ms", "0")),
-            fmt_ms(r.get("total_ms", "0")),
+            fmt_disp(r, "phase_init_ms", ci=ci),
+            fmt_disp(r, "phase_insert_ms", ci=ci),
+            fmt_disp(r, "phase_delete_ms", ci=ci),
+            fmt_disp(r, "phase_compute_ms", ci=ci),
+            fmt_disp(r, "phase_decrypt_ms", ci=ci),
+            fmt_disp(r, "total_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
             r.get("ops_insert_per_sec", ""),
             r.get("ops_delete_per_sec", ""),
@@ -528,7 +587,7 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False):
 
 # ── T21–T23: Threshold Timing ──────────────────────────────────────
 
-def table_threshold_timing(data, scenario, tnum, title, latex=False):
+def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
     """Threshold benchmark timing table."""
     rows_data = filter_rows(data, "label", scenario)
     if not rows_data:
@@ -538,7 +597,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False):
     print(f"  Table {tnum}: {title}")
     print(f"{'=' * 70}")
 
-    headers = ["Label", "k", "m", "n", "N", "tau", "Depth",
+    headers = ["Label", "Tri", "k", "m", "n", "N", "tau", "Depth",
                "MinHash", "Encode", "Encrypt", "Multiply",
                "RotSum", "Mask", "PolyEval", "Decrypt",
                "Total (ms)", "CT Size"]
@@ -546,21 +605,22 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False):
     for r in rows_data:
         rows.append([
             r.get("label", ""),
+            get_trials(r),
             r.get("k", ""),
             r.get("m", ""),
             r.get("set_size", ""),
             r.get("ring_dim", ""),
             r.get("tau", ""),
             r.get("mult_depth", ""),
-            fmt_ms(r.get("phase_minhash_ms", "0")),
-            fmt_ms(r.get("phase_encode_ms", "0")),
-            fmt_ms(r.get("phase_encrypt_ms", "0")),
-            fmt_ms(r.get("phase_multiply_ms", "0")),
-            fmt_ms(r.get("phase_rotate_sum_ms", "0")),
-            fmt_ms(r.get("phase_mask_ms", "0")),
-            fmt_ms(r.get("phase_poly_eval_ms", "0")),
-            fmt_ms(r.get("phase_decrypt_ms", "0")),
-            fmt_ms(r.get("total_ms", "0")),
+            fmt_disp(r, "phase_minhash_ms", ci=ci),
+            fmt_disp(r, "phase_encode_ms", ci=ci),
+            fmt_disp(r, "phase_encrypt_ms", ci=ci),
+            fmt_disp(r, "phase_multiply_ms", ci=ci),
+            fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
+            fmt_disp(r, "phase_mask_ms", ci=ci),
+            fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+            fmt_disp(r, "phase_decrypt_ms", ci=ci),
+            fmt_disp(r, "total_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
         ])
 
@@ -689,6 +749,9 @@ def main():
                         help="Also emit LaTeX table fragments")
     parser.add_argument("--save-dir",
                         help="Save each table as a separate .txt file")
+    parser.add_argument("--ci", action="store_true",
+                        help="Render 95%% two-sided Student-t confidence intervals "
+                             "instead of raw standard deviation (n≥2 required)")
     args = parser.parse_args()
 
     d = Path(args.results_dir)
@@ -746,6 +809,7 @@ def main():
 
         fs = suffix  # file suffix for saved tables
         lx = args.latex
+        ci = args.ci
 
         def sp(name):
             """Build save path or None."""
@@ -754,13 +818,13 @@ def main():
         # ── T1–T3: Piccard Timing ─────────────────────────────────
         run_and_save(table_piccard_timing, sp("T01_piccard_timing_vary_k"),
                      piccard_timing, "vary_k_", 1,
-                     "Piccard Timing — Varying k", latex=lx)
+                     "Piccard Timing — Varying k", latex=lx, ci=ci)
         run_and_save(table_piccard_timing, sp("T02_piccard_timing_vary_m"),
                      piccard_timing, "vary_m_", 2,
-                     "Piccard Timing — Varying m", latex=lx)
+                     "Piccard Timing — Varying m", latex=lx, ci=ci)
         run_and_save(table_piccard_timing, sp("T03_piccard_timing_vary_n"),
                      piccard_timing, "vary_size_", 3,
-                     "Piccard Timing — Varying n", latex=lx)
+                     "Piccard Timing — Varying n", latex=lx, ci=ci)
 
         # ── T4–T6: Piccard Accuracy ───────────────────────────────
         run_and_save(table_accuracy_stats, sp("T04_piccard_accuracy_vary_k"),
@@ -776,27 +840,27 @@ def main():
         # ── T7–T9: Piccard Combined ───────────────────────────────
         run_and_save(table_piccard_combined, sp("T07_piccard_combined_vary_k"),
                      piccard_combined, "vary_k_", 7,
-                     "Piccard Combined — Varying k", latex=lx)
+                     "Piccard Combined — Varying k", latex=lx, ci=ci)
         run_and_save(table_piccard_combined, sp("T08_piccard_combined_vary_m"),
                      piccard_combined, "vary_m_", 8,
-                     "Piccard Combined — Varying m", latex=lx)
+                     "Piccard Combined — Varying m", latex=lx, ci=ci)
         run_and_save(table_piccard_combined, sp("T09_piccard_combined_vary_n"),
                      piccard_combined, "vary_size_", 9,
-                     "Piccard Combined — Varying n", latex=lx)
+                     "Piccard Combined — Varying n", latex=lx, ci=ci)
 
         # ── T10–T13: Comparison Timing ────────────────────────────
         run_and_save(table_comparison_timing, sp("T10_comparison_vary_k"),
                      comparison_timing, "vary_k_", 10,
-                     "Comparison — Varying k", latex=lx)
+                     "Comparison — Varying k", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T11_comparison_vary_m"),
                      comparison_timing, "vary_m_", 11,
-                     "Comparison — Varying m", latex=lx)
+                     "Comparison — Varying m", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T12_comparison_vary_n"),
                      comparison_timing, "vary_size_", 12,
-                     "Comparison — Varying n", latex=lx)
+                     "Comparison — Varying n", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T13_comparison_vary_universe"),
                      comparison_timing, "vary_universe_", 13,
-                     "Comparison — Varying |U|", latex=lx)
+                     "Comparison — Varying |U|", latex=lx, ci=ci)
 
         # ── T14: Communication Cost ───────────────────────────────
         run_and_save(table_communication_cost, sp("T14_communication_cost"),
@@ -805,13 +869,13 @@ def main():
         # ── T15–T17: Dynamic Timing ───────────────────────────────
         run_and_save(table_dynamic_timing, sp("T15_dynamic_timing_vary_k"),
                      dynamic_timing, "vary_k_", 15,
-                     "Dynamic Timing — Varying k", latex=lx)
+                     "Dynamic Timing — Varying k", latex=lx, ci=ci)
         run_and_save(table_dynamic_timing, sp("T16_dynamic_timing_vary_m"),
                      dynamic_timing, "vary_m_", 16,
-                     "Dynamic Timing — Varying m", latex=lx)
+                     "Dynamic Timing — Varying m", latex=lx, ci=ci)
         run_and_save(table_dynamic_timing, sp("T17_dynamic_timing_vary_n"),
                      dynamic_timing, "vary_size_", 17,
-                     "Dynamic Timing — Varying n", latex=lx)
+                     "Dynamic Timing — Varying n", latex=lx, ci=ci)
 
         # ── T18–T20: Dynamic Accuracy ─────────────────────────────
         run_and_save(table_accuracy_stats, sp("T18_dynamic_accuracy_vary_k"),
@@ -827,13 +891,13 @@ def main():
         # ── T21–T23: Threshold Timing ─────────────────────────────
         run_and_save(table_threshold_timing, sp("T21_threshold_timing_vary_k"),
                      threshold_timing, "vary_k_", 21,
-                     "Threshold Timing — Varying k", latex=lx)
+                     "Threshold Timing — Varying k", latex=lx, ci=ci)
         run_and_save(table_threshold_timing, sp("T22_threshold_timing_vary_m"),
                      threshold_timing, "vary_m_", 22,
-                     "Threshold Timing — Varying m", latex=lx)
+                     "Threshold Timing — Varying m", latex=lx, ci=ci)
         run_and_save(table_threshold_timing, sp("T23_threshold_timing_vary_n"),
                      threshold_timing, "vary_size_", 23,
-                     "Threshold Timing — Varying n", latex=lx)
+                     "Threshold Timing — Varying n", latex=lx, ci=ci)
 
         # ── T24–T26: Threshold Accuracy ───────────────────────────
         run_and_save(table_threshold_accuracy, sp("T24_threshold_accuracy_vary_k"),

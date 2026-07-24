@@ -215,6 +215,12 @@ if(BUILD_TESTS)
             target_link_libraries(test_sqrt_piccard piccard_fhe test_main)
             add_test(NAME SqrtPiccard COMMAND test_sqrt_piccard)
 
+            # Benchmark utility tests (DispersionStats / ComputeDispersion)
+            add_executable(test_benchmark_utils tests/unit/test_benchmark_utils.cpp)
+            target_link_libraries(test_benchmark_utils piccard_fhe test_main)
+            target_include_directories(test_benchmark_utils PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+            add_test(NAME BenchmarkUtils COMMAND test_benchmark_utils)
+
             # Integration test
             add_executable(test_piccard_e2e tests/integration/test_piccard_e2e.cpp)
             target_link_libraries(test_piccard_e2e piccard_fhe test_main)

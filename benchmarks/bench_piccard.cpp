@@ -138,16 +138,8 @@ static BenchmarkResult RunTimedProtocol(
 }
 
 // ============================================================================
-// Multi-trial median helper
+// Multi-trial aggregation using ComputeDispersion (replaces local Median)
 // ============================================================================
-
-static double Median(std::vector<double>& v) {
-    size_t n = v.size();
-    if (n == 0) return 0.0;
-    std::sort(v.begin(), v.end());
-    if (n % 2 == 0) return (v[n / 2 - 1] + v[n / 2]) / 2.0;
-    return v[n / 2];
-}
 
 static BenchmarkResult RunMultiTrial(
     const Piccard& engine,
@@ -155,7 +147,7 @@ static BenchmarkResult RunMultiTrial(
     const std::vector<uint64_t>& set_y,
     double j_true,
     const std::string& label,
-    size_t trials)
+    size_t num_trials)
 {
     // Warmup iteration (discarded)
     RunTimedProtocol(engine, set_x, set_y, j_true, "warmup");
@@ -163,10 +155,11 @@ static BenchmarkResult RunMultiTrial(
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
     std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
     size_t ct_size = 0;
-    double last_j_hat = 0.0;
-    double total_error = 0.0;
+    double sum_j_hat = 0.0, sum_j_err = 0.0;
+    size_t rel_eligible = 0;
+    double sum_rel_err = 0.0;
 
-    for (size_t t = 0; t < trials; t++) {
+    for (size_t t = 0; t < num_trials; t++) {
         auto br = RunTimedProtocol(engine, set_x, set_y, j_true, label);
         v_total.push_back(br.time_ms);
         v_minhash.push_back(br.phase_minhash_ms);
@@ -177,39 +170,82 @@ static BenchmarkResult RunMultiTrial(
         v_decrypt.push_back(br.phase_decrypt_ms);
         v_bias.push_back(br.phase_bias_correction_ms);
         ct_size = br.ct_size_bytes;
-        last_j_hat = br.jaccard_computed;
-        total_error += br.jaccard_error;
+        sum_j_hat += br.jaccard_computed;
+        sum_j_err += br.jaccard_error;
+        if (j_true > 0.0) {
+            sum_rel_err += br.jaccard_error / j_true;
+            rel_eligible++;
+        }
     }
 
-    BenchmarkResult median;
-    median.label = label;
-    median.param_k = engine.GetParams().k;
-    median.param_m = engine.GetParams().m;
-    median.param_set_size = set_x.size();
-    median.param_ring_dim = engine.GetParams().ring_dim;
-    median.time_ms = Median(v_total);
-    median.phase_minhash_ms = Median(v_minhash);
-    median.phase_encode_ms = Median(v_encode);
-    median.phase_encrypt_ms = Median(v_encrypt);
-    median.phase_multiply_ms = Median(v_multiply);
-    median.phase_rotate_sum_ms = Median(v_rotate);
-    median.phase_decrypt_ms = Median(v_decrypt);
-    median.phase_bias_correction_ms = Median(v_bias);
-    median.memory_bytes = MemoryTracker::GetPeakRSS();
-    median.ct_size_bytes = ct_size;
-    median.jaccard_computed = last_j_hat;
-    median.jaccard_expected = j_true;
-    median.jaccard_error = total_error / static_cast<double>(trials);
-    median.jaccard_rel_error = (j_true > 0.0) ? (median.jaccard_error / j_true) : -1.0;
+    auto d_total    = ComputeDispersion(v_total);
+    auto d_minhash  = ComputeDispersion(v_minhash);
+    auto d_encode   = ComputeDispersion(v_encode);
+    auto d_encrypt  = ComputeDispersion(v_encrypt);
+    auto d_multiply = ComputeDispersion(v_multiply);
+    auto d_rotate   = ComputeDispersion(v_rotate);
+    auto d_decrypt  = ComputeDispersion(v_decrypt);
+    auto d_bias     = ComputeDispersion(v_bias);
 
-    return median;
+    BenchmarkResult result;
+    result.label          = label;
+    result.param_k        = engine.GetParams().k;
+    result.param_m        = engine.GetParams().m;
+    result.param_set_size = set_x.size();
+    result.param_ring_dim = engine.GetParams().ring_dim;
+    result.trials         = num_trials;
+
+    result.time_ms = d_total.mean;
+    result.time_ms_sd = d_total.sd;
+    result.time_ms_median = d_total.median;
+
+    result.phase_minhash_ms = d_minhash.mean;
+    result.phase_minhash_ms_sd = d_minhash.sd;
+    result.phase_minhash_ms_median = d_minhash.median;
+
+    result.phase_encode_ms = d_encode.mean;
+    result.phase_encode_ms_sd = d_encode.sd;
+    result.phase_encode_ms_median = d_encode.median;
+
+    result.phase_encrypt_ms = d_encrypt.mean;
+    result.phase_encrypt_ms_sd = d_encrypt.sd;
+    result.phase_encrypt_ms_median = d_encrypt.median;
+
+    result.phase_multiply_ms = d_multiply.mean;
+    result.phase_multiply_ms_sd = d_multiply.sd;
+    result.phase_multiply_ms_median = d_multiply.median;
+
+    result.phase_rotate_sum_ms = d_rotate.mean;
+    result.phase_rotate_sum_ms_sd = d_rotate.sd;
+    result.phase_rotate_sum_ms_median = d_rotate.median;
+
+    result.phase_decrypt_ms = d_decrypt.mean;
+    result.phase_decrypt_ms_sd = d_decrypt.sd;
+    result.phase_decrypt_ms_median = d_decrypt.median;
+
+    result.phase_bias_correction_ms = d_bias.mean;
+    result.phase_bias_correction_ms_sd = d_bias.sd;
+    result.phase_bias_correction_ms_median = d_bias.median;
+
+    result.memory_bytes  = MemoryTracker::GetPeakRSS();
+    result.ct_size_bytes = ct_size;
+
+    double n = static_cast<double>(num_trials);
+    result.jaccard_computed = sum_j_hat / n;
+    result.jaccard_expected = j_true;
+    result.jaccard_error    = sum_j_err / n;
+    result.jaccard_rel_error = (rel_eligible > 0)
+        ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
+    result.rel_error_eligible_n = rel_eligible;
+
+    return result;
 }
 
 // ============================================================================
 // Scenario 1: Varying k
 // ============================================================================
 static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
 
     for (uint32_t k : k_values) {
         PiccardParams params;
@@ -231,9 +267,9 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
         std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
         size_t ct_size = 0;
-        double last_j_hat = 0.0;
-        double total_error = 0.0;
-        double last_j_true = 0.0;
+        double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
+        size_t rel_eligible = 0;
+        double sum_rel_err = 0.0;
 
         for (size_t t = 0; t < config.trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
@@ -251,43 +287,52 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
-            last_j_hat = br.jaccard_computed;
-            last_j_true = j_true;
-            total_error += br.jaccard_error;
+            sum_j_hat  += br.jaccard_computed;
+            sum_j_true += j_true;
+            sum_j_err  += br.jaccard_error;
+            if (j_true > 0.0) { sum_rel_err += br.jaccard_error / j_true; rel_eligible++; }
         }
 
-        BenchmarkResult median;
-        median.label = "vary_k_" + std::to_string(k);
-        median.param_k = params.k;
-        median.param_m = params.m;
-        median.param_set_size = config.set_size;
-        median.param_ring_dim = params.ring_dim;
-        median.time_ms = Median(v_total);
-        median.phase_minhash_ms = Median(v_minhash);
-        median.phase_encode_ms = Median(v_encode);
-        median.phase_encrypt_ms = Median(v_encrypt);
-        median.phase_multiply_ms = Median(v_multiply);
-        median.phase_rotate_sum_ms = Median(v_rotate);
-        median.phase_decrypt_ms = Median(v_decrypt);
-        median.phase_bias_correction_ms = Median(v_bias);
-        median.memory_bytes = MemoryTracker::GetPeakRSS();
-        median.ct_size_bytes = ct_size;
-        median.jaccard_computed = last_j_hat;
-        median.jaccard_expected = last_j_true;
-        median.jaccard_error = total_error / static_cast<double>(config.trials);
-        median.jaccard_rel_error = (last_j_true > 0.0)
-            ? (median.jaccard_error / last_j_true) : -1.0;
+        auto d_total    = ComputeDispersion(v_total);
+        auto d_minhash  = ComputeDispersion(v_minhash);
+        auto d_encode   = ComputeDispersion(v_encode);
+        auto d_encrypt  = ComputeDispersion(v_encrypt);
+        auto d_multiply = ComputeDispersion(v_multiply);
+        auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_decrypt  = ComputeDispersion(v_decrypt);
+        auto d_bias     = ComputeDispersion(v_bias);
+        double n = static_cast<double>(config.trials);
 
-        csv.WriteRow(median);
+        BenchmarkResult result;
+        result.label = "vary_k_" + std::to_string(k);
+        result.param_k = params.k; result.param_m = params.m;
+        result.param_set_size = config.set_size; result.param_ring_dim = params.ring_dim;
+        result.trials = config.trials;
+        result.time_ms = d_total.mean; result.time_ms_sd = d_total.sd; result.time_ms_median = d_total.median;
+        result.phase_minhash_ms = d_minhash.mean; result.phase_minhash_ms_sd = d_minhash.sd; result.phase_minhash_ms_median = d_minhash.median;
+        result.phase_encode_ms = d_encode.mean; result.phase_encode_ms_sd = d_encode.sd; result.phase_encode_ms_median = d_encode.median;
+        result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
+        result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
+        result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
+        result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
+        result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
+        result.jaccard_computed = sum_j_hat / n;
+        result.jaccard_expected = sum_j_true / n;
+        result.jaccard_error    = sum_j_err / n;
+        result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
+        result.rel_error_eligible_n = rel_eligible;
+
+        csv.WriteRow(result);
 
         std::cerr << "  k=" << k
                   << " N=" << params.ring_dim
-                  << " time=" << median.time_ms << "ms"
-                  << " (mul=" << median.phase_multiply_ms
-                  << " rot=" << median.phase_rotate_sum_ms << ")"
-                  << " ct=" << median.ct_size_bytes << "B"
-                  << " J_hat=" << median.jaccard_computed
-                  << " err=" << median.jaccard_error << "\n";
+                  << " time=" << result.time_ms << "ms"
+                  << " (mul=" << result.phase_multiply_ms
+                  << " rot=" << result.phase_rotate_sum_ms << ")"
+                  << " ct=" << result.ct_size_bytes << "B"
+                  << " J_hat=" << result.jaccard_computed
+                  << " err=" << result.jaccard_error << "\n";
     }
 }
 
@@ -295,7 +340,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
 // Scenario 2: Varying m
 // ============================================================================
 static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
 
     for (uint32_t m : m_values) {
         PiccardParams params;
@@ -317,9 +362,9 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
         std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
         size_t ct_size = 0;
-        double last_j_hat = 0.0;
-        double total_error = 0.0;
-        double last_j_true = 0.0;
+        double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
+        size_t rel_eligible = 0;
+        double sum_rel_err = 0.0;
 
         for (size_t t = 0; t < config.trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
@@ -337,42 +382,51 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
-            last_j_hat = br.jaccard_computed;
-            last_j_true = j_true;
-            total_error += br.jaccard_error;
+            sum_j_hat  += br.jaccard_computed;
+            sum_j_true += j_true;
+            sum_j_err  += br.jaccard_error;
+            if (j_true > 0.0) { sum_rel_err += br.jaccard_error / j_true; rel_eligible++; }
         }
 
-        BenchmarkResult median;
-        median.label = "vary_m_" + std::to_string(m);
-        median.param_k = params.k;
-        median.param_m = params.m;
-        median.param_set_size = config.set_size;
-        median.param_ring_dim = params.ring_dim;
-        median.time_ms = Median(v_total);
-        median.phase_minhash_ms = Median(v_minhash);
-        median.phase_encode_ms = Median(v_encode);
-        median.phase_encrypt_ms = Median(v_encrypt);
-        median.phase_multiply_ms = Median(v_multiply);
-        median.phase_rotate_sum_ms = Median(v_rotate);
-        median.phase_decrypt_ms = Median(v_decrypt);
-        median.phase_bias_correction_ms = Median(v_bias);
-        median.memory_bytes = MemoryTracker::GetPeakRSS();
-        median.ct_size_bytes = ct_size;
-        median.jaccard_computed = last_j_hat;
-        median.jaccard_expected = last_j_true;
-        median.jaccard_error = total_error / static_cast<double>(config.trials);
-        median.jaccard_rel_error = (last_j_true > 0.0)
-            ? (median.jaccard_error / last_j_true) : -1.0;
+        auto d_total    = ComputeDispersion(v_total);
+        auto d_minhash  = ComputeDispersion(v_minhash);
+        auto d_encode   = ComputeDispersion(v_encode);
+        auto d_encrypt  = ComputeDispersion(v_encrypt);
+        auto d_multiply = ComputeDispersion(v_multiply);
+        auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_decrypt  = ComputeDispersion(v_decrypt);
+        auto d_bias     = ComputeDispersion(v_bias);
+        double n = static_cast<double>(config.trials);
 
-        csv.WriteRow(median);
+        BenchmarkResult result;
+        result.label = "vary_m_" + std::to_string(m);
+        result.param_k = params.k; result.param_m = params.m;
+        result.param_set_size = config.set_size; result.param_ring_dim = params.ring_dim;
+        result.trials = config.trials;
+        result.time_ms = d_total.mean; result.time_ms_sd = d_total.sd; result.time_ms_median = d_total.median;
+        result.phase_minhash_ms = d_minhash.mean; result.phase_minhash_ms_sd = d_minhash.sd; result.phase_minhash_ms_median = d_minhash.median;
+        result.phase_encode_ms = d_encode.mean; result.phase_encode_ms_sd = d_encode.sd; result.phase_encode_ms_median = d_encode.median;
+        result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
+        result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
+        result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
+        result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
+        result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
+        result.jaccard_computed = sum_j_hat / n;
+        result.jaccard_expected = sum_j_true / n;
+        result.jaccard_error    = sum_j_err / n;
+        result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
+        result.rel_error_eligible_n = rel_eligible;
+
+        csv.WriteRow(result);
 
         std::cerr << "  m=" << m
                   << " N=" << params.ring_dim
-                  << " time=" << median.time_ms << "ms"
-                  << " (mul=" << median.phase_multiply_ms
-                  << " rot=" << median.phase_rotate_sum_ms << ")"
-                  << " ct=" << median.ct_size_bytes << "B"
-                  << " err=" << median.jaccard_error << "\n";
+                  << " time=" << result.time_ms << "ms"
+                  << " (mul=" << result.phase_multiply_ms
+                  << " rot=" << result.phase_rotate_sum_ms << ")"
+                  << " ct=" << result.ct_size_bytes << "B"
+                  << " err=" << result.jaccard_error << "\n";
     }
 }
 
@@ -380,7 +434,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
 // Scenario 3: Varying set size
 // ============================================================================
 static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000, 100000}, config.security_level);
 
     PiccardParams params;
     params.k = config.k;
@@ -402,9 +456,9 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
         std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
         size_t ct_size = 0;
-        double last_j_hat = 0.0;
-        double total_error = 0.0;
-        double last_j_true = 0.0;
+        double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
+        size_t rel_eligible = 0;
+        double sum_rel_err = 0.0;
 
         for (size_t t = 0; t < config.trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, 0.5));
@@ -422,42 +476,51 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
-            last_j_hat = br.jaccard_computed;
-            last_j_true = j_true;
-            total_error += br.jaccard_error;
+            sum_j_hat  += br.jaccard_computed;
+            sum_j_true += j_true;
+            sum_j_err  += br.jaccard_error;
+            if (j_true > 0.0) { sum_rel_err += br.jaccard_error / j_true; rel_eligible++; }
         }
 
-        BenchmarkResult median;
-        median.label = "vary_size_" + std::to_string(sz);
-        median.param_k = params.k;
-        median.param_m = params.m;
-        median.param_set_size = sz;
-        median.param_ring_dim = params.ring_dim;
-        median.time_ms = Median(v_total);
-        median.phase_minhash_ms = Median(v_minhash);
-        median.phase_encode_ms = Median(v_encode);
-        median.phase_encrypt_ms = Median(v_encrypt);
-        median.phase_multiply_ms = Median(v_multiply);
-        median.phase_rotate_sum_ms = Median(v_rotate);
-        median.phase_decrypt_ms = Median(v_decrypt);
-        median.phase_bias_correction_ms = Median(v_bias);
-        median.memory_bytes = MemoryTracker::GetPeakRSS();
-        median.ct_size_bytes = ct_size;
-        median.jaccard_computed = last_j_hat;
-        median.jaccard_expected = last_j_true;
-        median.jaccard_error = total_error / static_cast<double>(config.trials);
-        median.jaccard_rel_error = (last_j_true > 0.0)
-            ? (median.jaccard_error / last_j_true) : -1.0;
+        auto d_total    = ComputeDispersion(v_total);
+        auto d_minhash  = ComputeDispersion(v_minhash);
+        auto d_encode   = ComputeDispersion(v_encode);
+        auto d_encrypt  = ComputeDispersion(v_encrypt);
+        auto d_multiply = ComputeDispersion(v_multiply);
+        auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_decrypt  = ComputeDispersion(v_decrypt);
+        auto d_bias     = ComputeDispersion(v_bias);
+        double n = static_cast<double>(config.trials);
 
-        csv.WriteRow(median);
+        BenchmarkResult result;
+        result.label = "vary_size_" + std::to_string(sz);
+        result.param_k = params.k; result.param_m = params.m;
+        result.param_set_size = sz; result.param_ring_dim = params.ring_dim;
+        result.trials = config.trials;
+        result.time_ms = d_total.mean; result.time_ms_sd = d_total.sd; result.time_ms_median = d_total.median;
+        result.phase_minhash_ms = d_minhash.mean; result.phase_minhash_ms_sd = d_minhash.sd; result.phase_minhash_ms_median = d_minhash.median;
+        result.phase_encode_ms = d_encode.mean; result.phase_encode_ms_sd = d_encode.sd; result.phase_encode_ms_median = d_encode.median;
+        result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
+        result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
+        result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
+        result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
+        result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
+        result.jaccard_computed = sum_j_hat / n;
+        result.jaccard_expected = sum_j_true / n;
+        result.jaccard_error    = sum_j_err / n;
+        result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
+        result.rel_error_eligible_n = rel_eligible;
+
+        csv.WriteRow(result);
 
         std::cerr << "  size=" << sz
-                  << " time=" << median.time_ms << "ms"
-                  << " (minhash=" << median.phase_minhash_ms
-                  << " enc=" << median.phase_encrypt_ms
-                  << " mul=" << median.phase_multiply_ms
-                  << " rot=" << median.phase_rotate_sum_ms << ")"
-                  << " err=" << median.jaccard_error << "\n";
+                  << " time=" << result.time_ms << "ms"
+                  << " (minhash=" << result.phase_minhash_ms
+                  << " enc=" << result.phase_encrypt_ms
+                  << " mul=" << result.phase_multiply_ms
+                  << " rot=" << result.phase_rotate_sum_ms << ")"
+                  << " err=" << result.jaccard_error << "\n";
     }
 }
 
@@ -465,7 +528,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
 // Accuracy across k values (MinHash convergence)
 // ============================================================================
 static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t k : k_values) {
@@ -520,7 +583,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
 // Accuracy across m values
 // ============================================================================
 static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t m : m_values) {
@@ -573,7 +636,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
 // Accuracy across set sizes
 // ============================================================================
 static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000, 100000}, config.security_level);
     std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
 
     PiccardParams params;
@@ -682,7 +745,7 @@ static void PrintComparison(const std::vector<BenchmarkResult>& results) {
 // ============================================================================
 
 static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> k_values = {16, 32, 64, 128, 256, 512};
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
 
     for (uint32_t k : k_values) {
         PiccardParams params;
@@ -725,7 +788,7 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
 }
 
 static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<uint32_t> m_values = {16, 32, 64, 128, 256};
+    std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
 
     for (uint32_t m : m_values) {
         PiccardParams params;
@@ -766,7 +829,7 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
 }
 
 static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
-    std::vector<size_t> sizes = {100, 1000, 10000, 100000};
+    std::vector<size_t> sizes = QuickSweep<size_t>({100, 1000, 10000, 100000}, config.security_level);
 
     PiccardParams params;
     params.k = config.k;

@@ -64,6 +64,10 @@ CSV_DIR="$OUT_DIR/csv"
 TABLE_DIR="$OUT_DIR/tables"
 mkdir -p "$CSV_DIR" "$TABLE_DIR"
 
+# Stable pointer to the most recent run, so tooling and verification gates have
+# a predictable path (results/latest/csv/...) independent of the timestamp.
+ln -sfn "$OUT_DIR" "$PROJECT_DIR/scripts/results/latest"
+
 LOG="$OUT_DIR/run.log"
 exec > >(tee -a "$LOG") 2>&1
 
