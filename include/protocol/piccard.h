@@ -36,6 +36,14 @@ public:
     JaccardResult Run(const std::vector<uint64_t>& set_x,
                       const std::vector<uint64_t>& set_y) const;
 
+    // Replace the public CRS seed. Invariant: always updates
+    // params_.hash_seed, and rebuilds the MinHasher if KeyGen() has already
+    // run. The BFV context and keys do not depend on the hash family, so they
+    // are preserved and accuracy trials can resample the CRS without paying
+    // for KeyGen again. Must not be called concurrently with a Run()/Encrypt()
+    // on the same object.
+    void SetHashSeed(uint64_t seed);
+
     // ── Advanced/benchmarking API (public, documented) ──────────
 
     std::vector<uint64_t> ComputeSignature(const std::vector<uint64_t>& set) const;

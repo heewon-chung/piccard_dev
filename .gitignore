@@ -7,6 +7,9 @@
 .gemini
 .claude
 .omc
+.gjc
+
+__pycache__/
 
 
 build

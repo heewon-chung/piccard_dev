@@ -6,8 +6,17 @@ namespace piccard {
 
 Piccard::Piccard(const PiccardParams& params) : params_(params) {}
 
+void Piccard::SetHashSeed(uint64_t seed) {
+    params_.hash_seed = seed;
+    if (hasher_) {
+        hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                              seed);
+    }
+}
+
 void Piccard::KeyGen() {
-    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range);
+    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                          params_.hash_seed);
 
     // Initialize BFV first: OpenFHE may select a different ring_dim than
     // what PiccardParams::Validate() computed (e.g. a smaller ring_dim

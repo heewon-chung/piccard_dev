@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/minhash.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -245,4 +246,132 @@ TEST(MinHasher, Symmetry) {
     RecordProperty("output_J(B,A)", std::to_string(j_ba));
 
     EXPECT_DOUBLE_EQ(j_ab, j_ba);
+}
+
+// ── Regression: unreduced elements (§5 of the hash-seed-crs plan) ────────────
+// h_i(x) = ((a_i * x + b_i) mod P) mod R is defined over Z_P, so hashing x and
+// hashing (x mod P) must agree. The original MulModMersenne computed
+// hi = (a_i * x) >> 61 without reducing x first; for x >= 2^61 and a_i close to
+// P, hi approaches 2^64 and hi + lo wrapped around, yielding a wrong hash.
+
+TEST(MinHasher, ElementHashesInvariantUnderModMersennePrime) {
+    constexpr uint64_t kP = (1ULL << 61) - 1;
+    MinHasher hasher(128, UINT64_MAX, 42);
+
+    // UINT64_MAX - 8 .. UINT64_MAX - 13 are witnesses: with seed 42 and k=128
+    // they drive (a_10 * elem) >> 61 close enough to 2^64 that the old
+    // hi + lo addition wrapped, shifting the result by 2^64 mod P = 8.
+    const std::vector<uint64_t> large_elems = {
+        UINT64_MAX - 8,
+        UINT64_MAX - 9,
+        UINT64_MAX - 10,
+        UINT64_MAX - 11,
+        UINT64_MAX - 12,
+        UINT64_MAX - 13,
+        kP,
+        kP + 1,
+        1ULL << 61,
+        (1ULL << 61) + 12345,
+        1ULL << 62,
+        1ULL << 63,
+        UINT64_MAX - 1,
+        UINT64_MAX,
+    };
+
+    for (uint64_t elem : large_elems) {
+        SCOPED_TRACE("elem=" + std::to_string(elem));
+        EXPECT_EQ(hasher.ComputeElementHashes(elem),
+                  hasher.ComputeElementHashes(elem % kP));
+    }
+}
+
+TEST(MinHasher, SignatureInvariantUnderModMersennePrime) {
+    constexpr uint64_t kP = (1ULL << 61) - 1;
+    MinHasher hasher(64, UINT64_MAX, 42);
+
+    const std::vector<uint64_t> big = {UINT64_MAX, 1ULL << 63,
+                                       (1ULL << 61) + 7};
+    std::vector<uint64_t> reduced;
+    reduced.reserve(big.size());
+    for (uint64_t elem : big) reduced.push_back(elem % kP);
+
+    EXPECT_EQ(hasher.ComputeSignature(big), hasher.ComputeSignature(reduced));
+}
+
+// ── Golden vectors: portable CRS expansion (§"CRS 표현") ─────────────────────
+// The public seed must pin down H = ((a_i,b_i))_{i=1..k} identically across
+// standard library implementations. std::uniform_int_distribution does not
+// guarantee that, so the expansion consumes raw std::mt19937_64 words and
+// reduces them with explicit rejection sampling. These constants come from an
+// independent implementation of that spec. If they ever need updating, the
+// expansion changed and every accuracy number in the paper changed with it.
+//
+// h_i(0) = b_i and h_i(1) = (a_i + b_i) mod P, so the public API pins down
+// both coefficient vectors without exposing them as API.
+
+namespace {
+
+constexpr uint64_t kGoldenP = (1ULL << 61) - 1;
+
+const std::vector<uint64_t> kGoldenA42 = {
+      95102796975956707ULL,   39571969185577751ULL,  521470388932581732ULL,
+    1375579315383837737ULL,  440399444735294651ULL,  228421809995595596ULL,
+    1111809001163100643ULL, 1412093754192123610ULL,
+};
+
+const std::vector<uint64_t> kGoldenB42 = {
+     258833531435025069ULL,  207944309991461711ULL, 1735254072534978428ULL,
+    2266877941675178242ULL,  281698041229442404ULL,  437290932926198858ULL,
+     227598555174041651ULL, 1304156888754514735ULL,
+};
+
+const std::vector<uint64_t> kGoldenSig42 = {
+     402287361805472517ULL,  603664001847239221ULL,   32428934219713895ULL,
+    1870553434456246562ULL,   74006470155001012ULL,  329166386637508903ULL,
+     477816392200418977ULL,  141831826097110360ULL,
+};
+
+} // namespace
+
+TEST(MinHasher, Seed42CoefficientGoldenVector) {
+    MinHasher hasher(8, UINT64_MAX, 42);
+
+    const auto h0 = hasher.ComputeElementHashes(0);
+    const auto h1 = hasher.ComputeElementHashes(1);
+    ASSERT_EQ(h0.size(), kGoldenB42.size());
+    ASSERT_EQ(h1.size(), kGoldenA42.size());
+
+    for (size_t i = 0; i < kGoldenA42.size(); i++) {
+        SCOPED_TRACE("i=" + std::to_string(i));
+        EXPECT_EQ(h0[i], kGoldenB42[i]);
+        EXPECT_EQ((h1[i] + kGoldenP - h0[i]) % kGoldenP, kGoldenA42[i]);
+    }
+}
+
+TEST(MinHasher, Seed42SignatureGoldenVector) {
+    MinHasher hasher(8, UINT64_MAX, 42);
+    const std::vector<uint64_t> set = {10, 20, 30, 40, 50};
+    EXPECT_EQ(hasher.ComputeSignature(set), kGoldenSig42);
+}
+
+TEST(MinHasher, DistinctSeedsGiveDistinctCoefficients) {
+    MinHasher h42(8, UINT64_MAX, 42);
+    MinHasher h43(8, UINT64_MAX, 43);
+
+    EXPECT_EQ(h42.GetSeed(), 42ULL);
+    EXPECT_EQ(h43.GetSeed(), 43ULL);
+    EXPECT_NE(h42.ComputeElementHashes(0), h43.ComputeElementHashes(0));
+    EXPECT_NE(h42.ComputeElementHashes(1), h43.ComputeElementHashes(1));
+}
+
+// The expansion is sequential, so a smaller k must yield a prefix of a larger
+// k's family. This is what lets one seed describe the CRS for every k sweep.
+TEST(MinHasher, CoefficientsArePrefixAcrossK) {
+    MinHasher small(8, UINT64_MAX, 42);
+    MinHasher large(128, UINT64_MAX, 42);
+
+    const auto s0 = small.ComputeElementHashes(0);
+    const auto l0 = large.ComputeElementHashes(0);
+    ASSERT_LE(s0.size(), l0.size());
+    EXPECT_TRUE(std::equal(s0.begin(), s0.end(), l0.begin()));
 }

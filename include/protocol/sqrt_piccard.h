@@ -28,6 +28,12 @@ public:
     JaccardResult Run(const std::vector<uint64_t>& set_x,
                       const std::vector<uint64_t>& set_y) const;
 
+    // Replace the public CRS seed. Same invariant as Piccard::SetHashSeed:
+    // params_.hash_seed always updates, and the MinHasher is rebuilt if KeyGen()
+    // has already run. Used to give one-hot and sqrt the same CRS in a paired
+    // trial, so signatures stay comparable.
+    void SetHashSeed(uint64_t seed);
+
     // Advanced/benchmarking API
     std::vector<uint64_t> ComputeSignature(const std::vector<uint64_t>& set) const;
     std::vector<int64_t>  EncodeSignature(const std::vector<uint64_t>& sig) const;

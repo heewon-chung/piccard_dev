@@ -265,6 +265,10 @@ def table_accuracy_stats(data, param_prefix, param_name, tnum, title, latex=Fals
     print(f"  Table {tnum}: {title}")
     print(f"{'=' * 70}")
 
+    # Split by hash_randomness only when mixed; pooling would report a mean describing neither mode.
+    modes = {r.get("hash_randomness", "") for r in filtered}
+    split_modes = len(modes) > 1
+
     # Group by parameter value from labels like "accuracy_k64_0.5_t0" → "64"
     groups = defaultdict(list)
     prefix_len = len(param_prefix)
@@ -272,18 +276,23 @@ def table_accuracy_stats(data, param_prefix, param_name, tnum, title, latex=Fals
         label = r.get("label", "")
         rest = label[prefix_len:]
         param_val = rest.split("_")[0]
-        groups[param_val].append(r)
+        mode = r.get("hash_randomness", "") if split_modes else ""
+        groups[(param_val, mode)].append(r)
 
     if not groups:
         return
 
     show_theoretical = (param_prefix == "accuracy_k")
-    headers = [param_name, "Trials", "Mean |err|", "Max |err|", "RMSE",
-               "Std Dev", "1/sqrt(k)" if show_theoretical else "Mean Rel Err"]
+    headers = [param_name]
+    if split_modes:
+        headers.append("Hash")
+    headers += ["Trials", "Mean |err|", "Max |err|", "RMSE", "Std Dev",
+                "1/sqrt(k)" if show_theoretical else "Mean Rel Err"]
 
     rows = []
-    for pval in sorted(groups.keys(), key=lambda s: float(s)):
-        trials = groups[pval]
+    for key in sorted(groups.keys(), key=lambda kv: (float(kv[0]), kv[1])):
+        pval, mode = key
+        trials = groups[key]
         errors = [abs(float(r.get("jaccard_error", "0"))) for r in trials]
         n = len(errors)
         mean_err = sum(errors) / n
@@ -299,21 +308,24 @@ def table_accuracy_stats(data, param_prefix, param_name, tnum, title, latex=Fals
             valid_rel = [e for e in rel_errs if e >= 0]
             last_col = f"{sum(valid_rel) / len(valid_rel):.4f}" if valid_rel else "N/A"
 
-        rows.append([
-            pval, str(n),
-            f"{mean_err:.4f}", f"{max_err:.4f}",
-            f"{rmse:.4f}", f"{std_dev:.4f}",
-            last_col,
-        ])
+        row = [pval]
+        if split_modes:
+            row.append(mode or "n/a")
+        row += [str(n), f"{mean_err:.4f}", f"{max_err:.4f}",
+                f"{rmse:.4f}", f"{std_dev:.4f}", last_col]
+        rows.append(row)
 
     print_table(headers, rows)
 
     if latex:
         print()
         pn = f"${param_name}$" if len(param_name) <= 2 else param_name
-        lh = [pn, "Trials", "Mean $|\\epsilon|$", "Max $|\\epsilon|$",
-              "RMSE", "Std Dev",
-              "$1/\\sqrt{k}$" if show_theoretical else "Mean Rel Err"]
+        lh = [pn]
+        if split_modes:
+            lh.append("Hash")
+        lh += ["Trials", "Mean $|\\epsilon|$", "Max $|\\epsilon|$", "RMSE",
+               "Std Dev",
+               "$1/\\sqrt{k}$" if show_theoretical else "Mean Rel Err"]
         tab_id = param_prefix.replace("accuracy_", "")
         print_latex_table(title, f"tab:accuracy-{tab_id}", lh, rows)
 

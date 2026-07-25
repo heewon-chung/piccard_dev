@@ -238,6 +238,12 @@ static BenchmarkResult RunMultiTrial(
         ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     result.rel_error_eligible_n = rel_eligible;
 
+    // Timing always runs under one CRS; record which, so a timing row is
+    // reproducible from the CSV rather than implicitly "whatever the default is".
+    result.hash_seed = engine.GetParams().hash_seed;
+    result.hash_root_seed = engine.GetParams().hash_seed;
+    result.hash_randomness = "fixed";
+
     return result;
 }
 
@@ -547,7 +553,13 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
         for (double frac : overlaps) {
             double total_error = 0;
             for (size_t t = 0; t < config.trials; t++) {
+                // Sets and hash family are drawn from separate domains.
                 std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : params.hash_seed;
+                engine.SetHashSeed(trial_hash_seed);
                 auto [set_a, set_b] = MakeRandomSetsWithOverlap(
                     config.set_size, frac, rng);
                 double j_true = ExactJaccard(set_a, set_b);
@@ -569,6 +581,11 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.jaccard_expected = j_true;
                 br.jaccard_error = err;
                 br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                br.trials = 1;              // measured single sample, not skipped
+                br.accuracy_trials = 1;
+                br.hash_randomness = HashRandomnessName(config.hash_randomness);
+                br.hash_seed = trial_hash_seed;
+                br.hash_root_seed = config.seed;
                 csv.WriteRow(br);
             }
         }
@@ -601,7 +618,13 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
 
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
+                // Sets and hash family are drawn from separate domains.
                 std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : params.hash_seed;
+                engine.SetHashSeed(trial_hash_seed);
                 auto [set_a, set_b] = MakeRandomSetsWithOverlap(
                     config.set_size, frac, rng);
                 double j_true = ExactJaccard(set_a, set_b);
@@ -622,6 +645,11 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.jaccard_expected = j_true;
                 br.jaccard_error = err;
                 br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                br.trials = 1;              // measured single sample, not skipped
+                br.accuracy_trials = 1;
+                br.hash_randomness = HashRandomnessName(config.hash_randomness);
+                br.hash_seed = trial_hash_seed;
+                br.hash_root_seed = config.seed;
                 csv.WriteRow(br);
             }
         }
@@ -655,6 +683,11 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
                 std::mt19937_64 rng(TrialSeed(config.seed, t, frac));
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : params.hash_seed;
+                engine.SetHashSeed(trial_hash_seed);
                 auto [set_a, set_b] = MakeRandomSetsWithOverlap(sz, frac, rng);
                 double j_true = ExactJaccard(set_a, set_b);
                 auto result = engine.Run(set_a, set_b);
@@ -674,6 +707,11 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
                 br.jaccard_expected = j_true;
                 br.jaccard_error = err;
                 br.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
+                br.trials = 1;              // measured single sample, not skipped
+                br.accuracy_trials = 1;
+                br.hash_randomness = HashRandomnessName(config.hash_randomness);
+                br.hash_seed = trial_hash_seed;
+                br.hash_root_seed = config.seed;
                 csv.WriteRow(br);
             }
         }
@@ -752,6 +790,7 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
+        params.hash_seed = config.seed;
         params.Validate();
 
         Piccard engine(params);
@@ -764,9 +803,16 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
         auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
 
         // Accuracy phase: random sets per trial
+        // The timing row above used this fixed CRS; record it before the
+        // accuracy loop reseeds the engine.
+        const uint64_t timing_hash_seed = params.hash_seed;
         std::vector<std::pair<double, double>> estimates;
         for (size_t t = 0; t < config.accuracy_trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            engine.SetHashSeed(
+                (config.hash_randomness == HashRandomness::Resampled)
+                    ? HashTrialSeed(config.seed, t, config.overlap)
+                    : timing_hash_seed);
             auto [sa, sb] = MakeRandomSetsWithOverlap(config.set_size, config.overlap, rng);
             double jt = ExactJaccard(sa, sb);
             auto result = engine.Run(sa, sb);
@@ -778,6 +824,11 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
         br.accuracy_p75 = stats.p75;
         br.accuracy_p95 = stats.p95;
         br.accuracy_max = stats.max_error;
+
+        br.accuracy_trials = stats.num_trials;
+        br.hash_randomness = HashRandomnessName(config.hash_randomness);
+        br.hash_seed = timing_hash_seed;   // CRS the timing measurement used
+        br.hash_root_seed = config.seed;
 
         csv.WriteRow(br);
         std::cerr << "  k=" << k
@@ -795,6 +846,7 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
+        params.hash_seed = config.seed;
         params.Validate();
 
         Piccard engine(params);
@@ -805,9 +857,16 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
         std::string label = "vary_m_" + std::to_string(m);
         auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
 
+        // The timing row above used this fixed CRS; record it before the
+        // accuracy loop reseeds the engine.
+        const uint64_t timing_hash_seed = params.hash_seed;
         std::vector<std::pair<double, double>> estimates;
         for (size_t t = 0; t < config.accuracy_trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            engine.SetHashSeed(
+                (config.hash_randomness == HashRandomness::Resampled)
+                    ? HashTrialSeed(config.seed, t, config.overlap)
+                    : timing_hash_seed);
             auto [sa, sb] = MakeRandomSetsWithOverlap(config.set_size, config.overlap, rng);
             double jt = ExactJaccard(sa, sb);
             auto result = engine.Run(sa, sb);
@@ -819,6 +878,11 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
         br.accuracy_p75 = stats.p75;
         br.accuracy_p95 = stats.p95;
         br.accuracy_max = stats.max_error;
+
+        br.accuracy_trials = stats.num_trials;
+        br.hash_randomness = HashRandomnessName(config.hash_randomness);
+        br.hash_seed = timing_hash_seed;   // CRS the timing measurement used
+        br.hash_root_seed = config.seed;
 
         csv.WriteRow(br);
         std::cerr << "  m=" << m
@@ -835,6 +899,7 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
+    params.hash_seed = config.seed;
     params.Validate();
 
     Piccard engine(params);
@@ -846,9 +911,16 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
         std::string label = "vary_size_" + std::to_string(sz);
         auto br = RunMultiTrial(engine, set_a, set_b, j_true, label, config.trials);
 
+        // The timing row above used this fixed CRS; record it before the
+        // accuracy loop reseeds the engine.
+        const uint64_t timing_hash_seed = params.hash_seed;
         std::vector<std::pair<double, double>> estimates;
         for (size_t t = 0; t < config.accuracy_trials; t++) {
             std::mt19937_64 rng(TrialSeed(config.seed, t, config.overlap));
+            engine.SetHashSeed(
+                (config.hash_randomness == HashRandomness::Resampled)
+                    ? HashTrialSeed(config.seed, t, config.overlap)
+                    : timing_hash_seed);
             auto [sa, sb] = MakeRandomSetsWithOverlap(sz, config.overlap, rng);
             double jt = ExactJaccard(sa, sb);
             auto result = engine.Run(sa, sb);
@@ -860,6 +932,11 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
         br.accuracy_p75 = stats.p75;
         br.accuracy_p95 = stats.p95;
         br.accuracy_max = stats.max_error;
+
+        br.accuracy_trials = stats.num_trials;
+        br.hash_randomness = HashRandomnessName(config.hash_randomness);
+        br.hash_seed = timing_hash_seed;   // CRS the timing measurement used
+        br.hash_root_seed = config.seed;
 
         csv.WriteRow(br);
         std::cerr << "  size=" << sz

@@ -12,8 +12,9 @@ namespace piccard {
 // element insertion and deletion without recomputing from scratch.
 class BottomStructure {
 public:
+    // `seed` is the public CRS seed; deliberately no default (see MinHasher).
     BottomStructure(uint32_t k, uint32_t d, uint64_t hash_range,
-                    uint64_t seed = 42);
+                    uint64_t seed);
 
     // Algorithm 3: Initialize bottom structure from a set
     void Initialize(const std::vector<uint64_t>& set);
@@ -29,6 +30,10 @@ public:
 
     uint32_t GetK() const { return k_; }
     uint32_t GetD() const { return d_; }
+
+    // The public CRS seed this structure's hash family was expanded from.
+    // Delegates to the hasher so there is a single source of truth.
+    uint64_t GetSeed() const { return hasher_.GetSeed(); }
     const std::vector<std::vector<uint64_t>>& GetBottom() const {
         return bottom_;
     }

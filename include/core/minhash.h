@@ -7,7 +7,10 @@ namespace piccard {
 
 class MinHasher {
 public:
-    MinHasher(uint32_t k, uint64_t hash_range, uint64_t seed = 42);
+    // `seed` is the public CRS seed; there is deliberately no default so that
+    // every construction site names the CRS it uses and static/dynamic paths
+    // cannot silently diverge. Do not reintroduce a default here or elsewhere.
+    MinHasher(uint32_t k, uint64_t hash_range, uint64_t seed);
 
     // Compute k-dimensional MinHash signature for a set
     std::vector<uint64_t> ComputeSignature(const std::vector<uint64_t>& set) const;
@@ -21,9 +24,13 @@ public:
 
     uint32_t GetK() const { return k_; }
 
+    // The public CRS seed this hasher was expanded from.
+    uint64_t GetSeed() const { return seed_; }
+
 private:
     uint32_t k_;
     uint64_t hash_range_;
+    uint64_t seed_;
 
     // Mersenne prime P = 2^61 - 1 for universal hash family
     static constexpr uint64_t kMersennePrime = (1ULL << 61) - 1;

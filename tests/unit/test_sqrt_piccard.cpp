@@ -144,3 +144,58 @@ TEST_F(SqrtPiccardTest, Symmetry) {
     EXPECT_EQ(r1.match_count, r2.match_count);
     EXPECT_DOUBLE_EQ(r1.jaccard_estimate, r2.jaccard_estimate);
 }
+
+// ── Shared CRS across encodings (§"벤치마크 난수 계약") ───────────────────────
+// The paired one-hot vs sqrt comparison is only meaningful if both encodings
+// draw their MinHash signature from the same hash family. The encoding differs
+// downstream of the signature, so the same seed must give the same signature.
+
+TEST_F(SqrtPiccardTest, SharesMinHashSignatureWithOneHotForSameSeed) {
+    PiccardParams onehot_params = params;
+    onehot_params.Validate();
+    PiccardParams sqrt_params = params;
+    sqrt_params.ValidateSqrt();
+    ASSERT_EQ(onehot_params.hash_seed, sqrt_params.hash_seed);
+
+    Piccard onehot_engine(onehot_params);
+    onehot_engine.KeyGen();
+    SqrtPiccard sqrt_engine(sqrt_params);
+    sqrt_engine.KeyGen();
+
+    std::vector<uint64_t> set;
+    for (uint64_t i = 1; i <= 100; i++) set.push_back(i);
+
+    EXPECT_EQ(onehot_engine.ComputeSignature(set),
+              sqrt_engine.ComputeSignature(set));
+}
+
+// Reseeding both engines to the same trial seed keeps them paired, and moving
+// to a different seed actually moves the signature.
+TEST_F(SqrtPiccardTest, ReseedingBothEnginesKeepsSignaturesPaired) {
+    PiccardParams onehot_params = params;
+    onehot_params.Validate();
+    PiccardParams sqrt_params = params;
+    sqrt_params.ValidateSqrt();
+
+    Piccard onehot_engine(onehot_params);
+    onehot_engine.KeyGen();
+    SqrtPiccard sqrt_engine(sqrt_params);
+    sqrt_engine.KeyGen();
+
+    std::vector<uint64_t> set;
+    for (uint64_t i = 1; i <= 100; i++) set.push_back(i);
+
+    std::vector<std::vector<uint64_t>> seen;
+    for (uint64_t trial_seed : {1001ULL, 2002ULL, 3003ULL}) {
+        onehot_engine.SetHashSeed(trial_seed);
+        sqrt_engine.SetHashSeed(trial_seed);
+
+        const auto onehot_sig = onehot_engine.ComputeSignature(set);
+        const auto sqrt_sig = sqrt_engine.ComputeSignature(set);
+
+        SCOPED_TRACE("trial_seed=" + std::to_string(trial_seed));
+        EXPECT_EQ(onehot_sig, sqrt_sig);
+        for (const auto& earlier : seen) EXPECT_NE(onehot_sig, earlier);
+        seen.push_back(onehot_sig);
+    }
+}

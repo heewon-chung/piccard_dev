@@ -98,6 +98,21 @@ public:
     }
 };
 
+/// Whether accuracy trials redraw the MinHash CRS.
+///   Resampled — default: each trial uses HashTrialSeed(root, trial, overlap).
+///   Fixed     — audit/sensitivity mode: every trial keeps whatever
+///               PiccardParams::hash_seed already holds, so the whole run uses
+///               one CRS. This is NOT the pre-CRS behaviour: Phase 1 replaced
+///               the coefficient expansion, so even seed 42 no longer
+///               reproduces the originally submitted numbers.
+/// Timing measurements always use a fixed CRS regardless of this setting, so
+/// hash-expansion cost never lands in a reported protocol timing.
+enum class HashRandomness { Resampled, Fixed };
+
+inline const char* HashRandomnessName(HashRandomness r) {
+    return r == HashRandomness::Fixed ? "fixed" : "resampled";
+}
+
 // ============================================================================
 // BenchmarkResult - Result data structure
 // ============================================================================
@@ -173,6 +188,19 @@ struct BenchmarkResult {
     double phase_bias_correction_ms_median = 0.0;
     // Size of the nonzero-denominator subset backing jaccard_rel_error.
     size_t rel_error_eligible_n = 0;
+
+    // ── Hash randomness provenance (R3-1, R3-2) ──────────────────────
+    // hash_randomness: accuracy-portion mode ("resampled"/"fixed"); "" when the
+    //   row has no accuracy component. The default is empty on purpose: a
+    //   writer that never sets it must not claim a mode it did not use.
+    // hash_seed: CRS actually used; on a combined row, the timing CRS.
+    // hash_root_seed: root the per-trial hash seeds derive from.
+    // accuracy_trials: accuracy sample count, separate from `trials`, which on
+    //   a combined row counts timing trials instead.
+    std::string hash_randomness;
+    uint64_t hash_seed = 0;
+    uint64_t hash_root_seed = 0;
+    size_t accuracy_trials = 0;
 };
 
 // ============================================================================
@@ -314,7 +342,10 @@ public:
               << "phase_rotate_sum_ms_sd,phase_rotate_sum_ms_median,"
               << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
               << "phase_bias_correction_ms_sd,phase_bias_correction_ms_median,"
-              << "rel_error_eligible_n\n";
+              << "rel_error_eligible_n,"
+              // Hash randomness provenance (R3-1/R3-2), appended so no
+              // existing column changes position.
+              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials\n";
     }
 
     void WriteRow(const BenchmarkResult& result) {
@@ -370,7 +401,11 @@ public:
               << result.phase_decrypt_ms_median << ","
               << result.phase_bias_correction_ms_sd << ","
               << result.phase_bias_correction_ms_median << ","
-              << result.rel_error_eligible_n << "\n";
+              << result.rel_error_eligible_n << ","
+              << result.hash_randomness << ","
+              << result.hash_seed << ","
+              << result.hash_root_seed << ","
+              << result.accuracy_trials << "\n";
     }
 };
 
@@ -388,6 +423,7 @@ struct BenchmarkConfig {
     uint64_t seed;                 // RNG seed for accuracy trials (0 = random)
     double overlap;                // Overlap fraction for combined mode
     size_t accuracy_trials;        // Number of accuracy trials in combined mode
+    HashRandomness hash_randomness;  // accuracy CRS mode; timing is always fixed
 
     BenchmarkConfig()
         : k(128),
@@ -398,7 +434,8 @@ struct BenchmarkConfig {
           security_level(SecurityLevel::STD128),
           seed(0),
           overlap(0.3),
-          accuracy_trials(100) {}
+          accuracy_trials(100),
+          hash_randomness(HashRandomness::Resampled) {}
 
     // Parse known flags, ignoring unrecognized ones (so callers can
     // layer additional flags on top without triggering errors).
@@ -440,6 +477,17 @@ struct BenchmarkConfig {
                 config.overlap = std::stod(arg.substr(10));
             } else if (arg.find("--accuracy_trials=") == 0) {
                 config.accuracy_trials = std::stoull(arg.substr(18));
+            } else if (arg.find("--hash_randomness=") == 0) {
+                std::string hr = arg.substr(18);
+                if (hr == "resampled") {
+                    config.hash_randomness = HashRandomness::Resampled;
+                } else if (hr == "fixed") {
+                    config.hash_randomness = HashRandomness::Fixed;
+                } else {
+                    throw std::invalid_argument(
+                        "Invalid hash_randomness: " + hr +
+                        " (expected 'resampled' or 'fixed')");
+                }
             } else if (arg == "--help" || arg == "-h") {
                 // Handled by caller
             }
@@ -466,6 +514,7 @@ struct BenchmarkConfig {
                   << "  --seed=N           RNG seed for accuracy trials (default: random)\n"
                   << "  --overlap=F        Overlap fraction for combined mode (default: 0.3)\n"
                   << "  --accuracy_trials=N  Accuracy trials in combined mode (default: 100)\n"
+                  << "  --hash_randomness=M  'resampled' or 'fixed' (default: resampled)\n"
                   << "  --help, -h         Print this help message\n";
     }
 
@@ -482,7 +531,8 @@ struct BenchmarkConfig {
                       security_level == SecurityLevel::STD192 ? "STD192" : "STD256") << "\n"
                   << "  Seed:      " << seed << "\n"
                   << "  Overlap:   " << overlap << "\n"
-                  << "  Acc trials:" << accuracy_trials << "\n";
+                  << "  Acc trials:" << accuracy_trials << "\n"
+                  << "  Hash rand: " << HashRandomnessName(hash_randomness) << "\n";
     }
 };
 
@@ -560,6 +610,30 @@ MakeRandomSetsWithOverlap(size_t set_size, double overlap_fraction,
 /// Ensures each (trial, overlap) pair gets a distinct but reproducible seed.
 inline uint64_t TrialSeed(uint64_t base_seed, size_t trial, double overlap) {
     return base_seed + trial * 10007 + static_cast<uint64_t>(overlap * 1000);
+}
+
+/// Domain-separated per-trial seed for the MinHash CRS.
+///
+/// TrialSeed above owns set generation; this owns hash-family selection. For
+/// the same (base_seed, trial, overlap) the two must differ, otherwise the set
+/// draw and the hash draw are correlated and the accuracy experiment is not
+/// sampling the probability space it claims to. An additive lattice like
+/// TrialSeed's would collide with it on some inputs, so mix through a distinct
+/// domain tag and a splitmix64 finalizer instead.
+///
+/// The signature deliberately excludes k, m, set_size, and engine identity:
+/// that is what lets a k/m/n sweep and the Piccard / Dynamic / one-hot / sqrt
+/// benchmarks reuse one hash seed per trial and keep their comparisons paired.
+inline uint64_t HashTrialSeed(uint64_t base_seed, size_t trial, double overlap) {
+    uint64_t x = base_seed
+               + 0x9E3779B97F4A7C15ULL * (static_cast<uint64_t>(trial) + 1)
+               + 0xD1B54A32D192ED03ULL *
+                     static_cast<uint64_t>(overlap * 1000.0);
+    x ^= 0xA5A5A5A5A5A5A5A5ULL;  // hash-domain tag, absent from TrialSeed
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27; x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    return x;
 }
 
 } // namespace benchmark
