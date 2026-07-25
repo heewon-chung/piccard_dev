@@ -1,6 +1,7 @@
 #include "core/minhash.h"
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -33,9 +34,13 @@ uint64_t MinHasher::ModMersenne(uint64_t val) {
     return val;
 }
 
+// Precondition: both operands must already be reduced (< P). With a, b < 2^61
+// the product stays below 2^122, so hi < 2^61 and hi + lo cannot overflow.
+// Passing an unreduced operand (e.g. a raw set element) lets hi approach 2^64,
+// wrapping hi + lo and shifting the result by 2^64 mod P = 8. Callers reduce
+// elements once via ModMersenne before entering the per-hash loop.
 uint64_t MinHasher::MulModMersenne(uint64_t a, uint64_t b) {
-    // Split into high and low 32-bit parts to avoid 128-bit overflow
-    // Using __uint128_t for platforms that support it
+    assert(a < kMersennePrime && b < kMersennePrime);
     __uint128_t product = static_cast<__uint128_t>(a) * b;
     uint64_t hi = static_cast<uint64_t>(product >> 61);
     uint64_t lo = static_cast<uint64_t>(product) & kMersennePrime;
@@ -54,7 +59,8 @@ std::vector<uint64_t> MinHasher::ComputeSignature(const std::vector<uint64_t>& s
 
         #pragma omp for nowait
         for (size_t e = 0; e < set.size(); e++) {
-            uint64_t elem = set[e];
+            // Reduce once per element, not once per hash function.
+            uint64_t elem = ModMersenne(set[e]);
             for (uint32_t i = 0; i < k_; i++) {
                 uint64_t h = ModMersenne(MulModMersenne(a_[i], elem) + b_[i]);
                 if (hash_range_ != std::numeric_limits<uint64_t>::max()) {
@@ -72,7 +78,9 @@ std::vector<uint64_t> MinHasher::ComputeSignature(const std::vector<uint64_t>& s
         }
     }
 #else
-    for (uint64_t elem : set) {
+    for (uint64_t raw_elem : set) {
+        // Reduce once per element, not once per hash function.
+        uint64_t elem = ModMersenne(raw_elem);
         for (uint32_t i = 0; i < k_; i++) {
             uint64_t h = ModMersenne(MulModMersenne(a_[i], elem) + b_[i]);
             if (hash_range_ != std::numeric_limits<uint64_t>::max()) {
@@ -86,7 +94,9 @@ std::vector<uint64_t> MinHasher::ComputeSignature(const std::vector<uint64_t>& s
     return signature;
 }
 
-std::vector<uint64_t> MinHasher::ComputeElementHashes(uint64_t elem) const {
+std::vector<uint64_t> MinHasher::ComputeElementHashes(uint64_t raw_elem) const {
+    // Reduce once per element, not once per hash function.
+    const uint64_t elem = ModMersenne(raw_elem);
     std::vector<uint64_t> hashes(k_);
     for (uint32_t i = 0; i < k_; i++) {
         uint64_t h = ModMersenne(MulModMersenne(a_[i], elem) + b_[i]);

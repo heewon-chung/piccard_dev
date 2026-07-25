@@ -246,3 +246,53 @@ TEST(MinHasher, Symmetry) {
 
     EXPECT_DOUBLE_EQ(j_ab, j_ba);
 }
+
+// ── Regression: unreduced elements (§5 of the hash-seed-crs plan) ────────────
+// h_i(x) = ((a_i * x + b_i) mod P) mod R is defined over Z_P, so hashing x and
+// hashing (x mod P) must agree. The original MulModMersenne computed
+// hi = (a_i * x) >> 61 without reducing x first; for x >= 2^61 and a_i close to
+// P, hi approaches 2^64 and hi + lo wrapped around, yielding a wrong hash.
+
+TEST(MinHasher, ElementHashesInvariantUnderModMersennePrime) {
+    constexpr uint64_t kP = (1ULL << 61) - 1;
+    MinHasher hasher(128, UINT64_MAX, 42);
+
+    // UINT64_MAX - 8 .. UINT64_MAX - 13 are witnesses: with seed 42 and k=128
+    // they drive (a_10 * elem) >> 61 close enough to 2^64 that the old
+    // hi + lo addition wrapped, shifting the result by 2^64 mod P = 8.
+    const std::vector<uint64_t> large_elems = {
+        UINT64_MAX - 8,
+        UINT64_MAX - 9,
+        UINT64_MAX - 10,
+        UINT64_MAX - 11,
+        UINT64_MAX - 12,
+        UINT64_MAX - 13,
+        kP,
+        kP + 1,
+        1ULL << 61,
+        (1ULL << 61) + 12345,
+        1ULL << 62,
+        1ULL << 63,
+        UINT64_MAX - 1,
+        UINT64_MAX,
+    };
+
+    for (uint64_t elem : large_elems) {
+        SCOPED_TRACE("elem=" + std::to_string(elem));
+        EXPECT_EQ(hasher.ComputeElementHashes(elem),
+                  hasher.ComputeElementHashes(elem % kP));
+    }
+}
+
+TEST(MinHasher, SignatureInvariantUnderModMersennePrime) {
+    constexpr uint64_t kP = (1ULL << 61) - 1;
+    MinHasher hasher(64, UINT64_MAX, 42);
+
+    const std::vector<uint64_t> big = {UINT64_MAX, 1ULL << 63,
+                                       (1ULL << 61) + 7};
+    std::vector<uint64_t> reduced;
+    reduced.reserve(big.size());
+    for (uint64_t elem : big) reduced.push_back(elem % kP);
+
+    EXPECT_EQ(hasher.ComputeSignature(big), hasher.ComputeSignature(reduced));
+}
