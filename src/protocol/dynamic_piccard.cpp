@@ -8,7 +8,7 @@ DynamicPiccard::DynamicPiccard(const PiccardParams& params)
 std::unique_ptr<BottomStructure>
 DynamicPiccard::InitSet(const std::vector<uint64_t>& set) const {
     auto bottom = std::make_unique<BottomStructure>(
-        params_.k, params_.bottom_depth, params_.hash_range);
+        params_.k, params_.bottom_depth, params_.hash_range, params_.hash_seed);
     bottom->Initialize(set);
     return bottom;
 }

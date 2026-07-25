@@ -7,7 +7,8 @@ namespace piccard {
 SqrtPiccard::SqrtPiccard(const PiccardParams& params) : params_(params) {}
 
 void SqrtPiccard::KeyGen() {
-    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range);
+    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                          params_.hash_seed);
 
     bfv_ = std::make_unique<BFVContext>(params_);
     bfv_->Initialize();

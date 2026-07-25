@@ -249,3 +249,50 @@ TEST(PiccardParams, FeatureDimAndRingDimConsistency) {
             << "ring_dim must be power of 2";
     }
 }
+
+// ── Public CRS seed (§"CRS 표현") ────────────────────────────────────────────
+// hash_seed is a public parameter, not a derived one: Validate()/ValidateSqrt()
+// must preserve whatever the caller set and must not range-check it, since
+// every uint64_t is a valid seed.
+
+TEST(PiccardParams, HashSeedDefaultsTo42) {
+    PiccardParams params;
+    EXPECT_EQ(params.hash_seed, 42ULL);
+}
+
+TEST(PiccardParams, ValidatePreservesDefaultHashSeed) {
+    PiccardParams params;
+    params.Validate();
+    EXPECT_EQ(params.hash_seed, 42ULL);
+}
+
+TEST(PiccardParams, ValidatePreservesCustomHashSeed) {
+    const uint64_t seeds[] = {0ULL, 1ULL, 42ULL, 12345ULL,
+                              UINT64_MAX - 1, UINT64_MAX};
+    for (uint64_t seed : seeds) {
+        PiccardParams params;
+        params.hash_seed = seed;
+        params.Validate();
+        RecordProperty("seed_" + std::to_string(seed), "preserved");
+        EXPECT_EQ(params.hash_seed, seed);
+    }
+}
+
+TEST(PiccardParams, ValidateSqrtPreservesCustomHashSeed) {
+    const uint64_t seeds[] = {0ULL, 7ULL, UINT64_MAX};
+    for (uint64_t seed : seeds) {
+        PiccardParams params;
+        params.hash_seed = seed;
+        params.ValidateSqrt();
+        EXPECT_EQ(params.hash_seed, seed);
+    }
+}
+
+// Extreme seeds must not make expansion throw or produce a degenerate family.
+TEST(PiccardParams, ExtremeHashSeedsAreAccepted) {
+    for (uint64_t seed : {0ULL, UINT64_MAX}) {
+        PiccardParams params;
+        params.hash_seed = seed;
+        EXPECT_NO_THROW(params.Validate());
+    }
+}
