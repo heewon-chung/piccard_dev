@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "protocol/dynamic_piccard.h"
 
+#include <stdexcept>
+
 using namespace piccard;
 
 class DynamicEngineTest : public ::testing::Test {
@@ -169,4 +171,91 @@ TEST_F(DynamicEngineTest, ManyMutationsStillProducesValidResult) {
     // After replacing all elements in A, similarity with B should be low
     EXPECT_LT(result.jaccard_estimate, 0.3)
         << "Replacing all elements should yield low similarity";
+}
+
+// ── Public CRS propagation (§"실행 중 재추출") ────────────────────────────────
+
+// Same equivalence as MatchesBasicProtocol, but under a seed that is not the
+// default 42, so a path that silently kept the old default would show up here.
+TEST_F(DynamicEngineTest, MatchesBasicProtocolUnderCustomHashSeed) {
+    PiccardParams custom = params;
+    custom.hash_seed = 20260725ULL;
+    custom.Validate();
+
+    DynamicPiccard custom_engine(custom);
+    custom_engine.KeyGen();
+    ASSERT_EQ(custom_engine.GetParams().hash_seed, 20260725ULL);
+
+    std::vector<uint64_t> set_a, set_b;
+    for (uint64_t i = 0; i < 100; i++) set_a.push_back(i);
+    for (uint64_t i = 50; i < 150; i++) set_b.push_back(i);
+
+    auto basic_result = custom_engine.Run(set_a, set_b);
+
+    auto bottom_a = custom_engine.InitSet(set_a);
+    auto bottom_b = custom_engine.InitSet(set_b);
+    EXPECT_EQ(bottom_a->GetSeed(), 20260725ULL);
+    EXPECT_EQ(bottom_b->GetSeed(), 20260725ULL);
+
+    auto dynamic_result = custom_engine.Run(*bottom_a, *bottom_b);
+
+    EXPECT_EQ(basic_result.match_count, dynamic_result.match_count);
+    EXPECT_DOUBLE_EQ(basic_result.jaccard_estimate,
+                     dynamic_result.jaccard_estimate);
+}
+
+// A structure built under the previous CRS must be refused, not silently
+// compared against one built under the new CRS.
+TEST_F(DynamicEngineTest, RejectsBottomStructureFromPreviousCrs) {
+    std::vector<uint64_t> set;
+    for (uint64_t i = 0; i < 60; i++) set.push_back(i);
+
+    auto stale = engine->InitSet(set);
+    ASSERT_EQ(stale->GetSeed(), params.hash_seed);
+
+    engine->SetHashSeed(params.hash_seed + 1);
+    auto fresh = engine->InitSet(set);
+    ASSERT_NE(stale->GetSeed(), fresh->GetSeed());
+
+    EXPECT_THROW(engine->Encrypt(*stale), std::invalid_argument);
+    EXPECT_THROW(engine->Run(*stale, *fresh), std::invalid_argument);
+    EXPECT_THROW(engine->Run(*fresh, *stale), std::invalid_argument);
+    EXPECT_NO_THROW(engine->Run(*fresh, *fresh));
+}
+
+// Reseeding must change the hash family but leave the BFV context and keys
+// alone -- that is what makes per-trial resampling affordable.
+TEST_F(DynamicEngineTest, SetHashSeedChangesFamilyButKeepsCryptoContext) {
+    std::vector<uint64_t> set;
+    for (uint64_t i = 0; i < 60; i++) set.push_back(i);
+
+    const auto sig_before = engine->ComputeSignature(set);
+    const uint32_t ring_before = engine->GetParams().ring_dim;
+    const size_t slots_before = engine->GetBFVContext().GetSlotCount();
+
+    engine->SetHashSeed(999983ULL);
+
+    EXPECT_EQ(engine->GetParams().hash_seed, 999983ULL);
+    EXPECT_NE(engine->ComputeSignature(set), sig_before);
+    EXPECT_EQ(engine->GetParams().ring_dim, ring_before);
+    EXPECT_EQ(engine->GetBFVContext().GetSlotCount(), slots_before);
+}
+
+// After reseeding, freshly built structures agree with the static path again.
+TEST_F(DynamicEngineTest, StructuresBuiltAfterReseedMatchBasicProtocol) {
+    std::vector<uint64_t> set_a, set_b;
+    for (uint64_t i = 0; i < 100; i++) set_a.push_back(i);
+    for (uint64_t i = 50; i < 150; i++) set_b.push_back(i);
+
+    engine->SetHashSeed(31337ULL);
+
+    auto basic_result = engine->Run(set_a, set_b);
+    auto bottom_a = engine->InitSet(set_a);
+    auto bottom_b = engine->InitSet(set_b);
+    auto dynamic_result = engine->Run(*bottom_a, *bottom_b);
+
+    EXPECT_EQ(bottom_a->GetSeed(), 31337ULL);
+    EXPECT_EQ(basic_result.match_count, dynamic_result.match_count);
+    EXPECT_DOUBLE_EQ(basic_result.jaccard_estimate,
+                     dynamic_result.jaccard_estimate);
 }

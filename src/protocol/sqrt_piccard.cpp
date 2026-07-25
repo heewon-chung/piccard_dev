@@ -6,6 +6,14 @@ namespace piccard {
 
 SqrtPiccard::SqrtPiccard(const PiccardParams& params) : params_(params) {}
 
+void SqrtPiccard::SetHashSeed(uint64_t seed) {
+    params_.hash_seed = seed;
+    if (hasher_) {
+        hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                              seed);
+    }
+}
+
 void SqrtPiccard::KeyGen() {
     hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
                                           params_.hash_seed);

@@ -35,6 +35,15 @@ public:
     // void KeyGen();
     // Ciphertext Evaluate(ct_x, ct_y);
     // JaccardResult Decrypt(ct);
+    // void SetHashSeed(uint64_t);  -- structures built afterwards use the new
+    //                                 CRS; ones built before are rejected below.
+
+private:
+    // Throws if `bs` was built under a different CRS than the one currently
+    // configured. Checked where the structure is consumed rather than where it
+    // is created: signatures only become incomparable when they meet, and a
+    // creation-time check would put the rejection out of a test's reach.
+    void RequireCurrentHashCrs(const BottomStructure& bs) const;
 };
 
 } // namespace piccard
