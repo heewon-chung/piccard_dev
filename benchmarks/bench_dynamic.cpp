@@ -13,6 +13,7 @@
 #include <iostream>
 #include <iomanip>
 #include <set>
+#include <string>
 #include <vector>
 
 using namespace piccard;
@@ -97,6 +98,13 @@ struct DynamicResult {
     double phase_compute_ms_sd = -1.0;    double phase_compute_ms_median = 0.0;
     double phase_decrypt_ms_sd = -1.0;    double phase_decrypt_ms_median = 0.0;
     size_t rel_error_eligible_n = 0;
+
+    // Hash randomness provenance (R3-1/R3-2); see BenchmarkResult for the
+    // meaning of each field.
+    std::string hash_randomness;  // "" until a writer sets it; see BenchmarkResult
+    uint64_t hash_seed = 0;
+    uint64_t hash_root_seed = 0;
+    size_t accuracy_trials = 0;
 };
 
 class DynamicCSVWriter {
@@ -123,7 +131,8 @@ public:
               << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
               << "phase_compute_ms_sd,phase_compute_ms_median,"
               << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-              << "rel_error_eligible_n\n";
+              << "rel_error_eligible_n,"
+              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials\n";
     }
 
     void WriteRow(const DynamicResult& r) {
@@ -153,7 +162,11 @@ public:
               << r.phase_encrypt_ms_sd << "," << r.phase_encrypt_ms_median << ","
               << r.phase_compute_ms_sd << "," << r.phase_compute_ms_median << ","
               << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << "\n";
+              << r.rel_error_eligible_n << ","
+              << r.hash_randomness << ","
+              << r.hash_seed << ","
+              << r.hash_root_seed << ","
+              << r.accuracy_trials << "\n";
     }
 };
 
@@ -336,6 +349,11 @@ static DynamicResult RunMultiTrialDynamic(
     result.rel_error_eligible_n = elig;
     result.ops_insert_per_sec = sum_ins / n;
     result.ops_delete_per_sec = sum_del / n;
+    // Timing always runs under one CRS; record which, so a timing row is
+    // reproducible from the CSV rather than implicitly "whatever the default is".
+    result.hash_seed = engine.GetParams().hash_seed;
+    result.hash_root_seed = engine.GetParams().hash_seed;
+    result.hash_randomness = "fixed";
 
     return result;
 }
@@ -484,6 +502,15 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
             for (double frac : overlaps) {
                 for (size_t t = 0; t < config.trials; t++) {
                     std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    const uint64_t trial_hash_seed =
+                        (config.hash_randomness ==
+                         benchmark::HashRandomness::Resampled)
+                            ? benchmark::HashTrialSeed(config.seed, t, frac)
+                            : params.hash_seed;
+                    // Reseed first: both structures must be built under the CRS
+                    // this trial will run under, or Run() rejects them.
+                    engine.SetHashSeed(trial_hash_seed);
+
                     auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
                         config.set_size, frac, rng);
                     double j_true = ExactJaccard(sa, sb);
@@ -510,6 +537,11 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
                     dr.trials = 1;
                     dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
+                    dr.accuracy_trials = 1;
+                    dr.hash_randomness =
+                        benchmark::HashRandomnessName(config.hash_randomness);
+                    dr.hash_seed = trial_hash_seed;
+                    dr.hash_root_seed = config.seed;
                     csv.WriteRow(dr);
                 }
             }
@@ -550,6 +582,15 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
             for (double frac : overlaps) {
                 for (size_t t = 0; t < config.trials; t++) {
                     std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    const uint64_t trial_hash_seed =
+                        (config.hash_randomness ==
+                         benchmark::HashRandomness::Resampled)
+                            ? benchmark::HashTrialSeed(config.seed, t, frac)
+                            : params.hash_seed;
+                    // Reseed first: both structures must be built under the CRS
+                    // this trial will run under, or Run() rejects them.
+                    engine.SetHashSeed(trial_hash_seed);
+
                     auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
                         config.set_size, frac, rng);
                     double j_true = ExactJaccard(sa, sb);
@@ -576,6 +617,11 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
                     dr.trials = 1;
                     dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
+                    dr.accuracy_trials = 1;
+                    dr.hash_randomness =
+                        benchmark::HashRandomnessName(config.hash_randomness);
+                    dr.hash_seed = trial_hash_seed;
+                    dr.hash_root_seed = config.seed;
                     csv.WriteRow(dr);
                 }
             }
@@ -616,6 +662,12 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
             for (double frac : overlaps) {
                 for (size_t t = 0; t < config.trials; t++) {
                     std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
+                    const uint64_t trial_hash_seed =
+                        (config.hash_randomness ==
+                         benchmark::HashRandomness::Resampled)
+                            ? benchmark::HashTrialSeed(config.seed, t, frac)
+                            : params.hash_seed;
+                    engine.SetHashSeed(trial_hash_seed);
                     auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(sz, frac, rng);
                     double j_true = ExactJaccard(sa, sb);
 
@@ -641,6 +693,11 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                     dr.jaccard_rel_error = (j_true > 0.0) ? (err / j_true) : -1.0;
                     dr.trials = 1;
                     dr.rel_error_eligible_n = (j_true > 0.0) ? 1 : 0;
+                    dr.accuracy_trials = 1;
+                    dr.hash_randomness =
+                        benchmark::HashRandomnessName(config.hash_randomness);
+                    dr.hash_seed = trial_hash_seed;
+                    dr.hash_root_seed = config.seed;
                     csv.WriteRow(dr);
                 }
             }

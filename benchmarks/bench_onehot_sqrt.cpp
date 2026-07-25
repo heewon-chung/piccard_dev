@@ -415,6 +415,14 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         for (size_t t = 0; t < config.accuracy_trials; t++) {
             uint64_t tseed = TrialSeed(config.seed, t, overlap);
             std::mt19937_64 rng(tseed);
+            // Both encodings must share the CRS in a given trial, otherwise the
+            // paired comparison also measures hash noise.
+            const uint64_t trial_hash_seed =
+                (config.hash_randomness == HashRandomness::Resampled)
+                    ? HashTrialSeed(config.seed, t, overlap)
+                    : pp.hash_seed;   // == sp.hash_seed; both default to 42
+            onehot.SetHashSeed(trial_hash_seed);
+            sqrt_eng.SetHashSeed(trial_hash_seed);
             auto [set_a, set_b] = MakeRandomSetsWithOverlap(
                 config.set_size, overlap, rng);
             double j_true = ExactJaccard(set_a, set_b);
@@ -443,6 +451,12 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         oh_br.accuracy_p75 = oh_stats.p75;
         oh_br.accuracy_p95 = oh_stats.p95;
         oh_br.accuracy_max = oh_stats.max_error;
+        oh_br.trials = oh_stats.num_trials;
+        oh_br.accuracy_trials = oh_stats.num_trials;
+        oh_br.hash_randomness = HashRandomnessName(config.hash_randomness);
+        oh_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
+                              ? pp.hash_seed : 0;
+        oh_br.hash_root_seed = config.seed;
         csv.WriteRow(oh_br);
 
         // Sqrt accuracy stats
@@ -460,6 +474,12 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         sq_br.accuracy_p75 = sq_stats.p75;
         sq_br.accuracy_p95 = sq_stats.p95;
         sq_br.accuracy_max = sq_stats.max_error;
+        sq_br.trials = sq_stats.num_trials;
+        sq_br.accuracy_trials = sq_stats.num_trials;
+        sq_br.hash_randomness = HashRandomnessName(config.hash_randomness);
+        sq_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
+                              ? sp.hash_seed : 0;
+        sq_br.hash_root_seed = config.seed;
         csv.WriteRow(sq_br);
 
         std::cerr << "  overlap=" << overlap
