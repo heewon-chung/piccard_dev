@@ -1,10 +1,82 @@
 #include "fhe/bfv_context.h"
 
+#include "math/distributiongenerator.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace piccard {
+
+namespace {
+
+/// A polynomial whose every coefficient is an independent uniform integer on
+/// [-2^bits, 2^bits - 1], returned in EVALUATION format so it can be added to
+/// a ciphertext component directly.
+///
+/// `bits` exceeds 128 for every configuration and reaches 605 for the
+/// threshold variant at STD128, so the value is never materialised. Each coefficient is
+/// drawn as 32-bit words w_0, w_1, ... representing u = sum_j w_j * 2^(32j),
+/// and reduced per RNS limb using u mod q = sum_j w_j * (2^(32j) mod q).
+/// Subtracting 2^bits mod q centres the result.
+lbcrypto::DCRTPoly SampleFloodingNoise(
+    const std::shared_ptr<lbcrypto::DCRTPoly::Params>& params, uint32_t bits) {
+    auto& prng = lbcrypto::PseudoRandomNumberGenerator::GetPRNG();
+
+    const uint32_t n = params->GetRingDimension();
+    const auto& towers = params->GetParams();
+    const uint32_t total_bits = bits + 1;              // u is drawn on [0, 2^(bits+1))
+    const uint32_t num_words = (total_bits + 31) / 32;
+    const uint32_t top_bits = total_bits - 32 * (num_words - 1);
+
+    // Draw every coefficient's words once; the same integer has to be reduced
+    // consistently against each limb, so it cannot be re-drawn per limb.
+    std::vector<uint32_t> words(static_cast<size_t>(n) * num_words);
+    for (size_t i = 0; i < words.size(); i++) {
+        words[i] = prng();
+    }
+    // Trim the most significant word so u stays below 2^(bits+1).
+    if (top_bits < 32) {
+        const uint32_t mask = (1u << top_bits) - 1u;
+        for (uint32_t c = 0; c < n; c++) {
+            words[static_cast<size_t>(c) * num_words + (num_words - 1)] &= mask;
+        }
+    }
+
+    lbcrypto::DCRTPoly noise(params, Format::COEFFICIENT, true);
+
+    for (size_t i = 0; i < towers.size(); i++) {
+        const lbcrypto::NativeInteger q = towers[i]->GetModulus();
+
+        // pow[j] = 2^(32j) mod q
+        std::vector<lbcrypto::NativeInteger> pow(num_words);
+        pow[0] = lbcrypto::NativeInteger(1).Mod(q);
+        lbcrypto::NativeInteger step = lbcrypto::NativeInteger(1).Mod(q);
+        for (uint32_t s = 0; s < 32; s++) step = step.ModAdd(step, q);   // 2^32 mod q
+        for (uint32_t j = 1; j < num_words; j++) pow[j] = pow[j - 1].ModMul(step, q);
+
+        // centre = 2^bits mod q
+        lbcrypto::NativeInteger centre = lbcrypto::NativeInteger(1).Mod(q);
+        for (uint32_t s = 0; s < bits; s++) centre = centre.ModAdd(centre, q);
+
+        lbcrypto::NativePoly limb(towers[i], Format::COEFFICIENT, true);
+        for (uint32_t c = 0; c < n; c++) {
+            lbcrypto::NativeInteger acc(0);
+            const uint32_t* w = &words[static_cast<size_t>(c) * num_words];
+            for (uint32_t j = 0; j < num_words; j++) {
+                acc = acc.ModAdd(lbcrypto::NativeInteger(w[j]).ModMul(pow[j], q), q);
+            }
+            limb[c] = acc.ModSub(centre, q);
+        }
+        noise.SetElementAtIndex(i, limb);
+    }
+
+    noise.SetFormat(Format::EVALUATION);
+    return noise;
+}
+
+} // namespace
 
 BFVContext::BFVContext(const PiccardParams& params) : params_(params) {}
 
@@ -226,6 +298,29 @@ BFVContext::EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
     }
 
     return result;
+}
+
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+BFVContext::Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const {
+    // Throws unless Validate() sized the flooding term against the calibration
+    // table, which is what keeps an unsized parameter set from producing a mask
+    // smaller than the evaluation noise it is supposed to hide.
+    const uint32_t bits = params_.FloodNoiseBits();
+
+    // Re-randomize first. Smudging c0 hides the phase, but leaves c1 a
+    // deterministic function of both operands -- and the receiver never saw
+    // the sender's. Adding a fresh encryption of zero makes the pair itself
+    // simulatable, which is what appendix.tex's "fresh encryption" claims.
+    // Its own noise is negligible beside the mask added below.
+    std::vector<int64_t> zeros(params_.ring_dim, 0);
+    auto out = cc_->EvalAdd(ct, Encrypt(zeros));
+
+    auto elem_params = cc_->GetCryptoParameters()->GetElementParams();
+
+    // Decryption evaluates c0 + c1*s, so a term added to c0 lands in the
+    // decryption noise additively; adding to c1 would be scaled by the key.
+    out->GetElements()[0] += SampleFloodingNoise(elem_params, bits);
+    return out;
 }
 
 } // namespace piccard

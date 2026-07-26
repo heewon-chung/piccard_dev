@@ -52,6 +52,21 @@ public:
     EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
                 const std::vector<int64_t>& coeffs) const;
 
+    // Add the masking noise the security proof requires, and return the result.
+    //
+    // The receiver can otherwise inspect the decryption noise of an evaluated
+    // ciphertext and learn more than the output, which is what stops the
+    // receiver's view from being simulatable. Adding a uniform mask of
+    // magnitude 2^FloodNoiseBits() -- calibrated to exceed any evaluation
+    // noise this circuit can produce by 2^lambda_stat -- brings the real view
+    // within statistical distance 2^-lambda_stat of a fresh encryption.
+    //
+    // Apply this ONLY to a ciphertext being handed back to the receiver. The
+    // mask is enormous by construction, so any further homomorphic operation
+    // on a flooded ciphertext will exhaust the modulus and destroy the result.
+    lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+    Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const;
+
     uint32_t GetSlotCount() const { return params_.ring_dim; }
 
     const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& GetCryptoContext() const {
