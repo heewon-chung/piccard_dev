@@ -1,0 +1,45 @@
+#include "baselines/bcg12.h"
+#include "core/minhash.h"
+#include <gtest/gtest.h>
+
+using namespace piccard::baselines;
+
+TEST(Bcg12, MinHashMatchesPlaintextEstimator) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 64;
+    p.minhash_seed = 42;
+    BCG12 e(p);
+    e.Setup();
+    std::vector<uint64_t> X{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    std::vector<uint64_t> Y{6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    auto qc = e.RunQuery(X, Y);
+    piccard::MinHasher mh(p.k, UINT64_MAX, p.minhash_seed);
+    double ref = piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y));
+    EXPECT_DOUBLE_EQ(qc.jaccard_estimate, ref);
+    EXPECT_EQ(e.Security(), SecurityClass::AHE_NoLeakage);
+    EXPECT_STREQ(e.Name(), "bcg12_mh_ec");
+    EXPECT_GT(qc.total_ms, 0.0);
+    EXPECT_GT(qc.comm_bytes, 0u);
+}
+
+// Partial-overlap fixture -> a non-trivial (!=0, !=1) estimate, the meaningful case.
+// (Position-tag disambiguation of equal sketch values at different indices is
+// proven directly at the PSI-CA layer in Task 1.2 PositionTagDisambiguates;
+// full-range MinHash cannot force intra-signature value repeats, so asserting it
+// here would be vacuous.)
+TEST(Bcg12, MinHashPartialOverlapIdentity) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::FF;
+    p.k = 64;
+    p.minhash_seed = 7;
+    BCG12 e(p);
+    e.Setup();
+    std::vector<uint64_t> X{1, 2, 3, 4, 5, 6};
+    std::vector<uint64_t> Y{4, 5, 6, 7, 8, 9};
+    piccard::MinHasher mh(p.k, UINT64_MAX, 7);
+    double ref = piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y));
+    EXPECT_DOUBLE_EQ(e.RunQuery(X, Y).jaccard_estimate, ref);
+}
