@@ -50,7 +50,6 @@
 #include "benchmark_utils.h"  // Timer, MakeRandomSetsWithOverlap, ComputeDispersion
 
 using piccard::baselines::SJ16;
-using piccard::benchmark::ComputeDispersion;
 using piccard::benchmark::MakeRandomSetsWithOverlap;
 
 namespace {
@@ -355,7 +354,8 @@ MedIqr MeasureEncMs(const SJ16& s, size_t enc_iters,
 // Short git commit for provenance; "unknown" if git is unavailable/not a repo.
 std::string GitCommit() {
     std::string commit = "unknown";
-    FILE* p = popen("git rev-parse --short HEAD 2>/dev/null", "r");
+    // Full 40-char SHA (not --short): permanently unambiguous provenance.
+    FILE* p = popen("git rev-parse HEAD 2>/dev/null", "r");
     if (p) {
         char buf[128] = {0};
         if (std::fgets(buf, sizeof(buf), p)) {
@@ -370,16 +370,23 @@ std::string GitCommit() {
     return commit;
 }
 
-// SHA-256 over the exact source files that define the measured binary, hashed
-// in a fixed deterministic order (run from the repo root). This uniquely
-// identifies the measured source even when it is uncommitted, so a reviewer can
-// reconstruct the binary that git_commit alone cannot. "unknown" if popen fails.
+// Complete path-bound source manifest hash: SHA-256 of the per-file
+// "<digest>  <path>" listing over EVERY source/build input that defines the
+// measured binary (all compiled headers + translation units + the CMake build
+// definition), in a fixed order. Because the inner listing carries each file's
+// path and its own digest, the outer hash binds filenames and file boundaries,
+// not just concatenated bytes. Uniquely identifies the measured source tree
+// even when uncommitted; "unknown" if popen fails.
 std::string SourceSha256() {
     std::string digest = "unknown";
     FILE* p = popen(
-        "cat include/baselines/csprng.h include/baselines/paillier.h "
-        "include/baselines/sj16.h src/baselines/paillier.cpp "
-        "src/baselines/sj16.cpp benchmarks/bench_sj16_calibrate.cpp "
+        "shasum -a 256 "
+        "include/baselines/csprng.h include/baselines/paillier.h "
+        "include/baselines/sj16.h include/baselines/pjs_baseline.h "
+        "include/util/params.h benchmarks/benchmark_utils.h "
+        "benchmarks/bench_sj16_calibrate.cpp "
+        "src/baselines/paillier.cpp src/baselines/sj16.cpp "
+        "CMakeLists.txt "
         "2>/dev/null | shasum -a 256",
         "r");
     if (p) {
