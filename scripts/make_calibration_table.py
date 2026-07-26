@@ -206,13 +206,21 @@ def main():
     cells = build_cells(rows)
     chosen, rejected = select(cells, args.lam, args.margin)
 
+    dest = args.out or os.path.join(args.dir, "TABLE.md")
+
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, check=True).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, check=True).stdout.strip()
+        # Exclude this script's own outputs: regenerating them dirties the tree,
+        # so counting them would make every run report "dirty" no matter what.
+        outputs = {os.path.basename(dest), "noise_calibration.inc"}
+        dirty = [
+            line for line in subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, check=True).stdout.splitlines()
+            if line.strip() and os.path.basename(line.split()[-1]) not in outputs
+        ]
         if dirty:
             commit += " (working tree dirty)"
     except Exception:
@@ -280,7 +288,6 @@ def main():
               file=sys.stderr)
 
     text = "\n".join(out) + "\n"
-    dest = args.out or os.path.join(args.dir, "TABLE.md")
     with open(dest, "w") as fh:
         fh.write(text)
     print(text)
