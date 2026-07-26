@@ -509,6 +509,12 @@ step 10의 판정 기준(정확히 일치 vs 예측 이상)을 확정할 것.
 
 ### Phase 2 — flooding 연산 (`include/fhe/bfv_context.h`, `src/fhe/bfv_context.cpp`)
 
+**완료 (2026-07-26, Task 1–5, 커밋 `fc82fcf..f3033f2`).** 아래 항목 전부 구현되고 `ctest`
+13/13으로 검증됨: `BFVContext::Flood()`(§5.3, 재랜덤화 포함), `Initialize()` 검증 로직 7–10,
+`Piccard`/`SqrtPiccard`/`ThresholdPiccard`의 `Evaluate`/`EvaluateRaw` 분리, `bench_noise.cpp`의
+raw 경로 전환. 원 계획에 없던 확장(`SqrtPiccard`/`ThresholdPiccard`에도 `EvaluateRaw` 추가)은
+Task 5에서 이뤄졌고 §8-12에 기록. 비용 측정과 재랜덤화 결정의 귀결은 §8-11, §8-13 참조.
+
 - `Initialize()`에 §5.2의 검증 로직 7–10 추가
 - `Flood()` 구현 (§5.3)
 - 적용 지점:
@@ -687,6 +693,60 @@ step 10의 판정 기준(정확히 일치 vs 예측 이상)을 확정할 것.
 10. **STD192 / STD256는 캘리브레이션 표에 없다** — 해당 레벨로 벤치마크를 돌리면
    `Validate()`가 던진다. 의도된 fail-closed 동작이며, 논문은 STD128만 보고한다.
    해당 레벨이 필요해지면 캘리브레이션을 확장할 것.
+
+11. **`Flood()` 자체 비용 측정 (Task 6, TOY, N=1024, `FloodNoiseBits()`=140비트).**
+    `bench_noise`는 Task 5 이후 모든 경로가 `EvaluateRaw`를 쓰고 그 파라미터는
+    `CalibrationAccess`에서 나와 `flooding_sized_ == false`이므로 `Flood()`를 측정할 수
+    없다(`FloodNoiseBits()`가 throw). `tests/unit/test_bfv_context.cpp`의
+    `FloodCostIsRecorded`(20회 반복, 중앙값)가 검증된 컨텍스트와 `Flood()`가 만나는
+    유일한 지점이라 여기서 측정했다:
+
+    - 총 비용: 중앙값 **1,119 μs**
+    - 분리 — 재랜덤화(`ctx->Encrypt(zeros)` 776 μs + `cc->EvalAdd(ct, ...)` 29 μs =
+      **805 μs, 총합의 약 72%**) vs 마스크 샘플링·합산 나머지(**≈314 μs, 약 28%**).
+      두 조각 모두 `BFVContext`에 공개된 API로 테스트에서 직접 측정했으며 `Flood()`
+      본체는 계측하지 않았다.
+    - **재랜덤화가 지배적이다.** §3.4가 기록한 "flooding 연산 자체는 전체의 3% 미만"은
+      재랜덤화가 없던 스파이크 측정치이고, 완전한 공개키 암호화(`Encrypt(zeros)`)가
+      추가된 지금은 "flooding 비용"이라고 부르는 수치의 대부분이 사실 그 암호화다.
+    - N=1024 TOY 스케일 숫자이며, threshold @ STD128(N=32768, 605비트 마스크, 14 limb)에
+      그대로 적용할 수 없다. STD128 수치가 필요하면 별도 하네스로 Phase 4에서 재측정한다.
+
+12. **Task 5 범위 확장: `SqrtPiccard`/`ThresholdPiccard`에 `EvaluateRaw` 추가.** Task 3이
+    `Piccard::Evaluate`를 플러딩 버전으로 바꾸자 `bench_noise`의 네 호출 지점
+    (`RunOneHot`/`RunSqrt`/`RunThreshold`의 두 호출)이 캘리브레이션 미확정 파라미터
+    (`flooding_sized_ == false`)에서 `FloodNoiseBits()`를 요구해 전부 throw했다. 하네스에서
+    `lambda_stat`/`flood_margin_bits`를 조정해 플러딩을 우회하는 대안은 **작동하지 않는다** —
+    throw는 마스크 크기가 아니라 `flooding_sized_` 플래그 하나에 무조건 걸려 있기 때문이다
+    (`params.cpp:105-111`). 따라서 `SqrtPiccard`/`ThresholdPiccard`에도 `Piccard`와 동일한
+    `EvaluateRaw`/`Evaluate = Flood(EvaluateRaw)` 쌍을 추가해 세 회로가 같은 계약을
+    노출하도록 했다. 원 계획의 File Structure 표를 벗어나는 확장이며 Task 5의 "Scope note"에
+    명시적으로 기록됨.
+
+13. **재랜덤화 결정: 채택.** `3_noise-flooding.md`(본 문서) 상단의 "Open decision" 섹션이
+    2026-07-26에 확정한 대로, `Flood()`는 마스크를 더하기 전에
+    `cc_->EvalAdd(ct, Encrypt(zeros))`로 먼저 재랜덤화한다(`src/fhe/bfv_context.cpp`,
+    Task 1 Step 4). `appendix.tex`의 "fresh encryption" 서술이 구현과 일치하므로 논문 수정은
+    불필요. 다만 비용은 무시할 수 있는 수준이 아니다 — §8-11에서 보듯 재랜덤화가 `Flood()`
+    전체 비용의 약 72%를 차지한다.
+
+14. **Union-bound 자격 부여.** 수신자는 암호문의 `N`개 좌표 전부를 본다. smudging lemma가
+    좌표 하나당 주는 통계적 거리 `2^-(lambda_stat + flood_margin_bits)`를 그대로 전체
+    보안 주장에 쓸 수 없고, union bound로 `N * 2^-(lambda_stat + flood_margin_bits)`가
+    실제로 전달되는 통계적 거리다. `lambda_stat=64`, `flood_margin_bits=8`, `N=32768`
+    (=2^15)일 때 `2^15 * 2^-72 = 2^-57`이며, 쓰기 쉬운 `2^-lambda_stat = 2^-64`보다 약하다.
+    `flood_margin_bits`는 B_eval 과소평가를 덮기 위한 마진이지 이 union bound를 덮기 위한
+    것이 아니므로, 새 주석이나 논문 문구에 `2^-lambda_stat`만 단독으로 쓰지 말 것.
+
+15. **`bench_threshold`가 이제 라이브러리 API를 통해 플러딩된다 (threshold-fpfn에 알림).**
+    이 브랜치는 `benchmarks/bench_threshold.cpp`를 편집하지 않았지만, 그 파일의 여러
+    호출 지점(`engine->GetPiccard().Run(sa, sb)`, 예: `bench_threshold.cpp:462,518,570,
+    621,688,754`)은 `Piccard::Run` → `Piccard::Evaluate`(Task 3)를 거치므로 이 브랜치가
+    머지되면 자동으로 `Flood()`가 적용된다. 따라서 이 벤치마크의 wall-clock 수치는 조용히
+    변하는데, §8-8에서 요청한 `phase_flood_ms` 열이 아직 그 파일에 없어 변화폭을 어느
+    단계 탓으로 돌릴 방법이 없다. threshold-fpfn이 §8-8의 요구사항(Phase 7
+    `EvalPolyBFV` 직후 flooding, `phase_flood_ms` 열)을 처리할 때 이 시프트도 함께
+    흡수해야 한다.
 
 ---
 

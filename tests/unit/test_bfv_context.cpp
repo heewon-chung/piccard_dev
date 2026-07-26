@@ -3,6 +3,8 @@
 #include "util/params.h"
 #include "core/threshold_poly.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -464,6 +466,65 @@ TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
     // the measured maximum sits at the mask's own magnitude to within a bit.
     EXPECT_GE(measured_bits, expected_bits - 1.0);
     EXPECT_LE(measured_bits, expected_bits + 1.0);
+}
+
+TEST_F(BFVContextTest, FloodCostIsRecorded) {
+    // Not an assertion -- a recorded measurement. bench_noise runs on
+    // calibration-derived parameters where FloodNoiseBits() throws, so this
+    // fixture is the only place a validated context and Flood() meet.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+    auto ct = ctx->Encrypt(values);
+
+    // Split reference: Flood() re-randomizes with a full Encrypt(zeros) --
+    // a packed encode plus a public-key encryption -- before drawing and
+    // adding the mask. At large N that re-randomization step may dominate,
+    // so the total below alone would misattribute the cost as "flooding
+    // noise" when it may be mostly a public-key encryption. Time the two
+    // reachable public pieces directly from the test, without instrumenting
+    // Flood() itself.
+    std::vector<int64_t> zeros(params.ring_dim, 0);
+    auto cc = ctx->GetCryptoContext();
+
+    std::vector<double> ms;
+    std::vector<double> ms_encrypt_zeros;
+    std::vector<double> ms_eval_add;
+    for (int i = 0; i < 20; i++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto flooded = ctx->Flood(ct);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        (void)flooded;
+
+        auto e0 = std::chrono::high_resolution_clock::now();
+        auto fresh = ctx->Encrypt(zeros);
+        auto e1 = std::chrono::high_resolution_clock::now();
+        ms_encrypt_zeros.push_back(
+            std::chrono::duration<double, std::milli>(e1 - e0).count());
+
+        auto a0 = std::chrono::high_resolution_clock::now();
+        auto added = cc->EvalAdd(ct, fresh);
+        auto a1 = std::chrono::high_resolution_clock::now();
+        ms_eval_add.push_back(
+            std::chrono::duration<double, std::milli>(a1 - a0).count());
+        (void)added;
+    }
+    std::sort(ms.begin(), ms.end());
+    std::sort(ms_encrypt_zeros.begin(), ms_encrypt_zeros.end());
+    std::sort(ms_eval_add.begin(), ms_eval_add.end());
+
+    RecordProperty("input_ring_dim", static_cast<int>(params.ring_dim));
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+    RecordProperty("output_flood_median_us",
+                   static_cast<int>(ms[ms.size() / 2] * 1000.0));
+    RecordProperty("output_encrypt_zeros_median_us",
+                   static_cast<int>(
+                       ms_encrypt_zeros[ms_encrypt_zeros.size() / 2] * 1000.0));
+    RecordProperty("output_eval_add_median_us",
+                   static_cast<int>(
+                       ms_eval_add[ms_eval_add.size() / 2] * 1000.0));
+    SUCCEED();
 }
 
 TEST(BFVContextBudget, RejectsContextTooSmallForFlooding) {
