@@ -287,8 +287,9 @@ not `AHE/no-leakage` or `CPA/no-leakage`). Note on the `AHE/no-leakage`
 label itself: `AHE_NoLeakage` (`SecurityClass`, `pjs_baseline.h`) and the
 paper's Table I "AHE" crypto-primitive column are the paper's own
 classification of BCG12/DGT12; the concrete construction implemented here
-is DH-based and secure under DDH in the random-oracle model (blind
-exponentiation), not additively-homomorphic encryption — see the DEC-4
+is DH-based and secure against **semi-honest** adversaries under DDH in the
+random-oracle model (blind exponentiation) — it does not provide malicious
+security, and it is not additively-homomorphic encryption. See the DEC-4
 Table I erratum (item 5) for the full note.
 
 | `\|U\|` | Method | Model | total_ms median (±SD) | comm_bytes | jaccard (comp / expected) |
@@ -329,7 +330,13 @@ predictive "Estimated runtimes" model, which used a simplified
 - **BCG12 timing is stable and universe-independent, as designed.**
   `bcg12_mh_ec` medians are 33.8–42.9 ms and `bcg12_mh_ff` 1968–1998 ms
   across all four universe sizes (no trend with `\|U\|`, small SD relative
-  to the FF magnitude). These are the trustworthy BCG12 numbers.
+  to the FF magnitude). Two caveats keep this honest: BCG12's *algorithm*
+  is FHE-free, so these numbers are noise-flooding-independent **by
+  construction**; and the flat-across-`\|U\|` behaviour *suggests* BCG12 is
+  not materially perturbed by the co-scheduled baseline (unlike Piccard,
+  next bullet) — but BCG12 does run in the same trial loop, so a fully
+  clean *absolute* timing still warrants the same isolated rerun. These are
+  the more trustworthy of the two protocols' numbers, not certified-clean.
 - **The in-sweep Piccard column is contaminated — do NOT read a clean
   speedup from it.** Piccard's per-query cost is *designed* to be
   universe-size-independent (`ring_dim` is driven by `k·m`, not `\|U\|`),
@@ -349,9 +356,10 @@ predictive "Estimated runtimes" model, which used a simplified
   this is stated as fact. Piccard's true standalone steady state is
   ~19–20 ms (paper Table `tbl:comp`, measured in isolation). **Therefore
   this table's Piccard column overstates Piccard's cost, and the honest
-  reading is: BCG12's numbers are clean; Piccard must be re-measured in
-  isolation before any
-  paper-facing "Piccard vs. BCG12" time ratio is quoted.** Even against
+  reading is: BCG12's numbers are FHE-independent and flat across `\|U\|`
+  (so the more reliable side), while Piccard's are inflated and must be
+  re-measured in isolation before any paper-facing "Piccard vs. BCG12" time
+  ratio is quoted.** Even against
   the (inflated) in-sweep Piccard, `bcg12_mh_ec` is faster at every size;
   against Piccard's true ~19–20 ms standalone, `bcg12_mh_ec` (~34–43 ms)
   and Piccard are the same order of magnitude — consistent with DEC-1's
