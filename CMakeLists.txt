@@ -238,6 +238,10 @@ if(BUILD_TESTS)
                 add_executable(test_group tests/unit/test_group.cpp)
                 target_link_libraries(test_group piccard_baselines test_main)
                 add_test(NAME Group COMMAND test_group)
+
+                add_executable(test_dgt12_psica tests/unit/test_dgt12_psica.cpp)  # BCG12
+                target_link_libraries(test_dgt12_psica piccard_baselines test_main)  # BCG12
+                add_test(NAME Dgt12PsiCa COMMAND test_dgt12_psica)  # BCG12
             endif()
         endif()
     else()
