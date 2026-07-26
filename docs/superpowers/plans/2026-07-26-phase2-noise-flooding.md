@@ -4,7 +4,7 @@
 
 **Goal:** Make the server actually perform the noise flooding the security proof claims — add masking noise of magnitude `2^lambda_stat` times the evaluation-noise bound to every ciphertext returned to the receiver, in all four protocol variants.
 
-**Architecture:** One new primitive, `BFVContext::Flood()`, samples a uniform integer per polynomial coefficient and adds it to the `c0` component of a ciphertext. `Piccard::Evaluate` splits into `EvaluateRaw` (unflooded, for callers that stack more homomorphic work on top) and `Evaluate` (= `Flood(EvaluateRaw(...))`, receiver-facing). `BFVContext::Initialize` gains a budget assertion that fails loudly if the realised crypto context cannot carry the flooding term the calibration table promised.
+**Architecture:** One new primitive, `BFVContext::Flood()`, re-randomizes the ciphertext with a fresh encryption of zero and then samples a uniform integer per polynomial coefficient and adds it to the `c0` component. `Piccard::Evaluate` splits into `EvaluateRaw` (unflooded, for callers that stack more homomorphic work on top) and `Evaluate` (= `Flood(EvaluateRaw(...))`, receiver-facing). `BFVContext::Initialize` gains a budget assertion that fails loudly if the realised crypto context cannot carry the flooding term the calibration table promised.
 
 **Tech Stack:** C++17, OpenFHE 1.5.0 (BFV/RNS), GoogleTest, CMake.
 
@@ -20,9 +20,21 @@ c0 + c1*s  =  Delta * m  +  e   (mod q),      Delta = floor(q / t)
 
 `m` is the plaintext, `t` the plaintext modulus, and `e` the *noise*. Rounding recovers `m` exactly while `|e| < Delta/2`.
 
-**Why flooding is needed.** `e` grows as the server computes, and its magnitude depends on the inputs. A receiver who inspects `e` learns something about the operands beyond the intended output, so the security proof cannot simulate the receiver's view. The fix (the *smudging* lemma) is for the server to add a fresh uniform noise `f` that is `2^lambda_stat` times larger than any possible `e`; then `e + f` is within statistical distance `2^-lambda_stat` of `f` alone, which carries no information. Phase 0 measured the bound on `e` per configuration and Phase 1 stored it as `PiccardParams::eval_noise_bits`; `PiccardParams::FloodNoiseBits()` returns `eval_noise_bits + flood_margin_bits + lambda_stat`, which is `log2` of the flooding magnitude.
+**Why flooding is needed.** `e` grows as the server computes, and its magnitude depends on the inputs. A receiver who inspects `e` learns something about the operands beyond the intended output, so the security proof cannot simulate the receiver's view. The fix (the *smudging* lemma) is for the server to add a fresh uniform noise `f` that is `2^lambda_stat` times larger than any possible `e`; then `e + f` is within statistical distance `2^-lambda_stat` of `f` alone, which carries no information.
+
+Strictly, the receiver sees `N` coefficients, so a union bound gives `N * 2^-(lambda_stat + flood_margin_bits)` — about `2^-57` at `N = 32768` rather than `2^-64`. `flood_margin_bits` is documented as covering an underestimated `B_eval`, not this, so do not claim `2^-lambda_stat` in new comments without the qualification. Record it in `3_noise-flooding.md` §8; `FloodNoiseBits()` is Phase 1 code and not this plan's to change. Phase 0 measured the bound on `e` per configuration and Phase 1 stored it as `PiccardParams::eval_noise_bits`; `PiccardParams::FloodNoiseBits()` returns `eval_noise_bits + flood_margin_bits + lambda_stat`, which is `log2` of the flooding magnitude.
 
 **Why noise is added to `c0` only.** Decryption evaluates `c0 + c1*s`, so a term added to `c0` lands in the decryption noise additively and untouched. Adding to `c1` would be multiplied by the secret key.
+
+## ⚠️ Open decision: does `Flood()` also re-randomize?
+
+`appendix.tex` (Proof of Proposition, receiver's view) says the simulator *"constructs a **fresh encryption** of the corresponding inner-product value"*, and that after flooding the real ciphertext is *"statistically indistinguishable ... from that in a **fresh encryption of the same plaintext**"*.
+
+Smudging `c0` hides the *phase* `c0 + c1*s`. It does not make `(c0, c1)` look like a fresh encryption: `c1` is untouched, the receiver holds `sk`, and the evaluated `c1` is a deterministic function of both `ct_x` and `ct_y` — and the receiver never saw `ct_y`. A simulator holding only the output value cannot reproduce it.
+
+Closing that gap costs almost nothing: `BFVContext` already holds `key_pair_.publicKey`, so `Flood()` can add a fresh `Enc_pk(0)` before the mask. Against a `2^139`–`2^605` mask the added noise is negligible, and `3_noise-flooding.md` §5.3 already flagged this as *"cheap to add now, expensive after the response letter ships."*
+
+**This plan includes re-randomization** (Task 1, Step 4). It is called out here because it changes what the implementation establishes, not just how — if the paper's simulator is meant to receive `ct_x`/`ct_y` as part of the transcript, `c0`-smudging alone is defensible and this can be dropped. **Confirm before implementing Task 1.**
 
 ## Global Constraints
 
@@ -43,10 +55,12 @@ c0 + c1*s  =  Delta * m  +  e   (mod q),      Delta = floor(q / t)
 | `include/protocol/piccard.h` | Modify | Declare `EvaluateRaw()` alongside `Evaluate()`, documenting which one is receiver-facing |
 | `src/protocol/piccard.cpp` | Modify | Rename the existing body to `EvaluateRaw`; add `Evaluate = Flood(EvaluateRaw(...))` |
 | `src/protocol/threshold_piccard.cpp` | Modify | Consume `EvaluateRaw`; flood after the polynomial instead |
-| `src/protocol/sqrt_piccard.cpp` | Modify | Flood the result of its own `Evaluate` |
+| `src/protocol/sqrt_piccard.cpp` | Modify | Flood the result of its own `Evaluate`; split out `EvaluateRaw` (Task 5) |
+| `include/protocol/sqrt_piccard.h` | Modify | Declare `EvaluateRaw()` |
+| `include/protocol/threshold_piccard.h` | Modify | Declare `EvaluateRaw()` |
 | `tests/unit/test_bfv_context.cpp` | Modify | Unit tests for `Flood()` |
 | `tests/unit/test_piccard_engine.cpp` | Modify | `EvaluateRaw` vs `Evaluate` contract |
-| `benchmarks/bench_noise.cpp` | Modify | Its threshold correctness probe must use `EvaluateRaw`, or it starts measuring flooded noise |
+| `benchmarks/bench_noise.cpp` | Modify | Every measurement must use a raw path, or it throws on Phase 1's unsized-parameter guard |
 
 `DynamicPiccard` needs **no change**: it derives from `Piccard` and does not override `Evaluate`, so it inherits the flooded version.
 
@@ -63,7 +77,7 @@ c0 + c1*s  =  Delta * m  +  e   (mod q),      Delta = floor(q / t)
 - Consumes: `PiccardParams::FloodNoiseBits()` (throws unless `Validate()` sized the flooding term), `PiccardParams::eval_noise_bits` — both already exist from Phase 1.
 - Produces: `lbcrypto::Ciphertext<lbcrypto::DCRTPoly> BFVContext::Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&) const`
 
-**How the sampler works.** For each of the `N` coefficients we want an integer uniform on `[-2^b, 2^b - 1]` where `b = FloodNoiseBits()`. Draw `b+1` uniform bits as an unsigned value `u`, then the value is `u - 2^b`. `b` reaches 283 for the threshold variant, far beyond any built-in integer type, so never materialise `u`: draw it as 32-bit words `w_0, w_1, ...` (little-endian, `u = sum_j w_j * 2^(32j)`) and reduce per limb using
+**How the sampler works.** For each of the `N` coefficients we want an integer uniform on `[-2^b, 2^b - 1]` where `b = FloodNoiseBits()`. Draw `b+1` uniform bits as an unsigned value `u`, then the value is `u - 2^b`. `b` reaches **605** for the threshold variant at STD128 (`eval_noise_bits` 533 + margin 8 + `lambda_stat` 64, at requested N 16384/32768 and natural depth 15), far beyond any built-in integer type, so never materialise `u`: draw it as 32-bit words `w_0, w_1, ...` (little-endian, `u = sum_j w_j * 2^(32j)`) and reduce per limb using
 
 ```
 u mod q_i  =  sum_j  w_j * (2^(32j) mod q_i)   (mod q_i)
@@ -137,7 +151,67 @@ TEST_F(BFVContextTest, FloodIsRandomised) {
     RecordProperty("output_two_floods_differ", differs ? "true" : "false");
     EXPECT_TRUE(differs);
 }
+
+TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
+    // The three tests above all pass if Flood() added a ONE-BIT mask: they
+    // check the plaintext survives, that the input is untouched, and that two
+    // draws differ. None pins the magnitude -- and a mask smaller than the
+    // evaluation noise leaves the receiver's view unsimulatable while the
+    // ciphertext still decrypts, so no other signal would ever show it.
+    //
+    // Measure the decryption noise the way the calibration harness does:
+    // ||(c0 + c1*s) - Delta*m||_inf, via CRT interpolation.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+
+    auto ct = ctx->Encrypt(values);
+    auto flooded = ctx->Flood(ct);
+
+    const auto& sk = ctx->GetSecretKeyForCalibration();
+    auto cc = ctx->GetCryptoContext();
+    auto elem_params = cc->GetCryptoParameters()->GetElementParams();
+    lbcrypto::BigInteger Q = elem_params->GetModulus();
+    uint64_t t = cc->GetCryptoParameters()->GetPlaintextModulus();
+
+    lbcrypto::DCRTPoly s = sk->GetPrivateElement();
+    const auto& c = flooded->GetElements();
+    lbcrypto::DCRTPoly b = c[0];
+    lbcrypto::DCRTPoly s_pow = s;
+    for (size_t i = 1; i < c.size(); i++) {
+        b += c[i] * s_pow;
+        s_pow *= s;
+    }
+    b.SetFormat(Format::COEFFICIENT);
+    auto big = b.CRTInterpolate();
+
+    const lbcrypto::BigInteger delta = Q / lbcrypto::BigInteger(t);
+    const lbcrypto::BigInteger q_half = Q >> 1;
+    const lbcrypto::BigInteger delta_half = delta >> 1;
+    double worst = 0.0;
+    for (uint32_t j = 0; j < big.GetLength(); j++) {
+        lbcrypto::BigInteger v = big[j];
+        lbcrypto::BigInteger abs_v = (v > q_half) ? (Q - v) : v;
+        lbcrypto::BigInteger r = abs_v % delta;
+        lbcrypto::BigInteger d = (r > delta_half) ? (delta - r) : r;
+        double dd = d.ConvertToDouble();
+        if (dd > worst) worst = dd;
+    }
+    double measured_bits = std::log2(worst);
+    double expected_bits = static_cast<double>(params.FloodNoiseBits());
+
+    RecordProperty("input_expected_flood_bits", static_cast<int>(expected_bits));
+    RecordProperty("output_measured_noise_bits",
+                   static_cast<int>(measured_bits));
+
+    // The mask dominates the evaluation noise by 2^(lambda_stat + margin), so
+    // the measured maximum sits at the mask's own magnitude to within a bit.
+    EXPECT_GE(measured_bits, expected_bits - 1.0);
+    EXPECT_LE(measured_bits, expected_bits + 1.0);
+}
 ```
+
+This test needs `#include <cmath>` and the OpenFHE types already reachable
+through `fhe/bfv_context.h`.
 
 - [ ] **Step 2: Run the tests and confirm they fail to compile**
 
@@ -187,8 +261,8 @@ namespace {
 /// [-2^bits, 2^bits - 1], returned in EVALUATION format so it can be added to
 /// a ciphertext component directly.
 ///
-/// `bits` exceeds 128 for every configuration and reaches 283 for the
-/// threshold variant, so the value is never materialised. Each coefficient is
+/// `bits` exceeds 128 for every configuration and reaches 605 for the
+/// threshold variant at STD128, so the value is never materialised. Each coefficient is
 /// drawn as 32-bit words w_0, w_1, ... representing u = sum_j w_j * 2^(32j),
 /// and reduced per RNS limb using u mod q = sum_j w_j * (2^(32j) mod q).
 /// Subtracting 2^bits mod q centres the result.
@@ -261,7 +335,14 @@ BFVContext::Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const {
     // smaller than the evaluation noise it is supposed to hide.
     const uint32_t bits = params_.FloodNoiseBits();
 
-    auto out = ct->Clone();
+    // Re-randomize first. Smudging c0 hides the phase, but leaves c1 a
+    // deterministic function of both operands -- and the receiver never saw
+    // the sender's. Adding a fresh encryption of zero makes the pair itself
+    // simulatable, which is what appendix.tex's "fresh encryption" claims.
+    // Its own noise is negligible beside the mask added below.
+    std::vector<int64_t> zeros(params_.ring_dim, 0);
+    auto out = cc_->EvalAdd(ct, Encrypt(zeros));
+
     auto elem_params = cc_->GetCryptoParameters()->GetElementParams();
 
     // Decryption evaluates c0 + c1*s, so a term added to c0 lands in the
@@ -270,6 +351,12 @@ BFVContext::Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const {
     return out;
 }
 ```
+
+`EvalAdd` returns a new ciphertext, so `FloodDoesNotMutateInput` still holds
+without an explicit `Clone()`.
+
+If the re-randomization decision above comes back "not needed", delete the two
+`out` lines and restore `auto out = ct->Clone();` — nothing else changes.
 
 - [ ] **Step 5: Run the tests and verify they pass**
 
@@ -408,8 +495,12 @@ with:
                 "include/util/noise_calibration.inc.");
         }
     }
-}
 ```
+
+**This block is inserted mid-function**, before the `cc_->Enable(lbcrypto::PKE)`
+calls at `bfv_context.cpp:62-74`. Do not add a closing `}` — the lines after the
+insertion point still belong to `Initialize()`, and a stray brace either fails
+to compile or, if "fixed" by deleting them, ships a context with no keys.
 
 `<cmath>` and `<stdexcept>` are already included at the top of the file; add `#include <string>` if `std::to_string` does not resolve.
 
@@ -596,6 +687,12 @@ cd build && ctest --output-on-failure
 
 Expected: 13/13 passing. `ThresholdEngine` still passes because it now consumes the raw result; it is not yet flooded — Task 4 does that.
 
+`ctest` is green, but `bench_noise --sweep` is now broken: `RunOneHot` and
+`RunThreshold`'s cross-check call the flooded `Evaluate` on calibration-derived
+parameters and get `FAILED: FloodNoiseBits() on a parameter set whose flooding
+term was never sized` for every cell. That is expected and Task 5 Step 4 fixes
+it — do not attempt to fix it here.
+
 - [ ] **Step 8: Commit**
 
 ```bash
@@ -627,6 +724,12 @@ Add to `tests/unit/test_threshold_engine.cpp`:
 TEST_F(ThresholdEngineTest, FloodedDecisionIsStillCorrect) {
     // The threshold output is one bit, and it must survive flooding: the
     // masking noise is applied after the degree-k polynomial.
+    //
+    // This fixture has SetUpWithTau(), not SetUp() -- `engine` is null and
+    // `params` is unvalidated until it is called, and FloodNoiseBits() would
+    // throw on an unsized parameter set.
+    SetUpWithTau(10);
+
     std::vector<uint64_t> set_x, set_y;
     for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
 
@@ -646,21 +749,31 @@ Add to `tests/unit/test_sqrt_piccard.cpp`:
 ```cpp
 TEST_F(SqrtPiccardTest, FloodedMatchCountIsStillExact) {
     // Flooding must leave the base-sqrt(m) match count untouched.
+    //
+    // This fixture's SetUp() only fills in k/m/security -- it does not call
+    // ValidateSqrt() and there is no `engine` member. Every existing test in
+    // this file builds its own, so do the same.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
     std::vector<uint64_t> set_x, set_y;
     for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
 
     RecordProperty("input_flood_noise_bits",
                    static_cast<int>(params.FloodNoiseBits()));
 
-    auto result = engine->Run(set_x, set_y);
+    auto result = engine.Run(set_x, set_y);
 
     RecordProperty("output_match_count",
                    static_cast<int>(result.match_count));
+    // Exact, not the EXPECT_GE(k*0.8) the other tests in this file use: for
+    // identical sets the base-sqrt(m) circuit is exact (verified across all
+    // three input patterns), and an exact assertion is what catches flooding
+    // perturbing the value.
     EXPECT_EQ(result.match_count, static_cast<int64_t>(params.k));
 }
 ```
-
-Note: both test fixtures already build an engine and call `params.Validate()`/`ValidateSqrt()`; check the existing `SetUp()` in each file and reuse its member names (`engine`, `params`) rather than declaring new ones.
 
 - [ ] **Step 2: Run and verify they pass *before* the change**
 
@@ -721,7 +834,8 @@ Expected: PASS. A failure means the flooding term does not fit that circuit's mo
 cd build && ctest --output-on-failure
 ```
 
-Expected: 13/13 passing.
+Expected: 13/13 passing. `bench_noise --sweep` remains broken for all three
+circuits until Task 5 Step 4; that is expected.
 
 - [ ] **Step 6: Commit**
 
@@ -733,73 +847,259 @@ git commit -m "feat(protocol): flood the threshold and base-sqrt(m) results"
 
 ---
 
-## Task 5: Keep the calibration harness measuring unflooded noise
+## Task 5: Give every variant a raw path, and keep the harness on it
 
 **Files:**
-- Modify: `benchmarks/bench_noise.cpp` (the `base.Evaluate` call inside `RunThreshold`, around line 485)
+- Modify: `include/protocol/sqrt_piccard.h`, `src/protocol/sqrt_piccard.cpp`
+- Modify: `include/protocol/threshold_piccard.h`, `src/protocol/threshold_piccard.cpp`
+- Modify: `benchmarks/bench_noise.cpp` (`RunOneHot`, `RunSqrt`, `RunThreshold`)
 
 **Interfaces:**
 - Consumes: `Piccard::EvaluateRaw` (Task 3).
-- Produces: no API change.
+- Produces: `SqrtPiccard::EvaluateRaw(ct_x, ct_y)` and `ThresholdPiccard::EvaluateRaw(ct_x, ct_y)`, same signatures as their `Evaluate`, returning the unflooded result.
 
-**Why.** `RunThreshold` recovers the pre-polynomial match count through `base.Evaluate(ct_x, ct_y)` as a correctness cross-check. After Task 3 that call floods, so the check would compare against a value whose noise has been deliberately blown up — and, worse, the harness would be measuring flooded noise while producing the very table that sizes the flooding. It must use the raw path.
+**Why this is not optional, and what it fixes.** `bench_noise` builds parameters
+through `CalibrationAccess::Derive`/`DeriveSqrt` (`bench_noise.cpp:530-539`),
+which leaves `flooding_sized_ == false` — it has to, because it measures the
+very table `Validate()` looks up. After Tasks 3–4 every flooded path it calls
+reaches `FloodNoiseBits()`, which **throws `std::logic_error`** on an unsized
+parameter set (Phase 1's guard, `params.cpp:105-111`).
 
-The `RunOneHot` and `RunSqrt` measurements are a separate question: they call `engine.Evaluate(...)`, which now floods, so `eval_noise_bits` would be measured *after* flooding and the calibration would chase its own tail. Both must move to the raw path too. `SqrtPiccard` has no raw variant, so for that circuit measure the components directly — see Step 2.
+So the harness does not "measure flooded noise" — every measurement fails. All
+four call sites, and the task that breaks each:
 
-- [ ] **Step 1: Point the one-hot and threshold measurements at the raw path**
+| site | call | breaks at |
+|---|---|---|
+| `bench_noise.cpp:359` (`RunOneHot`) | `engine.Evaluate` | **Task 3** |
+| `bench_noise.cpp:486` (`RunThreshold` cross-check) | `base.Evaluate` | **Task 3** |
+| `bench_noise.cpp:424` (`RunSqrt`) | `engine.Evaluate` | Task 4 |
+| `bench_noise.cpp:478` (`RunThreshold`) | `engine.Evaluate` | Task 4 |
 
-In `benchmarks/bench_noise.cpp`, inside `RunOneHot`, replace:
+`RunOne`'s `catch` (`bench_noise.cpp:574`) turns each throw into a `FAILED:` row
+rather than a crash, so the symptom is a sweep that produces no measurements at
+all — not an obvious failure.
+
+That breaks `bench_noise --sweep` for two of three circuits — the command every
+`SelectFloodingParams` error message tells the operator to run, and the only way
+to regenerate `include/util/noise_calibration.inc`.
+
+**Scope note.** Adding `EvaluateRaw` to the two variants extends this plan's
+original file list. It is the smallest fix that keeps the harness working, and
+it makes all three circuits expose the same pair, which the design already
+assumes. The alternative — having the harness suppress flooding by tuning
+`lambda_stat`/`flood_margin_bits` — does not work: the throw is unconditional
+on `flooding_sized_`, not on the magnitude.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/unit/test_sqrt_piccard.cpp`:
+
+```cpp
+TEST_F(SqrtPiccardTest, EvaluateRawAndEvaluateAgreeOnMatchCount) {
+    // Same contract as Piccard: flooding changes the ciphertext, not the value.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine.Encrypt(set_x);
+    auto ct_y = engine.Encrypt(set_y);
+
+    auto raw = engine.Decrypt(engine.EvaluateRaw(ct_x, ct_y));
+    auto flooded = engine.Decrypt(engine.Evaluate(ct_x, ct_y));
+
+    RecordProperty("output_raw_match_count", static_cast<int>(raw.match_count));
+    RecordProperty("output_flooded_match_count",
+                   static_cast<int>(flooded.match_count));
+    EXPECT_EQ(raw.match_count, flooded.match_count);
+}
+
+TEST_F(SqrtPiccardTest, EvaluateFloodsAndEvaluateRawDoesNot) {
+    // Value equality alone passes even if Flood() is never called, and this
+    // task deletes the Flood call Task 4 added and re-adds it in a new
+    // one-line wrapper -- so a wrapper written without it would ship unflooded
+    // receiver-facing output with a fully green suite. Compare the ciphertexts.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 50; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine.Encrypt(set_x);
+    auto ct_y = engine.Encrypt(set_y);
+    auto raw = engine.EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine.Evaluate(ct_x, ct_y);
+
+    const auto& er = raw->GetElements()[0];
+    const auto& ef = flooded->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < er.GetNumOfElements() && !differs; i++) {
+        if (er.GetElementAtIndex(i) != ef.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+```
+
+Add to `tests/unit/test_threshold_engine.cpp`:
+
+```cpp
+TEST_F(ThresholdEngineTest, EvaluateRawIsUnfloodedAndDecidesTheSame) {
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+
+    bool raw = engine->Decrypt(engine->EvaluateRaw(ct_x, ct_y));
+    bool flooded = engine->Decrypt(engine->Evaluate(ct_x, ct_y));
+
+    RecordProperty("output_raw_decision", raw ? "true" : "false");
+    RecordProperty("output_flooded_decision", flooded ? "true" : "false");
+    EXPECT_EQ(raw, flooded);
+    EXPECT_TRUE(flooded);
+}
+
+TEST_F(ThresholdEngineTest, EvaluateFloodsAndEvaluateRawDoesNot) {
+    // Same reasoning as the sqrt case: a decision bit is equal either way, so
+    // only comparing ciphertexts catches a wrapper that forgot to flood.
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 50; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+    auto raw = engine->EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine->Evaluate(ct_x, ct_y);
+
+    const auto& er = raw->GetElements()[0];
+    const auto& ef = flooded->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < er.GetNumOfElements() && !differs; i++) {
+        if (er.GetElementAtIndex(i) != ef.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+```
+
+- [ ] **Step 2: Run and confirm they fail to compile**
+
+```bash
+cmake --build build --target test_sqrt_piccard test_threshold_engine -j8
+```
+
+Expected: `no member named 'EvaluateRaw'` for both engines.
+
+- [ ] **Step 3: Split both variants the same way as Task 3**
+
+In `include/protocol/sqrt_piccard.h`, next to the existing `Evaluate`:
+
+```cpp
+    // The unflooded result. Same contract as Piccard::EvaluateRaw: for callers
+    // that must not receive the masking noise -- today only the calibration
+    // harness, which measures the evaluation noise that sizes that mask and
+    // therefore cannot include it. Returning this to the receiver is a
+    // security bug.
+    lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+    EvaluateRaw(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+                const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const;
+```
+
+In `src/protocol/sqrt_piccard.cpp`, rename the existing `SqrtPiccard::Evaluate`
+definition to `SqrtPiccard::EvaluateRaw`, drop the `Flood` call Task 4 added to
+it so it ends with `return result;` again, and add:
+
+```cpp
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+SqrtPiccard::Evaluate(
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
+    return bfv_->Flood(EvaluateRaw(ct_x, ct_y));
+}
+```
+
+Apply the identical pattern to `ThresholdPiccard`: declare `EvaluateRaw` in the
+header with the same comment, rename the current `Evaluate` body (the one Task 4
+gave a trailing `Flood`) to `EvaluateRaw` with that `Flood` removed, and add:
+
+```cpp
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+ThresholdPiccard::Evaluate(
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
+    return piccard_.GetBFVContext().Flood(EvaluateRaw(ct_x, ct_y));
+}
+```
+
+- [ ] **Step 4: Point the harness at the raw paths**
+
+In `benchmarks/bench_noise.cpp`, `RunOneHot`:
 
 ```cpp
             auto ct_res = engine.Evaluate(ct_x, ct_y);
 ```
-
-with:
-
+becomes
 ```cpp
             // Raw: this harness measures the evaluation noise that sizes the
             // flooding term, so it must not include the flooding term itself.
             auto ct_res = engine.EvaluateRaw(ct_x, ct_y);
 ```
 
-Inside `RunThreshold`, replace both:
+`RunSqrt`: the identical line becomes `engine.EvaluateRaw(ct_x, ct_y)`.
 
-```cpp
-            auto ct_match = base.Evaluate(ct_x, ct_y);
-```
+`RunThreshold` has **two** distinct calls, and there is exactly **one**
+occurrence of each:
+- `auto ct_res = engine.Evaluate(ct_x, ct_y);` → `engine.EvaluateRaw(...)`
+- `auto ct_match = base.Evaluate(ct_x, ct_y);` → `base.EvaluateRaw(...)`
 
-with:
-
-```cpp
-            auto ct_match = base.EvaluateRaw(ct_x, ct_y);
-```
-
-and leave `engine.Evaluate(ct_x, ct_y)` (the `ThresholdPiccard` one) as it is for now — Step 2 handles it.
-
-- [ ] **Step 2: Decide how sqrt and threshold outputs get measured**
-
-`SqrtPiccard::Evaluate` and `ThresholdPiccard::Evaluate` now flood, and neither exposes a raw variant. Adding one to each is **outside this plan's scope**.
-
-Stop here and report the situation, with these two options:
-  - (a) add `EvaluateRaw` to `SqrtPiccard` and `ThresholdPiccard` mirroring Task 3 — a scope extension that needs approval;
-  - (b) have the harness set `params.lambda_stat` and `flood_margin_bits` such that the flooding term is negligible while measuring, which is a measurement artefact and changes what is being measured.
-
-Do not pick one unilaterally. Record whichever is chosen in `3_noise-flooding.md` §8.
-
-- [ ] **Step 3: Verify the one-hot calibration is unchanged by flooding**
+- [ ] **Step 5: Run the new tests**
 
 ```bash
-./build/bench_noise --circuit=onehot --security=TOY --k=16 --m=64 \
-  --sms=40 --depth_delta=2 --reps=1 --patterns=match
+cmake --build build --target test_sqrt_piccard test_threshold_engine -j8 \
+  && ./build/test_sqrt_piccard && ./build/test_threshold_engine
 ```
 
-Expected: a `B_eval` within ~1 bit of the value in `scripts/results/calibration/onehot.csv` for the same cell. A jump of tens of bits means the measurement is picking up the flooding term.
+Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Verify the harness works for all three circuits**
 
 ```bash
-git add benchmarks/bench_noise.cpp
-git commit -m "fix(bench): measure evaluation noise on the unflooded path"
+./build/bench_noise --circuit=onehot    --security=TOY --k=16 --m=64 --sms=40 --depth_delta=2 --reps=1 --patterns=match
+./build/bench_noise --circuit=sqrt      --security=TOY --k=16 --m=64 --sms=40 --depth_delta=2 --reps=1 --patterns=match
+./build/bench_noise --circuit=threshold --security=TOY --k=16 --m=8  --sms=45 --depth_delta=2 --reps=1 --patterns=match
+```
+
+Expected: each prints a `B_eval` row and exits 0. No `logic_error`. The
+`all_match` values for these exact cells are **55.37** (onehot), **91.18**
+(sqrt) and **210.31** (threshold); each must land within ~1 bit. A jump of tens
+of bits means the measurement is picking up the flooding term, which is the
+failure this task exists to prevent.
+
+- [ ] **Step 7: Run the whole suite**
+
+```bash
+cd build && ctest --output-on-failure
+```
+
+Expected: all passing.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add include/protocol/sqrt_piccard.h src/protocol/sqrt_piccard.cpp \
+        include/protocol/threshold_piccard.h src/protocol/threshold_piccard.cpp \
+        benchmarks/bench_noise.cpp tests/unit/test_sqrt_piccard.cpp \
+        tests/unit/test_threshold_engine.cpp
+git commit -m "feat(protocol): give every variant a raw path for the calibration harness"
 ```
 
 ---
@@ -811,22 +1111,81 @@ git commit -m "fix(bench): measure evaluation noise on the unflooded path"
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Measure the flooding overhead**
+- [ ] **Step 1: Measure what `Flood()` itself costs**
 
-```bash
-./build/bench_piccard --mode=timing --security=STD128 --k=128 --m=64 --trials=10
+`bench_noise` cannot produce this number. After Task 5 it calls `EvaluateRaw`
+everywhere, and it *could not* call `Evaluate` even if the line were restored:
+its parameters come from `CalibrationAccess`, so `FloodNoiseBits()` throws.
+`bench_piccard` inlines the protocol and never calls `Piccard::Evaluate` at all.
+
+Measure the primitive in the unit test, which already holds a validated context.
+Add to `tests/unit/test_bfv_context.cpp` (Task 1's file):
+
+```cpp
+TEST_F(BFVContextTest, FloodCostIsRecorded) {
+    // Not an assertion -- a recorded measurement. bench_noise runs on
+    // calibration-derived parameters where FloodNoiseBits() throws, so this
+    // fixture is the only place a validated context and Flood() meet.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+    auto ct = ctx->Encrypt(values);
+
+    std::vector<double> ms;
+    for (int i = 0; i < 20; i++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto flooded = ctx->Flood(ct);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        (void)flooded;
+    }
+    std::sort(ms.begin(), ms.end());
+
+    RecordProperty("input_ring_dim", static_cast<int>(params.ring_dim));
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+    RecordProperty("output_flood_median_us",
+                   static_cast<int>(ms[ms.size() / 2] * 1000.0));
+    SUCCEED();
+}
 ```
 
-Record `phase_multiply_ms`, `phase_rotate_sum_ms`, and total. Compare against the pre-flooding numbers in `3_noise-flooding.md` §3.4 (`d1/sms60`: encrypt 5.97, compute 13.09, decrypt 0.33, total 19.4 ms).
+Needs `#include <algorithm>` and `#include <chrono>`.
 
-Note that `bench_piccard` inlines the protocol rather than calling `Piccard::Evaluate`, so it does **not** yet flood — the comparison measures the cost of the larger modulus only. Wiring flooding into the seven inlined benchmark sites is Phase 4, not this task.
+Run it and read the recorded properties:
+
+```bash
+cmake --build build --target test_bfv_context -j8 \
+  && ./build/test_bfv_context --gtest_filter=BFVContextTest.FloodCostIsRecorded
+```
+
+**This is a TOY-scale number** — the fixture is one-hot at `N=1024` with
+`FloodNoiseBits() == 140`. The threshold variant at STD128 draws a 605-bit mask
+over 15 limbs at `N=32768` and will cost far more; do not quote this figure for
+it. If an STD128 number is needed for the paper, that is a separate one-off
+harness and belongs in Phase 4 with the rest of the re-measurement.
+
+**Report the split.** With re-randomization enabled, `Flood()` does a full
+`Encrypt(zeros)` — a packed encode plus a public-key encryption — before drawing
+the mask. At large `N` that may dominate. Time the two halves separately (wrap
+just the `EvalAdd(ct, Encrypt(zeros))` line) and record both, or the number
+reported as "flooding cost" is mostly a public-key encryption.
 
 - [ ] **Step 2: Update the plan document**
 
-In `3_noise-flooding.md`, tick the Phase 2 items in §6 and append to §8:
-  - the measured overhead from Step 1;
-  - the Task 5 Step 2 decision and its rationale;
-  - a note that `SqrtPiccard`/`ThresholdPiccard` have no raw variant, if option (a) was not taken.
+In `3_noise-flooding.md`, mark the Phase 2 items in §6 done (that list has no
+checkboxes — annotate it) and append to §8:
+  - the `Flood()` overhead from Step 1, the configuration it was measured at,
+    and the re-randomization / mask split;
+  - the Task 5 scope extension: `EvaluateRaw` added to `SqrtPiccard` and
+    `ThresholdPiccard` so the calibration harness has an unflooded path, and
+    why the alternative (tuning `lambda_stat` in the harness) does not work;
+  - the outcome of the re-randomization decision from the Open-decision section;
+  - the union-bound qualification: the receiver sees `N` coefficients, so the
+    delivered statistical distance is `N * 2^-(lambda_stat + flood_margin_bits)`,
+    about `2^-57` at `N = 32768` rather than `2^-64`;
+  - that `bench_threshold` now floods through the library API (`Run()`) even
+    though this branch does not edit it, so its wall-clock numbers shift with no
+    `phase_flood_ms` column to attribute the shift to — for threshold-fpfn.
 
 - [ ] **Step 3: Commit**
 
@@ -840,5 +1199,6 @@ git commit -m "docs: record Phase 2 results in the branch plan"
 ## Self-review notes
 
 - **Spec coverage.** Plan §6 Phase 2 lists: `Initialize()` verification (Task 2), `Flood()` (Task 1), and a table of six edit sites. Of those: `piccard.cpp` and `piccard.h` (Task 3), `threshold_piccard.cpp:30` and `:38` (Tasks 3 and 4), `sqrt_piccard.cpp:94` (Task 4), `bench_noise.cpp` (Task 5). `dynamic_piccard` requires no change (inherits) and `piccard_engine.cpp` is explicitly untouched — both stated in the File Structure table.
-- **Known gap, deliberately surfaced rather than papered over.** Task 5 Step 2 stops for a decision instead of silently extending scope; the plan's own Global Constraints forbid the unilateral fix.
+- **One stated scope extension.** Task 5 adds `EvaluateRaw` to `SqrtPiccard` and `ThresholdPiccard`, beyond the file list this plan started with. It is the smallest change that keeps `bench_noise` working once Task 3 lands, and the Global Constraints require such an extension to be stated rather than made silently — Task 5's "Scope note" does that.
+- **One open decision requiring a human answer before Task 1 starts:** whether `Flood()` re-randomizes. Record the answer in `3_noise-flooding.md` §8 via Task 6 Step 2.
 - **Type consistency.** `Flood`, `EvaluateRaw`, `FloodNoiseBits`, `FloodingSized`, `ring_dim_natural`, `eval_noise_bits` are used with the same names and signatures throughout; `FloodNoiseBits()` and `FloodingSized()` exist as written in `include/util/params.h` from Phase 1.
