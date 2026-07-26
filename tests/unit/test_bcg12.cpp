@@ -54,3 +54,45 @@ TEST(Bcg12, ExactEqualsPlaintextJaccard) {
     EXPECT_NEAR(qc.jaccard_estimate, 1.0 / 3.0, 1e-12);
     EXPECT_STREQ(e.Name(), "bcg12_exact_ff");
 }
+
+TEST(Bcg12, BackendsAgree) {
+    auto run = [&](Bcg12Backend b) {
+        Bcg12Params p;
+        p.mode = Bcg12Mode::MinHash;
+        p.backend = b;
+        p.k = 32;
+        p.minhash_seed = 9;
+        BCG12 e(p);
+        e.Setup();
+        return e.RunQuery({1, 2, 3, 4, 5}, {3, 4, 5, 6, 7}).jaccard_estimate;
+    };
+    EXPECT_DOUBLE_EQ(run(Bcg12Backend::FF), run(Bcg12Backend::EC));
+}
+
+TEST(Bcg12, SeedParityNonDefault) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 48;
+    p.minhash_seed = 1234;
+    BCG12 e(p);
+    e.Setup();
+    piccard::MinHasher mh(48, UINT64_MAX, 1234);
+    std::vector<uint64_t> X{2, 4, 6, 8};
+    std::vector<uint64_t> Y{4, 6, 8, 10};
+    EXPECT_DOUBLE_EQ(e.RunQuery(X, Y).jaccard_estimate,
+                      piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y)));
+}
+
+TEST(Bcg12, QueryCostComplete) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 32;
+    BCG12 e(p);
+    e.Setup();
+    auto q = e.RunQuery({1, 2, 3}, {2, 3, 4});
+    EXPECT_NEAR(q.total_ms, q.phase_encode_ms + q.phase_encrypt_ms + q.phase_compute_ms + q.phase_decrypt_ms, 1e-6);
+    EXPECT_GT(q.ct_size_bytes, 0u);
+    EXPECT_GT(q.comm_bytes, 0u);
+}
