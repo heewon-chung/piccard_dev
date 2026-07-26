@@ -126,12 +126,13 @@ What actually differs between the two protocols is:
   and then go offline; an untrusted server performs all subsequent
   per-query computation on stored ciphertexts without either owner present.
 - **Data custody.** BCG12 never stores anyone's data with a **third party**:
-  the only cross-the-wire artifacts are ephemeral, single-session masked
-  elements/tags. Each owner *may* locally cache and reuse its own masked
-  items across sessions (that is exactly the long-lived-exponent offline
-  reuse above), but that cache never leaves the owner's machine. Piccard's
-  server, by contrast, persistently custodies encrypted representations of
-  both parties' sets
+  the wire carries only masked group elements and 32-byte tags — never
+  plaintext, and never an FHE ciphertext of a set. Each owner *may* locally
+  cache its own masked items/tags and retransmit them across sessions (that is
+  exactly the long-lived-exponent offline reuse above — so these are *not*
+  single-session artifacts), but that cache stays on the owner's machine and no
+  server ever holds either set. Piccard's server, by contrast, persistently
+  custodies encrypted representations of both parties' sets
   between queries.
 
 **Cold vs. amortized/online cost, reported separately** (STD128, `k=128`,
