@@ -298,8 +298,12 @@ predictive "Estimated runtimes" model, which used a simplified
   `bcg12_mh_ff` 102400 B, `bcg12_mh_ec` 12544 B. `bcg12_mh_ec`'s comm is
   `789033 / 12544 ≈ 62.9×` **less** than Piccard's — matches the "~60×
   less communication" figure from DEC-1. `bcg12_mh_ff`'s comm is
-  `789033 / 102400 ≈ 7.7×` less than Piccard's. These figures carry no FHE
-  and no measurement noise and are the safest to cite.
+  `789033 / 102400 ≈ 7.7×` less than Piccard's. The *BCG12* comm figures
+  (12544 / 102400 B — serialized group elements + 32-byte tags) carry no FHE
+  and no measurement noise, so they are stable and safe to cite as-is;
+  Piccard's 789033 B, by contrast, is three serialized BFV ciphertexts and
+  **will change when `noise-flooding` merges** (larger modulus ⇒ larger
+  ciphertexts), so the ratios above are provisional on the Piccard side.
 - **BCG12 timing is stable and universe-independent, as designed.**
   `bcg12_mh_ec` medians are 33.8–42.9 ms and `bcg12_mh_ff` 1968–1998 ms
   across all four universe sizes (no trend with `\|U\|`, small SD relative
