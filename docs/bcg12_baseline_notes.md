@@ -93,14 +93,16 @@ of truth for the FF/EC choice and its NIST SP 800-57 basis.)
 **The distinction is trust model + required per-query interaction + data
 custody — not a false "BCG12 has no reusable precomputation" claim.**
 EsPRESSo (BCG12) itself states (§2.2, §3.3) that DGT12 PSI-CA admits
-reusable **offline** `O(|A|+|B|)` work: each item's `HashToGroup` call
-(`H(a_i)` for Alice, `H(b_j)` for Bob — the `hash_to_group_ms` component
-of `PsiCaCost`, measured once *before* the three masking rounds in
-`RunDgt12`, `src/baselines/dgt12_psica.cpp`) depends only on the item
-itself, not on which counterparty it is later compared against. Once an
-owner has group-hashed their own elements, that work is reusable across
-*any number* of subsequent PSI-CA sessions against *any* counterparty —
-it is not re-derived per query.
+reusable **offline** `O(|A|+|B|)` work under **long-lived per-party
+exponents**. *Two* kinds of work are reusable across *any number* of later
+PSI-CA sessions against *any* counterparty, because neither depends on the
+counterparty: (i) each item's `HashToGroup` call (`H(a_i)`, `H(b_j)` — the
+`hash_to_group_ms` component of `PsiCaCost`, measured before the masking
+rounds in `RunDgt12`, `src/baselines/dgt12_psica.cpp`); and (ii) **each
+party's masking of its own items under its own long-lived exponent** —
+Alice's `α_i = H(a_i)^{R_a}` and Bob's `β_j = H(b_j)^{R_b}` with his tags
+`tb_j = H'(β_j)`. Only the cross-party steps (Bob re-masking Alice's items,
+Alice unmasking) depend on the live exchange and cannot be precomputed.
 
 What actually differs between the two protocols is:
 
@@ -113,10 +115,13 @@ What actually differs between the two protocols is:
 - **Required per-query interaction.** Every single PSI-CA execution needs
   **both data owners online simultaneously**, exchanging the 3-message
   DGT12 flow (Alice → Bob masked elements; Bob → Alice re-masked elements
-  + his own tags; Alice unmasks and matches) — even when each side's
-  `HashToGroup` step has already been amortized away, the masking-exponentiation
-  rounds (`alice_round1_ms`, `bob_ms`, `alice_round2_ms`) are inherently
-  interactive and must be re-run live for every comparison. Piccard is
+  + his own tags; Alice unmasks and matches). Even with *both* kinds of
+  offline work above amortized, what remains inherently live per comparison
+  is only the **cross-party** exponentiation: Bob raising Alice's masked
+  items to `R_b` (`α'_i = α_i^{R_b}`, `|A|` exps) and Alice unmasking
+  (`β'_i = α'^{1/R_a}`, `|A|`) — about `2|A|` exponentiations plus the
+  message round-trip. Alice's own-item masking and Bob's own-item tag
+  generation are *not* in this online remainder. Piccard is
   **3-party outsourced**: the two data owners upload FHE ciphertexts once
   and then go offline; an untrusted server performs all subsequent
   per-query computation on stored ciphertexts without either owner present.
@@ -132,23 +137,33 @@ What actually differs between the two protocols is:
 phases). `phase_encode_ms` (a real CSV column) is the MinHash sketch + item
 encoding + `HashToGroup` for every item; for the FF backend it is almost
 entirely `HashToGroup` (one 3072-bit modexp per item — the sketch/encode part
-is sub-millisecond). "Online rounds" = the three interactive masking rounds,
-computed as `phase_encrypt_ms_median + phase_compute_ms_median +
-phase_decrypt_ms_median` (verified against the CSV, e.g. `73.279 + 153.010 +
-78.735 = 305.02 ≈ 305.0` for `\|U\|=16384` FF), i.e. what a returning pair
-of data owners with already-hashed items still pays live per query. **This
-"Online rounds" column, and the "Cold/online ratio" column derived from it,
-are sum-of-medians proxies**, not the median of each trial's own
-`(phase_encrypt+phase_compute+phase_decrypt)` total — a sum of per-phase
-medians is not in general equal to the median of the paired per-trial
-online sum, so treat both columns as an approximation rather than an exact
-statistic. (We report `phase_encode_ms` rather than an isolated
-`hash_to_group_ms`: the latter is instrumented inside `PsiCaCost` but is
-not a column of the comparison CSV, so quoting it here would be a
-misattribution — for FF, `phase_encode_ms` *is* hash-dominated to within a
-sub-ms sketch/encode term.)
+is sub-millisecond). "Post-hashing rounds" = `phase_encrypt_ms_median +
+phase_compute_ms_median + phase_decrypt_ms_median` (verified against the CSV,
+e.g. `73.279 + 153.010 + 78.735 = 305.02 ≈ 305.0` for `\|U\|=16384` FF) — the
+per-query cost after the `HashToGroup` phase.
 
-| Universe `\|U\|` | Backend | Cold total (ms) | `phase_encode_ms` (hash-dominated) | Online rounds (ms) | Cold/online ratio |
+**This is NOT DGT12's fully-amortized online cost.** Our benchmark draws
+*fresh* `R_a, R_b` per query (a conservative implementation choice —
+`RunDgt12` never reuses exponents), so **none** of the masking work is
+amortized in these measurements: the numbers are the un-amortized per-query
+cost. Under DGT12's long-lived-exponent model, Alice's own-item masking
+(`phase_encrypt`, `α_i=H(a_i)^{R_a}`) and Bob's own-item tag generation (part
+of `phase_compute`, `β_j=H(b_j)^{R_b}`+tags) *also* move offline, leaving only
+the ~`2|A|` cross-party exponentiations (Bob's `α'_i=α_i^{R_b}` + Alice's
+unmask `β'_i`) truly online. We **cannot** read that ~`2|A|` figure off this
+CSV, because `phase_compute` lumps Bob's online cross-exponentiation of
+Alice's items together with his offline own-item exponentiations/tags. So the
+"Post-hashing rounds" column is an **upper bound** on the true amortized
+online cost, not the amortized online itself. **That column, and the
+"Cold/post-hashing ratio" derived from it, are additionally sum-of-medians
+proxies** (a sum of per-phase medians ≠ the median of the paired per-trial
+sum), so treat them as approximations. (We report `phase_encode_ms` rather
+than an isolated `hash_to_group_ms`: the latter is instrumented inside
+`PsiCaCost` but is not a column of the comparison CSV, so quoting it here
+would be a misattribution — for FF, `phase_encode_ms` *is* hash-dominated to
+within a sub-ms sketch/encode term.)
+
+| Universe `\|U\|` | Backend | Cold total (ms) | `phase_encode_ms` (hash-dominated) | Post-hashing rounds (ms) | Cold/post-hashing ratio |
 |---|---|---:|---:|---:|---:|
 | 16384 | FF | 1998.0 | 1693.7 | 305.0 | 6.6× |
 | 16384 | EC | 42.9 | 13.2 | 29.6 | 1.4× |
@@ -161,16 +176,18 @@ sub-ms sketch/encode term.)
 
 For the FF backend, `phase_encode_ms` (dominated by one 3072-bit modular
 exponentiation per item in `HashToGroup`, `group_ff.cpp`) is ~83–85% of the
-cold total, so amortizing it away matters a great deal: FF's *online* per-query
-cost (~305–333 ms) is ~16× Piccard's standalone steady-state per-query cost
-(~19–20 ms per the paper's isolated Piccard measurement; see the item-4 caveat
-on the in-sweep Piccard numbers) — far better than the ~100× that FF's cold
-total (~1980 ms ÷ ~19–20 ms) implies. For
+cold total, so amortizing it away matters a great deal: FF's *post-hashing*
+per-query cost (~305–333 ms, un-amortized/fresh-exponent) is ~16× Piccard's
+standalone steady-state per-query cost (~19–20 ms per the paper's isolated
+Piccard measurement; see the item-4 caveat on the in-sweep Piccard numbers) —
+far better than the ~100× that FF's cold total (~1980 ms ÷ ~19–20 ms) implies,
+and DGT12's *fully*-amortized online (only ~`2|A|` cross-exponentiations, which
+this benchmark does not isolate) would be smaller still. For
 the EC backend, `HashToGroup` (try-and-increment; compressed-coordinate
 recovery does compute a P-256 field square root, which *is* a field
 exponentiation, but it is cheap relative to the FF path) avoids the two
 expensive operations FF pays for — no 3072-bit cofactor exponentiation and
-no group scalar multiplication — so cold and online numbers are close and
+no group scalar multiplication — so cold and post-hashing numbers are close and
 both remain in the tens-of-ms range. This feeds reviewer point R2-W5/P1-7: the fair statement is
 "BCG12 can amortize per-item hashing, but not the live 2-party interaction," not
 "BCG12 has no precomputation reuse at all."
@@ -336,7 +353,7 @@ predictive "Estimated runtimes" model, which used a simplified
   "comparable time," with BCG12's decisive advantage being communication.
 - `bcg12_mh_ff` (faithful-but-slower, dominated by 3072-bit modular
   exponentiation) is the slow variant on cold total (~100× Piccard's
-  standalone steady state), but only ~16× on the amortizable/online number
+  standalone steady state), but only ~16× on the post-hashing number
   (item 2) — its disadvantage is concentrated almost entirely in the amortizable
   `HashToGroup` step, not the interactive protocol.
 - `baseline`/ZLG+24 is included only for scale context: not the same
