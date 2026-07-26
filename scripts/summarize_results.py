@@ -188,6 +188,46 @@ def filter_rows(data, key, prefix):
     return [r for r in data if r.get(key, "").startswith(prefix)]
 
 
+# ── Comparison-table extra methods ───────────────────────────────────
+# The comparison timing/comm tables render Piccard vs Baseline side by side.
+# These additional methods (when present in the CSV) are emitted as their own
+# supplementary rows so they are no longer silently dropped — notably `sj16`.
+COMPARISON_EXTRA_METHODS = ("piccard_sqrt", "bcg12", "sj16")
+
+# Row labels carrying each method's security class, and for SJ16 the
+# lower-bound caveat the design doc requires the emitted table to carry.
+_METHOD_LABELS = {
+    "piccard_sqrt": "piccard_sqrt [CPA/no-leakage]",
+    "bcg12": "bcg12 [AHE/no-leakage]",
+    "sj16": "sj16 [AHE/no-leakage; shares only, secure division excluded]",
+}
+
+# Exact disclosure sentence appended to the ASCII title AND the LaTeX caption of
+# the comparison timing and communication tables whenever an sj16 row is present.
+# SJ16 publishes shares of the intersection cardinality only; the secure-division
+# step that would yield an end-to-end Jaccard is excluded, so its timing/comm are
+# an optimistic lower bound and must not be read as a full-protocol cost.
+SJ16_LOWER_BOUND_NOTE = (
+    "SJ16: shares of intersection cardinality; "
+    "secure division excluded — optimistic lower bound."
+)
+
+
+def has_sj16_row(rows):
+    """True if any row in `rows` is an sj16 method row."""
+    return any(r.get("method", "") == "sj16" for r in rows)
+
+
+def method_tag(method):
+    """Plain (ASCII) supplementary-row label for a comparison method."""
+    return _METHOD_LABELS.get(method, method)
+
+
+def method_tag_latex(method):
+    """LaTeX-safe label: escape underscores so tabular rows compile."""
+    return method_tag(method).replace("_", "\\_")
+
+
 # ── T1–T3: Piccard Timing ──────────────────────────────────────────
 
 def table_piccard_timing(data, scenario, tnum, title, latex=False, ci=False):
@@ -395,8 +435,11 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
     if not rows_data:
         return
 
+    sj16_present = has_sj16_row(rows_data)
+
+    ascii_title = f"{title} {SJ16_LOWER_BOUND_NOTE}" if sj16_present else title
     print(f"\n{'=' * 70}")
-    print(f"  Table {tnum}: {title}")
+    print(f"  Table {tnum}: {ascii_title}")
     print(f"{'=' * 70}")
 
     # Group by scenario value, then by method
@@ -441,6 +484,42 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_bytes(b.get("comm_bytes", "0")),
         ])
 
+        # Supplementary rows for methods the side-by-side Piccard/Baseline row
+        # does not carry (sj16, bcg12, piccard_sqrt). Emitted so an sj16 row is
+        # no longer silently dropped; the main row above is left untouched.
+        #
+        # Column placement is correctness-critical: piccard_sqrt is a Piccard
+        # variant, so its value belongs under the Piccard-labeled columns; sj16
+        # and bcg12 are NOT Piccard, so their values go under the Baseline-labeled
+        # columns and the Piccard columns are blanked. No non-Piccard method is
+        # ever printed under a "Piccard *" column.
+        for extra in COMPARISON_EXTRA_METHODS:
+            e = methods.get(extra, {})
+            if not e:
+                continue
+            e_time = float(e.get("total_ms", "0"))
+            # Same sense as the main Speedup column: method_time / piccard_time,
+            # i.e. how many x faster Piccard is than this method.
+            sp = f"{e_time / p_time:.1f}x" if e_time > 0 and p_time > 0 else "-"
+            piccard_side = (extra == "piccard_sqrt")
+            time_cell = fmt_disp(e, "total_ms", ci=ci)
+            ct_cell = fmt_bytes(e.get("ct_size_bytes", "0"))
+            comm_cell = fmt_bytes(e.get("comm_bytes", "0"))
+            rows.append([
+                "  " + method_tag(extra),
+                get_trials(e),
+                e.get("k", ""), e.get("m", ""),
+                e.get("set_size", ""), e.get("universe_size", ""),
+                "", "",
+                time_cell if piccard_side else "",   # Piccard (ms)
+                "" if piccard_side else time_cell,   # Baseline (ms)
+                sp,
+                ct_cell if piccard_side else "",      # Piccard CT
+                "" if piccard_side else ct_cell,      # Baseline CT
+                comm_cell if piccard_side else "",    # Comm P
+                "" if piccard_side else comm_cell,    # Comm B
+            ])
+
     print_table(headers, rows)
 
     if latex:
@@ -467,8 +546,31 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
                 speedup, fmt_bytes(p.get("comm_bytes", "0")),
                 fmt_bytes(b.get("comm_bytes", "0")),
             ])
+            # Supplementary LaTeX rows for sj16/bcg12/piccard_sqrt when present.
+            # piccard_sqrt stays on the Piccard side; sj16/bcg12 sit under the
+            # Baseline-side columns (never under "Piccard (ms)"/"Comm P").
+            for extra in COMPARISON_EXTRA_METHODS:
+                e = methods.get(extra, {})
+                if not e:
+                    continue
+                e_time = float(e.get("total_ms", "0"))
+                sp = f"{e_time / p_time:.1f}$\\times$" if e_time > 0 and p_time > 0 else "-"
+                piccard_side = (extra == "piccard_sqrt")
+                time_l = fmt_ms(e.get("total_ms", "0"))
+                comm_l = fmt_bytes(e.get("comm_bytes", "0"))
+                lr.append([
+                    method_tag_latex(extra), "", "",
+                    time_l if piccard_side else "",   # Piccard (ms)
+                    "" if piccard_side else time_l,   # Baseline (ms)
+                    sp,
+                    comm_l if piccard_side else "",   # Comm P
+                    "" if piccard_side else comm_l,   # Comm B
+                ])
         tab_id = scenario.rstrip("_").replace("_", "-")
-        print_latex_table(title, f"tab:comparison-{tab_id}", lh, lr)
+        latex_caption = title
+        if sj16_present:
+            latex_caption = f"{title} {SJ16_LOWER_BOUND_NOTE}"
+        print_latex_table(latex_caption, f"tab:comparison-{tab_id}", lh, lr)
 
 
 # ── T14: Communication Cost ────────────────────────────────────────
@@ -478,8 +580,13 @@ def table_communication_cost(data, tnum, latex=False):
     if not data:
         return
 
+    sj16_present = has_sj16_row(data)
+
+    comm_title = "Communication Cost — Piccard vs Baseline"
+    if sj16_present:
+        comm_title = f"{comm_title} {SJ16_LOWER_BOUND_NOTE}"
     print(f"\n{'=' * 70}")
-    print(f"  Table {tnum}: Communication Cost — Piccard vs Baseline")
+    print(f"  Table {tnum}: {comm_title}")
     print(f"{'=' * 70}")
 
     # Group by scenario, then method
@@ -518,14 +625,41 @@ def table_communication_cost(data, tnum, latex=False):
             ratio,
         ])
 
+        # Supplementary rows for sj16/bcg12/piccard_sqrt so their communication
+        # is no longer dropped. Ratio is the method's comm relative to Piccard.
+        # piccard_sqrt is a Piccard variant → Piccard-side columns; sj16/bcg12 go
+        # under the Baseline-side columns, never under "Piccard CTs"/"Piccard Comm".
+        for extra in COMPARISON_EXTRA_METHODS:
+            e = methods.get(extra, {})
+            if not e:
+                continue
+            e_comm = int(e.get("comm_bytes", "0"))
+            e_ratio = f"{e_comm / p_comm:.1f}x" if p_comm > 0 else "-"
+            piccard_side = (extra == "piccard_sqrt")
+            cts_cell = e.get("num_cts", "")
+            comm_cell = fmt_bytes(e_comm)
+            rows.append([
+                "  " + method_tag(extra),
+                e.get("k", ""),
+                e.get("universe_size", ""),
+                e.get("set_size", ""),
+                cts_cell if piccard_side else "",    # Piccard CTs
+                comm_cell if piccard_side else "",   # Piccard Comm
+                "" if piccard_side else cts_cell,    # Baseline CTs
+                "" if piccard_side else comm_cell,   # Baseline Comm
+                e_ratio,
+            ])
+
     print_table(headers, rows)
 
     if latex:
         print()
         lh = ["Scenario", "$k$", "$|U|$", "$n$",
               "P CTs", "P Comm", "B CTs", "B Comm", "Ratio"]
-        print_latex_table("Communication cost: Piccard vs.\\ baseline.",
-                          "tab:communication-cost", lh, rows)
+        latex_caption = "Communication cost: Piccard vs.\\ baseline."
+        if sj16_present:
+            latex_caption = f"{latex_caption} {SJ16_LOWER_BOUND_NOTE}"
+        print_latex_table(latex_caption, "tab:communication-cost", lh, rows)
 
 
 # ── T15–T17: Dynamic Timing ────────────────────────────────────────
