@@ -78,7 +78,10 @@ TEST_F(SqrtPiccardTest, MultDepthIsThree) {
     // headroom for the intermediate rotate-and-sum operations.
     params.ValidateSqrt();
 
-    EXPECT_EQ(params.mult_depth, 3u);
+    // The circuit's own requirement stays 3; mult_depth is provisioned at or
+    // above it to carry the noise-flooding term (R2-W6).
+    EXPECT_EQ(params.natural_mult_depth, 3u);
+    EXPECT_GE(params.mult_depth, params.natural_mult_depth);
 }
 
 TEST_F(SqrtPiccardTest, RingDimSmallerOrEqual) {

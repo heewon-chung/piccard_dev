@@ -83,7 +83,11 @@ TEST(PiccardParams, DefaultValidation) {
     EXPECT_GT(params.plaintext_mod, params.k);
     EXPECT_EQ(params.plaintext_mod % (2 * params.ring_dim), 1u);
     EXPECT_TRUE(IsPrime(params.plaintext_mod));
-    EXPECT_EQ(params.mult_depth, 1u);
+    // The one-hot circuit needs one multiplication. mult_depth is provisioned
+    // at or above that to leave room for noise flooding (R2-W6), so the
+    // circuit's own requirement is natural_mult_depth.
+    EXPECT_EQ(params.natural_mult_depth, 1u);
+    EXPECT_GE(params.mult_depth, params.natural_mult_depth);
 }
 
 TEST(PiccardParams, ToySecuritySmallRing) {
@@ -169,16 +173,20 @@ TEST(PiccardParams, ThresholdMultDepth) {
 
         RecordProperty("k_" + std::to_string(c.k) + "_mult_depth",
                        static_cast<int>(params.mult_depth));
-        EXPECT_EQ(params.mult_depth, c.expected_depth)
-            << "k=" << c.k << ": expected mult_depth=" << c.expected_depth
-            << ", got " << params.mult_depth;
+        // Assert on natural_mult_depth: this is the number that must keep
+        // matching EvalPolyBFV's step-size calculation. mult_depth may sit
+        // above it to carry the flooding term.
+        EXPECT_EQ(params.natural_mult_depth, c.expected_depth)
+            << "k=" << c.k << ": expected natural depth=" << c.expected_depth
+            << ", got " << params.natural_mult_depth;
+        EXPECT_GE(params.mult_depth, params.natural_mult_depth) << "k=" << c.k;
     }
 }
 
 TEST(PiccardParams, NonThresholdMultDepthIsOne) {
-    // Without threshold_mode, mult_depth should always be 1
+    // Without threshold_mode, the circuit needs exactly one multiplication
     RecordProperty("input_threshold_mode", "false");
-    RecordProperty("expected_mult_depth", "1");
+    RecordProperty("expected_natural_mult_depth", "1");
 
     for (uint32_t k : {4u, 16u, 64u, 128u}) {
         PiccardParams params;
@@ -187,9 +195,10 @@ TEST(PiccardParams, NonThresholdMultDepthIsOne) {
         params.security = SecurityLevel::TOY;
         params.Validate();
 
-        RecordProperty("k_" + std::to_string(k) + "_mult_depth",
-                       static_cast<int>(params.mult_depth));
-        EXPECT_EQ(params.mult_depth, 1u) << "k=" << k;
+        RecordProperty("k_" + std::to_string(k) + "_natural_mult_depth",
+                       static_cast<int>(params.natural_mult_depth));
+        EXPECT_EQ(params.natural_mult_depth, 1u) << "k=" << k;
+        EXPECT_GE(params.mult_depth, params.natural_mult_depth) << "k=" << k;
     }
 }
 

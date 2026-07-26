@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 using namespace piccard;
@@ -150,18 +151,31 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
               sqrt_base = 1u << (log2m / 2); }
             cr.sqrt_feature_dim = k * 2 * sqrt_base;
 
-            // OneHot engine
+            // Validate() fails closed for a configuration the noise-flooding
+            // calibration does not cover (R2-W6), and this sweep runs its full
+            // grid at every security level. Skip such a cell with a warning
+            // rather than aborting the whole sweep -- the same handling
+            // bench_threshold uses. `bench_noise --coverage` lists which keys
+            // are missing and 3_noise-flooding.md section 8 records why.
             PiccardParams pp;
-            pp.k = k; pp.m = m; pp.security = config.security_level;
-            pp.Validate();
+            PiccardParams sp;
+            try {
+                pp.k = k; pp.m = m; pp.security = config.security_level;
+                pp.Validate();
+                sp.k = k; sp.m = m; sp.security = config.security_level;
+                sp.ValidateSqrt();
+            } catch (const std::exception& e) {
+                std::cerr << "WARNING: skipping k=" << k << " m=" << m
+                          << ": " << e.what() << "\n";
+                continue;
+            }
+
+            // OneHot engine
             Piccard onehot(pp);
             onehot.KeyGen();
             cr.onehot_ring_dim = onehot.GetParams().ring_dim;
 
             // Sqrt engine
-            PiccardParams sp;
-            sp.k = k; sp.m = m; sp.security = config.security_level;
-            sp.ValidateSqrt();
             SqrtPiccard sqrt_eng(sp);
             sqrt_eng.KeyGen();
             cr.sqrt_ring_dim = sqrt_eng.GetParams().ring_dim;
