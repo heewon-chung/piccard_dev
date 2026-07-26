@@ -40,7 +40,11 @@ Record the answer *here*, in this section, before Task 1 starts — Task 6 Step 
 copies it into `3_noise-flooding.md` §8 afterwards, which is too late to guide
 the implementer.
 
-> **Decision:** _(unanswered — Task 1 is blocked until this is filled in)_
+> **Decision (2026-07-26): include re-randomization.** `Flood()` adds a fresh
+> `Enc_pk(0)` before the mask, as written in Task 1 Step 4. The appendix's
+> "fresh encryption" wording then describes what the code actually does, so no
+> paper edit is needed, and the added noise is negligible against a
+> `2^129`–`2^605` mask.
 
 ## Global Constraints
 
