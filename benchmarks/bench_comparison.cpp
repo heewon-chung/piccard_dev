@@ -135,8 +135,16 @@ struct ComparisonResult {
 static const char* SecurityClassOf(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "CPA/no-leakage";
     if (method == "baseline") return "KPA/leakage";  // ZLG+24
-    if (method == "bcg12" || method == "sj16") return "AHE/no-leakage";
+    // BCG12: prefix match so per-variant names (bcg12_mh_ff, bcg12_exact_ec, ...) resolve.
+    if (method.rfind("bcg12", 0) == 0 || method.rfind("sj16", 0) == 0) return "AHE/no-leakage";
     return "unknown";
+}
+
+// BCG12: protocol model, orthogonal to security class. 2-party = both data owners
+// interact per query; 3-party = data outsourced to an untrusted server.
+static const char* ModelOf(const std::string& method) {
+    if (method.rfind("bcg12", 0) == 0 || method.rfind("sj16", 0) == 0) return "2-party";
+    return "3-party-outsourced";   // piccard, piccard_sqrt, baseline
 }
 
 class ComparisonCSVWriter {
@@ -157,7 +165,8 @@ public:
               << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
               << "phase_compute_ms_sd,phase_compute_ms_median,"
               << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-              << "rel_error_eligible_n\n";
+              << "rel_error_eligible_n,"
+              << "model\n";  // BCG12: trailing column (2-party vs 3-party-outsourced)
     }
 
     void WriteRow(const ComparisonResult& r) {
@@ -198,7 +207,8 @@ public:
               << r.phase_compute_ms_median << ","
               << r.phase_decrypt_ms_sd << ","
               << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << "\n";
+              << r.rel_error_eligible_n << ","
+              << ModelOf(r.method) << "\n";  // BCG12: trailing column
     }
 
 private:
@@ -462,6 +472,49 @@ static ComparisonResult RunMultiTrialBaseline(
     r.rel_error_eligible_n = rel_eligible;
     return r;
 }
+
+// ============================================================================
+// Multi-trial: BCG12 (fixed-set scenario — mirrors RunMultiTrialPiccard)
+// ============================================================================
+
+#ifdef HAVE_PICCARD_BASELINES
+#include "baselines/bcg12.h"
+#include "util/params.h"   // PiccardParams (CRS parity source)
+static ComparisonResult RunBCG12MultiTrial(
+    piccard::baselines::BCG12& eng, const std::vector<uint64_t>& x,
+    const std::vector<uint64_t>& y, double j_true, const std::string& scenario,
+    uint32_t universe, const char* method, uint32_t k, size_t trials) {
+    eng.RunQuery(x,y);                                  // warmup (excluded)
+    std::vector<double> enc,encr,comp,dec,tot;
+    double sum_j_hat=0.0, sum_j_err=0.0, sum_rel=0.0; size_t rel_elig=0;
+    piccard::baselines::QueryCost last{};
+    for(size_t t=0;t<trials;t++){ auto q=eng.RunQuery(x,y);
+        enc.push_back(q.phase_encode_ms); encr.push_back(q.phase_encrypt_ms);
+        comp.push_back(q.phase_compute_ms); dec.push_back(q.phase_decrypt_ms);
+        tot.push_back(q.total_ms);
+        double e=std::abs(q.jaccard_estimate-j_true);
+        sum_j_hat+=q.jaccard_estimate; sum_j_err+=e;
+        if(j_true>0.0){ sum_rel+=e/j_true; rel_elig++; }
+        last=q; }
+    using piccard::benchmark::ComputeDispersion;
+    auto de=ComputeDispersion(enc), dr=ComputeDispersion(encr), dc=ComputeDispersion(comp),
+         dd=ComputeDispersion(dec), dt=ComputeDispersion(tot);
+    double n=static_cast<double>(trials);
+    ComparisonResult cr; cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
+    cr.set_size=x.size(); cr.k=k; cr.m=0; cr.ring_dim=0; cr.num_cts=0; cr.mult_depth=0;
+    cr.trials=trials;
+    cr.phase_encode_ms=de.mean;  cr.phase_encode_ms_sd=de.sd;  cr.phase_encode_ms_median=de.median;
+    cr.phase_encrypt_ms=dr.mean; cr.phase_encrypt_ms_sd=dr.sd; cr.phase_encrypt_ms_median=dr.median;
+    cr.phase_compute_ms=dc.mean; cr.phase_compute_ms_sd=dc.sd; cr.phase_compute_ms_median=dc.median;
+    cr.phase_decrypt_ms=dd.mean; cr.phase_decrypt_ms_sd=dd.sd; cr.phase_decrypt_ms_median=dd.median;
+    cr.total_ms=dt.mean;         cr.total_ms_sd=dt.sd;         cr.total_ms_median=dt.median;
+    cr.ct_size_bytes=last.ct_size_bytes; cr.comm_bytes=last.comm_bytes;
+    cr.jaccard_computed=sum_j_hat/n; cr.jaccard_expected=j_true; cr.jaccard_error=sum_j_err/n;
+    cr.jaccard_rel_error=(rel_elig>0)?(sum_rel/static_cast<double>(rel_elig)):-1.0;
+    cr.rel_error_eligible_n=rel_elig;
+    cr.memory_bytes=MemoryTracker::GetPeakRSS(); return cr;
+}
+#endif
 
 // ============================================================================
 // Helper: check if m is valid for sqrt encoding

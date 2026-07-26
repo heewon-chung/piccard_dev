@@ -266,6 +266,9 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
 
     add_executable(bench_comparison benchmarks/bench_comparison.cpp)
     target_link_libraries(bench_comparison piccard_fhe)
+    if(HAVE_PICCARD_BASELINES)                              # BCG12: enable baseline rows
+        target_link_libraries(bench_comparison piccard_baselines)
+    endif()
     target_include_directories(bench_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_dynamic benchmarks/bench_dynamic.cpp)
