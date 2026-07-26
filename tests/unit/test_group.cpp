@@ -1,5 +1,6 @@
 #include "baselines/group.h"
 #include "baselines/group_ff.h"
+#include "baselines/group_ec.h"
 #include <gtest/gtest.h>
 using namespace piccard::baselines;
 TEST(TagHash, DeterministicAnd32Bytes){
@@ -32,3 +33,4 @@ TEST(Group, FiniteFieldSubgroupValid){
     // out-of-subgroup element must be rejected (fabricate via a raw non-member if exposed;
     // otherwise assert x != identity and x^q == identity, checked inside InSubgroup)
 }
+TEST(Group, EcContract){ CheckGroupContract(*MakeEcGroup()); }
