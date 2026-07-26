@@ -1,10 +1,11 @@
 # BCG12 baseline — implementation notes
 
 Working notes for the BCG12 (EsPRESSo, arXiv:1111.5062v5) comparison
-baseline, built on top of `include/baselines/group.h`. Phase 0 (this file)
-covers only the group-arithmetic foundation: the abstract `Group` interface
-and its two backends. Protocol-level notes (DGT12 PSI-CA, the `BCG12`
-`PJSBaseline` wrapper, benchmark integration) land here in later phases.
+baseline, built on top of `include/baselines/group.h`. This file now covers
+the full implementation: the group-arithmetic foundation (the abstract
+`Group` interface and its two backends, Phase 0), the DGT12 PSI-CA protocol
+and the `BCG12`/`PJSBaseline` wrapper with benchmark integration (Phases
+1–3), and paper-ready provenance/analysis for items 1–6 (Phase 4, below).
 
 ## Group parameter provenance (Task 0.5)
 
@@ -45,17 +46,22 @@ to satisfy all of the required properties:
 - `g^q mod p == 1` (i.e. `g` generates a subgroup of order dividing `q`;
   combined with `q` prime and `g != 1`, `g`'s order is exactly `q`).
 
-`FFGroup::ValidateParams()` (`src/baselines/group_ff.cpp`) re-checks the
-same five properties with GMP (`mpz_probab_prime_p`, 40 rounds) at every
-construction, so a corrupted or mistyped constant fails fast at startup
-rather than silently degrading security.
+`FFGroup::ValidateParams()` (`src/baselines/group_ff.cpp`) re-checks, with
+GMP, that `p` and `q` are prime (`mpz_probab_prime_p`, 40 rounds), that
+`q | (p-1)`, that `1 < g < p`, and that `g^q mod p == 1` — four of the
+five Python-verified properties. It does **not** re-check the 3072/256-bit
+lengths of `p`/`q` at construction time (those are fixed by the length of
+the hardcoded hex constants, not re-measured), so a corrupted or mistyped
+constant that happens to preserve primality/subgroup structure would still
+pass `ValidateParams()`.
 
 ### Elliptic-curve backend: NIST P-256
 
 The EC backend (`src/baselines/group_ec.cpp`) uses OpenSSL's built-in
 `NID_X9_62_prime256v1` (NIST P-256) curve parameters directly — no
 generation step is needed since these are standard, widely-audited domain
-parameters (FIPS 186-4). P-256 has cofactor 1, so every on-curve,
+parameters (FIPS 186-5 / NIST SP 800-186; FIPS 186-4 originally specified
+P-256 but was withdrawn in 2024). P-256 has cofactor 1, so every on-curve,
 non-infinity point is a valid group element of the full prime order.
 
 ### Security-level justification
@@ -63,12 +69,13 @@ non-infinity point is a valid group element of the full prime order.
 | Backend | Parameters | Security level | Source |
 |---|---|---|---|
 | FF `Z_p^*` (this branch) | `\|p\|=3072, \|q\|=256` | 128-bit | NIST SP 800-57 Pt.1 Rev.5, Table 2: 128-bit security ⇒ `L=3072, N=256` for FFC (DSA/DH-style) parameters |
-| EC P-256 (this branch) | NIST P-256 | 128-bit | FIPS 186-4; standard 256-bit-order curve, ~128-bit security |
-| BCG12 paper's original (EsPRESSo, §3.3) | `\|p\|=1024, \|q\|=160` | ~80-bit | Superseded parameter choice at time of publication (2011) |
+| EC P-256 (this branch) | NIST P-256 | 128-bit | FIPS 186-5 / NIST SP 800-186 (FIPS 186-4 was the original, now-withdrawn, source); standard 256-bit-order curve, ~128-bit security |
+| BCG12 paper's original (EsPRESSo, §3.3) | `\|p\|=1024, \|q\|=160` | ~80-bit | Superseded parameter choice at time of the original construction (arXiv 2011, v5 2013; journal version J. Computer Security 22(3), 2014) |
 
 Both backends target the modern 128-bit security level (NIST SP 800-57
-Pt.1 Rev.5, Table 2), which is one full security-level step above the
-paper's original 1024/160 (~80-bit) choice — chosen so the BCG12 comparison
+Pt.1 Rev.5, Table 2), which is two nominal NIST security tiers above the
+paper's original 1024/160 (~80-bit) choice (NIST's tiers run 80, 112,
+128-bit) — chosen so the BCG12 comparison
 in the paper is not artificially advantaged by outdated, weaker parameters.
 `P-256` is the modern/fastest-reasonable secondary backend; the FF
 `Z_p^*` backend at `3072/256` is the primary backend because it is
@@ -125,13 +132,21 @@ What actually differs between the two protocols is:
 phases). `phase_encode_ms` (a real CSV column) is the MinHash sketch + item
 encoding + `HashToGroup` for every item; for the FF backend it is almost
 entirely `HashToGroup` (one 3072-bit modexp per item — the sketch/encode part
-is sub-millisecond). "Online rounds" = the three interactive masking rounds
-(`phase_encrypt`+`phase_compute`+`phase_decrypt` medians), i.e. what a returning
-pair of data owners with already-hashed items still pays live per query. (We
-report `phase_encode_ms` rather than an isolated `hash_to_group_ms`: the latter
-is instrumented inside `PsiCaCost` but is not a column of the comparison CSV, so
-quoting it here would be a misattribution — for FF, `phase_encode_ms` *is*
-hash-dominated to within a sub-ms sketch/encode term.)
+is sub-millisecond). "Online rounds" = the three interactive masking rounds,
+computed as `phase_encrypt_ms_median + phase_compute_ms_median +
+phase_decrypt_ms_median` (verified against the CSV, e.g. `73.279 + 153.010 +
+78.735 = 305.02 ≈ 305.0` for `\|U\|=16384` FF), i.e. what a returning pair
+of data owners with already-hashed items still pays live per query. **This
+"Online rounds" column, and the "Cold/online ratio" column derived from it,
+are sum-of-medians proxies**, not the median of each trial's own
+`(phase_encrypt+phase_compute+phase_decrypt)` total — a sum of per-phase
+medians is not in general equal to the median of the paired per-trial
+online sum, so treat both columns as an approximation rather than an exact
+statistic. (We report `phase_encode_ms` rather than an isolated
+`hash_to_group_ms`: the latter is instrumented inside `PsiCaCost` but is
+not a column of the comparison CSV, so quoting it here would be a
+misattribution — for FF, `phase_encode_ms` *is* hash-dominated to within a
+sub-ms sketch/encode term.)
 
 | Universe `\|U\|` | Backend | Cold total (ms) | `phase_encode_ms` (hash-dominated) | Online rounds (ms) | Cold/online ratio |
 |---|---|---:|---:|---:|---:|
@@ -151,9 +166,12 @@ cost (~305–333 ms) is ~16× Piccard's standalone steady-state per-query cost
 (~19–20 ms per the paper's isolated Piccard measurement; see the item-4 caveat
 on the in-sweep Piccard numbers) — far better than the ~100× that FF's cold
 total (~1980 ms ÷ ~19–20 ms) implies. For
-the EC backend, `HashToGroup` (try-and-increment, no modular exponentiation) is
-already cheap, so cold and online numbers are close and both remain in the
-tens-of-ms range. This feeds reviewer point R2-W5/P1-7: the fair statement is
+the EC backend, `HashToGroup` (try-and-increment; compressed-coordinate
+recovery does compute a P-256 field square root, which *is* a field
+exponentiation, but it is cheap relative to the FF path) avoids the two
+expensive operations FF pays for — no 3072-bit cofactor exponentiation and
+no group scalar multiplication — so cold and online numbers are close and
+both remain in the tens-of-ms range. This feeds reviewer point R2-W5/P1-7: the fair statement is
 "BCG12 can amortize per-item hashing, but not the live 2-party interaction," not
 "BCG12 has no precomputation reuse at all."
 
@@ -176,7 +194,9 @@ covers.
 At **equal `k`**, BCG12's `Setup()` builds its `MinHasher` with
 `hash_range = UINT64_MAX` (`src/baselines/bcg12.cpp:48`) — the unbucketed
 full-range signature, matched by exact tag equality inside DGT12 PSI-CA.
-Piccard's engine (`src/protocol/piccard_engine.cpp:12`) also computes an
+Piccard's live protocol path (`Piccard::KeyGen`, `src/protocol/piccard.cpp:17-19`
+— not `src/protocol/piccard_engine.cpp`, which is not among the FHE sources
+`bench_comparison` builds against) also computes an
 unbucketed MinHash signature (`params_.hash_range` defaults to
 `UINT64_MAX` too), but then feeds it through `OneHotEncoder::Encode`
 (`include/core/onehot_encoder.h:15`) before the FHE inner-product step:
@@ -184,13 +204,17 @@ unbucketed MinHash signature (`params_.hash_range` defaults to
 *raw* matched-count reduces each of the `k` signature values mod `m`
 (`m=64` in the STD128 benchmark configuration) into one of `m` one-hot
 buckets, so two distinct signature values that happen to collide mod `m`
-are counted as a match. In expectation the raw matched-ratio is
+are counted as a match. **Under ideal minwise-independent hashing and
+independent, uniform mod-`m` collisions** — the fixed affine-hash MinHash
+CRS (`src/core/minhash.cpp`, item 6) *approximates* but does not guarantee
+these idealizing assumptions — in expectation the raw matched-ratio is
 `E[raw] = J + (1−J)/m`, i.e. an upward collision bias of `(1−J)/m` on the
 *raw* matched-ratio (at most `1/m`, reached at `J=0`; `≈ 1/96 ≈ 0.0104` at
 `J=1/3, m=64`, not `1/64`) — and it is precisely why `RunPiccardTimed`
 (`benchmarks/bench_comparison.cpp:279`) applies the correction
-`j_hat = (raw_ratio - 1/m) / (1 - 1/m)`, which is data-independent yet maps
-`E[raw]` back to `J` exactly (`(J + (1−J)/m − 1/m)/(1 − 1/m) = J`), before
+`j_hat = (raw_ratio - 1/m) / (1 - 1/m)`, which is data-independent and,
+under those same idealizing assumptions, maps `E[raw]` back to `J` exactly
+(`(J + (1−J)/m − 1/m)/(1 − 1/m) = J`), before
 reporting `jaccard_computed`. **Piccard's reported estimator therefore
 applies this correction and is unbiased in expectation — it does not retain
 a collision bias.** What the correction does *not* remove is the
@@ -233,10 +257,17 @@ Fig. 3 (MinHash, `bcg12_mh_ff` / `bcg12_mh_ec`) is the primary equal-accuracy
 comparison against Piccard, same `k`, same MinHash CRS (item 6). Fig. 2 exact
 (`bcg12_exact_ff` / `bcg12_exact_ec`, `O(n)`, no MinHash — see `vary_size_*`
 rows in the CSV) is scaling context only, never a like-for-like accuracy
-comparison, per DEC-1. `baseline`/ZLG+24 (`O(|U|log n)` SHE inner product,
-`benchmarks/baseline_engine.h`) is included for context, not as a
-same-security-class comparison (it is `KPA/leakage`, not `AHE/no-leakage`
-or `CPA/no-leakage`).
+comparison, per DEC-1. `baseline`/ZLG+24 (one HE multiplication plus
+`O(log|U|)` rotations/additions per query, `O(|U|)`-scaling encoding and
+communication — see item 6/R3-5 below, `benchmarks/baseline_engine.h`) is included
+for context, not as a same-security-class comparison (it is `KPA/leakage`,
+not `AHE/no-leakage` or `CPA/no-leakage`). Note on the `AHE/no-leakage`
+label itself: `AHE_NoLeakage` (`SecurityClass`, `pjs_baseline.h`) and the
+paper's Table I "AHE" crypto-primitive column are the paper's own
+classification of BCG12/DGT12; the concrete construction implemented here
+is DH-based and secure under DDH in the random-oracle model (blind
+exponentiation), not additively-homomorphic encryption — see the DEC-4
+Table I erratum (item 5) for the full note.
 
 | `\|U\|` | Method | Model | total_ms median (±SD) | comm_bytes | jaccard (comp / expected) |
 |---|---|---|---:|---:|---|
@@ -279,15 +310,21 @@ predictive "Estimated runtimes" model, which used a simplified
   yet its measured median here climbs with `\|U\|`: ~59–60 ms at the two
   smaller universes (60.2, 58.5 — flat within noise), then 103.2 and 220.5 ms
   at `\|U\|=2^18` and `2^20` (SD also grows, to ±49.6 ms at `\|U\|=2^20`).
-  That upward trend is a benchmark-structure artifact, not a Piccard cost: in
-  `BenchVaryUniverse` the universe-sized `baseline` engine (up to 100.7 MB
-  of ciphertext at `\|U\|=2^20`) is constructed and exercised in the *same*
-  per-trial loop as Piccard, so memory/cache pressure from the giant
-  baseline inflates the co-scheduled Piccard timing at large `\|U\|`.
-  Piccard's true standalone steady state is ~19–20 ms (paper Table
-  `tbl:comp`, measured in isolation). **Therefore this table's Piccard
-  column overstates Piccard's cost, and the honest reading is: BCG12's
-  numbers are clean; Piccard must be re-measured in isolation before any
+  The **most plausible** explanation is a benchmark-structure confounder,
+  not an intrinsic Piccard cost: in `BenchVaryUniverse` the universe-sized
+  `baseline` engine (up to 100.7 MB of ciphertext at `\|U\|=2^20`) is
+  constructed and exercised in the *same* per-trial loop as Piccard, so
+  memory/cache pressure from the giant co-scheduled baseline is a
+  plausible source of the inflated Piccard timing at large `\|U\|`. This is
+  not established causality, though — the CSV and code here only show the
+  correlation between `\|U\|` and Piccard's measured median; an isolated,
+  controlled rerun of Piccard alone (no co-scheduled `baseline`) is
+  required to confirm memory/cache pressure is actually the cause before
+  this is stated as fact. Piccard's true standalone steady state is
+  ~19–20 ms (paper Table `tbl:comp`, measured in isolation). **Therefore
+  this table's Piccard column overstates Piccard's cost, and the honest
+  reading is: BCG12's numbers are clean; Piccard must be re-measured in
+  isolation before any
   paper-facing "Piccard vs. BCG12" time ratio is quoted.** Even against
   the (inflated) in-sweep Piccard, `bcg12_mh_ec` is faster at every size;
   against Piccard's true ~19–20 ms standalone, `bcg12_mh_ec` (~34–43 ms)
@@ -304,8 +341,12 @@ predictive "Estimated runtimes" model, which used a simplified
   protocol) — 121 ms/1.58 MB at `\|U\|=16384` up to 4422 ms/100.7 MB at
   `\|U\|=1048576`.
 
-**This table is marked PROVISIONAL.** Per `INTEGRATION_NOTES.md` and
-`00_shared_context.md` §머지 순서, all timing/communication numbers across
+**This table is marked PROVISIONAL.** Per `INTEGRATION_NOTES.md` (§"PHASE 4
+RESULTS", which records that timing/communication numbers are re-measured
+after `noise-flooding` merges, citing merge-order section `"머지 순서"`;
+`00_shared_context.md`, if present in your checkout, has the fuller
+merge-order table but is untracked and not guaranteed to exist in a clean
+checkout), all timing/communication numbers across
 every branch are re-measured after the `noise-flooding` branch merges.
 BCG12 uses no FHE, so its *absolute* numbers (the `bcg12_*` rows above)
 are noise-flooding-independent and stable. Piccard's numbers are not —
@@ -314,8 +355,9 @@ the in-sweep Piccard numbers are additionally inflated by co-scheduled
 baseline memory pressure — so the **Piccard-vs-BCG12 speedup/ratio columns
 must be regenerated post-merge, with Piccard measured in isolation**, even
 though the BCG12-side numbers feeding those ratios will not change. The
-`trials=3` medians here carry SD; re-run with `trials≥5` at merge time for
-tighter dispersion.
+`trials=3` medians here carry SD; re-run with `trials≥5` at merge time for a
+tighter, more stable dispersion estimate (more trials sharpen the precision
+of the SD estimate itself, not the underlying spread of the measurements).
 
 ### 5. Table I erratum (DEC-4) — for merge-time, not edited here
 
@@ -329,16 +371,21 @@ single row for `\cite{BCG12}`:
 This conflates two different protocols from the BCG12/EsPRESSo paper into
 one row: the `$O(n)$` computation/communication figures are Fig. 2's
 **exact** Jaccard protocol (raw sets, no MinHash, cost linear in the
-underlying set/universe size `n`), while the "Minhash" tool column names
-Fig. 3's **approximate** protocol (MinHash signatures, cost `O(k)` in the
-signature length, independent of `n`). No single row can correctly
-describe both variants at once — the row as written is only accurate for
-Fig. 2 in its computation/communication columns and only accurate for
-Fig. 3 in its "Main tools/data structures" column. This is an **erratum**
-to fix at merge time (the paper's `\ours` row already correctly separates
-Piccard's own MinHash+one-hot mechanism from its complexity figures);
-`piccard.tex` itself is intentionally **not edited** by this branch —
-this is a note for the integrator, per the plan's scope discipline.
+underlying set size `n` — not universe size), while the "Minhash" tool
+column names Fig. 3's **approximate** protocol (MinHash signatures, cost
+`O(k)` in the signature length, independent of `n`). No single row can
+correctly describe both variants at once — the row as written is only
+accurate for Fig. 2 in its computation/communication columns and only
+accurate for Fig. 3 in its "Main tools/data structures" column. Separately,
+the row's "AHE" crypto-primitive column is also the paper's own
+classification (matching the `AHE_NoLeakage` enum label used in this
+codebase, item 1 above), not a description of the concrete DGT12
+construction, which is DH-based/DDH-in-the-ROM rather than
+additively-homomorphic encryption. This is an **erratum** to fix at merge
+time (the paper's `\ours` row already correctly separates Piccard's own
+MinHash+one-hot mechanism from its complexity figures); `piccard.tex`
+itself is intentionally **not edited** by this branch — this is a note
+for the integrator, per the plan's scope discipline.
 
 ### 6. R3-5 observation on `baseline_engine.h` fidelity, and the cross-branch MinHash-CRS dependency
 
@@ -352,14 +399,19 @@ ZLG+24 paper's headline complexity is `O(|U| log n)` SHE ops using a
 encoding plus a homomorphic inner product realized as rotate-and-sum**
 (`log2(N)` rotations to accumulate all slots into slot 0) — there is
 **no k-d-tree-based pruning/matching** anywhere in this implementation.
-This is a legitimate, working `O(|U|)`-communication SHE baseline (and its
-own doc comment at the top of the file is honest about this: "encodes sets
-as binary vectors of dimension `U_set`"), but it is **not** a faithful
-reimplementation of ZLG+24's asymptotic `O(|U| log n)` computation — it is
-closer to `O(|U|)` per query with no tree-pruning speedup. This is a
-fidelity risk the integrator should be aware of before citing this
-baseline's measured numbers as representative of ZLG+24 specifically (as
-opposed to "an `O(|U|)`-scaling SHE-based baseline in the same family").
+This is a legitimate, working SHE baseline (and its own doc comment at the
+top of the file is honest about this: "encodes sets as binary vectors of
+dimension `U_set`"), but it is **not** a faithful reimplementation of
+ZLG+24's asymptotic `O(|U| log n)` computation — with `ring_dim ≥ |U|`, its
+per-query HE-*operation* count is one homomorphic multiplication plus
+`O(log|U|)` rotations/additions (`RotateAndSum`'s `log2(N)` loop), not
+`O(|U|)` HE ops and not the paper's claimed `O(log n)` factor either. What
+actually scales `O(|U|)` here is the **encoding, ciphertext size, and
+communication** (the universe-sized indicator vector and the ciphertext(s)
+that carry it) — not the HE-operation count. This is a fidelity risk the
+integrator should be aware of before citing this baseline's measured
+numbers as representative of ZLG+24 specifically (as opposed to "an
+`O(|U|)`-encoding/communication SHE-based baseline in the same family").
 Flagged per R3-5; not fixed here — `baseline_engine.h` is out of this
 branch's scope (Global Constraints: "Do not modify... the *runtime
 behavior* of `benchmarks/baseline_engine.h`").
@@ -373,13 +425,23 @@ means Piccard and BCG12 provably share the same public common reference
 string for the hash family `H`, which is a precondition for item 3's
 "same estimator" claim to be meaningful (two engines computing MinHash
 signatures under *different* CRSs would not be comparable at all, same
-estimator or not). This is a **cross-branch dependency**: if a future
-change to `hash-seed-crs`'s owned files (`params.{h,cpp}`) changes the
-default `hash_seed`, or changes how the CRS is derived, both Piccard's
-and BCG12's benchmark rows track it automatically and stay in parity —
-but only because BCG12 reads the field rather than hardcoding `42`. Worth
-one line in `INTEGRATION_NOTES.md` at merge time so `hash-seed-crs`'s
-owners know a second branch now depends on their default.
+estimator or not). Note that `include/util/params.h` only *holds* the
+`hash_seed` field — the actual CRS derivation (expanding the seed into
+the per-hash coefficients `H = ((a_i,b_i))_{i=1..k}`) lives in
+`src/core/minhash.cpp` (`MinHasher`'s constructor / `ExpandHashSeed`), so
+that file, not `params.{h,cpp}`, is what to consult (or watch for
+changes) if the CRS-derivation *algorithm* itself is ever revised. There
+are two independent things that must line up, and they have different
+owners: (1) the **derivation algorithm** — both Piccard and BCG12 already
+construct their signatures through the same shared `MinHasher` class, so
+they track the *same* derivation automatically regardless of what
+`hash_seed` value is used; and (2) the **default-seed value** — parity on
+`42` specifically only holds because BCG12 reads
+`PiccardParams{}.hash_seed` rather than hardcoding the literal `42`, so a
+change to that default in `params.{h,cpp}` (`hash-seed-crs`'s owned
+files) automatically keeps both sides' *default* in sync too. Worth one
+line in `INTEGRATION_NOTES.md` at merge time so `hash-seed-crs`'s owners
+know a second branch now depends on their default.
 
 ## Status
 
