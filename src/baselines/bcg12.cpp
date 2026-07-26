@@ -92,8 +92,33 @@ QueryCost BCG12::RunQuery(const std::vector<uint64_t>& set_x, const std::vector<
         return qc;
     }
 
-    // Exact mode (Fig. 2) lands in Task 2.2.
-    throw std::runtime_error("BCG12::RunQuery: Exact mode not yet implemented");
+    // Exact mode (Fig. 2): dedup X, Y; PSI-CA on raw (encoded) elements;
+    // c = |Xu ∩ Yu|, u = |Xu| + |Yu| - c, estimate = u ? c/u : 1.0.
+    auto t0 = Clock::now();
+    std::set<uint64_t> xu(set_x.begin(), set_x.end());
+    std::set<uint64_t> yu(set_y.begin(), set_y.end());
+    a_items.reserve(xu.size());
+    b_items.reserve(yu.size());
+    for (uint64_t v : xu) a_items.push_back(EncodeRawItem(v));
+    for (uint64_t v : yu) b_items.push_back(EncodeRawItem(v));
+    auto t1 = Clock::now();
+    preprocessing_ms = ElapsedMs(t0, t1);
+
+    PsiCaCost psi = RunDgt12(*group_, a_items, b_items);
+    const uint64_t c = psi.cardinality;
+    const uint64_t u = xu.size() + yu.size() - c;
+    jaccard_estimate = u ? static_cast<double>(c) / static_cast<double>(u) : 1.0;
+
+    QueryCost qc;
+    qc.phase_encode_ms = preprocessing_ms + psi.hash_to_group_ms;
+    qc.phase_encrypt_ms = psi.alice_round1_ms;
+    qc.phase_compute_ms = psi.bob_ms;
+    qc.phase_decrypt_ms = psi.alice_round2_ms;
+    qc.total_ms = qc.phase_encode_ms + qc.phase_encrypt_ms + qc.phase_compute_ms + qc.phase_decrypt_ms;
+    qc.comm_bytes = psi.payload_bytes;
+    qc.ct_size_bytes = psi.alice_upload_bytes;
+    qc.jaccard_estimate = jaccard_estimate;
+    return qc;
 }
 
 }  // namespace baselines

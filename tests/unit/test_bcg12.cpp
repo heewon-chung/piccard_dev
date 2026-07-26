@@ -43,3 +43,14 @@ TEST(Bcg12, MinHashPartialOverlapIdentity) {
     double ref = piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y));
     EXPECT_DOUBLE_EQ(e.RunQuery(X, Y).jaccard_estimate, ref);
 }
+
+TEST(Bcg12, ExactEqualsPlaintextJaccard) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::Exact;
+    p.backend = Bcg12Backend::FF;
+    BCG12 e(p);
+    e.Setup();
+    auto qc = e.RunQuery({1, 2, 3, 4}, {3, 4, 5, 6});  // 2/6
+    EXPECT_NEAR(qc.jaccard_estimate, 1.0 / 3.0, 1e-12);
+    EXPECT_STREQ(e.Name(), "bcg12_exact_ff");
+}
