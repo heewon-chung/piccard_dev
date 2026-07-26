@@ -27,7 +27,11 @@ ThresholdPiccard::Evaluate(
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
 
     // Step 1-2: REUSE Piccard's multiply + rotate-and-sum
-    auto rotated_sum = piccard_.Evaluate(ct_x, ct_y);
+    //
+    // Raw on purpose: a mask and a degree-k polynomial are applied below, and
+    // the flooding mask would exhaust the modulus long before they finished.
+    // This method floods its own result at the end instead.
+    auto rotated_sum = piccard_.EvaluateRaw(ct_x, ct_y);
 
     // Step 3: Mask slot 0 with e_1 = (1, 0, ..., 0)
     std::vector<int64_t> e1(piccard_.GetParams().ring_dim, 0);

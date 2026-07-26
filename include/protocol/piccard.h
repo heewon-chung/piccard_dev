@@ -27,9 +27,26 @@ public:
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     Encrypt(const std::vector<uint64_t>& set) const;
 
+    // The result to hand back to the receiver: match count with the masking
+    // noise the security proof requires already applied.
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     Evaluate(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
              const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const;
+
+    // The same computation with no flooding applied.
+    //
+    // For callers that stack further homomorphic work on the result -- today
+    // only ThresholdPiccard, which masks it and evaluates a degree-k
+    // polynomial on top. The flooding mask is large enough to exhaust the
+    // modulus if anything is computed on it, so those callers must take the
+    // raw value and flood their own final output instead.
+    //
+    // Returning this ciphertext to the receiver is a security bug: the
+    // receiver can read the evaluation noise, which is exactly what the proof
+    // needs hidden.
+    lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+    EvaluateRaw(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+                const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const;
 
     JaccardResult Decrypt(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const;
 
