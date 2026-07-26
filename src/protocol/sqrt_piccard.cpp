@@ -48,7 +48,7 @@ SqrtPiccard::Encrypt(const std::vector<uint64_t>& set) const {
 }
 
 lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
-SqrtPiccard::Evaluate(
+SqrtPiccard::EvaluateRaw(
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
 
@@ -91,9 +91,14 @@ SqrtPiccard::Evaluate(
         result = bfv_->Add(result, rotated);
     }
 
-    // This ciphertext goes to the receiver, so it carries the masking noise
-    // the security proof requires.
-    return bfv_->Flood(result);
+    return result;
+}
+
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+SqrtPiccard::Evaluate(
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
+    return bfv_->Flood(EvaluateRaw(ct_x, ct_y));
 }
 
 JaccardResult

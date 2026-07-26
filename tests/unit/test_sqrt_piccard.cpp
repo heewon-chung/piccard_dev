@@ -175,6 +175,55 @@ TEST_F(SqrtPiccardTest, FloodedMatchCountIsStillExact) {
     EXPECT_EQ(result.match_count, static_cast<int64_t>(params.k));
 }
 
+TEST_F(SqrtPiccardTest, EvaluateRawAndEvaluateAgreeOnMatchCount) {
+    // Same contract as Piccard: flooding changes the ciphertext, not the value.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine.Encrypt(set_x);
+    auto ct_y = engine.Encrypt(set_y);
+
+    auto raw = engine.Decrypt(engine.EvaluateRaw(ct_x, ct_y));
+    auto flooded = engine.Decrypt(engine.Evaluate(ct_x, ct_y));
+
+    RecordProperty("output_raw_match_count", static_cast<int>(raw.match_count));
+    RecordProperty("output_flooded_match_count",
+                   static_cast<int>(flooded.match_count));
+    EXPECT_EQ(raw.match_count, flooded.match_count);
+}
+
+TEST_F(SqrtPiccardTest, EvaluateFloodsAndEvaluateRawDoesNot) {
+    // Value equality alone passes even if Flood() is never called, and this
+    // task deletes the Flood call Task 4 added and re-adds it in a new
+    // one-line wrapper -- so a wrapper written without it would ship unflooded
+    // receiver-facing output with a fully green suite. Compare the ciphertexts.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 50; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine.Encrypt(set_x);
+    auto ct_y = engine.Encrypt(set_y);
+    auto raw = engine.EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine.Evaluate(ct_x, ct_y);
+
+    const auto& er = raw->GetElements()[0];
+    const auto& ef = flooded->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < er.GetNumOfElements() && !differs; i++) {
+        if (er.GetElementAtIndex(i) != ef.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+
 // ── Shared CRS across encodings (§"벤치마크 난수 계약") ───────────────────────
 // The paired one-hot vs sqrt comparison is only meaningful if both encodings
 // draw their MinHash signature from the same hash family. The encoding differs

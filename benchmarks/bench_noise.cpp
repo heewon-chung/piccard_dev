@@ -356,7 +356,9 @@ static std::vector<CalibResult> RunOneHot(PiccardParams params,
             auto ct_x = engine.EncryptFeature(engine.EncodeSignature(sx));
             auto ct_y = engine.EncryptFeature(engine.EncodeSignature(sy));
             auto b2 = clk::now(); ms_enc += span(a, b2);
-            auto ct_res = engine.Evaluate(ct_x, ct_y);
+            // Raw: this harness measures the evaluation noise that sizes the
+            // flooding term, so it must not include the flooding term itself.
+            auto ct_res = engine.EvaluateRaw(ct_x, ct_y);
             auto c2 = clk::now(); ms_eval += span(b2, c2);
             noise = std::max(noise, NoiseBits(ct_res, bfv.GetSecretKeyForCalibration(),
                                               info.Q, info.plaintext_mod));
@@ -421,7 +423,9 @@ static std::vector<CalibResult> RunSqrt(PiccardParams params,
         for (uint32_t rep = 0; rep < reps; rep++) {
             auto ct_x = engine.EncryptFeature(engine.EncodeSignature(sx));
             auto ct_y = engine.EncryptFeature(engine.EncodeSignature(sy));
-            auto ct_res = engine.Evaluate(ct_x, ct_y);
+            // Raw: this harness measures the evaluation noise that sizes the
+            // flooding term, so it must not include the flooding term itself.
+            auto ct_res = engine.EvaluateRaw(ct_x, ct_y);
             noise = std::max(noise, NoiseBits(ct_res, bfv.GetSecretKeyForCalibration(),
                                               info.Q, info.plaintext_mod));
             r.got = engine.Decrypt(ct_res).match_count;
@@ -475,7 +479,9 @@ static std::vector<CalibResult> RunThreshold(PiccardParams params,
         for (uint32_t rep = 0; rep < reps; rep++) {
             auto ct_x = base.EncryptFeature(base.EncodeSignature(sx));
             auto ct_y = base.EncryptFeature(base.EncodeSignature(sy));
-            auto ct_res = engine.Evaluate(ct_x, ct_y);
+            // Raw: this harness measures the evaluation noise that sizes the
+            // flooding term, so it must not include the flooding term itself.
+            auto ct_res = engine.EvaluateRaw(ct_x, ct_y);
             noise = std::max(noise, NoiseBits(ct_res, bfv.GetSecretKeyForCalibration(),
                                               info.Q, info.plaintext_mod));
 
@@ -483,7 +489,7 @@ static std::vector<CalibResult> RunThreshold(PiccardParams params,
             // pass half the time on a fully corrupted decryption. Recover the
             // pre-polynomial match count through the base engine and check that
             // too; only both together show the circuit actually decrypted.
-            auto ct_match = base.Evaluate(ct_x, ct_y);
+            auto ct_match = base.EvaluateRaw(ct_x, ct_y);
             r.got = base.Decrypt(ct_match).match_count;
             r.decision_ok = r.decision_ok && (want == engine.Decrypt(ct_res));
             r.decrypt_ok = r.decrypt_ok && (r.expected == r.got);

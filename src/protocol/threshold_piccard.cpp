@@ -22,7 +22,7 @@ ThresholdPiccard::Encrypt(const std::vector<uint64_t>& set) const {
 }
 
 lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
-ThresholdPiccard::Evaluate(
+ThresholdPiccard::EvaluateRaw(
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
 
@@ -39,12 +39,14 @@ ThresholdPiccard::Evaluate(
     auto masked = piccard_.GetBFVContext().MultiplyPlain(rotated_sum, e1);
 
     // Step 4: Evaluate threshold polynomial (precomputed in KeyGen)
-    auto decision = piccard_.GetBFVContext().EvalPolyBFV(masked, threshold_poly_);
+    return piccard_.GetBFVContext().EvalPolyBFV(masked, threshold_poly_);
+}
 
-    // Step 5: flood, since this is what the receiver gets. It has to happen
-    // here rather than after the rotate-and-sum: the mask would not survive
-    // the polynomial above.
-    return piccard_.GetBFVContext().Flood(decision);
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+ThresholdPiccard::Evaluate(
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
+    return piccard_.GetBFVContext().Flood(EvaluateRaw(ct_x, ct_y));
 }
 
 bool ThresholdPiccard::Decrypt(
