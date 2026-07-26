@@ -184,13 +184,16 @@ unbucketed MinHash signature (`params_.hash_range` defaults to
 *raw* matched-count reduces each of the `k` signature values mod `m`
 (`m=64` in the STD128 benchmark configuration) into one of `m` one-hot
 buckets, so two distinct signature values that happen to collide mod `m`
-are counted as a match. That collision is exactly the standard
-birthday-style `1/m` upward bias on the *raw* matched-ratio — and it is
-precisely why `RunPiccardTimed` (`benchmarks/bench_comparison.cpp:279`)
-applies the standard bias correction, `j_hat = (raw_ratio - 1/m) / (1 -
-1/m)`, before reporting `jaccard_computed`. **Piccard's reported estimator
-therefore applies this correction and is unbiased in expectation — it does
-not retain a `1/m` bias.** What the correction does *not* remove is the
+are counted as a match. In expectation the raw matched-ratio is
+`E[raw] = J + (1−J)/m`, i.e. an upward collision bias of `(1−J)/m` on the
+*raw* matched-ratio (at most `1/m`, reached at `J=0`; `≈ 1/96 ≈ 0.0104` at
+`J=1/3, m=64`, not `1/64`) — and it is precisely why `RunPiccardTimed`
+(`benchmarks/bench_comparison.cpp:279`) applies the correction
+`j_hat = (raw_ratio - 1/m) / (1 - 1/m)`, which is data-independent yet maps
+`E[raw]` back to `J` exactly (`(J + (1−J)/m − 1/m)/(1 − 1/m) = J`), before
+reporting `jaccard_computed`. **Piccard's reported estimator therefore
+applies this correction and is unbiased in expectation — it does not retain
+a collision bias.** What the correction does *not* remove is the
 **additional collision variance/noise** the bucketing introduces: a
 bucket collision between two distinct MinHash values is still a random
 event layered on top of the base MinHash sampling randomness, and
@@ -273,9 +276,10 @@ predictive "Estimated runtimes" model, which used a simplified
 - **The in-sweep Piccard column is contaminated — do NOT read a clean
   speedup from it.** Piccard's per-query cost is *designed* to be
   universe-size-independent (`ring_dim` is driven by `k·m`, not `\|U\|`),
-  yet its measured median here *rises* with `\|U\|`: 60.2 → 58.5 → 103.2 →
-  220.5 ms (SD also grows, to ±49.6 ms at `\|U\|=2^20`). That monotone rise
-  is a benchmark-structure artifact, not a Piccard cost: in
+  yet its measured median here climbs with `\|U\|`: ~59–60 ms at the two
+  smaller universes (60.2, 58.5 — flat within noise), then 103.2 and 220.5 ms
+  at `\|U\|=2^18` and `2^20` (SD also grows, to ±49.6 ms at `\|U\|=2^20`).
+  That upward trend is a benchmark-structure artifact, not a Piccard cost: in
   `BenchVaryUniverse` the universe-sized `baseline` engine (up to 100.7 MB
   of ciphertext at `\|U\|=2^20`) is constructed and exercised in the *same*
   per-trial loop as Piccard, so memory/cache pressure from the giant
