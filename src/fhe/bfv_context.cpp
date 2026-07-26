@@ -131,6 +131,44 @@ void BFVContext::Initialize() {
     // Record the ring_dim OpenFHE actually selected.
     params_.ring_dim = cc_->GetRingDimension();
 
+    // The parameters came from measurements; this is the first point where the
+    // context they predicted actually exists, so verify the prediction here.
+    //
+    // ring_dim_natural is what this circuit needs with no flooding headroom.
+    // For the threshold variant it already exceeds the slot requirement,
+    // because a degree-k polynomial needs a long modulus chain either way --
+    // so growth is judged against it, not against the slot count. Growing past
+    // it would double every runtime, which is not something to do implicitly.
+    if (params_.ring_dim_natural != 0 &&
+        params_.ring_dim > params_.ring_dim_natural) {
+        throw std::runtime_error(
+            "ring dimension grew to " + std::to_string(params_.ring_dim) +
+            " past the calibrated " + std::to_string(params_.ring_dim_natural) +
+            " while making room for noise flooding; every timing would double. "
+            "Re-run `bench_noise --sweep` for this configuration.");
+    }
+
+    if (params_.FloodingSized()) {
+        auto elem_params = cc_->GetCryptoParameters()->GetElementParams();
+        const double log_q =
+            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double log_delta =
+            log_q - std::log2(static_cast<double>(params_.plaintext_mod));
+        const double required = static_cast<double>(params_.eval_noise_bits) +
+                                params_.flood_margin_bits +
+                                params_.lambda_stat + 2.0;
+        if (required > log_delta) {
+            throw std::runtime_error(
+                "noise flooding does not fit: needs " +
+                std::to_string(static_cast<int>(required)) +
+                " bits but log2(q/t) is only " +
+                std::to_string(static_cast<int>(log_delta)) +
+                ". The calibration table and this crypto context disagree; "
+                "re-run `bench_noise --sweep` and regenerate "
+                "include/util/noise_calibration.inc.");
+        }
+    }
+
     cc_->Enable(lbcrypto::PKE);
     cc_->Enable(lbcrypto::KEYSWITCH);
     cc_->Enable(lbcrypto::LEVELEDSHE);

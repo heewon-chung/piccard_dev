@@ -4,6 +4,7 @@
 #include "core/threshold_poly.h"
 
 #include <cmath>
+#include <stdexcept>
 #include <string>
 
 using namespace piccard;
@@ -463,4 +464,36 @@ TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
     // the measured maximum sits at the mask's own magnitude to within a bit.
     EXPECT_GE(measured_bits, expected_bits - 1.0);
     EXPECT_LE(measured_bits, expected_bits + 1.0);
+}
+
+TEST(BFVContextBudget, RejectsContextTooSmallForFlooding) {
+    // Hand-set an evaluation-noise bound far beyond what this modulus can
+    // carry. Initialize() must refuse rather than build a context whose
+    // flooding term would destroy decryption.
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    RecordProperty("input_calibrated_eval_noise_bits",
+                   static_cast<int>(params.eval_noise_bits));
+    params.eval_noise_bits = 10000;
+    RecordProperty("input_forced_eval_noise_bits", 10000);
+
+    BFVContext ctx(params);
+    EXPECT_THROW(ctx.Initialize(), std::runtime_error);
+}
+
+TEST(BFVContextBudget, AcceptsCalibratedParameters) {
+    // The parameters Validate() selects must pass the check it predicted.
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    RecordProperty("input_lambda_stat", static_cast<int>(params.lambda_stat));
+    BFVContext ctx(params);
+    EXPECT_NO_THROW(ctx.Initialize());
 }
