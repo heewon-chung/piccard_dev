@@ -113,9 +113,10 @@ What actually differs between the two protocols is:
   32-byte tags cross the wire. There is no third party at all, trusted or
   untrusted.
 - **Required per-query interaction.** Every single PSI-CA execution needs
-  **both data owners online simultaneously**, exchanging the 3-message
+  **both data owners online simultaneously**, exchanging the **2-message**
   DGT12 flow (Alice → Bob masked elements; Bob → Alice re-masked elements
-  + his own tags; Alice unmasks and matches). Even with *both* kinds of
+  + his own tags — Alice's final unmask/match is a *local* computation, not
+  a third wire message). Even with *both* kinds of
   offline work above amortized, what remains inherently live per comparison
   is only the **cross-party** exponentiation: Bob raising Alice's masked
   items to `R_b` (`α'_i = α_i^{R_b}`, `|A|` exps) and Alice unmasking
@@ -345,8 +346,9 @@ predictive "Estimated runtimes" model, which used a simplified
   at `\|U\|=2^18` and `2^20` (SD also grows, to ±49.6 ms at `\|U\|=2^20`).
   The **most plausible** explanation is a benchmark-structure confounder,
   not an intrinsic Piccard cost: in `BenchVaryUniverse` the universe-sized
-  `baseline` engine (up to 100.7 MB of ciphertext at `\|U\|=2^20`) is
-  constructed and exercised in the *same* per-trial loop as Piccard, so
+  `baseline` engine (up to 100.7 MB of ciphertext at `\|U\|=2^20`) is built
+  once per universe (before the trial loop) and then stays resident and is
+  exercised alongside Piccard in *every* trial, so
   memory/cache pressure from the giant co-scheduled baseline is a
   plausible source of the inflated Piccard timing at large `\|U\|`. This is
   not established causality, though — the CSV and code here only show the
@@ -382,8 +384,10 @@ after `noise-flooding` merges, citing merge-order section `"머지 순서"`;
 merge-order table but is untracked and not guaranteed to exist in a clean
 checkout), all timing/communication numbers across
 every branch are re-measured after the `noise-flooding` branch merges.
-BCG12 uses no FHE, so its *absolute* numbers (the `bcg12_*` rows above)
-are noise-flooding-independent and stable. Piccard's numbers are not —
+BCG12 uses no FHE, so its numbers are noise-flooding-independent **by
+construction** (and empirically flat across `\|U\|`); its absolute timings,
+however, share the same co-scheduling caveat as Piccard's and warrant an
+isolated rerun to certify (see the item-4 bullets above). Piccard's numbers are not —
 noise-flooding changes Piccard's FHE cost, and (per the previous bullet)
 the in-sweep Piccard numbers are additionally inflated by co-scheduled
 baseline memory pressure — so the **Piccard-vs-BCG12 speedup/ratio columns
