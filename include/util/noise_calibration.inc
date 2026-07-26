@@ -9,7 +9,7 @@
 // Rows are ordered by cost (log q, then noise) within a key, so the first row
 // whose budget covers the configured lambda_s is also the cheapest one.
 //
-// source commit : d2c093b (working tree dirty)
+// source commit : d31ecb2 (working tree dirty)
 // measured with : OpenFHE 1.5.0, macOS arm64
 // measurements  : 3579 rows, benchmarks/bench_noise --sweep --reps=5
 // raw data      : scripts/results/calibration/*.csv
