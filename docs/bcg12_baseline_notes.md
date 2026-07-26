@@ -391,8 +391,10 @@ isolated rerun to certify (see the item-4 bullets above). Piccard's numbers are 
 noise-flooding changes Piccard's FHE cost, and (per the previous bullet)
 the in-sweep Piccard numbers are additionally inflated by co-scheduled
 baseline memory pressure — so the **Piccard-vs-BCG12 speedup/ratio columns
-must be regenerated post-merge, with Piccard measured in isolation**, even
-though the BCG12-side numbers feeding those ratios will not change. The
+must be regenerated post-merge, with Piccard measured in isolation**. The
+BCG12-side inputs to those ratios are more stable — noise-flooding cannot
+change them (no FHE) — but their co-scheduled *absolute* wall-clock timings
+should still be confirmed by the same isolated rerun. The
 `trials=3` medians here carry SD; re-run with `trials≥5` at merge time for a
 tighter, more stable dispersion estimate (more trials sharpen the precision
 of the SD estimate itself, not the underlying spread of the measurements).
