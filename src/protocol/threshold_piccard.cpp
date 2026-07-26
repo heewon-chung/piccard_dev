@@ -30,7 +30,7 @@ ThresholdPiccard::EvaluateRaw(
     //
     // Raw on purpose: a mask and a degree-k polynomial are applied below, and
     // the flooding mask would exhaust the modulus long before they finished.
-    // This method floods its own result at the end instead.
+    // Evaluate() wraps this and floods the polynomial's output instead.
     auto rotated_sum = piccard_.EvaluateRaw(ct_x, ct_y);
 
     // Step 3: Mask slot 0 with e_1 = (1, 0, ..., 0)

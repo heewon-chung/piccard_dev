@@ -417,7 +417,8 @@ Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const;
 
 구현 (스파이크에서 동작 검증 완료, 0.35–0.68 ms):
 1. `B_bits = eval_noise_bits + flood_margin_bits + lambda_stat`
-2. 각 계수마다 `[-2^B_bits, 2^B_bits]` **균등 정수**를 뽑는다
+2. 각 계수마다 `[-2^B_bits, 2^B_bits - 1]` **균등 정수**를 뽑는다 (구현이 쓰는 구간.
+   폭이 정확히 2의 거듭제곱이라 비트 단위로 정확히 균등하다)
 3. RNS 잔여류로 변환해 `DCRTPoly`(COEFFICIENT)를 만들고 `SetFormat(EVALUATION)`
 4. `out->GetElements()[0] += noise` (사전에 `Clone()`)
 
@@ -747,6 +748,33 @@ Task 5에서 이뤄졌고 §8-12에 기록. 비용 측정과 재랜덤화 결정
     단계 탓으로 돌릴 방법이 없다. threshold-fpfn이 §8-8의 요구사항(Phase 7
     `EvalPolyBFV` 직후 flooding, `phase_flood_ms` 열)을 처리할 때 이 시프트도 함께
     흡수해야 한다.
+
+16. ⚠️ **재랜덤화가 "fresh encryption과 통계적으로 구별 불가"를 성립시키지 않는다 —
+    논문 문구 결정 필요 (gpt-5.6-sol 검토, 2026-07-26).**
+
+    `Flood()`는 `c0`에 지수적으로 넓은 마스크를 더하고 `Enc_pk(0)`으로 재랜덤화한다.
+    그런데 **일반 `Enc_pk(0)`은 일반 폭의 난수만 싣는다.** 그래서:
+
+    | 성분 | 무엇이 성립하는가 |
+    |---|---|
+    | 복호 위상 `c0 + c1·s` | **통계적** smudging (union bound 반영 시 ≈ 2^-57 @ N=32768) |
+    | `c1` | Ring-LWE 하의 **계산적** 구별 불가 |
+
+    `appendix.tex`가 주장하는 "**fresh encryption**과 통계적으로 구별 불가"는 이보다 강하다.
+    그 수준은 zero-encryption 자체에 넓은 난수를 싣는 sanitization 구성(예: Ducas–Stehlé 계열)이
+    필요하고, 그 경우 `c1·s` 기여분까지 다시 캘리브레이션해야 한다.
+
+    **두 갈래 중 하나를 골라야 한다:**
+    - (a) sanitization을 구현하고 재캘리브레이션 + 전체 쌍 분포 테스트 추가;
+    - (b) 증명을 실제 구성에 맞춰 수정 — 시뮬레이터가 평가된 `c1`을 받을 수 있게 하고,
+      위상 노이즈 smudging만 주장(반semi-honest 모델에서 표준적이고 전체 증명이 어차피
+      IND-CPA에 의존한다는 점에서 정합적).
+
+    **현재 코드는 (b)에 해당한다.** `bfv_context.h`의 `Flood()` 주석을 그에 맞게 정정해 두었다.
+    (a)를 택하면 Phase 2를 다시 열어야 한다. 응답서가 나가기 전에 결정할 것.
+
+    참고: https://eprint.iacr.org/2022/1459.pdf , https://eprint.iacr.org/2024/1534.pdf
+
 
 ---
 

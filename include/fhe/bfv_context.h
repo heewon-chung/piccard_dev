@@ -56,10 +56,22 @@ public:
     //
     // The receiver can otherwise inspect the decryption noise of an evaluated
     // ciphertext and learn more than the output, which is what stops the
-    // receiver's view from being simulatable. Adding a uniform mask of
-    // magnitude 2^FloodNoiseBits() -- calibrated to exceed any evaluation
-    // noise this circuit can produce by 2^lambda_stat -- brings the real view
-    // within statistical distance 2^-lambda_stat of a fresh encryption.
+    // receiver's view from being simulatable. A uniform mask of magnitude
+    // 2^FloodNoiseBits() -- calibrated to exceed any evaluation noise this
+    // circuit can produce by 2^lambda_stat -- smudges the decryption phase.
+    //
+    // What that delivers, stated precisely, because the two halves differ:
+    //   * the decryption noise is statistically smudged. Over the N
+    //     coefficients the receiver sees, a union bound gives
+    //     N * 2^-(lambda_stat + flood_margin_bits) -- roughly 2^-57 at
+    //     N = 32768, not 2^-lambda_stat.
+    //   * the c1 component is re-randomized by the fresh Enc_pk(0) below,
+    //     which hides the circuit *computationally* under Ring-LWE. An
+    //     ordinary encryption of zero carries ordinary-width randomness, so
+    //     this is not statistical indistinguishability from a fresh
+    //     ciphertext; that would need a sanitization construction with wide
+    //     randomness in the zero-encryption too. See 3_noise-flooding.md
+    //     section 8.
     //
     // Apply this ONLY to a ciphertext being handed back to the receiver. The
     // mask is enormous by construction, so any further homomorphic operation
