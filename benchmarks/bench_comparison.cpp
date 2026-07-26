@@ -932,6 +932,26 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             RunBaselineTimed(baseline, wa, wb, wj, "warmup");
         }
 
+        // BCG12: MinHash cost is universe-independent, so build engines once
+        // per universe row (before the trial loop) and accumulate per-trial,
+        // mirroring the Piccard/SqrtPiccard/Baseline accumulation above.
+#ifdef HAVE_PICCARD_BASELINES
+        using piccard::baselines::BCG12; using piccard::baselines::Bcg12Params;
+        using piccard::baselines::Bcg12Mode; using piccard::baselines::Bcg12Backend;
+        Bcg12Params bp_ff; bp_ff.mode=Bcg12Mode::MinHash; bp_ff.backend=Bcg12Backend::FF;
+        bp_ff.k=config.k; bp_ff.minhash_seed=PiccardParams{}.hash_seed;   // CRS parity
+        Bcg12Params bp_ec=bp_ff; bp_ec.backend=Bcg12Backend::EC;
+        BCG12 bcg12_ff(bp_ff); bcg12_ff.Setup();
+        BCG12 bcg12_ec(bp_ec); bcg12_ec.Setup();
+        std::vector<double> f_enc,f_encr,f_comp,f_dec,f_tot; double f_err=0,f_jhat=0; piccard::baselines::QueryCost f_last{};
+        std::vector<double> e_enc,e_encr,e_comp,e_dec,e_tot; double e_err=0,e_jhat=0; piccard::baselines::QueryCost e_last{};
+        double bcg12_jtrue=0.0;   // constant across trials (exact-overlap construction); captured for scope
+        // Warm-up (excluded) so the first measured trial has no cold-start bias, matching
+        // every other engine's warm-up. Uses deterministic sets, like the existing warm-up block.
+        { auto [wa,wb]=MakeSetsWithOverlap(config.set_size,0.5,u);
+          bcg12_ff.RunQuery(wa,wb); bcg12_ec.RunQuery(wa,wb); }
+#endif
+
         for (size_t t = 0; t < config.trials; t++) {
             std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, 0.5));
             auto [set_a, set_b] = benchmark::MakeRandomSetsWithOverlap(
@@ -966,6 +986,21 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             b_total.push_back(br.total_ms);
             total_b_err += br.jaccard_error;
             b_last = br;
+
+            // BCG12: per-trial accumulation using this trial's set_a/set_b/j_true.
+#ifdef HAVE_PICCARD_BASELINES
+            bcg12_jtrue=j_true;
+            { auto q=bcg12_ff.RunQuery(set_a,set_b);
+              f_enc.push_back(q.phase_encode_ms); f_encr.push_back(q.phase_encrypt_ms);
+              f_comp.push_back(q.phase_compute_ms); f_dec.push_back(q.phase_decrypt_ms);
+              f_tot.push_back(q.total_ms); f_err+=std::abs(q.jaccard_estimate-j_true);
+              f_jhat+=q.jaccard_estimate; f_last=q; }
+            { auto q=bcg12_ec.RunQuery(set_a,set_b);
+              e_enc.push_back(q.phase_encode_ms); e_encr.push_back(q.phase_encrypt_ms);
+              e_comp.push_back(q.phase_compute_ms); e_dec.push_back(q.phase_decrypt_ms);
+              e_tot.push_back(q.total_ms); e_err+=std::abs(q.jaccard_estimate-j_true);
+              e_jhat+=q.jaccard_estimate; e_last=q; }
+#endif
         }
 
         // Aggregate Piccard — explicit field assignment, no last-trial copy
@@ -1081,6 +1116,36 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                       << " comm=" << (br.comm_bytes / 1024) << "KB"
                       << " err=" << br.jaccard_error << "\n";
         }   // closes baseline block
+
+        // BCG12: aggregate + emit per-variant rows (mirrors the Piccard aggregate block).
+#ifdef HAVE_PICCARD_BASELINES
+        auto emit_bcg12=[&](const char* method, std::vector<double>& ve,std::vector<double>& vr,
+                            std::vector<double>& vc,std::vector<double>& vd,std::vector<double>& vt,
+                            double serr, double sjhat, const piccard::baselines::QueryCost& last){
+            using piccard::benchmark::ComputeDispersion;
+            auto de=ComputeDispersion(ve),dr=ComputeDispersion(vr),dc=ComputeDispersion(vc),
+                 dd=ComputeDispersion(vd),dt=ComputeDispersion(vt);
+            double n=static_cast<double>(config.trials);
+            ComparisonResult r; r.scenario=scenario; r.method=method; r.universe_size=u;
+            r.set_size=config.set_size; r.k=config.k; r.m=0; r.ring_dim=0; r.num_cts=0; r.mult_depth=0;
+            r.trials=config.trials;
+            r.phase_encode_ms=de.mean;  r.phase_encode_ms_sd=de.sd;  r.phase_encode_ms_median=de.median;
+            r.phase_encrypt_ms=dr.mean; r.phase_encrypt_ms_sd=dr.sd; r.phase_encrypt_ms_median=dr.median;
+            r.phase_compute_ms=dc.mean; r.phase_compute_ms_sd=dc.sd; r.phase_compute_ms_median=dc.median;
+            r.phase_decrypt_ms=dd.mean; r.phase_decrypt_ms_sd=dd.sd; r.phase_decrypt_ms_median=dd.median;
+            r.total_ms=dt.mean;         r.total_ms_sd=dt.sd;         r.total_ms_median=dt.median;
+            r.memory_bytes=MemoryTracker::GetPeakRSS();
+            r.ct_size_bytes=last.ct_size_bytes; r.comm_bytes=last.comm_bytes;
+            r.jaccard_computed=sjhat/n;              // MEAN estimate across trials (sets differ per trial)
+            r.jaccard_expected=bcg12_jtrue; r.jaccard_error=serr/n;
+            size_t rel=(bcg12_jtrue>0.0)?config.trials:0;
+            r.jaccard_rel_error=(rel>0)?(r.jaccard_error/bcg12_jtrue):-1.0; r.rel_error_eligible_n=rel;
+            csv.WriteRow(r);
+            std::cerr << "  U=" << u << " " << method << ": total=" << r.total_ms
+                      << "ms comm=" << (r.comm_bytes/1024) << "KB err=" << r.jaccard_error << "\n"; };
+        emit_bcg12("bcg12_mh_ff", f_enc,f_encr,f_comp,f_dec,f_tot, f_err, f_jhat, f_last);
+        emit_bcg12("bcg12_mh_ec", e_enc,e_encr,e_comp,e_dec,e_tot, e_err, e_jhat, e_last);
+#endif
     }   // closes for (uint32_t u : u_values)
 }
 
@@ -1162,6 +1227,33 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
                   << " baseline: total=" << br.total_ms << "ms"
                   << " comm=" << (br.comm_bytes / 1024) << "KB"
                   << " err=" << br.jaccard_error << "\n";
+
+        // BCG12: exact mode (Fig. 2), fixed-set multi-trial, with cost-model caps
+        // (single source of truth: EC ~0.037 ms/op, FF ~0.55 ms/op, exact = 4n ops).
+#ifdef HAVE_PICCARD_BASELINES
+        {
+            using namespace piccard::baselines;
+            // BCG12: capture named aliases, not the structured bindings themselves —
+            // capturing structured bindings in a lambda is a C++20 extension.
+            const std::vector<uint64_t>& bcg12_sa = set_a;
+            const std::vector<uint64_t>& bcg12_sb = set_b;
+            auto run_exact=[&](Bcg12Backend be,const char* m,size_t tr){
+                Bcg12Params bp; bp.mode=Bcg12Mode::Exact; bp.backend=be;   // exact mode ignores CRS
+                BCG12 eng(bp); eng.Setup();
+                csv.WriteRow(RunBCG12MultiTrial(eng,bcg12_sa,bcg12_sb,j_true,scenario,eff_u,m,0,tr));
+                std::cerr << "  size=" << sz << " " << m << ": ran trials=" << tr << "\n"; };
+            // EC exact
+            if (sz <= 10000) run_exact(Bcg12Backend::EC,"bcg12_exact_ec",config.trials);
+            else if (sz <= 100000){ run_exact(Bcg12Backend::EC,"bcg12_exact_ec",std::min<size_t>(config.trials,1));
+                std::cerr << "  CAP: bcg12_exact_ec size=" << sz << " ~"
+                          << (4.0*sz*0.037/1000.0) << "s/query -> trials=1\n"; }
+            else std::cerr << "  SKIP: bcg12_exact_ec size=" << sz << " exceeds budget\n";
+            // FF exact (faithful cost, expensive)
+            if (sz <= 1000) run_exact(Bcg12Backend::FF,"bcg12_exact_ff",config.trials);
+            else std::cerr << "  SKIP: bcg12_exact_ff size=" << sz << " ~"
+                           << (4.0*sz*0.55/1000.0) << "s/query > budget\n";
+        }
+#endif
     }
 }
 
