@@ -332,12 +332,15 @@ predictive "Estimated runtimes" model, which used a simplified
   `bcg12_mh_ec` medians are 33.8–42.9 ms and `bcg12_mh_ff` 1968–1998 ms
   across all four universe sizes (no trend with `\|U\|`, small SD relative
   to the FF magnitude). Two caveats keep this honest: BCG12's *algorithm*
-  is FHE-free, so these numbers are noise-flooding-independent **by
-  construction**; and the flat-across-`\|U\|` behaviour *suggests* BCG12 is
-  not materially perturbed by the co-scheduled baseline (unlike Piccard,
-  next bullet) — but BCG12 does run in the same trial loop, so a fully
-  clean *absolute* timing still warrants the same isolated rerun. These are
-  the more trustworthy of the two protocols' numbers, not certified-clean.
+  (and its communication/ciphertext sizes) is FHE-free, so **it** is
+  noise-flooding-independent **by construction** — noise-flooding changes
+  Piccard's FHE cost but touches nothing in BCG12's own computation. The
+  *measured wall-clock* is a weaker guarantee: the flat-across-`\|U\|`
+  behaviour *suggests* BCG12 is not materially perturbed by the co-scheduled
+  baseline (unlike Piccard, next bullet), but BCG12 runs in the same trial
+  loop, and noise-flooding will enlarge that baseline's footprint, so a
+  certified-clean *absolute* timing still warrants an isolated rerun. These
+  are the more trustworthy of the two protocols' numbers, not certified-clean.
 - **The in-sweep Piccard column is contaminated — do NOT read a clean
   speedup from it.** Piccard's per-query cost is *designed* to be
   universe-size-independent (`ring_dim` is driven by `k·m`, not `\|U\|`),
@@ -358,10 +361,10 @@ predictive "Estimated runtimes" model, which used a simplified
   this is stated as fact. Piccard's true standalone steady state is
   ~19–20 ms (paper Table `tbl:comp`, measured in isolation). **Therefore
   this table's Piccard column overstates Piccard's cost, and the honest
-  reading is: BCG12's numbers are FHE-independent and flat across `\|U\|`
-  (so the more reliable side), while Piccard's are inflated and must be
-  re-measured in isolation before any paper-facing "Piccard vs. BCG12" time
-  ratio is quoted.** Even against
+  reading is: BCG12's algorithm/comm are FHE-independent and its measured
+  timings are flat across `\|U\|` (so the more reliable side), while
+  Piccard's are inflated and must be re-measured in isolation before any
+  paper-facing "Piccard vs. BCG12" time ratio is quoted.** Even against
   the (inflated) in-sweep Piccard, `bcg12_mh_ec` is faster at every size;
   against Piccard's true ~19–20 ms standalone, `bcg12_mh_ec` (~34–43 ms)
   and Piccard are the same order of magnitude — consistent with DEC-1's
@@ -384,17 +387,19 @@ after `noise-flooding` merges, citing merge-order section `"머지 순서"`;
 merge-order table but is untracked and not guaranteed to exist in a clean
 checkout), all timing/communication numbers across
 every branch are re-measured after the `noise-flooding` branch merges.
-BCG12 uses no FHE, so its numbers are noise-flooding-independent **by
-construction** (and empirically flat across `\|U\|`); its absolute timings,
+BCG12 uses no FHE, so its **algorithm and communication/ciphertext sizes**
+are noise-flooding-independent **by construction** (and its measured timings
+are empirically flat across `\|U\|`); its *measured absolute timings*,
 however, share the same co-scheduling caveat as Piccard's and warrant an
 isolated rerun to certify (see the item-4 bullets above). Piccard's numbers are not —
 noise-flooding changes Piccard's FHE cost, and (per the previous bullet)
 the in-sweep Piccard numbers are additionally inflated by co-scheduled
 baseline memory pressure — so the **Piccard-vs-BCG12 speedup/ratio columns
 must be regenerated post-merge, with Piccard measured in isolation**. The
-BCG12-side inputs to those ratios are more stable — noise-flooding cannot
-change them (no FHE) — but their co-scheduled *absolute* wall-clock timings
-should still be confirmed by the same isolated rerun. The
+BCG12-side algorithm and comm are noise-flooding-invariant (no FHE), but the
+co-scheduled BCG12 *timing measurements* feeding those ratios can still shift
+indirectly (noise-flooding enlarges the co-scheduled baseline's footprint),
+so they too should be confirmed by the same isolated rerun. The
 `trials=3` medians here carry SD; re-run with `trials≥5` at merge time for a
 tighter, more stable dispersion estimate (more trials sharpen the precision
 of the SD estimate itself, not the underlying spread of the measurements).
