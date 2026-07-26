@@ -32,9 +32,15 @@ Strictly, the receiver sees `N` coefficients, so a union bound gives `N * 2^-(la
 
 Smudging `c0` hides the *phase* `c0 + c1*s`. It does not make `(c0, c1)` look like a fresh encryption: `c1` is untouched, the receiver holds `sk`, and the evaluated `c1` is a deterministic function of both `ct_x` and `ct_y` — and the receiver never saw `ct_y`. A simulator holding only the output value cannot reproduce it.
 
-Closing that gap costs almost nothing: `BFVContext` already holds `key_pair_.publicKey`, so `Flood()` can add a fresh `Enc_pk(0)` before the mask. Against a `2^139`–`2^605` mask the added noise is negligible, and `3_noise-flooding.md` §5.3 already flagged this as *"cheap to add now, expensive after the response letter ships."*
+Closing that gap costs almost nothing: `BFVContext` already holds `key_pair_.publicKey`, so `Flood()` can add a fresh `Enc_pk(0)` before the mask. Against a `2^129`–`2^605` mask the added noise is negligible, and `3_noise-flooding.md` §5.3 already flagged this as *"cheap to add now, expensive after the response letter ships."*
 
 **This plan includes re-randomization** (Task 1, Step 4). It is called out here because it changes what the implementation establishes, not just how — if the paper's simulator is meant to receive `ct_x`/`ct_y` as part of the transcript, `c0`-smudging alone is defensible and this can be dropped. **Confirm before implementing Task 1.**
+
+Record the answer *here*, in this section, before Task 1 starts — Task 6 Step 2
+copies it into `3_noise-flooding.md` §8 afterwards, which is too late to guide
+the implementer.
+
+> **Decision:** _(unanswered — Task 1 is blocked until this is filled in)_
 
 ## Global Constraints
 
@@ -879,7 +885,7 @@ four call sites, and the task that breaks each:
 rather than a crash, so the symptom is a sweep that produces no measurements at
 all — not an obvious failure.
 
-That breaks `bench_noise --sweep` for two of three circuits — the command every
+That breaks `bench_noise --sweep` for all three circuits — the command every
 `SelectFloodingParams` error message tells the operator to run, and the only way
 to regenerate `include/util/noise_calibration.inc`.
 
@@ -1107,6 +1113,7 @@ git commit -m "feat(protocol): give every variant a raw path for the calibration
 ## Task 6: Record the cost and update the branch plan
 
 **Files:**
+- Modify: `tests/unit/test_bfv_context.cpp` (adds `FloodCostIsRecorded` in Step 1)
 - Modify: `3_noise-flooding.md` (§6 Phase 2 checklist, §8 integration notes)
 
 **Interfaces:** none.
@@ -1166,9 +1173,11 @@ harness and belongs in Phase 4 with the rest of the re-measurement.
 
 **Report the split.** With re-randomization enabled, `Flood()` does a full
 `Encrypt(zeros)` — a packed encode plus a public-key encryption — before drawing
-the mask. At large `N` that may dominate. Time the two halves separately (wrap
-just the `EvalAdd(ct, Encrypt(zeros))` line) and record both, or the number
-reported as "flooding cost" is mostly a public-key encryption.
+the mask. At large `N` that may dominate. Time the two halves from the test rather than by instrumenting `Flood()` --
+both pieces are reachable publicly: `ctx->Encrypt(zeros)` for the fresh
+encryption and `ctx->GetCryptoContext()->EvalAdd(ct, ...)` for the addition.
+Record both, or the number reported as "flooding cost" is mostly a public-key
+encryption.
 
 - [ ] **Step 2: Update the plan document**
 
@@ -1190,7 +1199,7 @@ checkboxes — annotate it) and append to §8:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add 3_noise-flooding.md
+git add tests/unit/test_bfv_context.cpp 3_noise-flooding.md
 git commit -m "docs: record Phase 2 results in the branch plan"
 ```
 
