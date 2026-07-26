@@ -921,6 +921,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         std::vector<double> b_encode, b_encrypt, b_compute, b_decrypt, b_total;
         ComparisonResult p_last, s_last, b_last;
         double total_p_err = 0.0, total_s_err = 0.0, total_b_err = 0.0;
+        double sum_p_jhat = 0.0, sum_s_jhat = 0.0;  // BCG12: emit mean estimate (final-review finding 2)
 
         // Warmup with deterministic sets
         {
@@ -965,6 +966,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             p_decrypt.push_back(pr.phase_decrypt_ms);
             p_total.push_back(pr.total_ms);
             total_p_err += pr.jaccard_error;
+            sum_p_jhat += pr.jaccard_computed;  // BCG12: emit mean estimate (final-review finding 2)
             p_last = pr;
 
             if (has_sqrt) {
@@ -975,6 +977,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                 s_decrypt.push_back(sr.phase_decrypt_ms);
                 s_total.push_back(sr.total_ms);
                 total_s_err += sr.jaccard_error;
+                sum_s_jhat += sr.jaccard_computed;  // BCG12: emit mean estimate (final-review finding 2)
                 s_last = sr;
             }
 
@@ -1026,7 +1029,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             pr.total_ms = d_tot.mean;         pr.total_ms_sd = d_tot.sd;         pr.total_ms_median = d_tot.median;
             pr.memory_bytes = MemoryTracker::GetPeakRSS();
             pr.ct_size_bytes = p_last.ct_size_bytes; pr.comm_bytes = p_last.comm_bytes;
-            pr.jaccard_computed = p_last.jaccard_computed;  // same sets all trials
+            pr.jaccard_computed = sum_p_jhat / static_cast<double>(config.trials);  // BCG12: mean estimate across trials (final-review finding 2)
             pr.jaccard_expected = p_last.jaccard_expected;
             pr.jaccard_error = total_p_err / n;
             size_t p_rel = (p_last.jaccard_expected > 0.0) ? config.trials : 0;
@@ -1064,7 +1067,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             sr.total_ms = d_tot.mean;         sr.total_ms_sd = d_tot.sd;         sr.total_ms_median = d_tot.median;
             sr.memory_bytes = MemoryTracker::GetPeakRSS();
             sr.ct_size_bytes = s_last.ct_size_bytes; sr.comm_bytes = s_last.comm_bytes;
-            sr.jaccard_computed = s_last.jaccard_computed;
+            sr.jaccard_computed = sum_s_jhat / static_cast<double>(config.trials);  // BCG12: mean estimate across trials (final-review finding 2)
             sr.jaccard_expected = s_last.jaccard_expected;
             sr.jaccard_error = total_s_err / n;
             size_t s_rel = (s_last.jaccard_expected > 0.0) ? config.trials : 0;

@@ -104,11 +104,18 @@ public:
 
     ElementPtr HashToGroup(const std::vector<uint8_t>& msg,
                             size_t* out_hash_exps) const override {
-        // Try-and-increment with an unbiased y-bit drawn from the hash itself
-        // (not fixed to 0), so both square roots are reachable. P-256's
-        // cofactor is 1, so any on-curve, non-infinity point is a valid
-        // group element -- no cofactor exponentiation, hence out_hash_exps
-        // is left untouched (EC contributes 0 to hash_exps).
+        // Try-and-increment, with x and the sign bit derived INDEPENDENTLY
+        // from a single wide (SHA-512) digest per attempt:
+        //   wide = SHA512(0x11 || msg || be32(ctr))            // 64 bytes
+        //   x    = OS2IP(wide[0..47]) mod p                     // 384-bit
+        //          reduced mod the ~256-bit p -> bias ~2^-128
+        //   sign = wide[48] & 1                                 // independent
+        //          byte, uncorrelated with x, so both square roots are
+        //          reached with equal probability instead of being tied to
+        //          x's own parity.
+        // P-256's cofactor is 1, so any on-curve, non-infinity point is a
+        // valid group element -- no cofactor exponentiation, hence
+        // out_hash_exps is left untouched (EC contributes 0 to hash_exps).
         uint32_t ctr = 0;
         while (true) {
             std::vector<uint8_t> input;
@@ -117,10 +124,10 @@ public:
             input.insert(input.end(), msg.begin(), msg.end());
             AppendBE32(input, ctr);
 
-            std::array<uint8_t, SHA256_DIGEST_LENGTH> h{};
-            SHA256(input.data(), input.size(), h.data());
+            std::array<uint8_t, SHA512_DIGEST_LENGTH> wide{};
+            SHA512(input.data(), input.size(), wide.data());
 
-            BIGNUM* x = BN_bin2bn(h.data(), static_cast<int>(h.size()), nullptr);
+            BIGNUM* x = BN_bin2bn(wide.data(), 48, nullptr);  // wide[0..47]: 384 bits
             if (!x) {
                 throw std::runtime_error("EcGroup::HashToGroup: BN_bin2bn failed");
             }
@@ -128,7 +135,7 @@ public:
                 BN_free(x);
                 throw std::runtime_error("EcGroup::HashToGroup: BN_mod failed");
             }
-            int y_bit = h[SHA256_DIGEST_LENGTH - 1] & 1;
+            int y_bit = wide[48] & 1;  // independent byte for the sign bit
 
             EC_POINT* pt = EC_POINT_new(group_);
             if (!pt) {

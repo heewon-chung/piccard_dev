@@ -98,7 +98,7 @@ it is not re-derived per query.
 What actually differs between the two protocols is:
 
 - **Trust model.** BCG12/DGT12 is a genuine **2-party** protocol (per-variant
-  `SecurityClassOf()` in `benchmarks/bench_comparison.cpp` reports `"2-party"`
+  `ModelOf()` in `benchmarks/bench_comparison.cpp` reports `"2-party"`
   for every `bcg12_*` row): Alice and Bob interact directly; plaintext sets
   never leave either owner's machine, and only masked group elements /
   32-byte tags cross the wire. There is no third party at all, trusted or
@@ -147,35 +147,50 @@ This feeds reviewer point R2-W5/P1-7: the fair statement is "BCG12 can
 amortize per-item hashing, but not the live 2-party interaction," not
 "BCG12 has no precomputation reuse at all."
 
-### 3. Accuracy parity: same MinHash estimator, no 1/m bucketing bias in BCG12
+### 3. Accuracy parity: same pre-bucketing MinHash family; Piccard's bucketing adds collision variance, not a retained bias
 
-Fig. 3 (BCG12's MinHash-approximate mode) evaluates the **same** MinHash
-estimator Piccard is built on: bottom-`k` MinHash signatures compared by
-per-position equality, `\hat{J} = |\{i : sig_x[i] = sig_y[i]\}| / k`. This
-identity is proven bit-for-bit by
+Fig. 3 (BCG12's MinHash-approximate mode) and Piccard draw their bottom-`k`
+MinHash signatures from the **same shared pre-bucketing MinHash family**
+(the `k` min-hashes computed from the common CRS — see item 6), compared
+by per-position equality: `\hat{J} = |\{i : sig_x[i] = sig_y[i]\}| / k`.
+This identity is proven bit-for-bit by
 `tests/unit/test_bcg12.cpp::Bcg12.MinHashMatchesPlaintextEstimator`, which
 asserts `BCG12::RunQuery(...).jaccard_estimate == piccard::MinHasher::EstimateJaccard(...)`
 on the plaintext reference implementation — not an approximate/statistical
-match, an exact `EXPECT_DOUBLE_EQ`.
+match, an exact `EXPECT_DOUBLE_EQ`. The phrase "same estimator" is
+reserved for this shared *pre-bucketing* MinHash family; the one-hot
+bucketing described below is a **Piccard-only post-step** applied after
+the shared signature is computed, and is not what the identity test
+covers.
 
-At **equal `k`**, however, BCG12 has **no `1/m` bucketing bias that
-Piccard's own deployed estimator has**, and this is not a hand-wave: it is
-visible in the code path. `BCG12::Setup()` builds its `MinHasher` with
-`hash_range = UINT64_MAX` (`src/baselines/bcg12.cpp:48`) — the *unbucketed*
+At **equal `k`**, BCG12's `Setup()` builds its `MinHasher` with
+`hash_range = UINT64_MAX` (`src/baselines/bcg12.cpp:48`) — the unbucketed
 full-range signature, matched by exact tag equality inside DGT12 PSI-CA.
 Piccard's engine (`src/protocol/piccard_engine.cpp:12`) also computes an
 unbucketed MinHash signature (`params_.hash_range` defaults to
 `UINT64_MAX` too), but then feeds it through `OneHotEncoder::Encode`
 (`include/core/onehot_encoder.h:15`) before the FHE inner-product step:
-`feature[i*m + sig[i] % m] = 1` — i.e. Piccard's *homomorphically computed*
-estimate reduces each of the `k` signature values mod `m` (`m=64` in the
-STD128 benchmark configuration) into one of `m` one-hot buckets, so two
-distinct signature values that happen to collide mod `m` are counted as a
-match. This is the standard birthday-style `1/m` false-positive-collision
-bias inherent to one-hot bucketing, and BCG12's exact tag-equality matching
-has no analogue of it. Consequently, **at equal `k`, BCG12's Fig.-3 estimator
-variance is ≤ Piccard's** (Piccard's is the same base MinHash sampling
-variance plus this extra `1/m` bucketing term).
+`feature[i*m + sig[i] % m] = 1` — i.e. Piccard's homomorphically computed
+*raw* matched-count reduces each of the `k` signature values mod `m`
+(`m=64` in the STD128 benchmark configuration) into one of `m` one-hot
+buckets, so two distinct signature values that happen to collide mod `m`
+are counted as a match. That collision is exactly the standard
+birthday-style `1/m` upward bias on the *raw* matched-ratio — and it is
+precisely why `RunPiccardTimed` (`benchmarks/bench_comparison.cpp:279`)
+applies the standard bias correction, `j_hat = (raw_ratio - 1/m) / (1 -
+1/m)`, before reporting `jaccard_computed`. **Piccard's reported estimator
+therefore applies this correction and is unbiased in expectation — it does
+not retain a `1/m` bias.** What the correction does *not* remove is the
+**additional collision variance/noise** the bucketing introduces: a
+bucket collision between two distinct MinHash values is still a random
+event layered on top of the base MinHash sampling randomness, and
+correcting the mean does not shrink that extra source of spread.
+BCG12's exact tag-equality matching has no analogue of this term.
+Consequently, **at equal `k`, and under the stated independence
+assumptions, BCG12's Fig.-3 estimator variance is ≤ Piccard's** (stated as
+an inequality under that assumption, not as a proven strict inequality) —
+Piccard's variance is the same base MinHash sampling variance plus this
+extra collision-variance term from one-hot bucketing.
 
 This is stated honestly as a **theoretical/code-level** claim, backed by
 the identity test and by reading the two encoding paths above — it is
@@ -190,11 +205,11 @@ nonetheless *consistent* with the theoretical claim: at
 which report **identical** `jaccard_computed` at every universe size,
 confirming group-backend choice doesn't affect the matched-count) reports
 `0.018229 / 0.052083 / 0.020833 / 0.005208` — mixed sign of who is closer
-on any single trial, exactly what "same base variance plus an extra bias
-term that only matters in expectation/over many trials" predicts. A
-proper multi-trial dispersion comparison (via `ComputeDispersion`, as
-`INTEGRATION_NOTES.md`'s accuracy-mode analysis already does for Piccard
-alone) is future work, not claimed here.
+on any single trial, exactly what "same base variance plus an extra
+collision-variance term that only matters in expectation/over many
+trials" predicts. A proper multi-trial dispersion comparison (via
+`ComputeDispersion`, as `INTEGRATION_NOTES.md`'s accuracy-mode analysis
+already does for Piccard alone) is future work, not claimed here.
 
 ### 4. Measured comparison table (STD128, `vary_universe`, `k=128`) — PROVISIONAL
 

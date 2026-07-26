@@ -111,3 +111,10 @@ accuracy sets come from `[0, 10^7)` and `bench_comparison.cpp`'s
 `universe_size` is `uint32_t` (default 65536), so nothing today reaches
 `elem >= 2^61`. Raising the universe past `2^61` without that fix corrupts
 ~0.27% of hash values.
+
+## BCG12 branch — cross-branch touches
+
+`bench_comparison.cpp` `BenchVaryUniverse`: changed Piccard & SqrtPiccard
+`jaccard_computed` from last-trial to mean-of-trials for consistency with
+the BCG12 rows (finding from the BCG12 final review). Affects reported
+estimate at trials>1 only; trials=1 unchanged.
