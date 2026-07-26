@@ -120,7 +120,7 @@ What actually differs between the two protocols is:
 
 **Cold vs. amortized/online cost, reported separately** (STD128, `k=128`,
 `vary_universe` sweep, committed code `3edde48`,
-`.superpowers/sdd/2026-07-26-implement-bcg12-baseline/std128_measured.csv`,
+`docs/bcg12_std128_measured.csv`,
 `trials=3`, medians). "Cold total" = full `QueryCost.total_ms` (all four
 phases). `phase_encode_ms` (a real CSV column) is the MinHash sketch + item
 encoding + `HashToGroup` for every item; for the FF backend it is almost
@@ -147,9 +147,10 @@ hash-dominated to within a sub-ms sketch/encode term.)
 For the FF backend, `phase_encode_ms` (dominated by one 3072-bit modular
 exponentiation per item in `HashToGroup`, `group_ff.cpp`) is ~83–85% of the
 cold total, so amortizing it away matters a great deal: FF's *online* per-query
-cost (~305–333 ms) is only ~5× Piccard's standalone steady-state per-query cost
+cost (~305–333 ms) is ~16× Piccard's standalone steady-state per-query cost
 (~19–20 ms per the paper's isolated Piccard measurement; see the item-4 caveat
-on the in-sweep Piccard numbers), not the ~30× the cold number suggests. For
+on the in-sweep Piccard numbers) — far better than the ~100× that FF's cold
+total (~1980 ms ÷ ~19–20 ms) implies. For
 the EC backend, `HashToGroup` (try-and-increment, no modular exponentiation) is
 already cheap, so cold and online numbers are close and both remain in the
 tens-of-ms range. This feeds reviewer point R2-W5/P1-7: the fair statement is
@@ -223,7 +224,7 @@ analysis for BCG12 is future work, not claimed here.
 
 ### 4. Measured comparison table (STD128, `vary_universe`, `k=128`) — PROVISIONAL
 
-Source: `.superpowers/sdd/2026-07-26-implement-bcg12-baseline/std128_measured.csv`,
+Source: `docs/bcg12_std128_measured.csv`,
 committed code `3edde48`, **`trials=3`** per row, medians with sample SD.
 Fig. 3 (MinHash, `bcg12_mh_ff` / `bcg12_mh_ec`) is the primary equal-accuracy
 comparison against Piccard, same `k`, same MinHash CRS (item 6). Fig. 2 exact
@@ -289,9 +290,9 @@ predictive "Estimated runtimes" model, which used a simplified
   and Piccard are the same order of magnitude — consistent with DEC-1's
   "comparable time," with BCG12's decisive advantage being communication.
 - `bcg12_mh_ff` (faithful-but-slower, dominated by 3072-bit modular
-  exponentiation) is the slow variant on cold total, but only ~5× Piccard's
-  standalone steady state on the amortizable/online number (item 2) — its
-  disadvantage is concentrated almost entirely in the amortizable
+  exponentiation) is the slow variant on cold total (~100× Piccard's
+  standalone steady state), but only ~16× on the amortizable/online number
+  (item 2) — its disadvantage is concentrated almost entirely in the amortizable
   `HashToGroup` step, not the interactive protocol.
 - `baseline`/ZLG+24 is included only for scale context: not the same
   security class, and both its `total_ms` and `comm_bytes` grow with `\|U\|`
