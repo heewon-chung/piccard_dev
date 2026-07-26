@@ -58,6 +58,18 @@ public:
         return cc_;
     }
 
+    // Calibration and tests only — never call this from protocol code.
+    //
+    // In the protocol the receiver's secret key never leaves the receiver, and
+    // the server performs noise flooding without it. But the flooding bound is
+    // 2^(lambda_s) times the evaluation noise, and measuring that noise means
+    // computing ||(c0 + c1*s) - Delta*m||_inf, which is impossible without s.
+    // The calibration harness therefore needs the key; the resulting bound is
+    // baked in as an offline constant so the server never needs it at runtime.
+    const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>& GetSecretKeyForCalibration() const {
+        return key_pair_.secretKey;
+    }
+
 private:
     PiccardParams params_;
     lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc_;

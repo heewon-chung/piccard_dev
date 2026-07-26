@@ -265,6 +265,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     add_executable(bench_crossover benchmarks/bench_crossover.cpp)
     target_link_libraries(bench_crossover piccard_fhe)
     target_include_directories(bench_crossover PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    # Decryption-noise calibration for noise flooding (R2-W6). Not a timing
+    # benchmark: it measures the evaluation-noise bound that sizes the
+    # flooding term, and emits the calibration table the parameter selection
+    # in params.cpp is built from.
+    add_executable(bench_noise benchmarks/bench_noise.cpp)
+    target_link_libraries(bench_noise piccard_fhe)
+    target_include_directories(bench_noise PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 endif()
 
 # =============================================================================

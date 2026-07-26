@@ -14,6 +14,13 @@ void BFVContext::Initialize() {
     bfv_params.SetPlaintextModulus(params_.plaintext_mod);
     bfv_params.SetMultiplicativeDepth(params_.mult_depth);
 
+    // Ciphertext modulus shaping (R2-W6). Left at OpenFHE's default when 0.
+    // Set before every GenCryptoContext call below so the retry path that
+    // forces a larger ring dimension keeps the same limb layout.
+    if (params_.scaling_mod_size != 0) {
+        bfv_params.SetScalingModSize(params_.scaling_mod_size);
+    }
+
     // The minimum ring_dim our protocol needs (feature_dim slots).
     uint32_t needed_ring_dim = NextPowerOf2(params_.feature_dim);
 
