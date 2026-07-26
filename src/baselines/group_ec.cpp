@@ -121,10 +121,20 @@ public:
             SHA256(input.data(), input.size(), h.data());
 
             BIGNUM* x = BN_bin2bn(h.data(), static_cast<int>(h.size()), nullptr);
-            BN_mod(x, x, p_, ctx_);
+            if (!x) {
+                throw std::runtime_error("EcGroup::HashToGroup: BN_bin2bn failed");
+            }
+            if (BN_mod(x, x, p_, ctx_) != 1) {
+                BN_free(x);
+                throw std::runtime_error("EcGroup::HashToGroup: BN_mod failed");
+            }
             int y_bit = h[SHA256_DIGEST_LENGTH - 1] & 1;
 
             EC_POINT* pt = EC_POINT_new(group_);
+            if (!pt) {
+                BN_free(x);
+                throw std::runtime_error("EcGroup::HashToGroup: EC_POINT_new failed");
+            }
             int ok = EC_POINT_set_compressed_coordinates(group_, pt, x, y_bit, ctx_);
             BN_free(x);
 
@@ -140,7 +150,14 @@ public:
 
     ElementPtr Exp(const ElementPtr& base, const std::vector<uint8_t>& exp) const override {
         BIGNUM* e = BN_bin2bn(exp.data(), static_cast<int>(exp.size()), nullptr);
+        if (!e) {
+            throw std::runtime_error("EcGroup::Exp: BN_bin2bn failed");
+        }
         EC_POINT* result = EC_POINT_new(group_);
+        if (!result) {
+            BN_free(e);
+            throw std::runtime_error("EcGroup::Exp: EC_POINT_new failed");
+        }
         if (EC_POINT_mul(group_, result, nullptr, AsPoint(base), e, ctx_) != 1) {
             BN_free(e);
             EC_POINT_free(result);
@@ -153,13 +170,25 @@ public:
     ElementPtr ExpInverse(const ElementPtr& base,
                            const std::vector<uint8_t>& exp) const override {
         BIGNUM* e = BN_bin2bn(exp.data(), static_cast<int>(exp.size()), nullptr);
+        if (!e) {
+            throw std::runtime_error("EcGroup::ExpInverse: BN_bin2bn failed");
+        }
         BIGNUM* inv = BN_new();
+        if (!inv) {
+            BN_free(e);
+            throw std::runtime_error("EcGroup::ExpInverse: BN_new failed");
+        }
         if (!BN_mod_inverse(inv, e, order_, ctx_)) {
             BN_free(e);
             BN_free(inv);
             throw std::runtime_error("EcGroup::ExpInverse: exponent not invertible mod order");
         }
         EC_POINT* result = EC_POINT_new(group_);
+        if (!result) {
+            BN_free(e);
+            BN_free(inv);
+            throw std::runtime_error("EcGroup::ExpInverse: EC_POINT_new failed");
+        }
         if (EC_POINT_mul(group_, result, nullptr, AsPoint(base), inv, ctx_) != 1) {
             BN_free(e);
             BN_free(inv);

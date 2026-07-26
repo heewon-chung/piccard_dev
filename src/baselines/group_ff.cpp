@@ -126,23 +126,31 @@ public:
         mpz_init(g_);
         mpz_init(cofactor_);
 
-        if (mpz_set_str(p_, kPHex, 16) != 0) {
-            throw std::runtime_error("FFGroup: failed to parse p hex constant");
-        }
-        if (mpz_set_str(q_, kQHex, 16) != 0) {
-            throw std::runtime_error("FFGroup: failed to parse q hex constant");
-        }
-        if (mpz_set_str(g_, kGHex, 16) != 0) {
-            throw std::runtime_error("FFGroup: failed to parse g hex constant");
-        }
+        try {
+            if (mpz_set_str(p_, kPHex, 16) != 0) {
+                throw std::runtime_error("FFGroup: failed to parse p hex constant");
+            }
+            if (mpz_set_str(q_, kQHex, 16) != 0) {
+                throw std::runtime_error("FFGroup: failed to parse q hex constant");
+            }
+            if (mpz_set_str(g_, kGHex, 16) != 0) {
+                throw std::runtime_error("FFGroup: failed to parse g hex constant");
+            }
 
-        ValidateParams();  // p,q prime; q|(p-1); 1<g<p; g^q==1 mod p; g!=1
+            ValidateParams();  // p,q prime; q|(p-1); 1<g<p; g^q==1 mod p; g!=1
 
-        mpz_t p_minus_1;
-        mpz_init(p_minus_1);
-        mpz_sub_ui(p_minus_1, p_, 1);
-        mpz_divexact(cofactor_, p_minus_1, q_);  // exact: validated q|(p-1) above
-        mpz_clear(p_minus_1);
+            mpz_t p_minus_1;
+            mpz_init(p_minus_1);
+            mpz_sub_ui(p_minus_1, p_, 1);
+            mpz_divexact(cofactor_, p_minus_1, q_);  // exact: validated q|(p-1) above
+            mpz_clear(p_minus_1);
+        } catch (...) {
+            mpz_clear(p_);
+            mpz_clear(q_);
+            mpz_clear(g_);
+            mpz_clear(cofactor_);
+            throw;
+        }
     }
 
     ~FFGroup() override {
@@ -204,7 +212,7 @@ public:
         mpz_clear(t);
         ElementPtr result = WrapMpz(e);
         mpz_clear(e);
-        if (out_hash_exps) *out_hash_exps = hash_exps;
+        if (out_hash_exps) *out_hash_exps += hash_exps;
         return result;
     }
 
