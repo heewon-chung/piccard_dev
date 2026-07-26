@@ -148,6 +148,33 @@ TEST_F(SqrtPiccardTest, Symmetry) {
     EXPECT_DOUBLE_EQ(r1.jaccard_estimate, r2.jaccard_estimate);
 }
 
+TEST_F(SqrtPiccardTest, FloodedMatchCountIsStillExact) {
+    // Flooding must leave the base-sqrt(m) match count untouched.
+    //
+    // This fixture's SetUp() only fills in k/m/security -- it does not call
+    // ValidateSqrt() and there is no `engine` member. Every existing test in
+    // this file builds its own, so do the same.
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+
+    auto result = engine.Run(set_x, set_y);
+
+    RecordProperty("output_match_count",
+                   static_cast<int>(result.match_count));
+    // Exact, not the EXPECT_GE(k*0.8) the other tests in this file use: for
+    // identical sets the base-sqrt(m) circuit is exact (verified across all
+    // three input patterns), and an exact assertion is what catches flooding
+    // perturbing the value.
+    EXPECT_EQ(result.match_count, static_cast<int64_t>(params.k));
+}
+
 // ── Shared CRS across encodings (§"벤치마크 난수 계약") ───────────────────────
 // The paired one-hot vs sqrt comparison is only meaningful if both encodings
 // draw their MinHash signature from the same hash family. The encoding differs

@@ -91,7 +91,9 @@ SqrtPiccard::Evaluate(
         result = bfv_->Add(result, rotated);
     }
 
-    return result;
+    // This ciphertext goes to the receiver, so it carries the masking noise
+    // the security proof requires.
+    return bfv_->Flood(result);
 }
 
 JaccardResult

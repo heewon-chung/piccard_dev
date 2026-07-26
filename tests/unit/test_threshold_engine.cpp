@@ -145,6 +145,28 @@ TEST_F(ThresholdEngineTest, HighThresholdRejectsPartialOverlap) {
     EXPECT_FALSE(result) << "Partial overlap should fail tau=14 (match ~= 6.7 < 14)";
 }
 
+TEST_F(ThresholdEngineTest, FloodedDecisionIsStillCorrect) {
+    // The threshold output is one bit, and it must survive flooding: the
+    // masking noise is applied after the degree-k polynomial.
+    //
+    // This fixture has SetUpWithTau(), not SetUp() -- `engine` is null and
+    // `params` is unvalidated until it is called, and FloodNoiseBits() would
+    // throw on an unsized parameter set.
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    RecordProperty("input_threshold_tau", static_cast<int>(params.threshold_tau));
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+
+    bool decision = engine->Run(set_x, set_y);
+
+    RecordProperty("output_decision", decision ? "true" : "false");
+    EXPECT_TRUE(decision);
+}
+
 TEST_F(ThresholdEngineTest, SymmetryOfThreshold) {
     // Threshold decision should be symmetric: threshold(A,B) == threshold(B,A)
     SetUpWithTau(4);

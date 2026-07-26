@@ -39,7 +39,12 @@ ThresholdPiccard::Evaluate(
     auto masked = piccard_.GetBFVContext().MultiplyPlain(rotated_sum, e1);
 
     // Step 4: Evaluate threshold polynomial (precomputed in KeyGen)
-    return piccard_.GetBFVContext().EvalPolyBFV(masked, threshold_poly_);
+    auto decision = piccard_.GetBFVContext().EvalPolyBFV(masked, threshold_poly_);
+
+    // Step 5: flood, since this is what the receiver gets. It has to happen
+    // here rather than after the rotate-and-sum: the mask would not survive
+    // the polynomial above.
+    return piccard_.GetBFVContext().Flood(decision);
 }
 
 bool ThresholdPiccard::Decrypt(
