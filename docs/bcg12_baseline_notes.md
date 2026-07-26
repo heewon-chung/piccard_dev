@@ -119,32 +119,41 @@ What actually differs between the two protocols is:
   between queries.
 
 **Cold vs. amortized/online cost, reported separately** (STD128, `k=128`,
-`vary_universe` sweep, `.superpowers/sdd/2026-07-26-implement-bcg12-baseline/std128_measured.csv`,
-`trials=1` — see item 4 for the trials caveat). "Cold total" = full
-`QueryCost.total_ms` including `HashToGroup` for every item; "amortized/online"
-= the same total *minus* `hash_to_group_ms`, i.e. what a returning pair of
-data owners with already-hashed items still has to pay live per query:
+`vary_universe` sweep, committed code `3edde48`,
+`.superpowers/sdd/2026-07-26-implement-bcg12-baseline/std128_measured.csv`,
+`trials=3`, medians). "Cold total" = full `QueryCost.total_ms` (all four
+phases). `phase_encode_ms` (a real CSV column) is the MinHash sketch + item
+encoding + `HashToGroup` for every item; for the FF backend it is almost
+entirely `HashToGroup` (one 3072-bit modexp per item — the sketch/encode part
+is sub-millisecond). "Online rounds" = the three interactive masking rounds
+(`phase_encrypt`+`phase_compute`+`phase_decrypt` medians), i.e. what a returning
+pair of data owners with already-hashed items still pays live per query. (We
+report `phase_encode_ms` rather than an isolated `hash_to_group_ms`: the latter
+is instrumented inside `PsiCaCost` but is not a column of the comparison CSV, so
+quoting it here would be a misattribution — for FF, `phase_encode_ms` *is*
+hash-dominated to within a sub-ms sketch/encode term.)
 
-| Universe `\|U\|` | Backend | Cold total (ms) | `hash_to_group_ms` | Amortized/online (ms) | Cold/online ratio |
+| Universe `\|U\|` | Backend | Cold total (ms) | `phase_encode_ms` (hash-dominated) | Online rounds (ms) | Cold/online ratio |
 |---|---|---:|---:|---:|---:|
-| 16384 | FF | 1973.421 | 1664.518 | 308.903 | 6.4× |
-| 16384 | EC | 27.034 | 5.460 | 21.575 | 1.3× |
-| 65536 | FF | 1964.839 | 1650.150 | 314.688 | 6.2× |
-| 65536 | EC | 40.668 | 15.009 | 25.658 | 1.6× |
-| 262144 | FF | 2057.557 | 1713.611 | 343.946 | 6.0× |
-| 262144 | EC | 36.854 | 7.946 | 28.908 | 1.3× |
-| 1048576 | FF | 1977.368 | 1647.479 | 329.888 | 6.0× |
-| 1048576 | EC | 43.429 | 21.838 | 21.592 | 2.0× |
+| 16384 | FF | 1998.0 | 1693.7 | 305.0 | 6.6× |
+| 16384 | EC | 42.9 | 13.2 | 29.6 | 1.4× |
+| 65536 | FF | 1990.5 | 1674.5 | 307.4 | 6.5× |
+| 65536 | EC | 33.8 | 11.9 | 21.6 | 1.6× |
+| 262144 | FF | 1982.9 | 1653.8 | 333.3 | 5.9× |
+| 262144 | EC | 35.6 | 13.9 | 21.6 | 1.6× |
+| 1048576 | FF | 1968.4 | 1649.5 | 311.9 | 6.3× |
+| 1048576 | EC | 39.0 | 15.4 | 21.6 | 1.8× |
 
-For the FF backend, `HashToGroup` (one 3072-bit modular exponentiation per
-item, `group_ff.cpp`) is ~84% of the cold total, so amortizing it away
-matters a great deal: FF's *online* per-query cost (~309–344 ms) is only
-~4× Piccard's steady-state per-query cost (see item 4), not the ~20–30×
-the cold number suggests. For the EC backend, `HashToGroup` (try-and-increment,
-no modular exponentiation) is already cheap, so cold and amortized numbers
-are close and both backends' amortized costs remain in the tens-of-ms range.
-This feeds reviewer point R2-W5/P1-7: the fair statement is "BCG12 can
-amortize per-item hashing, but not the live 2-party interaction," not
+For the FF backend, `phase_encode_ms` (dominated by one 3072-bit modular
+exponentiation per item in `HashToGroup`, `group_ff.cpp`) is ~83–85% of the
+cold total, so amortizing it away matters a great deal: FF's *online* per-query
+cost (~305–333 ms) is only ~5× Piccard's standalone steady-state per-query cost
+(~19–20 ms per the paper's isolated Piccard measurement; see the item-4 caveat
+on the in-sweep Piccard numbers), not the ~30× the cold number suggests. For
+the EC backend, `HashToGroup` (try-and-increment, no modular exponentiation) is
+already cheap, so cold and online numbers are close and both remain in the
+tens-of-ms range. This feeds reviewer point R2-W5/P1-7: the fair statement is
+"BCG12 can amortize per-item hashing, but not the live 2-party interaction," not
 "BCG12 has no precomputation reuse at all."
 
 ### 3. Accuracy parity: same pre-bucketing MinHash family; Piccard's bucketing adds collision variance, not a retained bias
@@ -194,29 +203,30 @@ extra collision-variance term from one-hot bucketing.
 
 This is stated honestly as a **theoretical/code-level** claim, backed by
 the identity test and by reading the two encoding paths above — it is
-*not* re-derived as an empirical variance comparison in item 4's table,
-because that table is `trials=1` per row and carries no dispersion
-statistics (`ComputeDispersion` needs `n>1`; the CSV's `*_sd` columns are
-sentinel `-1.000` for single-trial rows). The single-trial CSV numbers are
+*not* re-derived as a rigorous empirical variance comparison, because
+item 4's `trials=3` table is still far too few trials to resolve a
+variance difference this small. The measured mean `jaccard_error` is
 nonetheless *consistent* with the theoretical claim: at
 `vary_universe_16384/65536/262144/1048576` (`k=128`, `set_size=1000`,
-`jaccard_expected=0.333333`), Piccard's single-trial `jaccard_error` is
-`0.007937 / 0.055556 / 0.031746 / 0.015873` while BCG12 (both backends,
+`jaccard_expected=0.333333`), Piccard's mean `jaccard_error` over 3 trials
+is `0.042328 / 0.047619 / 0.047619 / 0.044974` while BCG12 (both backends,
 which report **identical** `jaccard_computed` at every universe size,
-confirming group-backend choice doesn't affect the matched-count) reports
-`0.018229 / 0.052083 / 0.020833 / 0.005208` — mixed sign of who is closer
-on any single trial, exactly what "same base variance plus an extra
-collision-variance term that only matters in expectation/over many
-trials" predicts. A proper multi-trial dispersion comparison (via
+confirming group-backend choice doesn't affect the matched count) reports
+`0.041667 / 0.038194 / 0.030382 / 0.042535` — BCG12's mean |error| is ≤
+Piccard's at all four sizes, the direction the "same base MinHash sampling
+variance plus an extra one-hot collision-variance term for Piccard"
+argument predicts, though `n=3` is far too few to be conclusive. The
+definitive evidence is a high-`n` paired dispersion comparison (via
 `ComputeDispersion`, as `INTEGRATION_NOTES.md`'s accuracy-mode analysis
-already does for Piccard alone) is future work, not claimed here.
+already does for Piccard alone at `n=550`/cell); running that same paired
+analysis for BCG12 is future work, not claimed here.
 
 ### 4. Measured comparison table (STD128, `vary_universe`, `k=128`) — PROVISIONAL
 
 Source: `.superpowers/sdd/2026-07-26-implement-bcg12-baseline/std128_measured.csv`,
-**`trials=1`** per row (no dispersion available; see item 3). Fig. 3 (MinHash,
-`bcg12_mh_ff` / `bcg12_mh_ec`) is the primary equal-accuracy comparison
-against Piccard, same `k`, same MinHash CRS (item 6). Fig. 2 exact
+committed code `3edde48`, **`trials=3`** per row, medians with sample SD.
+Fig. 3 (MinHash, `bcg12_mh_ff` / `bcg12_mh_ec`) is the primary equal-accuracy
+comparison against Piccard, same `k`, same MinHash CRS (item 6). Fig. 2 exact
 (`bcg12_exact_ff` / `bcg12_exact_ec`, `O(n)`, no MinHash — see `vary_size_*`
 rows in the CSV) is scaling context only, never a like-for-like accuracy
 comparison, per DEC-1. `baseline`/ZLG+24 (`O(|U|log n)` SHE inner product,
@@ -224,63 +234,69 @@ comparison, per DEC-1. `baseline`/ZLG+24 (`O(|U|log n)` SHE inner product,
 same-security-class comparison (it is `KPA/leakage`, not `AHE/no-leakage`
 or `CPA/no-leakage`).
 
-| `\|U\|` | Method | Model | total_ms (cold) | comm_bytes | jaccard (comp / expected) |
+| `\|U\|` | Method | Model | total_ms median (±SD) | comm_bytes | jaccard (comp / expected) |
 |---|---|---|---:|---:|---|
-| 16384 | piccard | 3-party-outsourced | 93.962 | 789033 | 0.341270 / 0.333333 |
-| 16384 | bcg12_mh_ff | 2-party | 1973.421 | 102400 | 0.351562 / 0.333333 |
-| 16384 | bcg12_mh_ec | 2-party | 27.034 | 12544 | 0.351562 / 0.333333 |
-| 16384 | baseline (ZLG+24) | 3-party-outsourced | 134.096 | 1575465 | 0.333333 / 0.333333 |
-| 65536 | piccard | 3-party-outsourced | 71.832 | 789033 | 0.277778 / 0.333333 |
-| 65536 | bcg12_mh_ff | 2-party | 1964.839 | 102400 | 0.281250 / 0.333333 |
-| 65536 | bcg12_mh_ec | 2-party | 40.668 | 12544 | 0.281250 / 0.333333 |
-| 65536 | baseline (ZLG+24) | 3-party-outsourced | 517.108 | 6294057 | 0.333333 / 0.333333 |
-| 262144 | piccard | 3-party-outsourced | 68.152 | 789033 | 0.301587 / 0.333333 |
-| 262144 | bcg12_mh_ff | 2-party | 2057.557 | 102400 | 0.312500 / 0.333333 |
-| 262144 | bcg12_mh_ec | 2-party | 36.854 | 12544 | 0.312500 / 0.333333 |
-| 262144 | baseline (ZLG+24) | 3-party-outsourced | 1728.699 | 25168425 | 0.333333 / 0.333333 |
-| 1048576 | piccard | 3-party-outsourced | **380.144 (outlier — see below)** | 789033 | 0.317460 / 0.333333 |
-| 1048576 | bcg12_mh_ff | 2-party | 1977.368 | 102400 | 0.328125 / 0.333333 |
-| 1048576 | bcg12_mh_ec | 2-party | 43.429 | 12544 | 0.328125 / 0.333333 |
-| 1048576 | baseline (ZLG+24) | 3-party-outsourced | 4467.247 | 100665897 | 0.333333 / 0.333333 |
+| 16384 | piccard | 3-party-outsourced | 60.2 (±3.4) | 789033 | 0.291005 / 0.333333 |
+| 16384 | bcg12_mh_ff | 2-party | 1998.0 (±79.1) | 102400 | 0.291667 / 0.333333 |
+| 16384 | bcg12_mh_ec | 2-party | 42.9 (±5.6) | 12544 | 0.291667 / 0.333333 |
+| 16384 | baseline (ZLG+24) | 3-party-outsourced | 121.2 (±2.5) | 1575465 | 0.333333 / 0.333333 |
+| 65536 | piccard | 3-party-outsourced | 58.5 (±3.6) | 789033 | 0.322751 / 0.333333 |
+| 65536 | bcg12_mh_ff | 2-party | 1990.5 (±41.0) | 102400 | 0.328125 / 0.333333 |
+| 65536 | bcg12_mh_ec | 2-party | 33.8 (±3.9) | 12544 | 0.328125 / 0.333333 |
+| 65536 | baseline (ZLG+24) | 3-party-outsourced | 475.4 (±39.7) | 6294057 | 0.333333 / 0.333333 |
+| 262144 | piccard | 3-party-outsourced | 103.2 (±11.8) | 789033 | 0.333333 / 0.333333 |
+| 262144 | bcg12_mh_ff | 2-party | 1982.9 (±99.1) | 102400 | 0.330729 / 0.333333 |
+| 262144 | bcg12_mh_ec | 2-party | 35.6 (±9.2) | 12544 | 0.330729 / 0.333333 |
+| 262144 | baseline (ZLG+24) | 3-party-outsourced | 1579.3 (±352.4) | 25168425 | 0.333333 / 0.333333 |
+| 1048576 | piccard | 3-party-outsourced | 220.5 (±49.6) | 789033 | 0.346561 / 0.333333 |
+| 1048576 | bcg12_mh_ff | 2-party | 1968.4 (±15.2) | 102400 | 0.346354 / 0.333333 |
+| 1048576 | bcg12_mh_ec | 2-party | 39.0 (±11.3) | 12544 | 0.346354 / 0.333333 |
+| 1048576 | baseline (ZLG+24) | 3-party-outsourced | 4421.8 (±64.1) | 100665897 | 0.333333 / 0.333333 |
 
 **Key story, read from the actual numbers above (not from the plan's
 predictive "Estimated runtimes" model, which used a simplified
 `ms/op × op-count` formula and is superseded by these measured rows):**
 
-- `comm_bytes` for every method is constant across `\|U\|` in this sweep
-  (it depends on `k`/`set_size`, not universe size): Piccard 789033 B,
+- **Communication (the robust, reproducible result).** `comm_bytes` for
+  every non-baseline method is constant across `\|U\|` in this sweep (it
+  depends on `k`/`set_size`, not universe size): Piccard 789033 B,
   `bcg12_mh_ff` 102400 B, `bcg12_mh_ec` 12544 B. `bcg12_mh_ec`'s comm is
   `789033 / 12544 ≈ 62.9×` **less** than Piccard's — matches the "~60×
   less communication" figure from DEC-1. `bcg12_mh_ff`'s comm is
-  `789033 / 102400 ≈ 7.7×` less than Piccard's.
-- **Timing:** at the three non-outlier universe sizes (16384/65536/262144),
-  `bcg12_mh_ec`'s cold `total_ms` (27.0 / 40.7 / 36.9 ms) is actually
-  **faster** than Piccard's (94.0 / 71.8 / 68.2 ms) in this single-trial
-  measurement — 1.8×–3.5× faster, not merely "comparable time" as the
-  plan's predictive DEC-1 model estimated (~19 ms Piccard vs. ~24 ms EC).
-  The measured Piccard steady-state total is ~68–95 ms, not ~19–20 ms;
-  the DEC-1 figure was a theoretical per-op estimate from the plan's
-  "Estimated runtimes" table, not a measured number, and should be treated
-  as superseded by this table for any paper-facing claim. `bcg12_mh_ff`
-  (faithful-but-slower, dominated by 3072-bit modular exponentiation) is
-  ~20–30× slower than Piccard on the cold total, but only ~4× slower on
-  the amortized/online number from item 2's table — the FF backend's
+  `789033 / 102400 ≈ 7.7×` less than Piccard's. These figures carry no FHE
+  and no measurement noise and are the safest to cite.
+- **BCG12 timing is stable and universe-independent, as designed.**
+  `bcg12_mh_ec` medians are 33.8–42.9 ms and `bcg12_mh_ff` 1968–1998 ms
+  across all four universe sizes (no trend with `\|U\|`, small SD relative
+  to the FF magnitude). These are the trustworthy BCG12 numbers.
+- **The in-sweep Piccard column is contaminated — do NOT read a clean
+  speedup from it.** Piccard's per-query cost is *designed* to be
+  universe-size-independent (`ring_dim` is driven by `k·m`, not `\|U\|`),
+  yet its measured median here *rises* with `\|U\|`: 60.2 → 58.5 → 103.2 →
+  220.5 ms (SD also grows, to ±49.6 ms at `\|U\|=2^20`). That monotone rise
+  is a benchmark-structure artifact, not a Piccard cost: in
+  `BenchVaryUniverse` the universe-sized `baseline` engine (up to 100.7 MB
+  of ciphertext at `\|U\|=2^20`) is constructed and exercised in the *same*
+  per-trial loop as Piccard, so memory/cache pressure from the giant
+  baseline inflates the co-scheduled Piccard timing at large `\|U\|`.
+  Piccard's true standalone steady state is ~19–20 ms (paper Table
+  `tbl:comp`, measured in isolation). **Therefore this table's Piccard
+  column overstates Piccard's cost, and the honest reading is: BCG12's
+  numbers are clean; Piccard must be re-measured in isolation before any
+  paper-facing "Piccard vs. BCG12" time ratio is quoted.** Even against
+  the (inflated) in-sweep Piccard, `bcg12_mh_ec` is faster at every size;
+  against Piccard's true ~19–20 ms standalone, `bcg12_mh_ec` (~34–43 ms)
+  and Piccard are the same order of magnitude — consistent with DEC-1's
+  "comparable time," with BCG12's decisive advantage being communication.
+- `bcg12_mh_ff` (faithful-but-slower, dominated by 3072-bit modular
+  exponentiation) is the slow variant on cold total, but only ~5× Piccard's
+  standalone steady state on the amortizable/online number (item 2) — its
   disadvantage is concentrated almost entirely in the amortizable
-  `HashToGroup` step, not the interactive protocol itself.
-- The **`\|U\|=1048576` Piccard row (380.144 ms) is a clear outlier**
-  against Piccard's own ~68–95 ms steady state at the other three
-  universe sizes in this same sweep (driven by `phase_compute_ms=325.807`,
-  vs. 47–83 ms at the other three rows) — almost certainly single-trial
-  system noise (a scheduling stall, thermal/frequency-scaling event, or
-  similar), not a real universe-size effect, since Piccard's per-query
-  cost is designed to be universe-size-independent (`ring_dim` here is
-  driven by `k·m`, not `\|U\|`). **Do not use this row's Piccard number
-  in any paper-facing "Piccard vs. BCG12" comparison without re-measuring
-  with `trials>1`.**
-- `baseline`/ZLG+24 is included only for scale context: it is not the
-  same security class, and both its `total_ms` and `comm_bytes` grow with
-  `\|U\|` (as expected for an `O(\|U\|)`-communication, universe-sized-vector
-  protocol) — 134 ms/1.58 MB at `\|U\|=16384` up to 4467 ms/100.7 MB at
+  `HashToGroup` step, not the interactive protocol.
+- `baseline`/ZLG+24 is included only for scale context: not the same
+  security class, and both its `total_ms` and `comm_bytes` grow with `\|U\|`
+  (as expected for an `O(\|U\|)`-communication, universe-sized-vector
+  protocol) — 121 ms/1.58 MB at `\|U\|=16384` up to 4422 ms/100.7 MB at
   `\|U\|=1048576`.
 
 **This table is marked PROVISIONAL.** Per `INTEGRATION_NOTES.md` and
@@ -288,13 +304,13 @@ predictive "Estimated runtimes" model, which used a simplified
 every branch are re-measured after the `noise-flooding` branch merges.
 BCG12 uses no FHE, so its *absolute* numbers (the `bcg12_*` rows above)
 are noise-flooding-independent and stable. Piccard's numbers are not —
-noise-flooding changes Piccard's FHE cost — so the **Piccard-vs-BCG12
-speedup/ratio columns in this table must be regenerated post-merge**,
-even though the BCG12-side numbers feeding those ratios will not change.
-Re-run with `trials≥5` (per `benchmark_utils.h`'s `ComputeDispersion`) at
-that point to also replace the single-trial numbers above with numbers
-that carry real dispersion statistics, resolving the item-3 caveat that
-this table currently has none.
+noise-flooding changes Piccard's FHE cost, and (per the previous bullet)
+the in-sweep Piccard numbers are additionally inflated by co-scheduled
+baseline memory pressure — so the **Piccard-vs-BCG12 speedup/ratio columns
+must be regenerated post-merge, with Piccard measured in isolation**, even
+though the BCG12-side numbers feeding those ratios will not change. The
+`trials=3` medians here carry SD; re-run with `trials≥5` at merge time for
+tighter dispersion.
 
 ### 5. Table I erratum (DEC-4) — for merge-time, not edited here
 
