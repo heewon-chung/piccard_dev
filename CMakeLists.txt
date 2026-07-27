@@ -65,6 +65,12 @@ else()
     set(GMP_FOUND FALSE)
 endif()
 
+# BCG12/SJ16: OpenSSL is REQUIRED by the baseline lib (TagHash + EC backend).
+find_package(OpenSSL)
+if(OpenSSL_FOUND)
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
+endif()
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 if(OpenFHE_FOUND)
@@ -136,19 +142,21 @@ endif()
 # implements include/baselines/pjs_baseline.h. The glob keeps this target
 # valid while the directory is still empty.
 
-file(GLOB PICCARD_BASELINE_SOURCES ${CMAKE_SOURCE_DIR}/src/baselines/*.cpp)
+file(GLOB PICCARD_BASELINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/baselines/*.cpp)  # BCG12: track new files
 
-if(PICCARD_BASELINE_SOURCES AND GMP_FOUND AND HAVE_PICCARD_FHE)
+if(PICCARD_BASELINE_SOURCES AND GMP_FOUND AND OpenSSL_FOUND AND HAVE_PICCARD_FHE)  # BCG12: require OpenSSL
     add_library(piccard_baselines ${PICCARD_BASELINE_SOURCES})
-    target_link_libraries(piccard_baselines PUBLIC piccard_fhe ${GMP_LIBRARY})
+    target_link_libraries(piccard_baselines PUBLIC piccard_fhe ${GMP_LIBRARY} OpenSSL::Crypto)  # BCG12: link OpenSSL
     target_include_directories(piccard_baselines PUBLIC ${GMP_INCLUDE_DIR})
     if(OpenMP_CXX_FOUND)
         target_link_libraries(piccard_baselines PUBLIC OpenMP::OpenMP_CXX)
     endif()
     set(HAVE_PICCARD_BASELINES TRUE)
+    add_compile_definitions(HAVE_PICCARD_BASELINES)     # BCG12: guards bench code
     message(STATUS "Comparison baselines enabled")
 else()
     set(HAVE_PICCARD_BASELINES FALSE)
+    message(STATUS "Comparison baselines disabled (need GMP + OpenSSL + OpenFHE)")  # BCG12
 endif()
 
 # =============================================================================
@@ -225,6 +233,20 @@ if(BUILD_TESTS)
             add_executable(test_piccard_e2e tests/integration/test_piccard_e2e.cpp)
             target_link_libraries(test_piccard_e2e piccard_fhe test_main)
             add_test(NAME PiccardE2E COMMAND test_piccard_e2e)
+
+            if(HAVE_PICCARD_BASELINES)                              # BCG12 unit tests
+                add_executable(test_group tests/unit/test_group.cpp)
+                target_link_libraries(test_group piccard_baselines test_main)
+                add_test(NAME Group COMMAND test_group)
+
+                add_executable(test_dgt12_psica tests/unit/test_dgt12_psica.cpp)  # BCG12
+                target_link_libraries(test_dgt12_psica piccard_baselines test_main)  # BCG12
+                add_test(NAME Dgt12PsiCa COMMAND test_dgt12_psica)  # BCG12
+
+                add_executable(test_bcg12 tests/unit/test_bcg12.cpp)  # BCG12
+                target_link_libraries(test_bcg12 piccard_baselines test_main)  # BCG12
+                add_test(NAME Bcg12 COMMAND test_bcg12)  # BCG12
+            endif()
         endif()
     else()
         message(STATUS "GTest not found, skipping tests")
@@ -244,6 +266,9 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
 
     add_executable(bench_comparison benchmarks/bench_comparison.cpp)
     target_link_libraries(bench_comparison piccard_fhe)
+    if(HAVE_PICCARD_BASELINES)                              # BCG12: enable baseline rows
+        target_link_libraries(bench_comparison piccard_baselines)
+    endif()
     target_include_directories(bench_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_dynamic benchmarks/bench_dynamic.cpp)
