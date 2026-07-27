@@ -54,14 +54,21 @@ endif()
 
 # Find GMP (used by the AHE/DH-based comparison baselines: BCG12, SJ16).
 # No standard FindGMP module ships with CMake, so locate it by hand.
-find_path(GMP_INCLUDE_DIR gmp.h HINTS /opt/homebrew/include /usr/local/include)
-find_library(GMP_LIBRARY NAMES gmp HINTS /opt/homebrew/lib /usr/local/lib)
-if(GMP_INCLUDE_DIR AND GMP_LIBRARY)
-    message(STATUS "Found GMP: ${GMP_LIBRARY}")
-    set(GMP_FOUND TRUE)
-    add_compile_definitions(HAVE_GMP)
+option(PICCARD_ENABLE_GMP "Enable GMP-based AHE baselines (BCG12/SJ16)" ON)
+
+if(PICCARD_ENABLE_GMP)
+    find_path(GMP_INCLUDE_DIR gmp.h HINTS /opt/homebrew/include /usr/local/include)
+    find_library(GMP_LIBRARY NAMES gmp HINTS /opt/homebrew/lib /usr/local/lib)
+    if(GMP_INCLUDE_DIR AND GMP_LIBRARY)
+        message(STATUS "Found GMP: ${GMP_LIBRARY}")
+        set(GMP_FOUND TRUE)
+        add_compile_definitions(HAVE_GMP)
+    else()
+        message(STATUS "GMP not found - AHE-based baselines (BCG12, SJ16) disabled")
+        set(GMP_FOUND FALSE)
+    endif()
 else()
-    message(STATUS "GMP not found - AHE-based baselines (BCG12, SJ16) disabled")
+    message(STATUS "PICCARD_ENABLE_GMP=OFF - AHE-based baselines (BCG12, SJ16) disabled")
     set(GMP_FOUND FALSE)
 endif()
 
@@ -142,11 +149,29 @@ endif()
 # implements include/baselines/pjs_baseline.h. The glob keeps this target
 # valid while the directory is still empty.
 
+# piccard_paillier: GMP-only static lib for the Paillier AHE primitive. Built
+# from an explicit source (not the glob below) so it compiles exactly once
+# and never links OpenFHE/piccard_fhe - Paillier has no FHE dependency.
+if(GMP_FOUND)
+    add_library(piccard_paillier STATIC src/baselines/paillier.cpp)
+    target_link_libraries(piccard_paillier PUBLIC ${GMP_LIBRARY})
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(piccard_paillier PUBLIC OpenMP::OpenMP_CXX)
+    endif()
+    target_include_directories(piccard_paillier PUBLIC ${GMP_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include)
+endif()
+
 file(GLOB PICCARD_BASELINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/baselines/*.cpp)  # BCG12: track new files
+# paillier.cpp is compiled once, in piccard_paillier above; keep it out of the
+# OpenFHE-linked piccard_baselines glob below.
+list(REMOVE_ITEM PICCARD_BASELINE_SOURCES "${CMAKE_SOURCE_DIR}/src/baselines/paillier.cpp")
 
 if(PICCARD_BASELINE_SOURCES AND GMP_FOUND AND OpenSSL_FOUND AND HAVE_PICCARD_FHE)  # BCG12: require OpenSSL
     add_library(piccard_baselines ${PICCARD_BASELINE_SOURCES})
     target_link_libraries(piccard_baselines PUBLIC piccard_fhe ${GMP_LIBRARY} OpenSSL::Crypto)  # BCG12: link OpenSSL
+    if(TARGET piccard_paillier)
+        target_link_libraries(piccard_baselines PUBLIC piccard_paillier)
+    endif()
     target_include_directories(piccard_baselines PUBLIC ${GMP_INCLUDE_DIR})
     if(OpenMP_CXX_FOUND)
         target_link_libraries(piccard_baselines PUBLIC OpenMP::OpenMP_CXX)
@@ -200,6 +225,25 @@ if(BUILD_TESTS)
         add_executable(test_threshold_poly tests/unit/test_threshold_poly.cpp)
         target_link_libraries(test_threshold_poly piccard_core test_main)
         add_test(NAME ThresholdPoly COMMAND test_threshold_poly)
+
+        # Paillier AHE primitive test (GMP-only, no OpenFHE dependency)
+        if(TARGET piccard_paillier)
+            add_executable(test_paillier tests/unit/test_paillier.cpp)
+            target_link_libraries(test_paillier piccard_paillier test_main)
+            add_test(NAME Paillier COMMAND test_paillier)
+        endif()
+
+        # SJ16 protocol engine test (needs piccard_baselines for sj16.cpp).
+        if(TARGET piccard_baselines)
+            add_executable(test_sj16 tests/unit/test_sj16.cpp)
+            target_link_libraries(test_sj16 piccard_baselines test_main)
+            # libgmpxx supplies mpz_class operator<< used by GTest's printer.
+            find_library(GMPXX_LIBRARY NAMES gmpxx HINTS /opt/homebrew/lib /usr/local/lib)
+            if(GMPXX_LIBRARY)
+                target_link_libraries(test_sj16 ${GMPXX_LIBRARY})
+            endif()
+            add_test(NAME SJ16 COMMAND test_sj16)
+        endif()
 
         # FHE tests (require OpenFHE)
         if(OpenFHE_FOUND AND HAVE_PICCARD_FHE)
@@ -270,6 +314,16 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         target_link_libraries(bench_comparison piccard_baselines)
     endif()
     target_include_directories(bench_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    # SJ16 baseline (Phase 4): link the AHE engine and define HAVE_SJ16 only when
+    # the GMP-backed baselines exist (implies GMP + Paillier + OpenFHE).
+    if(HAVE_PICCARD_BASELINES)
+        target_link_libraries(bench_comparison piccard_baselines)
+        target_compile_definitions(bench_comparison PRIVATE HAVE_SJ16)
+        find_library(GMPXX_LIBRARY NAMES gmpxx HINTS /opt/homebrew/lib /usr/local/lib)
+        if(GMPXX_LIBRARY)
+            target_link_libraries(bench_comparison ${GMPXX_LIBRARY})
+        endif()
+    endif()
 
     add_executable(bench_dynamic benchmarks/bench_dynamic.cpp)
     target_link_libraries(bench_dynamic piccard_fhe)
@@ -298,6 +352,21 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     add_executable(bench_noise benchmarks/bench_noise.cpp)
     target_link_libraries(bench_noise piccard_fhe)
     target_include_directories(bench_noise PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    # SJ16 calibration tool (Phase 3): own CLI, not a ctest. Needs the SJ16
+    # engine (piccard_baselines pulls SJ16 + Paillier + GMP + OpenFHE) and OpenMP.
+    if(HAVE_PICCARD_BASELINES)
+        add_executable(bench_sj16_calibrate benchmarks/bench_sj16_calibrate.cpp)
+        target_link_libraries(bench_sj16_calibrate piccard_baselines)
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(bench_sj16_calibrate OpenMP::OpenMP_CXX)
+        endif()
+        find_library(GMPXX_LIBRARY NAMES gmpxx HINTS /opt/homebrew/lib /usr/local/lib)
+        if(GMPXX_LIBRARY)
+            target_link_libraries(bench_sj16_calibrate ${GMPXX_LIBRARY})
+        endif()
+        target_include_directories(bench_sj16_calibrate PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    endif()
 endif()
 
 # =============================================================================

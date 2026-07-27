@@ -124,6 +124,13 @@ struct ComparisonResult {
     size_t rel_error_eligible_n = 0;
 };
 
+// SJ16 adapter (Phase 4) — owns the SJ16 per-trial timing + aggregation. Kept
+// out of this shared file; included here because it maps onto ComparisonResult
+// above. Compiled out entirely when GMP/piccard_baselines is absent.
+#ifdef HAVE_SJ16
+#include "sj16_adapter.h"
+#endif
+
 // ============================================================================
 // CSV output for ComparisonResult
 // ============================================================================
@@ -687,6 +694,12 @@ struct ComparisonConfig {
     BenchmarkConfig base;
     uint32_t universe_size = 65536;  // Default: 2^16
 
+    // SJ16 baseline (Phase 4), opt-in. Runs only in BenchVaryUniverse.
+    bool sj16 = false;                   // --sj16
+    uint32_t sj16_key_bits = 3072;       // --sj16_key_bits=K (1024/2048/3072)
+    uint32_t sj16_max_universe = 65536;  // --sj16_max_universe=N (measure boundary)
+    bool sj16_precompute = false;        // --sj16_precompute (D5 sensitivity row)
+
     static ComparisonConfig ParseArgs(int argc, char** argv) {
         ComparisonConfig config;
         config.base = BenchmarkConfig::ParseArgs(argc, argv);
@@ -696,6 +709,16 @@ struct ComparisonConfig {
             if (arg.find("--universe=") == 0) {
                 config.universe_size =
                     static_cast<uint32_t>(std::stoul(arg.substr(11)));
+            } else if (arg == "--sj16") {
+                config.sj16 = true;
+            } else if (arg.find("--sj16_key_bits=") == 0) {
+                config.sj16_key_bits =
+                    static_cast<uint32_t>(std::stoul(arg.substr(16)));
+            } else if (arg.find("--sj16_max_universe=") == 0) {
+                config.sj16_max_universe =
+                    static_cast<uint32_t>(std::stoul(arg.substr(20)));
+            } else if (arg == "--sj16_precompute") {
+                config.sj16_precompute = true;
             }
         }
         return config;
@@ -879,8 +902,36 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
     std::vector<uint32_t> u_values = QuickSweep<uint32_t>({16384, 65536, 262144, 1048576}, cfg.base.security_level);
     const auto& config = cfg.base;
 
+#ifdef HAVE_SJ16
+    // SJ16 engine is caller-owned: constructed + Setup() ONCE per key size,
+    // outside the universe loop (keygen is per-K, not per-trial/universe).
+    std::unique_ptr<piccard::baselines::SJ16> sj16_eng;
+    if (cfg.sj16) {
+        sj16_eng = std::make_unique<piccard::baselines::SJ16>(
+            cfg.sj16_key_bits, cfg.sj16_precompute);
+        sj16_eng->Setup();
+    }
+#endif
+
     for (uint32_t u : u_values) {
         std::string scenario = "vary_universe_" + std::to_string(u);
+
+#ifdef HAVE_SJ16
+        // SJ16 measures up to sj16_max_universe; beyond it the row is left for
+        // the Phase-3 fitted model. Instead of a symbolic T(m)=alpha*m+beta, the
+        // adapter loads the matching PASS fit from the calibration artifact and
+        // prints NUMERIC alpha/beta, the predicted T(u), the held-out residual,
+        // and provenance so the extrapolated row is reproducible.
+        std::vector<piccard::baselines::SJ16Trial> sj16_trials;
+        const bool sj16_active = cfg.sj16 && (u <= cfg.sj16_max_universe);
+        if (cfg.sj16 && !sj16_active) {
+            std::cerr << "  U=" << u
+                      << " sj16: SKIPPED (u > sj16_max_universe="
+                      << cfg.sj16_max_universe << ")\n";
+            PrintSJ16ExtrapolationNote(u, cfg.sj16_key_bits);
+        }
+        if (sj16_active) sj16_eng->SetUniverse(u);
+#endif
 
         // --- Piccard (constant ring_dim) ---
         PiccardParams pp;
@@ -1003,6 +1054,14 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
               e_comp.push_back(q.phase_compute_ms); e_dec.push_back(q.phase_decrypt_ms);
               e_tot.push_back(q.total_ms); e_err+=std::abs(q.jaccard_estimate-j_true);
               e_jhat+=q.jaccard_estimate; e_last=q; }
+#endif
+#ifdef HAVE_SJ16
+            // SJ16 reuses THIS trial's (set_a, set_b) — no independent draw.
+            if (sj16_active) {
+                sj16_trials.push_back(RunSJ16OnTrial(
+                    *sj16_eng, set_a, set_b, j_true, u, cfg.sj16_precompute,
+                    cfg.sj16_key_bits));
+            }
 #endif
         }
 
@@ -1149,6 +1208,20 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         emit_bcg12("bcg12_mh_ff", f_enc,f_encr,f_comp,f_dec,f_tot, f_err, f_jhat, f_last);
         emit_bcg12("bcg12_mh_ec", e_enc,e_encr,e_comp,e_dec,e_tot, e_err, e_jhat, e_last);
 #endif
+#ifdef HAVE_SJ16
+        // Aggregate SJ16 trials into one published row (median timing + mean
+        // error). Labeled a LOWER BOUND: shares only, secure division excluded.
+        if (sj16_active && !sj16_trials.empty()) {
+            auto sr = FinalizeSJ16(sj16_trials, u, scenario, config.set_size);
+            csv.WriteRow(sr);
+
+            std::cerr << "  U=" << u
+                      << " sj16: total=" << sr.total_ms << "ms"
+                      << " comm=" << (sr.comm_bytes / 1024) << "KB"
+                      << " err=" << sr.jaccard_error
+                      << " (shares only; secure division excluded)\n";
+        }
+#endif
     }   // closes for (uint32_t u : u_values)
 }
 
@@ -1285,6 +1358,10 @@ static void PrintUsage() {
         << "  --trials=N         Number of trials (default: 10)\n"
         << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256' (default: STD128)\n"
         << "  --universe=N       Baseline universe size (default: 65536)\n"
+        << "  --sj16             Also run the SJ16 AHE baseline in Vary |U| (opt-in; lower bound: shares only, secure division excluded)\n"
+        << "  --sj16_key_bits=K  SJ16 Paillier key size 1024/2048/3072 (default: 3072)\n"
+        << "  --sj16_max_universe=N  Skip SJ16 above this |U|; left for the Phase-3 fitted model (default: 65536)\n"
+        << "  --sj16_precompute  Use the offline rho^N randomiser pool (D5 sensitivity row)\n"
         << "  --help, -h         Print this help message\n"
         << "\n"
         << "Examples:\n"
