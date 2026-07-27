@@ -3,6 +3,10 @@
 #include "util/params.h"
 #include "core/threshold_poly.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <stdexcept>
 #include <string>
 
 using namespace piccard;
@@ -343,4 +347,214 @@ TEST_F(BFVContextTest, MultiplyPlainByZero) {
     EXPECT_EQ(result[0], 0);
     EXPECT_EQ(result[1], 0);
     EXPECT_EQ(result[2], 0);
+}
+
+TEST_F(BFVContextTest, FloodPreservesPlaintext) {
+    // Flooding must be invisible to the receiver's decryption: the whole point
+    // is that it hides the evaluation noise without disturbing the message.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 7;
+    values[1] = 3;
+    RecordProperty("input_slots_0_1", "[7, 3]");
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+
+    auto ct = ctx->Encrypt(values);
+    auto flooded = ctx->Flood(ct);
+    auto result = ctx->Decrypt(flooded);
+
+    RecordProperty("output_slots_0_1",
+                   "[" + std::to_string(result[0]) + ", " +
+                   std::to_string(result[1]) + "]");
+
+    EXPECT_EQ(result[0], 7);
+    EXPECT_EQ(result[1], 3);
+}
+
+TEST_F(BFVContextTest, FloodDoesNotMutateInput) {
+    // Flood() must return a new ciphertext. If it aliased its argument, a
+    // caller that floods an intermediate would silently corrupt the value it
+    // still intends to compute on.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 5;
+
+    auto ct = ctx->Encrypt(values);
+    auto before = ctx->Decrypt(ct);
+    auto flooded = ctx->Flood(ct);
+    auto after = ctx->Decrypt(ct);
+
+    RecordProperty("input_slot_0", 5);
+    RecordProperty("output_original_slot_0", static_cast<int>(after[0]));
+    EXPECT_EQ(before[0], after[0]);
+    EXPECT_EQ(after[0], 5);
+    EXPECT_NE(flooded.get(), ct.get());
+}
+
+TEST_F(BFVContextTest, FloodIsRandomised) {
+    // Two floods of the same ciphertext must differ. Identical output would
+    // mean the mask is deterministic, which hides nothing.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+
+    auto ct = ctx->Encrypt(values);
+    auto a = ctx->Flood(ct);
+    auto b = ctx->Flood(ct);
+
+    const auto& ea = a->GetElements()[0];
+    const auto& eb = b->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < ea.GetNumOfElements() && !differs; i++) {
+        if (ea.GetElementAtIndex(i) != eb.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_two_floods_differ", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+
+TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
+    // The three tests above all pass if Flood() added a ONE-BIT mask: they
+    // check the plaintext survives, that the input is untouched, and that two
+    // draws differ. None pins the magnitude -- and a mask smaller than the
+    // evaluation noise leaves the receiver's view unsimulatable while the
+    // ciphertext still decrypts, so no other signal would ever show it.
+    //
+    // Measure the decryption noise the way the calibration harness does:
+    // ||(c0 + c1*s) - Delta*m||_inf, via CRT interpolation.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+
+    auto ct = ctx->Encrypt(values);
+    auto flooded = ctx->Flood(ct);
+
+    const auto& sk = ctx->GetSecretKeyForCalibration();
+    auto cc = ctx->GetCryptoContext();
+    auto elem_params = cc->GetCryptoParameters()->GetElementParams();
+    lbcrypto::BigInteger Q = elem_params->GetModulus();
+    uint64_t t = cc->GetCryptoParameters()->GetPlaintextModulus();
+
+    lbcrypto::DCRTPoly s = sk->GetPrivateElement();
+    const auto& c = flooded->GetElements();
+    lbcrypto::DCRTPoly b = c[0];
+    lbcrypto::DCRTPoly s_pow = s;
+    for (size_t i = 1; i < c.size(); i++) {
+        b += c[i] * s_pow;
+        s_pow *= s;
+    }
+    b.SetFormat(Format::COEFFICIENT);
+    auto big = b.CRTInterpolate();
+
+    const lbcrypto::BigInteger delta = Q / lbcrypto::BigInteger(t);
+    const lbcrypto::BigInteger q_half = Q >> 1;
+    const lbcrypto::BigInteger delta_half = delta >> 1;
+    double worst = 0.0;
+    for (uint32_t j = 0; j < big.GetLength(); j++) {
+        lbcrypto::BigInteger v = big[j];
+        lbcrypto::BigInteger abs_v = (v > q_half) ? (Q - v) : v;
+        lbcrypto::BigInteger r = abs_v % delta;
+        lbcrypto::BigInteger d = (r > delta_half) ? (delta - r) : r;
+        double dd = d.ConvertToDouble();
+        if (dd > worst) worst = dd;
+    }
+    double measured_bits = std::log2(worst);
+    double expected_bits = static_cast<double>(params.FloodNoiseBits());
+
+    RecordProperty("input_expected_flood_bits", static_cast<int>(expected_bits));
+    RecordProperty("output_measured_noise_bits",
+                   static_cast<int>(measured_bits));
+
+    // The mask dominates the evaluation noise by 2^(lambda_stat + margin), so
+    // the measured maximum sits at the mask's own magnitude to within a bit.
+    EXPECT_GE(measured_bits, expected_bits - 1.0);
+    EXPECT_LE(measured_bits, expected_bits + 1.0);
+}
+
+TEST_F(BFVContextTest, FloodCostIsRecorded) {
+    // Not an assertion -- a recorded measurement. bench_noise runs on
+    // calibration-derived parameters where FloodNoiseBits() throws, so this
+    // fixture is the only place a validated context and Flood() meet.
+    std::vector<int64_t> values(params.ring_dim, 0);
+    values[0] = 1;
+    auto ct = ctx->Encrypt(values);
+
+    // Split reference: Flood() re-randomizes with a full Encrypt(zeros) --
+    // a packed encode plus a public-key encryption -- before drawing and
+    // adding the mask. At large N that re-randomization step may dominate,
+    // so the total below alone would misattribute the cost as "flooding
+    // noise" when it may be mostly a public-key encryption. Time the two
+    // reachable public pieces directly from the test, without instrumenting
+    // Flood() itself.
+    std::vector<int64_t> zeros(params.ring_dim, 0);
+    auto cc = ctx->GetCryptoContext();
+
+    std::vector<double> ms;
+    std::vector<double> ms_encrypt_zeros;
+    std::vector<double> ms_eval_add;
+    for (int i = 0; i < 20; i++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto flooded = ctx->Flood(ct);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        (void)flooded;
+
+        auto e0 = std::chrono::high_resolution_clock::now();
+        auto fresh = ctx->Encrypt(zeros);
+        auto e1 = std::chrono::high_resolution_clock::now();
+        ms_encrypt_zeros.push_back(
+            std::chrono::duration<double, std::milli>(e1 - e0).count());
+
+        auto a0 = std::chrono::high_resolution_clock::now();
+        auto added = cc->EvalAdd(ct, fresh);
+        auto a1 = std::chrono::high_resolution_clock::now();
+        ms_eval_add.push_back(
+            std::chrono::duration<double, std::milli>(a1 - a0).count());
+        (void)added;
+    }
+    std::sort(ms.begin(), ms.end());
+    std::sort(ms_encrypt_zeros.begin(), ms_encrypt_zeros.end());
+    std::sort(ms_eval_add.begin(), ms_eval_add.end());
+
+    RecordProperty("input_ring_dim", static_cast<int>(params.ring_dim));
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+    RecordProperty("output_flood_median_us",
+                   static_cast<int>(ms[ms.size() / 2] * 1000.0));
+    RecordProperty("output_encrypt_zeros_median_us",
+                   static_cast<int>(
+                       ms_encrypt_zeros[ms_encrypt_zeros.size() / 2] * 1000.0));
+    RecordProperty("output_eval_add_median_us",
+                   static_cast<int>(
+                       ms_eval_add[ms_eval_add.size() / 2] * 1000.0));
+    SUCCEED();
+}
+
+TEST(BFVContextBudget, RejectsContextTooSmallForFlooding) {
+    // Hand-set an evaluation-noise bound far beyond what this modulus can
+    // carry. Initialize() must refuse rather than build a context whose
+    // flooding term would destroy decryption.
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    RecordProperty("input_calibrated_eval_noise_bits",
+                   static_cast<int>(params.eval_noise_bits));
+    params.eval_noise_bits = 10000;
+    RecordProperty("input_forced_eval_noise_bits", 10000);
+
+    BFVContext ctx(params);
+    EXPECT_THROW(ctx.Initialize(), std::runtime_error);
+}
+
+TEST(BFVContextBudget, AcceptsCalibratedParameters) {
+    // The parameters Validate() selects must pass the check it predicted.
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    RecordProperty("input_lambda_stat", static_cast<int>(params.lambda_stat));
+    BFVContext ctx(params);
+    EXPECT_NO_THROW(ctx.Initialize());
 }

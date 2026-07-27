@@ -22,12 +22,16 @@ ThresholdPiccard::Encrypt(const std::vector<uint64_t>& set) const {
 }
 
 lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
-ThresholdPiccard::Evaluate(
+ThresholdPiccard::EvaluateRaw(
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
     const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
 
     // Step 1-2: REUSE Piccard's multiply + rotate-and-sum
-    auto rotated_sum = piccard_.Evaluate(ct_x, ct_y);
+    //
+    // Raw on purpose: a mask and a degree-k polynomial are applied below, and
+    // the flooding mask would exhaust the modulus long before they finished.
+    // Evaluate() wraps this and floods the polynomial's output instead.
+    auto rotated_sum = piccard_.EvaluateRaw(ct_x, ct_y);
 
     // Step 3: Mask slot 0 with e_1 = (1, 0, ..., 0)
     std::vector<int64_t> e1(piccard_.GetParams().ring_dim, 0);
@@ -36,6 +40,13 @@ ThresholdPiccard::Evaluate(
 
     // Step 4: Evaluate threshold polynomial (precomputed in KeyGen)
     return piccard_.GetBFVContext().EvalPolyBFV(masked, threshold_poly_);
+}
+
+lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+ThresholdPiccard::Evaluate(
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+    const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const {
+    return piccard_.GetBFVContext().Flood(EvaluateRaw(ct_x, ct_y));
 }
 
 bool ThresholdPiccard::Decrypt(

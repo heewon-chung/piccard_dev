@@ -22,6 +22,15 @@ public:
     Evaluate(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
              const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const;
 
+    // The unflooded result. Same contract as Piccard::EvaluateRaw: for callers
+    // that must not receive the masking noise -- today only the calibration
+    // harness, which measures the evaluation noise that sizes that mask and
+    // therefore cannot include it. Returning this to the receiver is a
+    // security bug.
+    lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
+    EvaluateRaw(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_x,
+                const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_y) const;
+
     bool Decrypt(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const;
 
     bool Run(const std::vector<uint64_t>& set_x,

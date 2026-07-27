@@ -145,6 +145,70 @@ TEST_F(ThresholdEngineTest, HighThresholdRejectsPartialOverlap) {
     EXPECT_FALSE(result) << "Partial overlap should fail tau=14 (match ~= 6.7 < 14)";
 }
 
+TEST_F(ThresholdEngineTest, FloodedDecisionIsStillCorrect) {
+    // The threshold output is one bit, and it must survive flooding: the
+    // masking noise is applied after the degree-k polynomial.
+    //
+    // This fixture has SetUpWithTau(), not SetUp() -- `engine` is null and
+    // `params` is unvalidated until it is called, and FloodNoiseBits() would
+    // throw on an unsized parameter set.
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    RecordProperty("input_threshold_tau", static_cast<int>(params.threshold_tau));
+    RecordProperty("input_flood_noise_bits",
+                   static_cast<int>(params.FloodNoiseBits()));
+
+    bool decision = engine->Run(set_x, set_y);
+
+    RecordProperty("output_decision", decision ? "true" : "false");
+    EXPECT_TRUE(decision);
+}
+
+TEST_F(ThresholdEngineTest, EvaluateRawIsUnfloodedAndDecidesTheSame) {
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+
+    bool raw = engine->Decrypt(engine->EvaluateRaw(ct_x, ct_y));
+    bool flooded = engine->Decrypt(engine->Evaluate(ct_x, ct_y));
+
+    RecordProperty("output_raw_decision", raw ? "true" : "false");
+    RecordProperty("output_flooded_decision", flooded ? "true" : "false");
+    EXPECT_EQ(raw, flooded);
+    EXPECT_TRUE(flooded);
+}
+
+TEST_F(ThresholdEngineTest, EvaluateFloodsAndEvaluateRawDoesNot) {
+    // Same reasoning as the sqrt case: a decision bit is equal either way, so
+    // only comparing ciphertexts catches a wrapper that forgot to flood.
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 50; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+    auto raw = engine->EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine->Evaluate(ct_x, ct_y);
+
+    const auto& er = raw->GetElements()[0];
+    const auto& ef = flooded->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < er.GetNumOfElements() && !differs; i++) {
+        if (er.GetElementAtIndex(i) != ef.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+
 TEST_F(ThresholdEngineTest, SymmetryOfThreshold) {
     // Threshold decision should be symmetric: threshold(A,B) == threshold(B,A)
     SetUpWithTau(4);

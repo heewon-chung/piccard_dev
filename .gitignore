@@ -4,13 +4,11 @@
 *.d
 
 .cache
-.gemini
 .claude
 .omc
 .gjc
 
 __pycache__/
-
 
 build
 results
@@ -18,3 +16,12 @@ results
 .DS_Store
 .agent
 .codex
+docs/
+
+# Calibration measurements are a tracked deliverable: the noise bounds baked
+# into src/util/params.cpp are derived from them and must stay auditable.
+# Git will not descend into an excluded directory, so the parent has to be
+# re-included before the exception can apply.
+!scripts/results/
+scripts/results/*
+!scripts/results/calibration/

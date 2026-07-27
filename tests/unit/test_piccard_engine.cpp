@@ -40,6 +40,53 @@ TEST_F(PiccardEngineTest, IdenticalSets) {
     EXPECT_NEAR(result.jaccard_estimate, 1.0, 0.01);
 }
 
+TEST_F(PiccardEngineTest, EvaluateAndEvaluateRawAgreeOnMatchCount) {
+    // Flooding must not move the value the receiver reads. Both paths must
+    // report the same match count for the same inputs.
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 100; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+
+    auto raw = engine->EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine->Evaluate(ct_x, ct_y);
+
+    auto raw_result = engine->Decrypt(raw);
+    auto flooded_result = engine->Decrypt(flooded);
+
+    RecordProperty("output_raw_match_count",
+                   static_cast<int>(raw_result.match_count));
+    RecordProperty("output_flooded_match_count",
+                   static_cast<int>(flooded_result.match_count));
+
+    EXPECT_EQ(raw_result.match_count, flooded_result.match_count);
+    EXPECT_EQ(flooded_result.match_count, static_cast<int64_t>(params.k));
+}
+
+TEST_F(PiccardEngineTest, EvaluateFloodsAndEvaluateRawDoesNot) {
+    // The two must differ as ciphertexts: if Evaluate returned the raw result
+    // the protocol would ship unflooded output while looking correct.
+    std::vector<uint64_t> set_x, set_y;
+    for (uint64_t i = 0; i < 50; i++) { set_x.push_back(i); set_y.push_back(i); }
+
+    auto ct_x = engine->Encrypt(set_x);
+    auto ct_y = engine->Encrypt(set_y);
+
+    auto raw = engine->EvaluateRaw(ct_x, ct_y);
+    auto flooded = engine->Evaluate(ct_x, ct_y);
+
+    const auto& er = raw->GetElements()[0];
+    const auto& ef = flooded->GetElements()[0];
+    bool differs = false;
+    for (size_t i = 0; i < er.GetNumOfElements() && !differs; i++) {
+        if (er.GetElementAtIndex(i) != ef.GetElementAtIndex(i)) differs = true;
+    }
+
+    RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
+    EXPECT_TRUE(differs);
+}
+
 TEST_F(PiccardEngineTest, DisjointSets) {
     RecordProperty("input_k", static_cast<int>(params.k));
     RecordProperty("input_m", static_cast<int>(params.m));
