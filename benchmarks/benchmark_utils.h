@@ -201,6 +201,20 @@ struct BenchmarkResult {
     uint64_t hash_seed = 0;
     uint64_t hash_root_seed = 0;
     size_t accuracy_trials = 0;
+
+    // ── Noise-flooding columns (Phase 4 benchmark pipelining) ─────────
+    // phase_flood_ms: measured Flood() cost at the protocol exit; dispersion
+    //   columns follow the same convention as the phases above.
+    // The remaining 5 fields are constants read from PiccardParams (not
+    // measured per trial), so they have no _sd/_median siblings.
+    double phase_flood_ms = 0.0;
+    double phase_flood_ms_sd = -1.0;
+    double phase_flood_ms_median = 0.0;
+    uint32_t flood_lambda_stat = 0;
+    uint32_t flood_eval_noise_bits = 0;
+    uint32_t flood_margin_bits = 0;
+    uint32_t flood_noise_bits = 0;
+    uint32_t scaling_mod_size = 0;
 };
 
 // ============================================================================
@@ -345,7 +359,12 @@ public:
               << "rel_error_eligible_n,"
               // Hash randomness provenance (R3-1/R3-2), appended so no
               // existing column changes position.
-              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials\n";
+              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
+              // Noise-flooding columns (Phase 4 benchmark pipelining),
+              // appended so no existing column changes position.
+              << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
+              << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
+              << "flood_noise_bits,scaling_mod_size\n";
     }
 
     void WriteRow(const BenchmarkResult& result) {
@@ -405,7 +424,16 @@ public:
               << result.hash_randomness << ","
               << result.hash_seed << ","
               << result.hash_root_seed << ","
-              << result.accuracy_trials << "\n";
+              << result.accuracy_trials << ","
+              << std::fixed << std::setprecision(3)
+              << result.phase_flood_ms << ","
+              << result.phase_flood_ms_sd << ","
+              << result.phase_flood_ms_median << ","
+              << result.flood_lambda_stat << ","
+              << result.flood_eval_noise_bits << ","
+              << result.flood_margin_bits << ","
+              << result.flood_noise_bits << ","
+              << result.scaling_mod_size << "\n";
     }
 };
 

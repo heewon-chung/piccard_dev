@@ -105,6 +105,17 @@ struct DynamicResult {
     uint64_t hash_seed = 0;
     uint64_t hash_root_seed = 0;
     size_t accuracy_trials = 0;
+
+    // ── Noise-flooding columns (Phase 4 benchmark pipelining) ─────────
+    // See BenchmarkResult in benchmark_utils.h for the meaning of each field.
+    double phase_flood_ms = 0.0;
+    double phase_flood_ms_sd = -1.0;
+    double phase_flood_ms_median = 0.0;
+    uint32_t flood_lambda_stat = 0;
+    uint32_t flood_eval_noise_bits = 0;
+    uint32_t flood_margin_bits = 0;
+    uint32_t flood_noise_bits = 0;
+    uint32_t scaling_mod_size = 0;
 };
 
 class DynamicCSVWriter {
@@ -132,7 +143,12 @@ public:
               << "phase_compute_ms_sd,phase_compute_ms_median,"
               << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
               << "rel_error_eligible_n,"
-              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials\n";
+              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
+              // Noise-flooding columns, appended so no existing column
+              // changes position.
+              << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
+              << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
+              << "flood_noise_bits,scaling_mod_size\n";
     }
 
     void WriteRow(const DynamicResult& r) {
@@ -166,7 +182,16 @@ public:
               << r.hash_randomness << ","
               << r.hash_seed << ","
               << r.hash_root_seed << ","
-              << r.accuracy_trials << "\n";
+              << r.accuracy_trials << ","
+              << std::fixed << std::setprecision(3)
+              << r.phase_flood_ms << ","
+              << r.phase_flood_ms_sd << ","
+              << r.phase_flood_ms_median << ","
+              << r.flood_lambda_stat << ","
+              << r.flood_eval_noise_bits << ","
+              << r.flood_margin_bits << ","
+              << r.flood_noise_bits << ","
+              << r.scaling_mod_size << "\n";
     }
 };
 
@@ -247,6 +272,11 @@ static DynamicResult RunTimedDynamic(
     }
     dr.phase_compute_ms = timer.ElapsedMs();
 
+    // Phase 7.5: Noise flooding (cloud) — mirrors Piccard::Evaluate exit (piccard.cpp:77)
+    timer.Start();
+    result = bfv.Flood(result);
+    dr.phase_flood_ms = timer.ElapsedMs();
+
     // Phase 8: Decrypt + bias correction
     timer.Start();
     auto values = bfv.Decrypt(result);
@@ -260,7 +290,7 @@ static DynamicResult RunTimedDynamic(
 
     dr.total_ms = dr.phase_init_ms + dr.phase_insert_ms + dr.phase_delete_ms +
                   dr.phase_signature_ms + dr.phase_encode_ms + dr.phase_encrypt_ms +
-                  dr.phase_compute_ms + dr.phase_decrypt_ms;
+                  dr.phase_compute_ms + dr.phase_flood_ms + dr.phase_decrypt_ms;
     dr.memory_bytes = MemoryTracker::GetPeakRSS();
     dr.jaccard_computed = j_hat;
     dr.jaccard_expected = j_true;
@@ -287,7 +317,7 @@ static DynamicResult RunMultiTrialDynamic(
     RunTimedDynamic(engine, set_x, set_y, j_true, depth, "warmup");
 
     std::vector<double> v_total, v_init, v_insert, v_delete, v_sig;
-    std::vector<double> v_encode, v_encrypt, v_compute, v_decrypt;
+    std::vector<double> v_encode, v_encrypt, v_compute, v_flood, v_decrypt;
     size_t ct_size = 0;
     double sum_j_hat = 0.0, total_err = 0.0;
     double sum_ins = 0.0, sum_del = 0.0;
@@ -302,6 +332,7 @@ static DynamicResult RunMultiTrialDynamic(
         v_encode.push_back(dr.phase_encode_ms);
         v_encrypt.push_back(dr.phase_encrypt_ms);
         v_compute.push_back(dr.phase_compute_ms);
+        v_flood.push_back(dr.phase_flood_ms);
         v_decrypt.push_back(dr.phase_decrypt_ms);
         ct_size = dr.ct_size_bytes;
         sum_j_hat += dr.jaccard_computed;
@@ -318,6 +349,7 @@ static DynamicResult RunMultiTrialDynamic(
     auto d_enc = ComputeDispersion(v_encode);
     auto d_cry = ComputeDispersion(v_encrypt);
     auto d_cmp = ComputeDispersion(v_compute);
+    auto d_flo = ComputeDispersion(v_flood);
     auto d_dec = ComputeDispersion(v_decrypt);
     double n = static_cast<double>(trials);
 
@@ -336,6 +368,7 @@ static DynamicResult RunMultiTrialDynamic(
     result.phase_encode_ms  = d_enc.mean; result.phase_encode_ms_sd  = d_enc.sd; result.phase_encode_ms_median  = d_enc.median;
     result.phase_encrypt_ms = d_cry.mean; result.phase_encrypt_ms_sd = d_cry.sd; result.phase_encrypt_ms_median = d_cry.median;
     result.phase_compute_ms = d_cmp.mean; result.phase_compute_ms_sd = d_cmp.sd; result.phase_compute_ms_median = d_cmp.median;
+    result.phase_flood_ms = d_flo.mean; result.phase_flood_ms_sd = d_flo.sd; result.phase_flood_ms_median = d_flo.median;
     result.phase_decrypt_ms = d_dec.mean; result.phase_decrypt_ms_sd = d_dec.sd; result.phase_decrypt_ms_median = d_dec.median;
     result.memory_bytes = MemoryTracker::GetPeakRSS();
     result.ct_size_bytes = ct_size;
@@ -354,6 +387,13 @@ static DynamicResult RunMultiTrialDynamic(
     result.hash_seed = engine.GetParams().hash_seed;
     result.hash_root_seed = engine.GetParams().hash_seed;
     result.hash_randomness = "fixed";
+    // Noise-flooding parameter fields are constants; copy explicitly from
+    // engine.GetParams() so this aggregation path does not leave them at 0.
+    result.flood_lambda_stat = engine.GetParams().lambda_stat;
+    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     return result;
 }
@@ -542,6 +582,11 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
+                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
             }
@@ -622,6 +667,11 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
+                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
             }
@@ -698,6 +748,11 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
+                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
             }

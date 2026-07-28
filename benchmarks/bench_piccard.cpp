@@ -109,6 +109,11 @@ static BenchmarkResult RunTimedProtocol(
     }
     br.phase_rotate_sum_ms = timer.ElapsedMs();
 
+    // Phase 5.5: Noise flooding (cloud) — mirrors Piccard::Evaluate exit (piccard.cpp:77)
+    timer.Start();
+    result = bfv.Flood(result);
+    br.phase_flood_ms = timer.ElapsedMs();
+
     // Phase 6: Decrypt (receiver)
     timer.Start();
     auto values = bfv.Decrypt(result);
@@ -126,8 +131,8 @@ static BenchmarkResult RunTimedProtocol(
     // Totals
     br.time_ms = br.phase_minhash_ms + br.phase_encode_ms +
                  br.phase_encrypt_ms + br.phase_multiply_ms +
-                 br.phase_rotate_sum_ms + br.phase_decrypt_ms +
-                 br.phase_bias_correction_ms;
+                 br.phase_rotate_sum_ms + br.phase_flood_ms +
+                 br.phase_decrypt_ms + br.phase_bias_correction_ms;
     br.memory_bytes = MemoryTracker::GetPeakRSS();
     br.jaccard_computed = j_hat;
     br.jaccard_expected = j_true;
@@ -153,7 +158,7 @@ static BenchmarkResult RunMultiTrial(
     RunTimedProtocol(engine, set_x, set_y, j_true, "warmup");
 
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-    std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+    std::vector<double> v_multiply, v_rotate, v_flood, v_decrypt, v_bias;
     size_t ct_size = 0;
     double sum_j_hat = 0.0, sum_j_err = 0.0;
     size_t rel_eligible = 0;
@@ -167,6 +172,7 @@ static BenchmarkResult RunMultiTrial(
         v_encrypt.push_back(br.phase_encrypt_ms);
         v_multiply.push_back(br.phase_multiply_ms);
         v_rotate.push_back(br.phase_rotate_sum_ms);
+        v_flood.push_back(br.phase_flood_ms);
         v_decrypt.push_back(br.phase_decrypt_ms);
         v_bias.push_back(br.phase_bias_correction_ms);
         ct_size = br.ct_size_bytes;
@@ -184,6 +190,7 @@ static BenchmarkResult RunMultiTrial(
     auto d_encrypt  = ComputeDispersion(v_encrypt);
     auto d_multiply = ComputeDispersion(v_multiply);
     auto d_rotate   = ComputeDispersion(v_rotate);
+    auto d_flood    = ComputeDispersion(v_flood);
     auto d_decrypt  = ComputeDispersion(v_decrypt);
     auto d_bias     = ComputeDispersion(v_bias);
 
@@ -219,6 +226,10 @@ static BenchmarkResult RunMultiTrial(
     result.phase_rotate_sum_ms_sd = d_rotate.sd;
     result.phase_rotate_sum_ms_median = d_rotate.median;
 
+    result.phase_flood_ms = d_flood.mean;
+    result.phase_flood_ms_sd = d_flood.sd;
+    result.phase_flood_ms_median = d_flood.median;
+
     result.phase_decrypt_ms = d_decrypt.mean;
     result.phase_decrypt_ms_sd = d_decrypt.sd;
     result.phase_decrypt_ms_median = d_decrypt.median;
@@ -229,6 +240,14 @@ static BenchmarkResult RunMultiTrial(
 
     result.memory_bytes  = MemoryTracker::GetPeakRSS();
     result.ct_size_bytes = ct_size;
+
+    // Noise-flooding parameter fields are constants; copy explicitly from
+    // engine.GetParams() so this aggregation path does not leave them at 0.
+    result.flood_lambda_stat = engine.GetParams().lambda_stat;
+    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     double n = static_cast<double>(num_trials);
     result.jaccard_computed = sum_j_hat / n;
@@ -271,7 +290,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         }
 
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        std::vector<double> v_multiply, v_rotate, v_flood, v_decrypt, v_bias;
         size_t ct_size = 0;
         double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
         size_t rel_eligible = 0;
@@ -290,6 +309,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
             v_encrypt.push_back(br.phase_encrypt_ms);
             v_multiply.push_back(br.phase_multiply_ms);
             v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_flood.push_back(br.phase_flood_ms);
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
@@ -305,6 +325,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         auto d_encrypt  = ComputeDispersion(v_encrypt);
         auto d_multiply = ComputeDispersion(v_multiply);
         auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_flood    = ComputeDispersion(v_flood);
         auto d_decrypt  = ComputeDispersion(v_decrypt);
         auto d_bias     = ComputeDispersion(v_bias);
         double n = static_cast<double>(config.trials);
@@ -320,6 +341,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
         result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
         result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_flood_ms = d_flood.mean; result.phase_flood_ms_sd = d_flood.sd; result.phase_flood_ms_median = d_flood.median;
         result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
         result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
         result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
@@ -328,6 +350,21 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
+        result.flood_lambda_stat = engine.GetParams().lambda_stat;
+        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.scaling_mod_size = engine.GetParams().scaling_mod_size;
+
+        // Provenance (task 9-2): this sweep is --mode=timing and never
+        // reseeds, so hash_randomness is honestly "fixed". Both hash_seed and
+        // hash_root_seed hold the engine's actual CRS (never config.seed —
+        // this timing path does not derive its hash family from config.seed;
+        // writing config.seed here would be false provenance whenever
+        // --seed != the engine's default hash_seed=42).
+        result.hash_randomness = "fixed";
+        result.hash_seed = engine.GetParams().hash_seed;
+        result.hash_root_seed = engine.GetParams().hash_seed;
 
         csv.WriteRow(result);
 
@@ -366,7 +403,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         }
 
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        std::vector<double> v_multiply, v_rotate, v_flood, v_decrypt, v_bias;
         size_t ct_size = 0;
         double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
         size_t rel_eligible = 0;
@@ -385,6 +422,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
             v_encrypt.push_back(br.phase_encrypt_ms);
             v_multiply.push_back(br.phase_multiply_ms);
             v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_flood.push_back(br.phase_flood_ms);
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
@@ -400,6 +438,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         auto d_encrypt  = ComputeDispersion(v_encrypt);
         auto d_multiply = ComputeDispersion(v_multiply);
         auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_flood    = ComputeDispersion(v_flood);
         auto d_decrypt  = ComputeDispersion(v_decrypt);
         auto d_bias     = ComputeDispersion(v_bias);
         double n = static_cast<double>(config.trials);
@@ -415,6 +454,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
         result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
         result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_flood_ms = d_flood.mean; result.phase_flood_ms_sd = d_flood.sd; result.phase_flood_ms_median = d_flood.median;
         result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
         result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
         result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
@@ -423,6 +463,17 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
+        result.flood_lambda_stat = engine.GetParams().lambda_stat;
+        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.scaling_mod_size = engine.GetParams().scaling_mod_size;
+
+        // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
+        // rationale — identical here.
+        result.hash_randomness = "fixed";
+        result.hash_seed = engine.GetParams().hash_seed;
+        result.hash_root_seed = engine.GetParams().hash_seed;
 
         csv.WriteRow(result);
 
@@ -460,7 +511,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         }
 
         std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-        std::vector<double> v_multiply, v_rotate, v_decrypt, v_bias;
+        std::vector<double> v_multiply, v_rotate, v_flood, v_decrypt, v_bias;
         size_t ct_size = 0;
         double sum_j_hat = 0.0, sum_j_true = 0.0, sum_j_err = 0.0;
         size_t rel_eligible = 0;
@@ -479,6 +530,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
             v_encrypt.push_back(br.phase_encrypt_ms);
             v_multiply.push_back(br.phase_multiply_ms);
             v_rotate.push_back(br.phase_rotate_sum_ms);
+            v_flood.push_back(br.phase_flood_ms);
             v_decrypt.push_back(br.phase_decrypt_ms);
             v_bias.push_back(br.phase_bias_correction_ms);
             ct_size = br.ct_size_bytes;
@@ -494,6 +546,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         auto d_encrypt  = ComputeDispersion(v_encrypt);
         auto d_multiply = ComputeDispersion(v_multiply);
         auto d_rotate   = ComputeDispersion(v_rotate);
+        auto d_flood    = ComputeDispersion(v_flood);
         auto d_decrypt  = ComputeDispersion(v_decrypt);
         auto d_bias     = ComputeDispersion(v_bias);
         double n = static_cast<double>(config.trials);
@@ -509,6 +562,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
         result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
         result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+        result.phase_flood_ms = d_flood.mean; result.phase_flood_ms_sd = d_flood.sd; result.phase_flood_ms_median = d_flood.median;
         result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
         result.phase_bias_correction_ms = d_bias.mean; result.phase_bias_correction_ms_sd = d_bias.sd; result.phase_bias_correction_ms_median = d_bias.median;
         result.memory_bytes = MemoryTracker::GetPeakRSS(); result.ct_size_bytes = ct_size;
@@ -517,6 +571,17 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
+        result.flood_lambda_stat = engine.GetParams().lambda_stat;
+        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.scaling_mod_size = engine.GetParams().scaling_mod_size;
+
+        // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
+        // rationale — identical here.
+        result.hash_randomness = "fixed";
+        result.hash_seed = engine.GetParams().hash_seed;
+        result.hash_root_seed = engine.GetParams().hash_seed;
 
         csv.WriteRow(result);
 
@@ -586,6 +651,11 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
+                br.flood_lambda_stat = engine.GetParams().lambda_stat;
+                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
         }
@@ -650,6 +720,11 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
+                br.flood_lambda_stat = engine.GetParams().lambda_stat;
+                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
         }
@@ -712,6 +787,11 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
+                br.flood_lambda_stat = engine.GetParams().lambda_stat;
+                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
+                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
         }

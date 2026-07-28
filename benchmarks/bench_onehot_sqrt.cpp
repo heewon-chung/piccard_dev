@@ -45,6 +45,11 @@ static void RunOneHotEvaluateTimed(
     }
     br.phase_rotate_sum_ms = timer.ElapsedMs();
 
+    // Sub-phase 3: Noise flooding (cloud) — mirrors Piccard::Evaluate exit (piccard.cpp:77)
+    timer.Start();
+    ct_result = bfv.Flood(ct_result);
+    br.phase_flood_ms = timer.ElapsedMs();
+
     // Sqrt-specific fields not applicable
     br.phase_intra_digit_rotate_ms = 0.0;
     br.phase_digit_and_ms = 0.0;
@@ -96,6 +101,11 @@ static void RunSqrtEvaluateTimed(
         ct_result = bfv.Add(ct_result, rotated);
     }
     br.phase_cross_k_sum_ms = timer.ElapsedMs();
+
+    // Sub-phase 5: Noise flooding (cloud) — mirrors SqrtPiccard::Evaluate exit (sqrt_piccard.cpp:101)
+    timer.Start();
+    ct_result = bfv.Flood(ct_result);
+    br.phase_flood_ms = timer.ElapsedMs();
 
     // Aggregate into phase_rotate_sum_ms for backward-compatible total
     br.phase_rotate_sum_ms = br.phase_intra_digit_rotate_ms +
@@ -168,7 +178,8 @@ static BenchmarkResult RunTimedProtocol(
 
     br.time_ms = br.phase_minhash_ms + br.phase_encode_ms +
                  br.phase_encrypt_ms + br.phase_multiply_ms +
-                 br.phase_rotate_sum_ms + br.phase_decrypt_ms;
+                 br.phase_rotate_sum_ms + br.phase_flood_ms +
+                 br.phase_decrypt_ms;
     br.memory_bytes = MemoryTracker::GetPeakRSS();
     br.jaccard_computed = j_hat;
     br.jaccard_expected = j_true;
@@ -179,16 +190,13 @@ static BenchmarkResult RunTimedProtocol(
 }
 
 // ============================================================================
-// Multi-trial median
+// Multi-trial aggregation using ComputeDispersion (benchmark_utils.h)
 // ============================================================================
-
-static double Median(std::vector<double>& v) {
-    size_t n = v.size();
-    if (n == 0) return 0.0;
-    std::sort(v.begin(), v.end());
-    if (n % 2 == 0) return (v[n / 2 - 1] + v[n / 2]) / 2.0;
-    return v[n / 2];
-}
+//
+// The 3 sqrt-only sub-phases (phase_intra_digit_rotate_ms, phase_digit_and_ms,
+// phase_cross_k_sum_ms) have no _sd/_median siblings in BenchmarkResult, so
+// they stay mean-only here; every other phase (including the newly added
+// phase_flood_ms) gets the full mean/_sd/_median dispersion treatment.
 
 template <typename Engine>
 static BenchmarkResult RunMultiTrial(
@@ -205,8 +213,8 @@ static BenchmarkResult RunMultiTrial(
     RunTimedProtocol(engine, set_x, set_y, j_true, "warmup", encoding_name, mult_depth);
 
     std::vector<double> v_minhash, v_encode, v_encrypt, v_multiply;
-    std::vector<double> v_rotate_sum, v_decrypt, v_total;
-    std::vector<double> v_intra_digit, v_digit_and, v_cross_k;
+    std::vector<double> v_rotate_sum, v_flood, v_decrypt, v_total;
+    double sum_intra_digit = 0.0, sum_digit_and = 0.0, sum_cross_k = 0.0;
     BenchmarkResult last;
     double total_error = 0.0;
 
@@ -218,29 +226,50 @@ static BenchmarkResult RunMultiTrial(
         v_encrypt.push_back(br.phase_encrypt_ms);
         v_multiply.push_back(br.phase_multiply_ms);
         v_rotate_sum.push_back(br.phase_rotate_sum_ms);
+        v_flood.push_back(br.phase_flood_ms);
         v_decrypt.push_back(br.phase_decrypt_ms);
         v_total.push_back(br.time_ms);
-        v_intra_digit.push_back(br.phase_intra_digit_rotate_ms);
-        v_digit_and.push_back(br.phase_digit_and_ms);
-        v_cross_k.push_back(br.phase_cross_k_sum_ms);
+        sum_intra_digit += br.phase_intra_digit_rotate_ms;
+        sum_digit_and += br.phase_digit_and_ms;
+        sum_cross_k += br.phase_cross_k_sum_ms;
         total_error += br.jaccard_error;
         last = br;
     }
 
-    BenchmarkResult median = last;
-    median.phase_minhash_ms = Median(v_minhash);
-    median.phase_encode_ms = Median(v_encode);
-    median.phase_encrypt_ms = Median(v_encrypt);
-    median.phase_multiply_ms = Median(v_multiply);
-    median.phase_rotate_sum_ms = Median(v_rotate_sum);
-    median.phase_decrypt_ms = Median(v_decrypt);
-    median.time_ms = Median(v_total);
-    median.phase_intra_digit_rotate_ms = Median(v_intra_digit);
-    median.phase_digit_and_ms = Median(v_digit_and);
-    median.phase_cross_k_sum_ms = Median(v_cross_k);
-    median.jaccard_error = total_error / static_cast<double>(trials);
-    median.memory_bytes = MemoryTracker::GetPeakRSS();
-    return median;
+    auto d_minhash  = ComputeDispersion(v_minhash);
+    auto d_encode   = ComputeDispersion(v_encode);
+    auto d_encrypt  = ComputeDispersion(v_encrypt);
+    auto d_multiply = ComputeDispersion(v_multiply);
+    auto d_rotate   = ComputeDispersion(v_rotate_sum);
+    auto d_flood    = ComputeDispersion(v_flood);
+    auto d_decrypt  = ComputeDispersion(v_decrypt);
+    auto d_total    = ComputeDispersion(v_total);
+    double n = static_cast<double>(trials);
+
+    BenchmarkResult result = last;
+    result.trials = trials;
+    result.phase_minhash_ms = d_minhash.mean; result.phase_minhash_ms_sd = d_minhash.sd; result.phase_minhash_ms_median = d_minhash.median;
+    result.phase_encode_ms = d_encode.mean; result.phase_encode_ms_sd = d_encode.sd; result.phase_encode_ms_median = d_encode.median;
+    result.phase_encrypt_ms = d_encrypt.mean; result.phase_encrypt_ms_sd = d_encrypt.sd; result.phase_encrypt_ms_median = d_encrypt.median;
+    result.phase_multiply_ms = d_multiply.mean; result.phase_multiply_ms_sd = d_multiply.sd; result.phase_multiply_ms_median = d_multiply.median;
+    result.phase_rotate_sum_ms = d_rotate.mean; result.phase_rotate_sum_ms_sd = d_rotate.sd; result.phase_rotate_sum_ms_median = d_rotate.median;
+    result.phase_flood_ms = d_flood.mean; result.phase_flood_ms_sd = d_flood.sd; result.phase_flood_ms_median = d_flood.median;
+    result.phase_decrypt_ms = d_decrypt.mean; result.phase_decrypt_ms_sd = d_decrypt.sd; result.phase_decrypt_ms_median = d_decrypt.median;
+    result.time_ms = d_total.mean; result.time_ms_sd = d_total.sd; result.time_ms_median = d_total.median;
+    // Sqrt-only sub-phases: mean only (no _sd/_median fields in BenchmarkResult).
+    result.phase_intra_digit_rotate_ms = sum_intra_digit / n;
+    result.phase_digit_and_ms = sum_digit_and / n;
+    result.phase_cross_k_sum_ms = sum_cross_k / n;
+    result.jaccard_error = total_error / n;
+    result.memory_bytes = MemoryTracker::GetPeakRSS();
+    // Noise-flooding parameter fields are constants; copy explicitly from
+    // engine.GetParams() so this aggregation path does not leave them at 0.
+    result.flood_lambda_stat = engine.GetParams().lambda_stat;
+    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.scaling_mod_size = engine.GetParams().scaling_mod_size;
+    return result;
 }
 
 // ============================================================================
@@ -457,6 +486,11 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         oh_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
                               ? pp.hash_seed : 0;
         oh_br.hash_root_seed = config.seed;
+        oh_br.flood_lambda_stat = onehot.GetParams().lambda_stat;
+        oh_br.flood_eval_noise_bits = onehot.GetParams().eval_noise_bits;
+        oh_br.flood_margin_bits = onehot.GetParams().flood_margin_bits;
+        oh_br.flood_noise_bits = onehot.GetParams().FloodNoiseBits();
+        oh_br.scaling_mod_size = onehot.GetParams().scaling_mod_size;
         csv.WriteRow(oh_br);
 
         // Sqrt accuracy stats
@@ -480,6 +514,11 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         sq_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
                               ? sp.hash_seed : 0;
         sq_br.hash_root_seed = config.seed;
+        sq_br.flood_lambda_stat = sqrt_eng.GetParams().lambda_stat;
+        sq_br.flood_eval_noise_bits = sqrt_eng.GetParams().eval_noise_bits;
+        sq_br.flood_margin_bits = sqrt_eng.GetParams().flood_margin_bits;
+        sq_br.flood_noise_bits = sqrt_eng.GetParams().FloodNoiseBits();
+        sq_br.scaling_mod_size = sqrt_eng.GetParams().scaling_mod_size;
         csv.WriteRow(sq_br);
 
         std::cerr << "  overlap=" << overlap

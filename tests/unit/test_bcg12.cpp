@@ -84,6 +84,55 @@ TEST(Bcg12, SeedParityNonDefault) {
                       piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y)));
 }
 
+// SetHashSeed (task 9-1, BCG12 option a): must update BOTH the reported
+// params_.minhash_seed (so GetParams() never goes stale) AND rebuild
+// hasher_ so the signature family actually changes.
+TEST(Bcg12, SetHashSeedUpdatesReportedParam) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 32;
+    p.minhash_seed = 42;
+    BCG12 e(p);
+    e.Setup();
+    EXPECT_EQ(e.GetParams().minhash_seed, 42u);
+    e.SetHashSeed(1234);
+    EXPECT_EQ(e.GetParams().minhash_seed, 1234u);
+}
+
+TEST(Bcg12, SetHashSeedChangesSignatureFamily) {
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 32;
+    p.minhash_seed = 42;
+    BCG12 e(p);
+    e.Setup();
+    std::vector<uint64_t> X{1, 2, 3, 4, 5, 6, 7, 8};
+    std::vector<uint64_t> Y{4, 5, 6, 7, 8, 9, 10, 11};
+
+    double est_before = e.RunQuery(X, Y).jaccard_estimate;
+
+    e.SetHashSeed(9999);
+    double est_after = e.RunQuery(X, Y).jaccard_estimate;
+
+    // Reference against a fresh MinHasher at each seed: the estimate after
+    // reseeding must track the NEW seed's hash family, not the old one.
+    piccard::MinHasher mh_before(32, UINT64_MAX, 42);
+    piccard::MinHasher mh_after(32, UINT64_MAX, 9999);
+    double ref_before = piccard::MinHasher::EstimateJaccard(
+        mh_before.ComputeSignature(X), mh_before.ComputeSignature(Y));
+    double ref_after = piccard::MinHasher::EstimateJaccard(
+        mh_after.ComputeSignature(X), mh_after.ComputeSignature(Y));
+
+    EXPECT_DOUBLE_EQ(est_before, ref_before);
+    EXPECT_DOUBLE_EQ(est_after, ref_after);
+    // Strong (near-certain, not scalar-estimate-coincidence-prone) check that
+    // the signature FAMILY actually changed: compare the raw k-dim
+    // signatures, not just the derived scalar estimate.
+    EXPECT_NE(mh_before.ComputeSignature(X), mh_after.ComputeSignature(X));
+}
+
 TEST(Bcg12, QueryCostComplete) {
     Bcg12Params p;
     p.mode = Bcg12Mode::MinHash;

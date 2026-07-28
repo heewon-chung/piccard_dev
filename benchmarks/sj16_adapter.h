@@ -140,6 +140,11 @@ inline ComparisonResult FinalizeSJ16(
     double n = static_cast<double>(trials.size());
 
     r.trials = trials.size();
+    // SJ16 uses no MinHash CRS (task 9-1a): hash_randomness/hash_seed/
+    // hash_root_seed stay at their blank/0 defaults. accuracy_trials
+    // reflects the real sample count (SJ16 accuracy and timing share the
+    // same per-trial loop, so it equals `trials`).
+    r.accuracy_trials = trials.size();
     r.phase_encode_ms = d_enc.mean;  r.phase_encode_ms_sd = d_enc.sd;  r.phase_encode_ms_median = d_enc.median;
     r.phase_encrypt_ms = d_cry.mean; r.phase_encrypt_ms_sd = d_cry.sd; r.phase_encrypt_ms_median = d_cry.median;
     r.phase_compute_ms = d_cmp.mean; r.phase_compute_ms_sd = d_cmp.sd; r.phase_compute_ms_median = d_cmp.median;
