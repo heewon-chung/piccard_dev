@@ -3,6 +3,11 @@
 #include "baselines/group_ec.h"
 #include "baselines/group.h"
 #include <gtest/gtest.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+#include <functional>
+#include <memory>
 #include <random>
 #include <set>
 #include <vector>
@@ -96,4 +101,91 @@ TEST(Dgt12PsiCa, PositionTagDisambiguates){
     std::vector<std::vector<uint8_t>> a{EncodeTaggedItem(5,0), EncodeTaggedItem(5,1)};
     std::vector<std::vector<uint8_t>> b{EncodeTaggedItem(5,1), EncodeTaggedItem(5,2)};
     EXPECT_EQ(RunDgt12(*G,a,b).cardinality, 1u);   // only <5,1> matches, not <5,0>/<5,2>
+}
+
+// --- 13-1c: parallel-vs-sequential equivalence (this task's pass/fail gate) ---
+//
+// RunDgt12's pre-hash and Round 1-3 loops are now parallelized with OpenMP
+// (13-1b). PSI-CA is a cryptographic protocol, so "it got faster but the
+// value changed" is a failure, not an acceptable tradeoff. These cases force
+// the SAME protocol run (same items, same masking exponents via a fixed
+// ExponentSource) through 1-thread and 8-thread execution within a single
+// process and assert the two runs are bit/value-identical on every
+// non-timing field. Timing fields obviously differ between the two runs and
+// are excluded from comparison.
+
+static std::vector<uint8_t> FixedExponentBytes(uint64_t value) {
+    std::vector<uint8_t> out(32, 0);  // both backends' ExponentBytes() == 32
+    for (int i = 0; i < 8; ++i) {
+        out[31 - static_cast<size_t>(i)] = static_cast<uint8_t>((value >> (8 * i)) & 0xFF);
+    }
+    return out;
+}
+
+// RunDgt12 calls the exponent source exactly twice per invocation (R_a, then
+// R_b), always sequentially on the control thread before any parallel region
+// opens (DrawExponent() sites are outside every `#pragma omp parallel for`).
+// A fresh instance of this source is used for each RunDgt12 call below, so
+// both the 1-thread and 8-thread runs get the SAME R_a/R_b -- the only
+// remaining source of difference is the loop parallelization itself, which
+// is exactly what this test is checking.
+static ExponentSource MakeFixedExponentSource() {
+    auto call = std::make_shared<int>(0);
+    return [call]() -> std::vector<uint8_t> {
+        static const uint64_t kValues[2] = {0x1234567890ABCDEFULL, 0xFEDCBA0987654321ULL};
+        std::vector<uint8_t> out = FixedExponentBytes(kValues[*call % 2]);
+        ++*call;
+        return out;
+    };
+}
+
+static void CheckThreadEquivalence(const std::function<std::unique_ptr<Group>()>& make_group) {
+    // Unequal sizes (16 vs 14), like CheckPsiCa above, so the asymmetric
+    // Round-2/Round-3 loop bounds (v vs w) are both exercised under
+    // parallelization, not just a symmetric |A|==|B| fixture.
+    std::vector<uint64_t> A{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+    std::vector<uint64_t> B{9,10,11,12,13,14,15,16,17,18,19,20,21,22};
+    const auto a_items = Items(A);
+    const auto b_items = Items(B);
+    const uint64_t expected = PlainInter(A, B);
+
+#ifdef _OPENMP
+    const int saved_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+#endif
+    auto g1 = make_group();
+    PsiCaCost c1 = RunDgt12(*g1, a_items, b_items, MakeFixedExponentSource());
+
+#ifdef _OPENMP
+    omp_set_num_threads(8);
+#endif
+    auto g8 = make_group();
+    PsiCaCost c8 = RunDgt12(*g8, a_items, b_items, MakeFixedExponentSource());
+
+#ifdef _OPENMP
+    omp_set_num_threads(saved_threads);
+#endif
+
+    // Sanity: both runs must match the known plaintext answer, not just each
+    // other (rules out "both equally wrong").
+    ASSERT_EQ(c1.cardinality, expected);
+    ASSERT_EQ(c8.cardinality, expected);
+
+    EXPECT_EQ(c1.cardinality, c8.cardinality);
+    EXPECT_EQ(c1.protocol_exps, c8.protocol_exps);
+    EXPECT_EQ(c1.hash_exps, c8.hash_exps);
+    EXPECT_EQ(c1.alice_upload_bytes, c8.alice_upload_bytes);
+    EXPECT_EQ(c1.bob_upload_bytes, c8.bob_upload_bytes);
+    EXPECT_EQ(c1.payload_bytes, c8.payload_bytes);
+    // Timing fields (hash_to_group_ms, alice_round1_ms, bob_ms,
+    // alice_round2_ms, total_ms) intentionally excluded -- they are expected
+    // to differ between the two runs.
+}
+
+TEST(Dgt12PsiCa, ThreadEquivalenceEllipticCurve) {
+    CheckThreadEquivalence([]() -> std::unique_ptr<Group> { return MakeEcGroup(); });
+}
+
+TEST(Dgt12PsiCa, ThreadEquivalenceFiniteField) {
+    CheckThreadEquivalence([]() -> std::unique_ptr<Group> { return MakeFiniteFieldGroup(); });
 }
