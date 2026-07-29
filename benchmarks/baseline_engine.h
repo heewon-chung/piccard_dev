@@ -2,16 +2,17 @@
 
 /**
  * @file baseline_engine.h
- * @brief ZLG+24 / LeP20 baseline: binary vector encoding + BFV inner product
+ * @brief FHE-IND comparator: binary vector encoding + BFV inner product
  *
  * Implements pairwise Jaccard computation using full-dimension binary vectors
- * encrypted with BFV. This is the core approach from both LeP20 and EPSet
- * (ZLG+24), reimplemented in C++ using the same OpenFHE library as Piccard
- * for a fair same-machine comparison.
+ * encrypted with BFV, in the style of LeP20's one-hot BFV construction. This
+ * is not a faithful reimplementation of ZLG+24/EPSet; this is a
+ * universe-sized BFV indicator-vector protocol, implemented in C++ using the
+ * same OpenFHE library as Piccard for a fair same-machine comparison.
  *
  * Key difference from Piccard: encodes sets as binary vectors of dimension
  * U_set (universe size), whereas Piccard compresses to dimension k*m via
- * MinHash + one-hot encoding. When U_set >> k*m, the baseline requires
+ * MinHash + one-hot encoding. When U_set >> k*m, the comparator requires
  * larger ring_dim, making all BFV operations more expensive.
  */
 

@@ -189,13 +189,18 @@ def filter_rows(data, key, prefix):
 
 
 # ── Comparison-table extra methods ───────────────────────────────────
-# The comparison timing/comm tables render Piccard vs Baseline side by side.
-# These additional methods (when present in the CSV) are emitted as their own
+# The comparison timing/comm tables render Piccard vs the FHE-IND comparator
+# ("baseline" CSV key, see FHE_IND_DISCLOSURE below) side by side. These
+# additional methods (when present in the CSV) are emitted as their own
 # supplementary rows so they are no longer silently dropped — notably `sj16`.
 COMPARISON_EXTRA_METHODS = ("piccard_sqrt", "bcg12", "sj16")
 
 # Row labels carrying each method's security class, and for SJ16 the
 # lower-bound caveat the design doc requires the emitted table to carry.
+# Only exact-match methods live here — bcg12 variant names (bcg12_mh_ff,
+# bcg12_exact_ec, ...) have no exact key and fall back to method_tag()'s
+# boundary-aware branch below, which reads security_class off their own CSV
+# row instead of a hardcoded string.
 _METHOD_LABELS = {
     "piccard_sqrt": "piccard_sqrt [CPA/no-leakage]",
     "bcg12": "bcg12 [AHE/no-leakage]",
@@ -212,20 +217,136 @@ SJ16_LOWER_BOUND_NOTE = (
     "secure division excluded — optimistic lower bound."
 )
 
+# Printed in the Method column of every primary (Piccard-vs-comparator) row.
+# The CSV method key stays "baseline" for internal/legacy compatibility; this
+# is the display-only relabel (R3-5(ii)): the "baseline" engine is NOT a
+# faithful reimplementation of [11] (Zheng et al., EPSet/ZLG+24) — it is a
+# universe-sized BFV indicator-vector protocol with KPA/leakage security, and
+# must not be read as reproducing [11]'s numbers.
+FHE_IND_DISCLOSURE = (
+    "FHE-IND [KPA/leakage; universe-sized BFV indicator vector; "
+    "not a faithful [11] reimplementation]"
+)
+
 
 def has_sj16_row(rows):
     """True if any row in `rows` is an sj16 method row."""
     return any(r.get("method", "") == "sj16" for r in rows)
 
 
-def method_tag(method):
-    """Plain (ASCII) supplementary-row label for a comparison method."""
-    return _METHOD_LABELS.get(method, method)
+def _boundary_match(name, base):
+    """True if `name` is exactly `base` or a `base_`-prefixed variant.
+
+    Boundary-aware on purpose: a bare `name.startswith(base)` would also
+    match an unrelated future method name that merely shares the prefix
+    (e.g. a hypothetical "bcg12x"). Mirrors the C++ SecurityClassOf's
+    intent (bench_comparison.cpp) but with an explicit boundary instead of
+    a bare prefix match.
+    """
+    return name == base or name.startswith(base + "_")
 
 
-def method_tag_latex(method):
+# Deterministic output order for extra-method rows: piccard_sqrt, then all
+# bcg12 variants (sorted), then sj16.
+_EXTRA_METHOD_RANK = {base: i for i, base in enumerate(COMPARISON_EXTRA_METHODS)}
+
+
+def _extra_method_base(name):
+    """Which COMPARISON_EXTRA_METHODS bucket `name` belongs to, or None.
+
+    Only "bcg12" uses boundary-aware (variant) matching — multiple BCG12
+    variants can coexist in one scenario (bcg12_mh_ff + bcg12_mh_ec in
+    vary_universe; bcg12_exact_ec + bcg12_exact_ff in vary_size_100/1000).
+    "piccard_sqrt" and "sj16" deliberately stay exact matches: extending the
+    boundary-aware predicate to them would let a future piccard_sqrt_*
+    variant silently land under the comparator-side columns (piccard_side
+    below assumes `extra == "piccard_sqrt"` is an exact check).
+    """
+    for base in COMPARISON_EXTRA_METHODS:
+        if base == "bcg12":
+            if _boundary_match(name, base):
+                return base
+        elif name == base:
+            return base
+    return None
+
+
+def _extra_method_keys(methods):
+    """All extra-method CSV keys present in one scenario's `methods` dict,
+    in deterministic order: piccard_sqrt -> sorted bcg12_* -> sj16.
+
+    Enumerates every matching key actually present (never just one), so
+    e.g. both bcg12_mh_ff and bcg12_mh_ec are emitted as separate rows.
+    """
+    keys = [k for k in methods if _extra_method_base(k) is not None]
+    keys.sort(key=lambda k: (_EXTRA_METHOD_RANK[_extra_method_base(k)], k))
+    return keys
+
+
+def method_tag(method, row=None):
+    """Plain (ASCII) supplementary-row label for a comparison method.
+
+    Exact-key methods (piccard_sqrt, bcg12, sj16) use the static table
+    above. BCG12 variant names (bcg12_mh_ff, bcg12_exact_ec, ...) have no
+    exact entry; their label is built from the CSV row's own
+    `security_class` field so the bracketed text always matches the row it
+    describes (R2-W1: security level next to the numbers), rather than a
+    hardcoded string that could drift from SecurityClassOf in the C++ side.
+    """
+    if method in _METHOD_LABELS:
+        return _METHOD_LABELS[method]
+    if row is not None and _boundary_match(method, "bcg12"):
+        return f"{method} [{row.get('security_class', '')}]"
+    return method
+
+
+def method_tag_latex(method, row=None):
     """LaTeX-safe label: escape underscores so tabular rows compile."""
-    return method_tag(method).replace("_", "\\_")
+    return method_tag(method, row).replace("_", "\\_")
+
+
+def fmt_speedup(method_ms, piccard_ms, *, latex: bool, row_role: str) -> str:
+    """Format a comparison-table Speedup cell: how many x faster Piccard is
+    than `method_ms`. Extracted from table_comparison_timing's two inline
+    call sites (ASCII + LaTeX, primary + supplementary) — output preserved
+    byte-for-byte.
+
+    row_role controls the zero-value policy (this is the behavior being
+    preserved, not a new choice):
+      - "primary": guarded on piccard_ms > 0 only, so method_ms == 0 still
+        renders "0.0x" (a genuinely-zero comparator time is a real ratio).
+      - "supplementary": guarded on method_ms > 0 and piccard_ms > 0, so a
+        missing/zero method row renders "-" instead of a misleading 0.0x.
+    """
+    if row_role == "primary":
+        ok = piccard_ms > 0
+    elif row_role == "supplementary":
+        ok = method_ms > 0 and piccard_ms > 0
+    else:
+        raise ValueError(f"unknown row_role: {row_role!r}")
+    if not ok:
+        return "-"
+    suffix = "$\\times$" if latex else "x"
+    return f"{method_ms / piccard_ms:.1f}{suffix}"
+
+
+def fmt_ratio(method_bytes, piccard_bytes, *, latex: bool, row_role: str) -> str:
+    """Format a communication-table Ratio cell: method_bytes / piccard_bytes.
+    Extracted from table_communication_cost's two inline call sites (primary
+    + supplementary) — output preserved byte-for-byte.
+
+    Both roles use the same guard (piccard_bytes > 0 only); `row_role` is
+    accepted for signature symmetry with fmt_speedup. `latex` is likewise
+    accepted but intentionally IGNORED: the LaTeX communication table
+    currently reuses the ASCII `rows` list (see table_communication_cost), so
+    its Ratio cells must keep the plain "x" suffix, never "$\\times$". Do not
+    switch this to $\\times$ without an explicit plan update — the reporting
+    plan requires that change to be reviewed, not a silent output change.
+    """
+    del row_role, latex  # both roles/formats share the same "x" guard today
+    if piccard_bytes > 0:
+        return f"{method_bytes / piccard_bytes:.1f}x"
+    return "-"
 
 
 # ── T1–T3: Piccard Timing ──────────────────────────────────────────
@@ -432,7 +553,7 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False, ci=False):
 # ── T10–T13: Comparison Timing ─────────────────────────────────────
 
 def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
-    """Comparison timing: Piccard vs Baseline side by side."""
+    """Comparison timing: Piccard vs the FHE-IND comparator side by side."""
     rows_data = filter_rows(data, "scenario", scenario)
     if not rows_data:
         return
@@ -455,9 +576,9 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
         method = r.get("method", "")
         groups[scen][method] = r
 
-    headers = ["Scenario", "Tri", "k", "m", "n", "|U|", "N_p", "N_b",
-               "Piccard (ms)", "Baseline (ms)", "Speedup",
-               "Piccard CT", "Baseline CT", "Comm P", "Comm B", "Flood"]
+    headers = ["Method", "Scenario", "Tri", "k", "m", "n", "|U|", "N_p", "N_c",
+               "Piccard (ms)", "Comparator (ms)", "Speedup",
+               "Piccard CT", "Comparator CT", "Comm P", "Comm C", "Flood"]
     rows = []
     for scen in order:
         methods = groups[scen]
@@ -466,9 +587,10 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
 
         p_time = float(p.get("total_ms", "0"))
         b_time = float(b.get("total_ms", "0"))
-        speedup = f"{b_time / p_time:.1f}x" if p_time > 0 else "-"
+        speedup = fmt_speedup(b_time, p_time, latex=False, row_role="primary")
 
         rows.append([
+            FHE_IND_DISCLOSURE,
             scen,
             get_trials(p) if p else get_trials(b),
             p.get("k", b.get("k", "")),
@@ -487,40 +609,44 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_disp(p, "phase_flood_ms", ci=ci) if p else "-",
         ])
 
-        # Supplementary rows for methods the side-by-side Piccard/Baseline row
-        # does not carry (sj16, bcg12, piccard_sqrt). Emitted so an sj16 row is
-        # no longer silently dropped; the main row above is left untouched.
+        # Supplementary rows for methods the side-by-side Piccard/Comparator
+        # row does not carry (sj16, bcg12 variants, piccard_sqrt). Emitted so
+        # they are no longer silently dropped; the main row above is left
+        # untouched. _extra_method_keys() enumerates every matching CSV key
+        # actually present in this scenario (e.g. both bcg12_mh_ff and
+        # bcg12_mh_ec), in deterministic order.
         #
         # Column placement is correctness-critical: piccard_sqrt is a Piccard
         # variant, so its value belongs under the Piccard-labeled columns; sj16
-        # and bcg12 are NOT Piccard, so their values go under the Baseline-labeled
-        # columns and the Piccard columns are blanked. No non-Piccard method is
-        # ever printed under a "Piccard *" column.
-        for extra in COMPARISON_EXTRA_METHODS:
-            e = methods.get(extra, {})
-            if not e:
-                continue
+        # and bcg12 are NOT Piccard, so their values go under the Comparator-
+        # labeled columns and the Piccard columns are blanked. No non-Piccard
+        # method is ever printed under a "Piccard *" column.
+        for key in _extra_method_keys(methods):
+            e = methods[key]
             e_time = float(e.get("total_ms", "0"))
             # Same sense as the main Speedup column: method_time / piccard_time,
             # i.e. how many x faster Piccard is than this method.
-            sp = f"{e_time / p_time:.1f}x" if e_time > 0 and p_time > 0 else "-"
-            piccard_side = (extra == "piccard_sqrt")
+            sp = fmt_speedup(e_time, p_time, latex=False, row_role="supplementary")
+            piccard_side = (key == "piccard_sqrt")
+            ring_cell = e.get("ring_dim", "")
             time_cell = fmt_disp(e, "total_ms", ci=ci)
             ct_cell = fmt_bytes(e.get("ct_size_bytes", "0"))
             comm_cell = fmt_bytes(e.get("comm_bytes", "0"))
             rows.append([
-                "  " + method_tag(extra),
+                "  " + method_tag(key, e),
+                scen,
                 get_trials(e),
                 e.get("k", ""), e.get("m", ""),
                 e.get("set_size", ""), e.get("universe_size", ""),
-                "", "",
-                time_cell if piccard_side else "",   # Piccard (ms)
-                "" if piccard_side else time_cell,   # Baseline (ms)
+                ring_cell if piccard_side else "",    # N_p
+                "" if piccard_side else ring_cell,    # N_c
+                time_cell if piccard_side else "",    # Piccard (ms)
+                "" if piccard_side else time_cell,    # Comparator (ms)
                 sp,
                 ct_cell if piccard_side else "",      # Piccard CT
-                "" if piccard_side else ct_cell,      # Baseline CT
+                "" if piccard_side else ct_cell,      # Comparator CT
                 comm_cell if piccard_side else "",    # Comm P
-                "" if piccard_side else comm_cell,    # Comm B
+                "" if piccard_side else comm_cell,    # Comm C
                 fmt_disp(e, "phase_flood_ms", ci=ci),  # Flood (0 for non-Piccard methods)
             ])
 
@@ -531,8 +657,8 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$",
                      "vary_size_": "$n$", "vary_universe_": "$|U|$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "Trials", "$N_P$", "$N_B$",
-              "Piccard (ms)", "Baseline (ms)", "Speedup", "Comm P", "Comm B", "Flood"]
+        lh = ["Method", param_label, "Trials", "$N_P$", "$N_C$",
+              "Piccard (ms)", "Comparator (ms)", "Speedup", "Comm P", "Comm C", "Flood"]
         lr = []
         for scen in order:
             methods = groups[scen]
@@ -543,8 +669,9 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
                 pval = f"{int(pval):,}"
             p_time = float(p.get("total_ms", "0"))
             b_time = float(b.get("total_ms", "0"))
-            speedup = f"{b_time / p_time:.1f}$\\times$" if p_time > 0 else "-"
+            speedup = fmt_speedup(b_time, p_time, latex=True, row_role="primary")
             lr.append([
+                FHE_IND_DISCLOSURE,
                 pval, get_trials(p) if p else get_trials(b),
                 p.get("ring_dim", ""), b.get("ring_dim", ""),
                 fmt_disp(p, "total_ms", ci=ci) if p else "-",
@@ -553,25 +680,27 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
                 fmt_bytes(b.get("comm_bytes", "0")),
                 fmt_disp(p, "phase_flood_ms", ci=ci) if p else "-",
             ])
-            # Supplementary LaTeX rows for sj16/bcg12/piccard_sqrt when present.
-            # piccard_sqrt stays on the Piccard side; sj16/bcg12 sit under the
-            # Baseline-side columns (never under "Piccard (ms)"/"Comm P").
-            for extra in COMPARISON_EXTRA_METHODS:
-                e = methods.get(extra, {})
-                if not e:
-                    continue
+            # Supplementary LaTeX rows for sj16/bcg12 variants/piccard_sqrt
+            # when present. piccard_sqrt stays on the Piccard side; sj16/bcg12
+            # sit under the Comparator-side columns (never under "Piccard
+            # (ms)"/"Comm P").
+            for key in _extra_method_keys(methods):
+                e = methods[key]
                 e_time = float(e.get("total_ms", "0"))
-                sp = f"{e_time / p_time:.1f}$\\times$" if e_time > 0 and p_time > 0 else "-"
-                piccard_side = (extra == "piccard_sqrt")
+                sp = fmt_speedup(e_time, p_time, latex=True, row_role="supplementary")
+                piccard_side = (key == "piccard_sqrt")
+                ring_cell = e.get("ring_dim", "")
                 time_l = fmt_disp(e, "total_ms", ci=ci)
                 comm_l = fmt_bytes(e.get("comm_bytes", "0"))
                 lr.append([
-                    method_tag_latex(extra), get_trials(e), "", "",
+                    method_tag_latex(key, e), pval, get_trials(e),
+                    ring_cell if piccard_side else "",   # $N_P$
+                    "" if piccard_side else ring_cell,   # $N_C$
                     time_l if piccard_side else "",   # Piccard (ms)
-                    "" if piccard_side else time_l,   # Baseline (ms)
+                    "" if piccard_side else time_l,   # Comparator (ms)
                     sp,
                     comm_l if piccard_side else "",   # Comm P
-                    "" if piccard_side else comm_l,   # Comm B
+                    "" if piccard_side else comm_l,   # Comm C
                     fmt_disp(e, "phase_flood_ms", ci=ci),  # Flood (0 for non-Piccard methods)
                 ])
         tab_id = scenario.rstrip("_").replace("_", "-")
@@ -590,7 +719,7 @@ def table_communication_cost(data, tnum, latex=False):
 
     sj16_present = has_sj16_row(data)
 
-    comm_title = "Communication Cost — Piccard vs Baseline"
+    comm_title = "Communication Cost — Piccard vs. Comparators (FHE-IND)"
     if sj16_present:
         comm_title = f"{comm_title} {SJ16_LOWER_BOUND_NOTE}"
     print(f"\n{'=' * 70}")
@@ -608,9 +737,9 @@ def table_communication_cost(data, tnum, latex=False):
         method = r.get("method", "")
         groups[scen][method] = r
 
-    headers = ["Scenario", "k", "|U|", "n",
+    headers = ["Method", "Scenario", "k", "|U|", "n",
                "Piccard CTs", "Piccard Comm",
-               "Baseline CTs", "Baseline Comm", "Ratio"]
+               "Comparator CTs", "Comparator Comm", "Ratio"]
     rows = []
     for scen in order:
         methods = groups[scen]
@@ -619,9 +748,10 @@ def table_communication_cost(data, tnum, latex=False):
 
         p_comm = int(p.get("comm_bytes", "0"))
         b_comm = int(b.get("comm_bytes", "0"))
-        ratio = f"{b_comm / p_comm:.1f}x" if p_comm > 0 else "-"
+        ratio = fmt_ratio(b_comm, p_comm, latex=False, row_role="primary")
 
         rows.append([
+            FHE_IND_DISCLOSURE,
             scen,
             p.get("k", ""),
             p.get("universe_size", ""),
@@ -633,28 +763,28 @@ def table_communication_cost(data, tnum, latex=False):
             ratio,
         ])
 
-        # Supplementary rows for sj16/bcg12/piccard_sqrt so their communication
-        # is no longer dropped. Ratio is the method's comm relative to Piccard.
-        # piccard_sqrt is a Piccard variant → Piccard-side columns; sj16/bcg12 go
-        # under the Baseline-side columns, never under "Piccard CTs"/"Piccard Comm".
-        for extra in COMPARISON_EXTRA_METHODS:
-            e = methods.get(extra, {})
-            if not e:
-                continue
+        # Supplementary rows for sj16/bcg12 variants/piccard_sqrt so their
+        # communication is no longer dropped. Ratio is the method's comm
+        # relative to Piccard. piccard_sqrt is a Piccard variant → Piccard-
+        # side columns; sj16/bcg12 go under the Comparator-side columns,
+        # never under "Piccard CTs"/"Piccard Comm".
+        for key in _extra_method_keys(methods):
+            e = methods[key]
             e_comm = int(e.get("comm_bytes", "0"))
-            e_ratio = f"{e_comm / p_comm:.1f}x" if p_comm > 0 else "-"
-            piccard_side = (extra == "piccard_sqrt")
+            e_ratio = fmt_ratio(e_comm, p_comm, latex=False, row_role="supplementary")
+            piccard_side = (key == "piccard_sqrt")
             cts_cell = e.get("num_cts", "")
             comm_cell = fmt_bytes(e_comm)
             rows.append([
-                "  " + method_tag(extra),
+                "  " + method_tag(key, e),
+                scen,
                 e.get("k", ""),
                 e.get("universe_size", ""),
                 e.get("set_size", ""),
                 cts_cell if piccard_side else "",    # Piccard CTs
                 comm_cell if piccard_side else "",   # Piccard Comm
-                "" if piccard_side else cts_cell,    # Baseline CTs
-                "" if piccard_side else comm_cell,   # Baseline Comm
+                "" if piccard_side else cts_cell,    # Comparator CTs
+                "" if piccard_side else comm_cell,   # Comparator Comm
                 e_ratio,
             ])
 
@@ -662,9 +792,13 @@ def table_communication_cost(data, tnum, latex=False):
 
     if latex:
         print()
-        lh = ["Scenario", "$k$", "$|U|$", "$n$",
-              "P CTs", "P Comm", "B CTs", "B Comm", "Ratio"]
-        latex_caption = "Communication cost: Piccard vs.\\ baseline."
+        # Reuses the ASCII `rows` list built above (not a fresh `lr`), so the
+        # LaTeX table's width and cell content match the ASCII one
+        # automatically. Consequence: its Ratio cells keep the ASCII "x"
+        # suffix rather than "$\times$" — see fmt_ratio()'s docstring.
+        lh = ["Method", "Scenario", "$k$", "$|U|$", "$n$",
+              "P CTs", "P Comm", "C CTs", "C Comm", "Ratio"]
+        latex_caption = "Communication cost: Piccard vs.\\ Comparators (FHE-IND)."
         if sj16_present:
             latex_caption = f"{latex_caption} {SJ16_LOWER_BOUND_NOTE}"
         print_latex_table(latex_caption, "tab:communication-cost", lh, rows)
@@ -1007,16 +1141,16 @@ def main():
         # ── T10–T13: Comparison Timing ────────────────────────────
         run_and_save(table_comparison_timing, sp("T10_comparison_vary_k"),
                      comparison_timing, "vary_k_", 10,
-                     "Comparison — Varying k", latex=lx, ci=ci)
+                     "Piccard vs. Comparators (FHE-IND) — Varying k", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T11_comparison_vary_m"),
                      comparison_timing, "vary_m_", 11,
-                     "Comparison — Varying m", latex=lx, ci=ci)
+                     "Piccard vs. Comparators (FHE-IND) — Varying m", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T12_comparison_vary_n"),
                      comparison_timing, "vary_size_", 12,
-                     "Comparison — Varying n", latex=lx, ci=ci)
+                     "Piccard vs. Comparators (FHE-IND) — Varying n", latex=lx, ci=ci)
         run_and_save(table_comparison_timing, sp("T13_comparison_vary_universe"),
                      comparison_timing, "vary_universe_", 13,
-                     "Comparison — Varying |U|", latex=lx, ci=ci)
+                     "Piccard vs. Comparators (FHE-IND) — Varying |U|", latex=lx, ci=ci)
 
         # ── T14: Communication Cost ───────────────────────────────
         run_and_save(table_communication_cost, sp("T14_communication_cost"),

@@ -6,6 +6,16 @@
 #   ./scripts/run_benchmarks.sh              # Full paper-grade run (STD128, 10/50 timing/accuracy trials)
 #   ./scripts/run_benchmarks.sh --quick      # Quick smoke test   (TOY, 2 trials)
 #
+# Environment overrides:
+#   BENCH_RESULTS_ROOT=<dir>  Override the results root (default: scripts/results).
+#   DRY_RUN=1                 Print the resolved command plan (including the
+#                              comparison-benchmark invocation and, in the
+#                              paper-grade branch, the assert_methods.sh
+#                              postcondition call) and the resolved results
+#                              root, then exit 0 before touching the
+#                              filesystem (no build check, mkdir, symlink,
+#                              log, or metadata writes).
+#
 # Output:
 #   results/YYYY-MM-DD_HHMMSS_TAG/
 #     csv/
@@ -21,6 +31,7 @@
 #       summary.txt
 #       tables_latex.tex
 #     system_info.txt
+#     run_metadata.txt
 #     run.log
 
 set -euo pipefail
@@ -28,6 +39,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
+
+# ── Thread policy ────────────────────────────────────────────────────
+# The measuring machine has 10 cores (`sysctl -n hw.ncpu` = 10) and the repo
+# already uses `-j8` throughout its build tooling. Fixing OMP to 8 leaves 2
+# cores for OS/background work, which reduces inter-trial variance, and
+# `OMP_DYNAMIC=FALSE` stops the OpenMP runtime from shrinking the team mid-run
+# so "fixed" is actually fixed. This matters because SJ16's encryption loop is
+# OpenMP-parallel (src/baselines/sj16.cpp:175) and R2-W1 requires that the
+# comparison against Piccard be measured under the same thread conditions.
+BENCH_OMP_THREADS=8
+export OMP_NUM_THREADS="$BENCH_OMP_THREADS"
+export OMP_DYNAMIC=FALSE
+
+# Prints a canonical, machine-readable line reporting the *exported*
+# environment as seen by a child process (not the runner's own shell
+# variables) — `env` only lists exported variables, so a missing `export`
+# surfaces here as "unset" instead of silently reporting the right text.
+print_env_line() {
+    env | awk -F= '/^OMP_NUM_THREADS=/{t=$2} /^OMP_DYNAMIC=/{d=$2} \
+         END{printf "ENV: OMP_NUM_THREADS=%s OMP_DYNAMIC=%s\n", (t?t:"unset"), (d?d:"unset")}'
+}
 
 # ── Defaults (paper-grade) ──────────────────────────────────────────
 SECURITY_LEVELS=("STD128")
@@ -49,63 +81,27 @@ if [[ "$TAG" == "quick" ]]; then
     DYNAMIC_EXTRA_FLAGS="--depth=5 --set_size=1000"
 fi
 
-# ── Verify binaries ─────────────────────────────────────────────────
-if [[ ! -x "$BUILD_DIR/bench_piccard" ]] || [[ ! -x "$BUILD_DIR/bench_comparison" ]]; then
-    echo "Building benchmarks..."
-    NCPU="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
-    cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" >/dev/null 2>&1
-    cmake --build "$BUILD_DIR" -j"$NCPU" 2>&1
-fi
+# ── Results root (overridable) ──────────────────────────────────────
+BENCH_RESULTS_ROOT="${BENCH_RESULTS_ROOT:-$PROJECT_DIR/scripts/results}"
 
-# ── Output directory ────────────────────────────────────────────────
+# Absolutize a caller-supplied relative root. Every path below (OUT_DIR, the
+# `latest` symlink target, the OUTPUT_CSV:/ASSERT_CSV: contract lines) derives
+# from this, and a CWD-relative value silently breaks them: `ln -s "$OUT_DIR"
+# "$ROOT/latest"` resolves the target relative to the *symlink's* directory,
+# so BENCH_RESULTS_ROOT=out yields out/latest -> out/out/<run> (dangling).
+# Pure string manipulation — no stat, no mkdir — so it stays safe to run
+# before the DRY_RUN early-exit below.
+case "$BENCH_RESULTS_ROOT" in
+    /*) ;;                                        # already absolute
+    *)  BENCH_RESULTS_ROOT="$PWD/$BENCH_RESULTS_ROOT" ;;
+esac
+
+# ── Output directory (path computation only — no filesystem writes yet,
+#    so this is safe to do before the DRY_RUN early-exit below) ────────
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-OUT_DIR="$PROJECT_DIR/scripts/results/${TIMESTAMP}_${TAG}"
+OUT_DIR="$BENCH_RESULTS_ROOT/${TIMESTAMP}_${TAG}"
 CSV_DIR="$OUT_DIR/csv"
 TABLE_DIR="$OUT_DIR/tables"
-mkdir -p "$CSV_DIR" "$TABLE_DIR"
-
-# Stable pointer to the most recent run, so tooling and verification gates have
-# a predictable path (results/latest/csv/...) independent of the timestamp.
-ln -sfn "$OUT_DIR" "$PROJECT_DIR/scripts/results/latest"
-
-LOG="$OUT_DIR/run.log"
-exec > >(tee -a "$LOG") 2>&1
-
-echo "============================================================"
-echo "  Piccard Benchmark Suite"
-echo "  $(date)"
-echo "  Security: ${SECURITY_LEVELS[*]}"
-echo "  Timing trials:   $TIMING_TRIALS"
-echo "  Accuracy trials: $ACCURACY_TRIALS"
-echo "  Tag: $TAG"
-echo "  Output: $OUT_DIR"
-echo "============================================================"
-echo ""
-
-# ── System info ─────────────────────────────────────────────────────
-{
-    echo "Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "Hostname: $(hostname)"
-    echo "OS:       $(uname -srm)"
-    if [[ "$(uname)" == "Darwin" ]]; then
-        echo "CPU:      $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
-        echo "Cores:    $(sysctl -n hw.ncpu)"
-        echo "RAM:      $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
-    else
-        echo "CPU:      $(lscpu 2>/dev/null | grep 'Model name' | sed 's/.*: *//' || echo unknown)"
-        echo "Cores:    $(nproc)"
-        echo "RAM:      $(free -h 2>/dev/null | awk '/Mem:/{print $2}' || echo unknown)"
-    fi
-    echo "Compiler: $(c++ --version 2>/dev/null | head -1 || echo unknown)"
-    echo "OpenFHE:  $(grep 'Found OpenFHE' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null | head -1 || echo unknown)"
-    echo "Build:    Release -O3"
-    echo "Security: ${SECURITY_LEVELS[*]}"
-    echo "Timing trials:   $TIMING_TRIALS"
-    echo "Accuracy trials: $ACCURACY_TRIALS"
-} > "$OUT_DIR/system_info.txt"
-
-cat "$OUT_DIR/system_info.txt"
-echo ""
 
 # ── Helper ──────────────────────────────────────────────────────────
 run_bench() {
@@ -143,6 +139,122 @@ run_bench() {
     return $rc
 }
 
+# ── Command plan: comparison timing + postcondition ─────────────────
+# Builds the bench_comparison timing invocation for one security level and,
+# in the paper-grade branch only, the assert_methods.sh postcondition check
+# that must run immediately after it. Both the comparison call and the
+# postcondition call are emitted from this single function so that a
+# dry-run's line-adjacency reflects real control flow, not just textual
+# proximity between two independently-generated log lines.
+plan_comparison() {
+    local security="$1"
+    local csv="$CSV_DIR/comparison_timing_${security}.csv"
+
+    local args=(--mode=timing --security="$security" --trials="$TIMING_TRIALS" \
+                --set_size=1000 --accuracy_trials="$ACCURACY_TRIALS")
+    if [[ "$TAG" != "quick" ]]; then
+        # --sj16, paper-grade only. SJ16 at 3072-bit costs ~4.9 min/query at
+        # 2^14 and ~19.5 min at 2^16, single-threaded (design doc
+        # docs/.../2026-07-24-sj16-baseline-design.md:207); 10 trials =>
+        # ~4.1h single-threaded, ~31min even at an ideal 8 threads. Acceptable
+        # for a long paper-grade run, not for a --quick smoke test.
+        args+=(--sj16)
+    fi
+
+    echo "OUTPUT_CSV: $csv"
+    echo "ASSERT_CSV: $csv"
+    echo "  bench_comparison ${args[*]}"
+    if [[ "$TAG" != "quick" ]]; then
+        echo "  scripts/assert_methods.sh $csv"
+    fi
+
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    run_bench "Comparison timing ($security)" "$BUILD_DIR/bench_comparison" "$csv" "${args[@]}"
+    if [[ "$TAG" != "quick" ]]; then
+        "$SCRIPT_DIR/assert_methods.sh" "$csv"
+    fi
+}
+
+# ── DRY_RUN: print the command plan and exit before any side effects ──
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "Command plan:"
+    print_env_line
+    for SECURITY in "${SECURITY_LEVELS[@]}"; do
+        plan_comparison "$SECURITY"
+    done
+    echo "Resolved results root: $BENCH_RESULTS_ROOT"
+    exit 0
+fi
+
+# ── Verify binaries ─────────────────────────────────────────────────
+if [[ ! -x "$BUILD_DIR/bench_piccard" ]] || [[ ! -x "$BUILD_DIR/bench_comparison" ]]; then
+    echo "Building benchmarks..."
+    NCPU="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+    cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" >/dev/null 2>&1
+    cmake --build "$BUILD_DIR" -j"$NCPU" 2>&1
+fi
+
+mkdir -p "$CSV_DIR" "$TABLE_DIR"
+
+# Stable pointer to the most recent run, so tooling and verification gates have
+# a predictable path (results/latest/csv/...) independent of the timestamp.
+# Lives under BENCH_RESULTS_ROOT so an overridden root stays fully isolated.
+# Target is the bare run-directory name, not $OUT_DIR: a symlink target is
+# resolved relative to the directory holding the link, and both live directly
+# under BENCH_RESULTS_ROOT. This keeps the link valid even if the whole
+# results tree is moved or mounted elsewhere.
+ln -sfn "${TIMESTAMP}_${TAG}" "$BENCH_RESULTS_ROOT/latest"
+
+LOG="$OUT_DIR/run.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "============================================================"
+echo "  Piccard Benchmark Suite"
+echo "  $(date)"
+echo "  Security: ${SECURITY_LEVELS[*]}"
+echo "  Timing trials:   $TIMING_TRIALS"
+echo "  Accuracy trials: $ACCURACY_TRIALS"
+echo "  Tag: $TAG"
+echo "  Output: $OUT_DIR"
+echo "  OMP threads: $BENCH_OMP_THREADS (OMP_DYNAMIC=FALSE)"
+echo "============================================================"
+echo ""
+
+# ── System info ─────────────────────────────────────────────────────
+{
+    echo "Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Hostname: $(hostname)"
+    echo "OS:       $(uname -srm)"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "CPU:      $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+        echo "Cores:    $(sysctl -n hw.ncpu)"
+        echo "RAM:      $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+    else
+        echo "CPU:      $(lscpu 2>/dev/null | grep 'Model name' | sed 's/.*: *//' || echo unknown)"
+        echo "Cores:    $(nproc)"
+        echo "RAM:      $(free -h 2>/dev/null | awk '/Mem:/{print $2}' || echo unknown)"
+    fi
+    echo "Compiler: $(c++ --version 2>/dev/null | head -1 || echo unknown)"
+    echo "OpenFHE:  $(grep 'Found OpenFHE' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null | head -1 || echo unknown)"
+    echo "Build:    Release -O3"
+    echo "Security: ${SECURITY_LEVELS[*]}"
+    echo "Timing trials:   $TIMING_TRIALS"
+    echo "Accuracy trials: $ACCURACY_TRIALS"
+} > "$OUT_DIR/system_info.txt"
+
+cat "$OUT_DIR/system_info.txt"
+echo ""
+
+# Thread-policy metadata, recorded by name so the paper can cite the
+# conditions the comparison ran under (R2-W1: same-conditions comparison).
+{
+    echo "OMP_NUM_THREADS=$BENCH_OMP_THREADS"
+    echo "OMP_DYNAMIC=FALSE"
+} > "$OUT_DIR/run_metadata.txt"
+
 # ── Run benchmarks for each security level ─────────────────────────
 for SECURITY in "${SECURITY_LEVELS[@]}"; do
     echo ""
@@ -171,11 +283,8 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         --trials="$TIMING_TRIALS" --accuracy_trials="$ACCURACY_TRIALS" \
         --overlap=0.3 --set_size=1000
 
-    # ── 4. bench_comparison: timing ─────────────────────────────────
-    run_bench "Comparison timing ($SECURITY)" \
-        "$BUILD_DIR/bench_comparison" \
-        "$CSV_DIR/comparison_timing_${SECURITY}.csv" \
-        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
+    # ── 4. bench_comparison: timing (+ SJ16 postcondition, paper-grade only)
+    plan_comparison "$SECURITY"
 
     # ── 5. bench_dynamic: timing (optional) ─────────────────────────
     if [[ -x "$BUILD_DIR/bench_dynamic" ]]; then
