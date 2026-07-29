@@ -19,6 +19,14 @@ using namespace piccard;
 using namespace piccard::benchmark;
 using namespace piccard::baseline;
 
+// NOTE (task 10-2, FHE-IND relabel): the std::cerr progress lines below print
+// the lowercase method key "baseline" as shorthand for the FHE-IND comparator
+// (baseline_engine.h) — this is developer-facing stderr progress output, not
+// a reporting surface (verify_reporting_gaps.py does not capture it), so it
+// is intentionally left unchanged. CSV/table/CLI-help text uses the FHE-IND
+// relabel exclusively; see FHE_IND_DISCLOSURE in scripts/summarize_results.py
+// and PrintUsage() below.
+
 // ============================================================================
 // Shared helpers
 // ============================================================================
@@ -171,7 +179,10 @@ struct ComparisonResult {
 /// name so adding a protocol touches exactly one place.
 static const char* SecurityClassOf(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "CPA/no-leakage";
-    if (method == "baseline") return "KPA/leakage";  // ZLG+24
+    // "baseline" here is the FHE-IND comparator implemented in
+    // baseline_engine.h: not a faithful reimplementation of ZLG+24/EPSet;
+    // this is a universe-sized BFV indicator-vector protocol.
+    if (method == "baseline") return "KPA/leakage";
     // BCG12: prefix match so per-variant names (bcg12_mh_ff, bcg12_exact_ec, ...) resolve.
     if (method.rfind("bcg12", 0) == 0 || method.rfind("sj16", 0) == 0) return "AHE/no-leakage";
     return "unknown";
@@ -1566,13 +1577,15 @@ static void PrintUsage() {
     std::cerr
         << "Usage: bench_comparison [options]\n"
         << "\n"
-        << "Three-way comparison: Piccard vs SqrtPiccard vs binary-vector baseline (ZLG+24).\n"
-        << "Reports compute time, end-to-end time, and communication cost.\n"
+        << "Comparator suite: Piccard vs SqrtPiccard vs the FHE-IND indicator-vector\n"
+        << "comparator (universe-sized BFV protocol; not a faithful [11]\n"
+        << "reimplementation). Reports compute time, end-to-end time, and\n"
+        << "communication cost.\n"
         << "\n"
         << "Timing scenarios (--mode=timing):\n"
-        << "  1. Vary k       — Piccard ring_dim changes; baseline constant\n"
-        << "  2. Vary m       — Piccard ring_dim changes; baseline constant\n"
-        << "  3. Vary |U|     — Baseline ring_dim grows; Piccard constant\n"
+        << "  1. Vary k       — Piccard ring_dim changes; comparator constant\n"
+        << "  2. Vary m       — Piccard ring_dim changes; comparator constant\n"
+        << "  3. Vary |U|     — Comparator ring_dim grows; Piccard constant\n"
         << "  4. Vary n       — Set size (affects encode/minhash phases)\n"
         << "\n"
         << "Options:\n"
@@ -1582,8 +1595,8 @@ static void PrintUsage() {
         << "  --set_size=N       Size of each party's set (default: 1000)\n"
         << "  --trials=N         Number of trials (default: 10)\n"
         << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256' (default: STD128)\n"
-        << "  --universe=N       Baseline universe size (default: 65536)\n"
-        << "  --sj16             Also run the SJ16 AHE baseline in Vary |U| (opt-in; lower bound: shares only, secure division excluded)\n"
+        << "  --universe=N       Comparator universe size (default: 65536)\n"
+        << "  --sj16             Also run the SJ16 AHE comparator in Vary |U| (opt-in; lower bound: shares only, secure division excluded)\n"
         << "  --sj16_key_bits=K  SJ16 Paillier key size 1024/2048/3072 (default: 3072)\n"
         << "  --sj16_max_universe=N  Skip SJ16 above this |U|; left for the Phase-3 fitted model (default: 65536)\n"
         << "  --sj16_precompute  Use the offline rho^N randomiser pool (D5 sensitivity row)\n"
