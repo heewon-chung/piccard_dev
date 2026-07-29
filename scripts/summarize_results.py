@@ -292,12 +292,24 @@ def method_tag(method, row=None):
     `security_class` field so the bracketed text always matches the row it
     describes (R2-W1: security level next to the numbers), rather than a
     hardcoded string that could drift from SecurityClassOf in the C++ side.
+
+    Plan 13-2: rows carrying `measurement_kind == "extrapolated"` (currently
+    only SJ16 rows beyond sj16_max_universe) get an `[extrapolated]` token
+    appended as a SEPARATE bracket from the security-class one, so
+    verify_reporting_gaps.py's `f"[{security_class}" in lab` invariant keeps
+    matching the leading bracket regardless of this suffix.
+    `row.get("measurement_kind", "measured")` keeps legacy CSVs (no such
+    column) rendering exactly as before.
     """
     if method in _METHOD_LABELS:
-        return _METHOD_LABELS[method]
-    if row is not None and _boundary_match(method, "bcg12"):
-        return f"{method} [{row.get('security_class', '')}]"
-    return method
+        base = _METHOD_LABELS[method]
+    elif row is not None and _boundary_match(method, "bcg12"):
+        base = f"{method} [{row.get('security_class', '')}]"
+    else:
+        base = method
+    if row is not None and row.get("measurement_kind", "measured") == "extrapolated":
+        return f"{base} [extrapolated]"
+    return base
 
 
 def method_tag_latex(method, row=None):

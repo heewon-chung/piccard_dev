@@ -24,6 +24,7 @@
 #include <cctype>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -186,43 +187,59 @@ inline std::string SJ16Trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
-// For a universe `u` that exceeds the measured boundary, print a NUMERIC,
-// reproducible extrapolation note to stderr instead of the symbolic
-// T(m)=alpha*m+beta. The fitted coefficients come from the matching PASS row of
-// results/sj16_calibration_<host>.txt, selected by key_bits. The coefficient row
-// is CSV: key_bits,t_enc_median,t_enc_iqr,alpha,beta,r2,held_measured,held_pred,
-// held_residual,gate. Provenance (git_commit, source_sha256) is echoed so the
-// extrapolated row is traceable to the calibration artifact that authorised it.
+// Value-returning result of consulting results/sj16_calibration_<host>.txt for
+// a PASS fit at `key_bits` (task 13-2). `authorized` is the single gate a
+// caller must check before publishing anything: it is true only when the
+// artifact exists, a coefficient row for `key_bits` was found, AND that row's
+// gate == "PASS". `file_found`/`fit_found` exist only so callers can print the
+// same three distinct diagnostics PrintSJ16ExtrapolationNote always has
+// (missing artifact vs. no matching key_bits vs. gate != PASS) — do not use
+// them as an authorization signal, only `authorized` is that.
+struct SJ16Extrapolation {
+    bool authorized = false;
+    bool file_found = false;   // calibration artifact could be opened
+    bool fit_found = false;    // a coefficient row for `key_bits` was parsed
+    double alpha = 0.0;
+    double beta = 0.0;
+    double predicted_ms = 0.0;   // alpha*u + beta; 0 unless authorized
+    double held_residual = 0.0;
+    std::string gate;
+    std::string git_commit = "unknown";
+    std::string source_sha256 = "unknown";
+};
+
+// Parse results/sj16_calibration_<host>.txt for the PASS-fit row matching
+// `key_bits` and return the coefficients needed to predict T(u)=alpha*u+beta,
+// without printing anything (PrintSJ16ExtrapolationNote below is the stderr
+// wrapper; this is the value-returning core plan 13-2 needs to build a CSV
+// row). The coefficient row is CSV: key_bits,t_enc_median,t_enc_iqr,alpha,
+// beta,r2,held_measured,held_pred,held_residual,gate. Provenance
+// (git_commit, source_sha256) is echoed from key=value lines elsewhere in the
+// file so the extrapolated row stays traceable to the artifact that
+// authorised it.
 //
-// Tolerant by design: a missing file, no matching key_bits, or a non-PASS gate
-// each print an explicit "extrapolation not authorized" line rather than a
-// fabricated prediction.
-inline void PrintSJ16ExtrapolationNote(uint32_t u, unsigned key_bits) {
+// ⚠ Gate semantics are load-bearing and must not change here: a missing
+// file, no matching key_bits row, or a non-PASS gate all leave
+// `authorized=false` — publishing an unauthorized extrapolation would be
+// worse than omitting the row entirely.
+inline SJ16Extrapolation LoadSJ16Extrapolation(uint32_t u, unsigned key_bits) {
+    SJ16Extrapolation ex;
     const std::string path =
         "results/sj16_calibration_" + SJ16HostLabel() + ".txt";
     std::ifstream f(path);
-    if (!f) {
-        std::cerr << "  U=" << u
-                  << " sj16: extrapolation not authorized: no calibration "
-                     "artifact (" << path << ")\n";
-        return;
-    }
-
-    std::string git_commit = "unknown", source_sha256 = "unknown";
-    bool found = false;
-    double alpha = 0.0, beta = 0.0, held_residual = 0.0;
-    std::string gate;
+    if (!f) return ex;  // file_found=false, authorized=false
+    ex.file_found = true;
 
     std::string line;
     while (std::getline(f, line)) {
         std::string t = SJ16Trim(line);
         if (t.empty() || t[0] == '#') continue;  // comments / column header
         if (t.rfind("git_commit=", 0) == 0) {
-            git_commit = SJ16Trim(t.substr(11));
+            ex.git_commit = SJ16Trim(t.substr(11));
             continue;
         }
         if (t.rfind("source_sha256=", 0) == 0) {
-            source_sha256 = SJ16Trim(t.substr(14));
+            ex.source_sha256 = SJ16Trim(t.substr(14));
             continue;
         }
         // Candidate coefficient row: exactly 10 comma-separated fields whose
@@ -236,36 +253,113 @@ inline void PrintSJ16ExtrapolationNote(uint32_t u, unsigned key_bits) {
         try {
             unsigned kb = static_cast<unsigned>(std::stoul(cols[0]));
             if (kb != key_bits) continue;
-            alpha = std::stod(cols[3]);
-            beta = std::stod(cols[4]);
-            held_residual = std::stod(cols[8]);
-            gate = cols[9];
-            found = true;
+            ex.alpha = std::stod(cols[3]);
+            ex.beta = std::stod(cols[4]);
+            ex.held_residual = std::stod(cols[8]);
+            ex.gate = cols[9];
+            ex.fit_found = true;
             break;
         } catch (...) {
             continue;  // not a numeric coefficient row
         }
     }
 
-    if (!found) {
+    if (!ex.fit_found) return ex;
+    if (ex.gate != "PASS") return ex;  // fit_found but not authorized
+
+    ex.authorized = true;
+    ex.predicted_ms = ex.alpha * static_cast<double>(u) + ex.beta;
+    return ex;
+}
+
+// For a universe `u` that exceeds the measured boundary, print a NUMERIC,
+// reproducible extrapolation note to stderr instead of the symbolic
+// T(m)=alpha*m+beta. Delegates all parsing/gate logic to
+// LoadSJ16Extrapolation (single source of truth); this function only turns
+// the result into the same three stderr diagnostics it has always printed —
+// text is unchanged so existing operational logs keep working.
+inline void PrintSJ16ExtrapolationNote(uint32_t u, unsigned key_bits) {
+    const std::string path =
+        "results/sj16_calibration_" + SJ16HostLabel() + ".txt";
+    SJ16Extrapolation ex = LoadSJ16Extrapolation(u, key_bits);
+
+    if (!ex.file_found) {
+        std::cerr << "  U=" << u
+                  << " sj16: extrapolation not authorized: no calibration "
+                     "artifact (" << path << ")\n";
+        return;
+    }
+    if (!ex.fit_found) {
         std::cerr << "  U=" << u
                   << " sj16: extrapolation NOT authorized: no PASS fit for "
                      "key_bits=" << key_bits << " in " << path << "\n";
         return;
     }
-    if (gate != "PASS") {
+    if (ex.gate != "PASS") {
         std::cerr << "  U=" << u
                   << " sj16: extrapolation NOT authorized: calibration gate="
-                  << gate << " (not PASS) for key_bits=" << key_bits << "\n";
+                  << ex.gate << " (not PASS) for key_bits=" << key_bits << "\n";
         return;
     }
 
-    double pred = alpha * static_cast<double>(u) + beta;
     std::cerr << "  U=" << u
               << " sj16: numeric extrapolation from PASS fit (key_bits="
-              << key_bits << "): alpha=" << alpha << " ms/m, beta=" << beta
-              << " ms, T(u)=alpha*u+beta=" << pred
-              << " ms, held_residual=" << held_residual
-              << ", git_commit=" << git_commit
-              << ", source_sha256=" << source_sha256 << "\n";
+              << key_bits << "): alpha=" << ex.alpha << " ms/m, beta=" << ex.beta
+              << " ms, T(u)=alpha*u+beta=" << ex.predicted_ms
+              << " ms, held_residual=" << ex.held_residual
+              << ", git_commit=" << ex.git_commit
+              << ", source_sha256=" << ex.source_sha256 << "\n";
+}
+
+// Build the CSV row for an authorized SJ16 extrapolation (task 13-2). Caller
+// MUST have checked ex.authorized == true first — this function does not
+// re-check the gate, it only maps an already-authorized fit onto
+// ComparisonResult's field conventions:
+//   - total_ms = predicted_ms, trials = 0, every *_sd stays at the class's
+//     -1 unmeasured default (do NOT set trials>0 or a positive sd — that
+//     would misrepresent a prediction as a measurement).
+//   - phase_* stay at their 0 default: the fit predicts total time only, a
+//     per-phase breakdown would be invented.
+//   - jaccard_*/accuracy_trials stay at their 0 default (unmeasured — SJ16
+//     was never run at this universe size).
+//   - the 8 flood columns stay at their non-Piccard 0/-1 default
+//     (ComparisonResult's own member initializers already do this; this
+//     function does not touch them).
+//   - num_cts = u+1 mirrors FinalizeSJ16's unconditional u+1 (a structural
+//     fact of the protocol at this universe size, not a measurement).
+//   - ct_size_bytes/comm_bytes stay at 0 (plan-13 D3): the fit gives timing
+//     only. Reproducing SJ16's Paillier-serialization byte accounting here
+//     would require re-deriving src/baselines/sj16.cpp's internal formula,
+//     which is out of this task's file ownership and risks inventing a
+//     wrong number — left at 0 for a caption footnote instead of a guess.
+inline ComparisonResult FinalizeSJ16Extrapolated(
+    const SJ16Extrapolation& ex,
+    uint32_t u,
+    const std::string& scenario,
+    size_t set_size = 0) {
+    ComparisonResult r;
+    r.scenario = scenario;
+    r.method = "sj16";
+    r.universe_size = u;
+    r.set_size = set_size;
+    r.k = 0;
+    r.m = 0;
+    r.ring_dim = 0;
+    r.num_cts = u + 1;
+    r.mult_depth = 0;
+
+    r.total_ms = ex.predicted_ms;
+    r.trials = 0;  // unmeasured sentinel; leaves total_ms_sd etc. at -1 default
+
+    r.measurement_kind = "extrapolated";
+    std::ostringstream a, b, res;
+    a << std::fixed << std::setprecision(6) << ex.alpha;
+    b << std::fixed << std::setprecision(6) << ex.beta;
+    res << std::fixed << std::setprecision(6) << ex.held_residual;
+    r.extrapolation_alpha = a.str();
+    r.extrapolation_beta = b.str();
+    r.extrapolation_residual = res.str();
+    r.extrapolation_source = ex.git_commit + ":" + ex.source_sha256;
+
+    return r;
 }

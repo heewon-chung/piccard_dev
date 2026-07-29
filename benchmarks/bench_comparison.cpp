@@ -15,6 +15,10 @@
 #include <set>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 using namespace piccard;
 using namespace piccard::benchmark;
 using namespace piccard::baseline;
@@ -160,6 +164,20 @@ struct ComparisonResult {
     uint32_t flood_margin_bits = 0;
     uint32_t flood_noise_bits = 0;
     uint32_t scaling_mod_size = 0;
+
+    // ── Measurement-condition symmetry (plan 13-2, 13-4) ──────────────
+    // measurement_kind: "measured" for every existing row (the default below
+    //   covers all current construction sites with no code change); SJ16's
+    //   extrapolated-row path (FinalizeSJ16Extrapolated, sj16_adapter.h) is
+    //   the only writer that sets "extrapolated". Stored as strings (not
+    //   sentinel doubles) so the four extrapolation_* fields render as a
+    //   literally EMPTY CSV cell on measured rows, distinguishable from a
+    //   genuine zero.
+    std::string measurement_kind = "measured";
+    std::string extrapolation_alpha;
+    std::string extrapolation_beta;
+    std::string extrapolation_residual;
+    std::string extrapolation_source;
 };
 
 // SJ16 adapter (Phase 4) — owns the SJ16 per-trial timing + aggregation. Kept
@@ -195,6 +213,19 @@ static const char* ModelOf(const std::string& method) {
     return "3-party-outsourced";   // piccard, piccard_sqrt, baseline
 }
 
+// Measurement thread count at the moment this row is written (task 13-4).
+// Not a per-row-construction field: OMP_NUM_THREADS/omp_set_num_threads is
+// fixed for the process lifetime, so querying it here (synchronously, right
+// before the row is serialized) is equivalent to capturing it wherever the
+// row was built, without touching every Run*/FinalizeSJ16* call site.
+static uint32_t CurrentOmpThreads() {
+#ifdef _OPENMP
+    return static_cast<uint32_t>(omp_get_max_threads());
+#else
+    return 1;
+#endif
+}
+
 class ComparisonCSVWriter {
 public:
     ComparisonCSVWriter() : out_(&std::cout) {}
@@ -222,7 +253,12 @@ public:
               // changes position.
               << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
               << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-              << "flood_noise_bits,scaling_mod_size\n";
+              << "flood_noise_bits,scaling_mod_size,"
+              // Measurement-condition symmetry columns (plan 13), appended
+              // at the end so no existing column changes position.
+              << "measurement_kind,extrapolation_alpha,extrapolation_beta,"
+              << "extrapolation_residual,extrapolation_source,"
+              << "omp_threads\n";
     }
 
     void WriteRow(const ComparisonResult& r) {
@@ -277,7 +313,13 @@ public:
               << r.flood_eval_noise_bits << ","
               << r.flood_margin_bits << ","
               << r.flood_noise_bits << ","
-              << r.scaling_mod_size << "\n";
+              << r.scaling_mod_size << ","
+              << r.measurement_kind << ","
+              << r.extrapolation_alpha << ","
+              << r.extrapolation_beta << ","
+              << r.extrapolation_residual << ","
+              << r.extrapolation_source << ","
+              << CurrentOmpThreads() << "\n";
     }
 
 private:
@@ -1039,6 +1081,18 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                       << " sj16: SKIPPED (u > sj16_max_universe="
                       << cfg.sj16_max_universe << ")\n";
             PrintSJ16ExtrapolationNote(u, cfg.sj16_key_bits);
+            // Task 13-2: publish the extrapolation as a CSV row too — the
+            // stderr note above is operational logging, not a reporting
+            // surface, so without this the row silently vanished from every
+            // table. Gate is unchanged: only an authorized (PASS-fit) load
+            // produces a row; an unauthorized one writes nothing.
+            SJ16Extrapolation sj16_extrap =
+                LoadSJ16Extrapolation(u, cfg.sj16_key_bits);
+            if (sj16_extrap.authorized) {
+                auto er = FinalizeSJ16Extrapolated(sj16_extrap, u, scenario,
+                                                    config.set_size);
+                csv.WriteRow(er);
+            }
         }
         if (sj16_active) sj16_eng->SetUniverse(u);
 #endif

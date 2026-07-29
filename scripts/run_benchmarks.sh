@@ -3,7 +3,7 @@
 # run_benchmarks.sh — Run all Piccard benchmarks and save results.
 #
 # Usage:
-#   ./scripts/run_benchmarks.sh              # Full paper-grade run (STD128, 10/50 timing/accuracy trials)
+#   ./scripts/run_benchmarks.sh              # Full paper-grade run (STD128, 30/50 timing/accuracy trials)
 #   ./scripts/run_benchmarks.sh --quick      # Quick smoke test   (TOY, 2 trials)
 #
 # Environment overrides:
@@ -63,7 +63,7 @@ print_env_line() {
 
 # ── Defaults (paper-grade) ──────────────────────────────────────────
 SECURITY_LEVELS=("STD128")
-TIMING_TRIALS=10
+TIMING_TRIALS=30
 ACCURACY_TRIALS=50
 TAG="paper"
 
@@ -155,9 +155,11 @@ plan_comparison() {
     if [[ "$TAG" != "quick" ]]; then
         # --sj16, paper-grade only. SJ16 at 3072-bit costs ~4.9 min/query at
         # 2^14 and ~19.5 min at 2^16, single-threaded (design doc
-        # docs/.../2026-07-24-sj16-baseline-design.md:207); 10 trials =>
-        # ~4.1h single-threaded, ~31min even at an ideal 8 threads. Acceptable
-        # for a long paper-grade run, not for a --quick smoke test.
+        # docs/.../2026-07-24-sj16-baseline-design.md:207); 30 trials =>
+        # ~12.2h single-threaded, ~92min even at an ideal 8 threads (plan 13-3
+        # tripled TIMING_TRIALS 10->30 on top of this; the 10-trial figures
+        # were ~4.1h / ~31min). Acceptable for a long paper-grade run, not for
+        # a --quick smoke test.
         args+=(--sj16)
     fi
 
@@ -253,6 +255,16 @@ echo ""
 {
     echo "OMP_NUM_THREADS=$BENCH_OMP_THREADS"
     echo "OMP_DYNAMIC=FALSE"
+    if [[ "$TAG" != "quick" ]]; then
+        # Comparison-stage runtime re-estimate (plan 13-3): TIMING_TRIALS
+        # tripled (10->30) on top of the --sj16 flag plan 10 added to the
+        # paper-grade branch. ~24.4 min/trial (4.9 min @2^14 + 19.5 min @2^16,
+        # single-threaded, design doc docs/.../2026-07-24-sj16-baseline-design.md:207).
+        est_min=$(awk -v t="$TIMING_TRIALS" 'BEGIN{printf "%.0f", t*24.4}')
+        est_hr=$(awk -v t="$TIMING_TRIALS" 'BEGIN{printf "%.1f", t*24.4/60}')
+        est_8t_min=$(awk -v t="$TIMING_TRIALS" 'BEGIN{printf "%.0f", t*24.4/8}')
+        echo "EstimatedComparisonRuntime: SJ16 sweep at TIMING_TRIALS=$TIMING_TRIALS => ~${est_hr}h single-threaded (~${est_min}min) / ~${est_8t_min}min at 8 threads (ideal)"
+    fi
 } > "$OUT_DIR/run_metadata.txt"
 
 # ── Run benchmarks for each security level ─────────────────────────
@@ -342,7 +354,7 @@ if [[ -f "$SUMMARIZE" ]]; then
     echo "  Generating summary tables..."
     echo "============================================================"
     echo ""
-    python3 "$SUMMARIZE" "$CSV_DIR" --save-dir "$TABLE_DIR" | tee "$TABLE_DIR/summary.txt"
+    python3 "$SUMMARIZE" "$CSV_DIR" --save-dir "$TABLE_DIR" --ci | tee "$TABLE_DIR/summary.txt"
     echo ""
     echo "  Summary saved: $TABLE_DIR/summary.txt"
 
@@ -350,7 +362,7 @@ if [[ -f "$SUMMARIZE" ]]; then
     echo "------------------------------------------------------------"
     echo "  Generating LaTeX tables..."
     echo "------------------------------------------------------------"
-    python3 "$SUMMARIZE" "$CSV_DIR" --latex > "$TABLE_DIR/tables_latex.tex"
+    python3 "$SUMMARIZE" "$CSV_DIR" --latex --ci > "$TABLE_DIR/tables_latex.tex"
     echo "  LaTeX saved: $TABLE_DIR/tables_latex.tex"
 else
     echo ""
