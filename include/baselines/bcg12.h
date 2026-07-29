@@ -26,6 +26,16 @@ public:
     void          Setup() override;                   // build group + MinHasher (excl. from query cost)
     QueryCost     RunQuery(const std::vector<uint64_t>& set_x,
                            const std::vector<uint64_t>& set_y) override;
+
+    // Replace the MinHash CRS (MinHash mode only). Updates BOTH
+    // params_.minhash_seed (so GetParams() reports the live value and a later
+    // Setup() call does not silently restore the old CRS) AND rebuilds
+    // hasher_ from the new seed. group_ is untouched — MinHash reseeding must
+    // not pay for the (expensive) group setup again. No-op if Setup() has not
+    // been called yet in MinHash mode, or if mode is Exact (no hasher_ to
+    // update; params_.minhash_seed is still recorded for consistency).
+    void SetHashSeed(uint64_t seed);
+
     const Bcg12Params& GetParams() const { return params_; }
 private:
     Bcg12Params params_;

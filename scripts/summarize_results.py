@@ -241,7 +241,7 @@ def table_piccard_timing(data, scenario, tnum, title, latex=False, ci=False):
     print(f"{'=' * 70}")
 
     headers = ["Label", "Tri", "k", "m", "n", "N", "MinHash", "Encode", "Encrypt",
-               "Multiply", "RotSum", "Decrypt", "Total (ms)", "CT Size"]
+               "Multiply", "RotSum", "Flood", "Decrypt", "Total (ms)", "CT Size"]
     rows = []
     for r in rows_data:
         rows.append([
@@ -256,6 +256,7 @@ def table_piccard_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_disp(r, "phase_encrypt_ms", ci=ci),
             fmt_disp(r, "phase_multiply_ms", ci=ci),
             fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
+            fmt_disp(r, "phase_flood_ms", ci=ci),
             fmt_disp(r, "phase_decrypt_ms", ci=ci),
             fmt_disp(r, "time_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
@@ -267,22 +268,23 @@ def table_piccard_timing(data, scenario, tnum, title, latex=False, ci=False):
         print()
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "$n$", "$N$", "MinHash", "Encode", "Encrypt",
-              "Multiply", "RotSum", "Decrypt", "Total (ms)", "CT Size"]
+        lh = [param_label, "$n$", "$N$", "Trials", "MinHash", "Encode", "Encrypt",
+              "Multiply", "RotSum", "Flood", "Decrypt", "Total (ms)", "CT Size"]
         lr = []
         for r in rows_data:
             pval = r.get("label", "").split("_")[-1]
             if scenario == "vary_size_":
                 pval = f"{int(pval):,}"
             lr.append([
-                pval, r.get("set_size", ""), r.get("ring_dim", ""),
-                fmt_ms(r.get("phase_minhash_ms", "0")),
-                fmt_ms(r.get("phase_encode_ms", "0")),
-                fmt_ms(r.get("phase_encrypt_ms", "0")),
-                fmt_ms(r.get("phase_multiply_ms", "0")),
-                fmt_ms(r.get("phase_rotate_sum_ms", "0")),
-                fmt_ms(r.get("phase_decrypt_ms", "0")),
-                fmt_ms(r.get("time_ms", "0")),
+                pval, r.get("set_size", ""), r.get("ring_dim", ""), get_trials(r),
+                fmt_disp(r, "phase_minhash_ms", ci=ci),
+                fmt_disp(r, "phase_encode_ms", ci=ci),
+                fmt_disp(r, "phase_encrypt_ms", ci=ci),
+                fmt_disp(r, "phase_multiply_ms", ci=ci),
+                fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
+                fmt_disp(r, "phase_flood_ms", ci=ci),
+                fmt_disp(r, "phase_decrypt_ms", ci=ci),
+                fmt_disp(r, "time_ms", ci=ci),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
             ])
         tab_id = scenario.rstrip("_").replace("_", "-")
@@ -407,7 +409,7 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False, ci=False):
         print()
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "$n$", "$N$", "Time (ms)",
+        lh = [param_label, "$n$", "$N$", "Trials", "Time (ms)",
               "Median Err", "P25", "P75", "P95", "Max Err"]
         lr = []
         for r in rows_data:
@@ -415,8 +417,8 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False, ci=False):
             if scenario == "vary_size_":
                 pval = f"{int(pval):,}"
             lr.append([
-                pval, r.get("set_size", ""), r.get("ring_dim", ""),
-                fmt_ms(r.get("time_ms", "0")),
+                pval, r.get("set_size", ""), r.get("ring_dim", ""), get_trials(r),
+                fmt_disp(r, "time_ms", ci=ci),
                 fmt_err(r.get("accuracy_median", "0")),
                 fmt_err(r.get("accuracy_p25", "0")),
                 fmt_err(r.get("accuracy_p75", "0")),
@@ -455,7 +457,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
 
     headers = ["Scenario", "Tri", "k", "m", "n", "|U|", "N_p", "N_b",
                "Piccard (ms)", "Baseline (ms)", "Speedup",
-               "Piccard CT", "Baseline CT", "Comm P", "Comm B"]
+               "Piccard CT", "Baseline CT", "Comm P", "Comm B", "Flood"]
     rows = []
     for scen in order:
         methods = groups[scen]
@@ -482,6 +484,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_bytes(b.get("ct_size_bytes", "0")),
             fmt_bytes(p.get("comm_bytes", "0")),
             fmt_bytes(b.get("comm_bytes", "0")),
+            fmt_disp(p, "phase_flood_ms", ci=ci) if p else "-",
         ])
 
         # Supplementary rows for methods the side-by-side Piccard/Baseline row
@@ -518,6 +521,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
                 "" if piccard_side else ct_cell,      # Baseline CT
                 comm_cell if piccard_side else "",    # Comm P
                 "" if piccard_side else comm_cell,    # Comm B
+                fmt_disp(e, "phase_flood_ms", ci=ci),  # Flood (0 for non-Piccard methods)
             ])
 
     print_table(headers, rows)
@@ -527,8 +531,8 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$",
                      "vary_size_": "$n$", "vary_universe_": "$|U|$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "$N_P$", "$N_B$",
-              "Piccard (ms)", "Baseline (ms)", "Speedup", "Comm P", "Comm B"]
+        lh = [param_label, "Trials", "$N_P$", "$N_B$",
+              "Piccard (ms)", "Baseline (ms)", "Speedup", "Comm P", "Comm B", "Flood"]
         lr = []
         for scen in order:
             methods = groups[scen]
@@ -541,10 +545,13 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
             b_time = float(b.get("total_ms", "0"))
             speedup = f"{b_time / p_time:.1f}$\\times$" if p_time > 0 else "-"
             lr.append([
-                pval, p.get("ring_dim", ""), b.get("ring_dim", ""),
-                fmt_ms(p.get("total_ms", "0")), fmt_ms(b.get("total_ms", "0")),
+                pval, get_trials(p) if p else get_trials(b),
+                p.get("ring_dim", ""), b.get("ring_dim", ""),
+                fmt_disp(p, "total_ms", ci=ci) if p else "-",
+                fmt_disp(b, "total_ms", ci=ci) if b else "-",
                 speedup, fmt_bytes(p.get("comm_bytes", "0")),
                 fmt_bytes(b.get("comm_bytes", "0")),
+                fmt_disp(p, "phase_flood_ms", ci=ci) if p else "-",
             ])
             # Supplementary LaTeX rows for sj16/bcg12/piccard_sqrt when present.
             # piccard_sqrt stays on the Piccard side; sj16/bcg12 sit under the
@@ -556,15 +563,16 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
                 e_time = float(e.get("total_ms", "0"))
                 sp = f"{e_time / p_time:.1f}$\\times$" if e_time > 0 and p_time > 0 else "-"
                 piccard_side = (extra == "piccard_sqrt")
-                time_l = fmt_ms(e.get("total_ms", "0"))
+                time_l = fmt_disp(e, "total_ms", ci=ci)
                 comm_l = fmt_bytes(e.get("comm_bytes", "0"))
                 lr.append([
-                    method_tag_latex(extra), "", "",
+                    method_tag_latex(extra), get_trials(e), "", "",
                     time_l if piccard_side else "",   # Piccard (ms)
                     "" if piccard_side else time_l,   # Baseline (ms)
                     sp,
                     comm_l if piccard_side else "",   # Comm P
                     "" if piccard_side else comm_l,   # Comm B
+                    fmt_disp(e, "phase_flood_ms", ci=ci),  # Flood (0 for non-Piccard methods)
                 ])
         tab_id = scenario.rstrip("_").replace("_", "-")
         latex_caption = title
@@ -675,7 +683,7 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False, ci=False):
     print(f"{'=' * 70}")
 
     headers = ["Label", "Tri", "k", "m", "n", "N", "Depth",
-               "Init", "Insert", "Delete", "Compute", "Decrypt",
+               "Init", "Insert", "Delete", "Compute", "Flood", "Decrypt",
                "Total (ms)", "CT Size", "Ins/s", "Del/s"]
     rows = []
     for r in rows_data:
@@ -691,6 +699,7 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_disp(r, "phase_insert_ms", ci=ci),
             fmt_disp(r, "phase_delete_ms", ci=ci),
             fmt_disp(r, "phase_compute_ms", ci=ci),
+            fmt_disp(r, "phase_flood_ms", ci=ci),
             fmt_disp(r, "phase_decrypt_ms", ci=ci),
             fmt_disp(r, "total_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
@@ -704,8 +713,8 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False, ci=False):
         print()
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "$n$", "$N$", "Depth",
-              "Init", "Insert", "Delete", "Compute", "Decrypt",
+        lh = [param_label, "$n$", "$N$", "Trials", "Depth",
+              "Init", "Insert", "Delete", "Compute", "Flood", "Decrypt",
               "Total (ms)", "CT Size"]
         lr = []
         for r in rows_data:
@@ -713,13 +722,14 @@ def table_dynamic_timing(data, scenario, tnum, title, latex=False, ci=False):
             if scenario == "vary_size_":
                 pval = f"{int(pval):,}"
             lr.append([
-                pval, r.get("set_size", ""), r.get("ring_dim", ""), r.get("depth", ""),
-                fmt_ms(r.get("phase_init_ms", "0")),
-                fmt_ms(r.get("phase_insert_ms", "0")),
-                fmt_ms(r.get("phase_delete_ms", "0")),
-                fmt_ms(r.get("phase_compute_ms", "0")),
-                fmt_ms(r.get("phase_decrypt_ms", "0")),
-                fmt_ms(r.get("total_ms", "0")),
+                pval, r.get("set_size", ""), r.get("ring_dim", ""), get_trials(r), r.get("depth", ""),
+                fmt_disp(r, "phase_init_ms", ci=ci),
+                fmt_disp(r, "phase_insert_ms", ci=ci),
+                fmt_disp(r, "phase_delete_ms", ci=ci),
+                fmt_disp(r, "phase_compute_ms", ci=ci),
+                fmt_disp(r, "phase_flood_ms", ci=ci),
+                fmt_disp(r, "phase_decrypt_ms", ci=ci),
+                fmt_disp(r, "total_ms", ci=ci),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
             ])
         tab_id = scenario.rstrip("_").replace("_", "-")
@@ -776,7 +786,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
         print()
         param_map = {"vary_k_": "$k$", "vary_m_": "$m$", "vary_size_": "$n$"}
         param_label = param_map.get(scenario, "Param")
-        lh = [param_label, "$n$", "$N$", "$\\tau$", "Depth",
+        lh = [param_label, "$n$", "$N$", "Trials", "$\\tau$", "Depth",
               "MinHash", "Encode", "Encrypt", "Multiply",
               "RotSum", "Mask", "PolyEval", "Decrypt",
               "Total (ms)", "CT Size"]
@@ -786,17 +796,17 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
             if scenario == "vary_size_":
                 pval = f"{int(pval):,}"
             lr.append([
-                pval, r.get("set_size", ""), r.get("ring_dim", ""),
+                pval, r.get("set_size", ""), r.get("ring_dim", ""), get_trials(r),
                 r.get("tau", ""), r.get("mult_depth", ""),
-                fmt_ms(r.get("phase_minhash_ms", "0")),
-                fmt_ms(r.get("phase_encode_ms", "0")),
-                fmt_ms(r.get("phase_encrypt_ms", "0")),
-                fmt_ms(r.get("phase_multiply_ms", "0")),
-                fmt_ms(r.get("phase_rotate_sum_ms", "0")),
-                fmt_ms(r.get("phase_mask_ms", "0")),
-                fmt_ms(r.get("phase_poly_eval_ms", "0")),
-                fmt_ms(r.get("phase_decrypt_ms", "0")),
-                fmt_ms(r.get("total_ms", "0")),
+                fmt_disp(r, "phase_minhash_ms", ci=ci),
+                fmt_disp(r, "phase_encode_ms", ci=ci),
+                fmt_disp(r, "phase_encrypt_ms", ci=ci),
+                fmt_disp(r, "phase_multiply_ms", ci=ci),
+                fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
+                fmt_disp(r, "phase_mask_ms", ci=ci),
+                fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+                fmt_disp(r, "phase_decrypt_ms", ci=ci),
+                fmt_disp(r, "total_ms", ci=ci),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
             ])
         tab_id = scenario.rstrip("_").replace("_", "-")

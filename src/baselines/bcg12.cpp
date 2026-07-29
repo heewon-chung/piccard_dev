@@ -49,6 +49,13 @@ void BCG12::Setup() {
     }
 }
 
+void BCG12::SetHashSeed(uint64_t seed) {
+    params_.minhash_seed = seed;
+    if (params_.mode == Bcg12Mode::MinHash) {
+        hasher_ = std::make_unique<piccard::MinHasher>(params_.k, UINT64_MAX, seed);
+    }
+}
+
 QueryCost BCG12::RunQuery(const std::vector<uint64_t>& set_x, const std::vector<uint64_t>& set_y) {
     if (!group_) {
         throw std::runtime_error("BCG12::RunQuery: Setup() was not called");
