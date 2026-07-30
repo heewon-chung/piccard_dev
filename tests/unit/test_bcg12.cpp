@@ -2,6 +2,8 @@
 #include "core/minhash.h"
 #include <gtest/gtest.h>
 
+#include <limits>
+
 using namespace piccard::baselines;
 
 TEST(Bcg12, MinHashMatchesPlaintextEstimator) {
@@ -82,6 +84,38 @@ TEST(Bcg12, SeedParityNonDefault) {
     std::vector<uint64_t> Y{4, 6, 8, 10};
     EXPECT_DOUBLE_EQ(e.RunQuery(X, Y).jaccard_estimate,
                       piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y)));
+}
+
+TEST(Bcg12, NonDefaultSeedPreservesDuplicatesAndFullWidthInputs) {
+    constexpr uint64_t seed = 20260729;
+    Bcg12Params p;
+    p.mode = Bcg12Mode::MinHash;
+    p.backend = Bcg12Backend::EC;
+    p.k = 48;
+    p.minhash_seed = seed;
+    BCG12 e(p);
+    e.Setup();
+    const uint64_t max = std::numeric_limits<uint64_t>::max();
+    const std::vector<uint64_t> x_unique = {0, 17, max};
+    const std::vector<uint64_t> x_with_duplicates = {17, max, 0, 17, max};
+    const std::vector<uint64_t> y_unique = {33, max};
+    const std::vector<uint64_t> y_with_duplicates = {max, 33, max};
+    const piccard::MinHasher reference(p.k, UINT64_MAX, seed);
+    const double expected = piccard::MinHasher::EstimateJaccard(
+        reference.ComputeSignature(x_unique),
+        reference.ComputeSignature(y_unique));
+
+    EXPECT_EQ(e.GetParams().minhash_seed, seed);
+    EXPECT_DOUBLE_EQ(e.RunQuery(x_unique, y_unique).jaccard_estimate,
+                     expected);
+    EXPECT_DOUBLE_EQ(
+        e.RunQuery(x_with_duplicates, y_with_duplicates).jaccard_estimate,
+        expected);
+
+    const double identical_max = e.RunQuery({max}, {max}).jaccard_estimate;
+    const double max_vs_zero = e.RunQuery({max}, {0}).jaccard_estimate;
+    EXPECT_DOUBLE_EQ(identical_max, 1.0);
+    EXPECT_NE(max_vs_zero, identical_max);
 }
 
 // SetHashSeed (task 9-1, BCG12 option a): must update BOTH the reported

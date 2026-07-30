@@ -31,7 +31,7 @@ public:
     uint32_t GetK() const { return k_; }
     uint32_t GetD() const { return d_; }
 
-    // The public CRS seed this structure's hash family was expanded from.
+    // The public CRS seed serialized into this structure's hash-rank inputs.
     // Delegates to the hasher so there is a single source of truth.
     uint64_t GetSeed() const { return hasher_.GetSeed(); }
     const std::vector<std::vector<uint64_t>>& GetBottom() const {

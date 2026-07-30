@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "protocol/dynamic_piccard.h"
 
+#include <limits>
 #include <stdexcept>
 
 using namespace piccard;
@@ -202,6 +203,61 @@ TEST_F(DynamicEngineTest, MatchesBasicProtocolUnderCustomHashSeed) {
     EXPECT_EQ(basic_result.match_count, dynamic_result.match_count);
     EXPECT_DOUBLE_EQ(basic_result.jaccard_estimate,
                      dynamic_result.jaccard_estimate);
+}
+
+TEST_F(DynamicEngineTest, CustomSeedStaticAndDynamicSignaturesMatchExactly) {
+    constexpr uint64_t custom_seed = 20260729;
+    PiccardParams custom = params;
+    custom.hash_seed = custom_seed;
+    custom.Validate();
+    DynamicPiccard custom_engine(custom);
+    custom_engine.KeyGen();
+    const std::vector<uint64_t> set = {
+        0,
+        17,
+        (1ULL << 63) + 5,
+        std::numeric_limits<uint64_t>::max(),
+        17,
+    };
+    const MinHasher reference(custom.k, custom.hash_range, custom_seed);
+
+    const auto static_signature = custom_engine.ComputeSignature(set);
+    const auto bottom = custom_engine.InitSet(set);
+
+    EXPECT_EQ(custom_engine.GetParams().hash_seed, custom_seed);
+    EXPECT_EQ(bottom->GetSeed(), custom_seed);
+    EXPECT_EQ(static_signature, reference.ComputeSignature(set));
+    EXPECT_EQ(bottom->GetSignature(), static_signature);
+}
+
+TEST_F(DynamicEngineTest, InitPlusInsertMatchesExactSetUnionState) {
+    const std::vector<uint64_t> prefix = {
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> suffix = {
+        99,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> exact_union = {
+        0,
+        17,
+        99,
+        std::numeric_limits<uint64_t>::max(),
+    };
+
+    auto incremental = engine->InitSet(prefix);
+    for (uint64_t element : suffix) {
+        engine->Insert(*incremental, element);
+    }
+    const auto initialized_from_union = engine->InitSet(exact_union);
+
+    EXPECT_EQ(incremental->GetSignature(),
+              initialized_from_union->GetSignature());
+    EXPECT_EQ(incremental->GetBottom(),
+              initialized_from_union->GetBottom());
 }
 
 // A structure built under the previous CRS must be refused, not silently

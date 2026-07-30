@@ -176,6 +176,50 @@ TEST(MinHasher, ComputeElementHashesMatchesSingleElementSignature) {
         << "Single-element signature should equal element hashes";
 }
 
+TEST(MinHasher, SignatureIsCoordinatewiseMinimumOfElementHashes) {
+    constexpr uint32_t k = 11;
+    constexpr uint64_t seed = 20260729;
+    const std::vector<uint64_t> set = {
+        0,
+        17,
+        (1ULL << 63) + 5,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const MinHasher hasher(k, UINT64_MAX, seed);
+
+    std::vector<uint64_t> coordinate_minima(
+        k, std::numeric_limits<uint64_t>::max());
+    for (uint64_t element : set) {
+        const auto hashes = hasher.ComputeElementHashes(element);
+        ASSERT_EQ(hashes.size(), coordinate_minima.size());
+        for (size_t i = 0; i < hashes.size(); ++i) {
+            coordinate_minima[i] = std::min(coordinate_minima[i], hashes[i]);
+        }
+    }
+
+    EXPECT_EQ(hasher.ComputeSignature(set), coordinate_minima);
+}
+
+TEST(MinHasher, DuplicateInputsDoNotChangeSignature) {
+    constexpr uint64_t seed = 987654321;
+    const MinHasher hasher(13, UINT64_MAX, seed);
+    const std::vector<uint64_t> unique = {
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> with_duplicates = {
+        17,
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+        0,
+    };
+
+    EXPECT_EQ(hasher.ComputeSignature(with_duplicates),
+              hasher.ComputeSignature(unique));
+}
+
 TEST(MinHasher, SubsetSimilarity) {
     // A ⊂ A∪B: J(A, A∪B) = |A| / |A∪B|
     // A = {0..99}, B = {50..149}, A∪B = {0..149}

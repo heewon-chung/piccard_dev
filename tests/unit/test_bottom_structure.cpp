@@ -2,6 +2,8 @@
 #include "core/bottom_structure.h"
 #include "core/minhash.h"
 
+#include <limits>
+
 using namespace piccard;
 
 class BottomStructureTest : public ::testing::Test {
@@ -29,6 +31,49 @@ TEST_F(BottomStructureTest, InitializeMatchesMinHash) {
         EXPECT_EQ(sig[i], bottom_sig[i])
             << "Mismatch at hash function " << i;
     }
+}
+
+TEST_F(BottomStructureTest, FullSignatureMatchesMinHasherForExactCrs) {
+    constexpr uint64_t custom_seed = 20260729;
+    const std::vector<uint64_t> set = {
+        0,
+        17,
+        (1ULL << 63) + 5,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const MinHasher hasher(k, hash_range, custom_seed);
+    BottomStructure bottom(k, d, hash_range, custom_seed);
+
+    bottom.Initialize(set);
+
+    EXPECT_EQ(bottom.GetSeed(), custom_seed);
+    EXPECT_EQ(bottom.GetSignature(), hasher.ComputeSignature(set));
+}
+
+TEST_F(BottomStructureTest, DuplicateInputsDoNotChangeSignatureOrState) {
+    const std::vector<uint64_t> unique = {
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> with_duplicates = {
+        17,
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+        0,
+    };
+    BottomStructure unique_bottom(k, d, hash_range, seed);
+    BottomStructure duplicate_bottom(k, d, hash_range, seed);
+    unique_bottom.Initialize(unique);
+    duplicate_bottom.Initialize(with_duplicates);
+
+    EXPECT_EQ(duplicate_bottom.GetSignature(), unique_bottom.GetSignature());
+    EXPECT_EQ(duplicate_bottom.GetBottom(), unique_bottom.GetBottom());
+
+    const auto state_before_duplicate_insert = unique_bottom.GetBottom();
+    unique_bottom.Insert(17);
+    EXPECT_EQ(unique_bottom.GetBottom(), state_before_duplicate_insert);
 }
 
 TEST_F(BottomStructureTest, DepthLimit) {
@@ -185,6 +230,38 @@ TEST_F(BottomStructureTest, InitPlusInsertMatchesFullInit) {
 
     EXPECT_EQ(matching, k)
         << "Init + Insert should produce same signature as full Init";
+}
+
+TEST_F(BottomStructureTest, InitPlusInsertMatchesExactSetUnion) {
+    const std::vector<uint64_t> prefix = {
+        0,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> suffix = {
+        99,
+        17,
+        std::numeric_limits<uint64_t>::max(),
+    };
+    const std::vector<uint64_t> exact_union = {
+        0,
+        17,
+        99,
+        std::numeric_limits<uint64_t>::max(),
+    };
+
+    BottomStructure incremental(k, d, hash_range, seed);
+    incremental.Initialize(prefix);
+    for (uint64_t element : suffix) {
+        incremental.Insert(element);
+    }
+
+    BottomStructure initialized_from_union(k, d, hash_range, seed);
+    initialized_from_union.Initialize(exact_union);
+
+    EXPECT_EQ(incremental.GetSignature(),
+              initialized_from_union.GetSignature());
+    EXPECT_EQ(incremental.GetBottom(), initialized_from_union.GetBottom());
 }
 
 TEST_F(BottomStructureTest, InsertDeleteCycleRestoresSignature) {

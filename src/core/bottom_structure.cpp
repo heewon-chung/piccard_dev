@@ -65,10 +65,13 @@ std::vector<uint64_t> BottomStructure::GetSignature() const {
 
 void BottomStructure::InsertIntoSorted(uint32_t i, uint64_t w) {
     auto& arr = bottom_[i];
+    auto pos = std::lower_bound(arr.begin(), arr.end(), w);
+    if (pos != arr.end() && *pos == w) {
+        return;
+    }
 
     // If not full, or w is smaller than the largest, insert
     if (arr.size() < d_ || (!arr.empty() && w < arr.back())) {
-        auto pos = std::lower_bound(arr.begin(), arr.end(), w);
         arr.insert(pos, w);
         // Trim to depth d
         if (arr.size() > d_) {
