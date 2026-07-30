@@ -733,6 +733,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                     "strict cleanup probe passed: iterations=3"
                 TIMEOUT 60
         )
+        add_test(NAME NoiseDetailIdentityMapping
+                 COMMAND bench_noise --detail_identity_probe)
+        set_tests_properties(
+            NoiseDetailIdentityMapping
+            PROPERTIES
+                FAIL_REGULAR_EXPRESSION "detail identity probe failed"
+                PASS_REGULAR_EXPRESSION "detail identity probe passed: failed_depth=2 success_depth=2"
+                TIMEOUT 5)
         add_test(
             NAME NoisePreThresholdCoverage
             COMMAND bench_noise --coverage --pre_threshold

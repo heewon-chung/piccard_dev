@@ -1196,6 +1196,7 @@ static piccard::benchmark::noise_calibration::DetailRow ToDetailRow(
     uint64_t rep_seed,
     uint32_t natural_ring_dim,
     uint32_t calibrated_ring_dim,
+    uint32_t provisioned_depth,
     const CalibResult& result) {
     namespace nc = piccard::benchmark::noise_calibration;
     nc::DetailRow row;
@@ -1219,8 +1220,7 @@ static piccard::benchmark::noise_calibration::DetailRow ToDetailRow(
         static_cast<double>(calibrated_ring_dim) /
         static_cast<double>(natural_ring_dim);
     row.natural_depth = options.natural_depth;
-    row.provisioned_depth =
-        result.ok ? result.mult_depth : options.natural_depth;
+    row.provisioned_depth = provisioned_depth;
     row.scaling_mod_size = result.scaling_mod_size;
     row.max_queries = options.max_queries;
     row.flood_margin_bits = options.margin;
@@ -1354,6 +1354,7 @@ static int RunStrictEvidence(
                                 rep_seed,
                                 natural_ring_dim,
                                 calibrated_ring_dim,
+                                provisioned_depth,
                                 measured.front()));
                         }
                     }
@@ -1482,6 +1483,201 @@ static void RequireProbe(bool condition, const char* message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+static int RunDetailIdentityProbe() {
+    namespace nc = piccard::benchmark::noise_calibration;
+    nc::EvidenceOptions options;
+    options.profile = "sensitivity64";
+    options.key_id = "probe-key";
+    options.circuit = "onehot";
+    options.shape_id = "onehot-v1";
+    options.security = "STD128";
+    options.requested_ring_dim = 8192;
+    options.natural_depth = 1;
+    options.transcript_stat_bits = 64;
+    options.max_queries = 1048576;
+    options.margin = 8;
+    options.openfhe_version = "probe-openfhe";
+    options.source_commit = "probe-source";
+
+    const piccard::noise_profile::ConsumerPoint consumer{16, 8};
+    const std::string candidate_id = "N8192-d2-s60";
+    const std::string pattern = "random";
+    constexpr uint32_t rep_index = 0;
+    constexpr uint64_t rep_seed = 20260729;
+    constexpr uint32_t natural_ring_dim = 8192;
+    constexpr uint32_t calibrated_ring_dim = 8192;
+    constexpr uint32_t provisioned_depth = 2;
+
+    CalibResult failed_result;
+    failed_result.scaling_mod_size = 60;
+    failed_result.ok = false;
+    failed_result.error = "probe context error";
+    const nc::DetailRow failed = ToDetailRow(
+        options,
+        candidate_id,
+        consumer,
+        pattern,
+        rep_index,
+        rep_seed,
+        natural_ring_dim,
+        calibrated_ring_dim,
+        provisioned_depth,
+        failed_result);
+    RequireProbe(failed.profile == "sensitivity64",
+                 "failed profile moved");
+    RequireProbe(failed.key_id == "probe-key",
+                 "failed key id moved");
+    RequireProbe(failed.candidate_id == "N8192-d2-s60",
+                 "failed candidate id moved");
+    RequireProbe(failed.circuit == "onehot",
+                 "failed circuit moved");
+    RequireProbe(failed.shape_id == "onehot-v1",
+                 "failed shape id moved");
+    RequireProbe(failed.security == "STD128",
+                 "failed security moved");
+    RequireProbe(failed.consumer_k == 16 && failed.consumer_m == 8,
+                 "failed consumer moved");
+    RequireProbe(failed.pattern == "random",
+                 "failed pattern moved");
+    RequireProbe(failed.rep_index == 0 && failed.rep_seed == 20260729,
+                 "failed repetition identity moved");
+    RequireProbe(failed.requested_ring_dim == 8192,
+                 "failed requested ring moved");
+    RequireProbe(failed.natural_ring_dim == 8192,
+                 "failed natural ring moved");
+    RequireProbe(failed.ring_dim_calibrated == 8192,
+                 "failed calibrated ring moved");
+    RequireProbe(failed.realized_ring_dim == 8192,
+                 "failed realized ring moved");
+    RequireProbe(failed.natural_depth == 1,
+                 "failed natural depth moved");
+    RequireProbe(failed.provisioned_depth == 2,
+                 "failed provisioned depth was not candidate depth");
+    RequireProbe(failed.scaling_mod_size == 60,
+                 "failed scaling modulus moved");
+    RequireProbe(failed.openfhe_version == "probe-openfhe",
+                 "failed OpenFHE provenance moved");
+    RequireProbe(failed.source_commit == "probe-source",
+                 "failed source provenance moved");
+    RequireProbe(failed.status_code == nc::StatusCode::ContextError,
+                 "failed status was not CONTEXT_ERROR");
+    RequireProbe(failed.error_message == "probe context error",
+                 "failed error moved");
+
+    CalibResult success_result;
+    success_result.ok = true;
+    success_result.ring_dim = 16384;
+    success_result.mult_depth = 2;
+    success_result.scaling_mod_size = 60;
+    success_result.num_limbs = 5;
+    success_result.plaintext_mod = 65537;
+    success_result.log_q = 301.25;
+    success_result.log_delta = 285.5;
+    success_result.eval_noise_bits = 23.25;
+    success_result.headroom_bits = 261.25;
+    success_result.decrypt_ok = true;
+    success_result.saturated = false;
+    success_result.ct_bytes = 12345;
+    const nc::DetailRow success = ToDetailRow(
+        options,
+        candidate_id,
+        consumer,
+        pattern,
+        rep_index,
+        rep_seed,
+        natural_ring_dim,
+        calibrated_ring_dim,
+        provisioned_depth,
+        success_result);
+    RequireProbe(success.profile == "sensitivity64",
+                 "success profile moved");
+    RequireProbe(success.key_id == "probe-key",
+                 "success key id moved");
+    RequireProbe(success.candidate_id == "N8192-d2-s60",
+                 "success candidate id moved");
+    RequireProbe(success.circuit == "onehot",
+                 "success circuit moved");
+    RequireProbe(success.shape_id == "onehot-v1",
+                 "success shape id moved");
+    RequireProbe(success.security == "STD128",
+                 "success security moved");
+    RequireProbe(success.consumer_k == 16 && success.consumer_m == 8,
+                 "success consumer moved");
+    RequireProbe(success.pattern == "random",
+                 "success pattern moved");
+    RequireProbe(success.rep_index == 0 && success.rep_seed == 20260729,
+                 "success repetition identity moved");
+    RequireProbe(success.requested_ring_dim == 8192,
+                 "success requested ring moved");
+    RequireProbe(success.natural_ring_dim == 8192,
+                 "success natural ring moved");
+    RequireProbe(success.ring_dim_calibrated == 8192,
+                 "success calibrated ring moved");
+    RequireProbe(success.realized_ring_dim == 16384,
+                 "success realized ring no longer uses result");
+    RequireProbe(success.ring_growth_factor == 1.0,
+                 "success ring growth factor moved");
+    RequireProbe(success.natural_depth == 1,
+                 "success natural depth moved");
+    RequireProbe(success.provisioned_depth == 2,
+                 "success provisioned depth moved");
+    RequireProbe(success.scaling_mod_size == 60,
+                 "success scaling modulus moved");
+    RequireProbe(success.num_limbs == 5,
+                 "success limb count moved");
+    RequireProbe(success.plaintext_mod == 65537,
+                 "success plaintext modulus moved");
+    RequireProbe(success.log_q == 301.25,
+                 "success log q moved");
+    RequireProbe(success.log_delta == 285.5,
+                 "success log delta moved");
+    RequireProbe(success.eval_noise_bits == 23.25,
+                 "success evaluation noise moved");
+    RequireProbe(success.headroom_bits == 261.25,
+                 "success headroom moved");
+    RequireProbe(success.max_queries == 1048576,
+                 "success max queries moved");
+    RequireProbe(success.query_stat_bits == 84,
+                 "success query statistical bits moved");
+    RequireProbe(success.coefficient_stat_bits == 98,
+                 "success coefficient statistical bits moved");
+    RequireProbe(success.flood_margin_bits == 8,
+                 "success flooding margin moved");
+    RequireProbe(success.flood_noise_bits == 130,
+                 "success flooding noise bits moved");
+    RequireProbe(success.decrypt_ok,
+                 "success decrypt flag moved");
+    RequireProbe(!success.saturated,
+                 "success saturation flag moved");
+    RequireProbe(success.ct_bytes == 12345,
+                 "success ciphertext size moved");
+    RequireProbe(success.openfhe_version == "probe-openfhe",
+                 "success OpenFHE provenance moved");
+    RequireProbe(success.source_commit == "probe-source",
+                 "success source provenance moved");
+    RequireProbe(success.status_code == nc::StatusCode::Ok,
+                 "success status was not OK");
+    RequireProbe(success.error_message.empty(),
+                 "success error was not empty");
+
+    const std::string& header = nc::DetailCsvHeader();
+    const std::string failed_csv = nc::SerializeDetailCsvRow(failed);
+    const std::string success_csv = nc::SerializeDetailCsvRow(success);
+    const auto header_commas = std::count(header.begin(), header.end(), ',');
+    RequireProbe(
+        std::count(failed_csv.begin(), failed_csv.end(), ',') ==
+            header_commas,
+        "failed CSV field count moved");
+    RequireProbe(
+        std::count(success_csv.begin(), success_csv.end(), ',') ==
+            header_commas,
+        "success CSV field count moved");
+
+    std::cout
+        << "detail identity probe passed: failed_depth=2 success_depth=2\n";
+    return 0;
 }
 
 static int RunStrictCleanupProbe() {
@@ -1622,6 +1818,16 @@ int main(int argc, char** argv) {
             return RunStrictCleanupProbe();
         } catch (const std::exception& error) {
             std::cerr << "strict cleanup probe failed: "
+                      << error.what() << '\n';
+            return 1;
+        }
+    }
+    if (raw_args.size() == 1 &&
+        raw_args.front() == "--detail_identity_probe") {
+        try {
+            return RunDetailIdentityProbe();
+        } catch (const std::exception& error) {
+            std::cerr << "detail identity probe failed: "
                       << error.what() << '\n';
             return 1;
         }
