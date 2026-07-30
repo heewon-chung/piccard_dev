@@ -784,8 +784,8 @@ def validate_measurement(
             "".join(consumer_lines).encode())
         expected_reductions = {
             "consumer_count": str(len(consumer_reductions)),
-            "worst_consumer_k": str(worst_k),
-            "worst_consumer_m": str(worst_m),
+            "worst_consumer_k": "" if overall_eval is None else str(worst_k),
+            "worst_consumer_m": "" if overall_eval is None else str(worst_m),
             "pattern_count": "3",
             "repetitions_per_pattern": str(reps),
             "eval_noise_bits": number(overall_eval),

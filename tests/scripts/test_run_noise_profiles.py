@@ -225,7 +225,7 @@ for ring in rings:
                 partition["profile_id"], partition["circuit"],
                 partition["shape_id"], partition["security"],
                 str(len(consumers)), partition["consumer_set_sha256"],
-                "0", "0", "3", str(reps),
+                "", "", "3", str(reps),
                 str(len(rows)), detail_hash, value("--seed"),
             ]
             fields[13:22] = [
@@ -945,6 +945,29 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             feasibility_manifest["profile_verdict"],
             "PASS_FEASIBILITY_WITH_INFEASIBLE",
         )
+        aggregate_paths = sorted(
+            (feasibility_root / "profiles" / "feasibility128").glob(
+                "key-*/aggregate.csv"))
+        self.assertEqual(len(aggregate_paths), 2)
+        unavailable_reductions = (
+            "worst_consumer_k", "worst_consumer_m",
+            "eval_noise_bits", "headroom_bits",
+            "query_stat_bits", "coefficient_stat_bits",
+            "flood_noise_bits",
+        )
+        for aggregate_path in aggregate_paths:
+            with aggregate_path.open(newline="") as source:
+                aggregate_rows = list(csv.DictReader(source))
+            self.assertTrue(aggregate_rows)
+            for row in aggregate_rows:
+                with self.subTest(
+                    shard=aggregate_path.parent.name,
+                    ring=row["realized_ring_dim"],
+                    depth=row["provisioned_depth"],
+                    scaling=row["scaling_mod_size"],
+                ):
+                    for field in unavailable_reductions:
+                        self.assertEqual(row[field], "")
 
     def test_resume_parent_digest_rejects_rehashed_mutable_shard(self):
         result_root = self.root / "rehash-tamper"
