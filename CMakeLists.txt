@@ -295,6 +295,26 @@ if(BUILD_TESTS)
     else()
         message(STATUS "GTest not found, skipping tests")
     endif()
+
+    # Cross-work approval-record verifier: pure Python standard library, so it
+    # is registered independently of GTest. The suite imports itself as
+    # tests.scripts.test_verify_work_approval, hence the source-tree WORKING_DIRECTORY.
+    #
+    # Python3 is REQUIRED here rather than optional: this suite *is* the approval
+    # gate, so a build tree that quietly dropped it would still report
+    # "100% tests passed" -- the one outcome a gate must never produce. With
+    # BUILD_TESTS=ON, a missing interpreter is a configuration error.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(NOT Python3_Interpreter_FOUND)
+        message(FATAL_ERROR
+                "BUILD_TESTS=ON requires a Python3 interpreter for the "
+                "VerifyWorkApproval approval gate. Install Python 3 or configure "
+                "with -DBUILD_TESTS=OFF; the gate must not be silently skipped.")
+    endif()
+    add_test(NAME VerifyWorkApproval
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_work_approval
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
