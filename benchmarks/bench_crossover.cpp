@@ -18,23 +18,6 @@ using namespace piccard;
 using namespace piccard::benchmark;
 
 // ============================================================================
-// Crossover result
-// ============================================================================
-
-struct CrossoverResult {
-    uint32_t k = 0;
-    uint32_t m = 0;
-    uint32_t onehot_feature_dim = 0;
-    uint32_t sqrt_feature_dim = 0;
-    uint32_t onehot_ring_dim = 0;
-    uint32_t sqrt_ring_dim = 0;
-    double onehot_total_ms = 0.0;
-    double sqrt_total_ms = 0.0;
-    bool sqrt_faster = false;
-    double speedup_ratio = 0.0;
-};
-
-// ============================================================================
 // CSV output
 // ============================================================================
 
@@ -43,25 +26,11 @@ public:
     CrossoverCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "k,m,onehot_feature_dim,sqrt_feature_dim,"
-              << "onehot_ring_dim,sqrt_ring_dim,"
-              << "onehot_total_ms,sqrt_total_ms,"
-              << "sqrt_faster,speedup_ratio\n";
+        *out_ << SerializeCrossoverHeader();
     }
 
     void WriteRow(const CrossoverResult& r) {
-        *out_ << r.k << ","
-              << r.m << ","
-              << r.onehot_feature_dim << ","
-              << r.sqrt_feature_dim << ","
-              << r.onehot_ring_dim << ","
-              << r.sqrt_ring_dim << ","
-              << std::fixed << std::setprecision(3)
-              << r.onehot_total_ms << ","
-              << r.sqrt_total_ms << ","
-              << (r.sqrt_faster ? 1 : 0) << ","
-              << std::setprecision(4)
-              << r.speedup_ratio << "\n";
+        *out_ << SerializeCrossoverRow(r);
     }
 
 private:
@@ -141,6 +110,7 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
     for (uint32_t k : k_values) {
         for (uint32_t m : m_values) {
             CrossoverResult cr;
+            cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
             cr.k = k;
             cr.m = m;
             cr.onehot_feature_dim = k * m;

@@ -12,6 +12,7 @@
 #include <vector>
 
 using namespace piccard;
+using namespace piccard::benchmark;
 using Clock = std::chrono::high_resolution_clock;
 
 double TrueJaccard(const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
@@ -92,35 +93,10 @@ Stats ComputeStats(const std::vector<double>& vals) {
     return {mean, stddev};
 }
 
-std::string FmtMS(double mean, double stddev) {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(2) << mean << "\xC2\xB1" << stddev;
-    return ss.str();
-}
-
-std::string FmtErr(double mean, double stddev) {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(4) << mean << "\xC2\xB1" << stddev;
-    return ss.str();
-}
-
 void PrintHeader(int num_trials) {
-    std::cout << "(Averaged over " << num_trials << " trials, mean\xC2\xB1stddev)\n\n";
-    std::cout << std::left
-              << std::setw(12) << "Encoding"
-              << std::setw(6)  << "k"
-              << std::setw(6)  << "m"
-              << std::setw(8)  << "N"
-              << std::setw(6)  << "Depth"
-              << std::setw(10) << "Encode"
-              << std::setw(10) << "Encrypt"
-              << std::setw(10) << "Evaluate"
-              << std::setw(10) << "Decrypt"
-              << std::setw(18) << "Total(ms)"
-              << std::setw(18) << "|err|"
-              << std::setw(18) << "rel_err"
-              << "\n";
-    std::cout << std::string(132, '-') << "\n";
+    std::cerr << "(Averaged over " << num_trials
+              << " trials, mean\xC2\xB1stddev)\n";
+    std::cout << SerializeSqrtComparisonHeader();
 }
 
 void PrintRow(const std::string& name, uint32_t k, uint32_t m,
@@ -146,20 +122,25 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
     auto s_abs = ComputeStats(abs_errs);
     auto s_rel = ComputeStats(rel_errs);
 
-    std::cout << std::left << std::fixed
-              << std::setw(12) << name
-              << std::setw(6)  << k
-              << std::setw(6)  << m
-              << std::setw(8)  << results[0].ring_dim
-              << std::setw(6)  << results[0].mult_depth
-              << std::setw(10) << std::setprecision(2) << s_enc.mean
-              << std::setw(10) << s_enr.mean
-              << std::setw(10) << s_eva.mean
-              << std::setw(10) << s_dec.mean
-              << std::setw(18) << FmtMS(s_tot.mean, s_tot.stddev)
-              << std::setw(18) << FmtErr(s_abs.mean, s_abs.stddev)
-              << std::setw(18) << (rel_errs.empty() ? std::string("N/A") : FmtErr(s_rel.mean, s_rel.stddev))
-              << "\n";
+    SqrtComparisonResult row;
+    row.encoding = name;
+    row.k = k;
+    row.m = m;
+    row.ring_dim = results[0].ring_dim;
+    row.mult_depth = results[0].mult_depth;
+    row.encode_ms = s_enc.mean;
+    row.encrypt_ms = s_enr.mean;
+    row.evaluate_ms = s_eva.mean;
+    row.decrypt_ms = s_dec.mean;
+    row.total_ms = s_tot.mean;
+    row.total_ms_sd = s_tot.stddev;
+    row.jaccard_error = s_abs.mean;
+    row.jaccard_error_sd = s_abs.stddev;
+    row.has_relative_error = !rel_errs.empty();
+    row.jaccard_rel_error = s_rel.mean;
+    row.jaccard_rel_error_sd = s_rel.stddev;
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    std::cout << SerializeSqrtComparisonRow(row);
 }
 
 int main(int argc, char** argv) {
@@ -180,10 +161,10 @@ int main(int argc, char** argv) {
 
     std::mt19937_64 rng(seed);
 
-    std::cout << "=== Base-sqrt(m) vs One-Hot Comparison ===\n";
-    std::cout << "Set size: n=" << n
+    std::cerr << "=== Base-sqrt(m) vs One-Hot Comparison ===\n";
+    std::cerr << "Set size: n=" << n
               << ", Trials=" << num_trials
-              << ", Seed=" << seed << "\n\n";
+              << ", Seed=" << seed << "\n";
 
     // Test with different (k, m) configurations
     struct Config { uint32_t k; uint32_t m; };
@@ -235,7 +216,6 @@ int main(int argc, char** argv) {
 
         PrintRow("OneHot", cfg.k, cfg.m, onehot_results);
         PrintRow("Sqrt", cfg.k, cfg.m, sqrt_results);
-        std::cout << std::string(132, '-') << "\n";
     }
 
     return 0;

@@ -86,100 +86,6 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction,
     return {a, b};
 }
 
-// ============================================================================
-// Comparison result (unified for both methods)
-// ============================================================================
-
-struct ComparisonResult {
-    std::string scenario;
-    std::string method;  // "piccard", "piccard_sqrt", or "baseline"
-
-    // Parameters
-    uint32_t universe_size = 0;
-    size_t set_size = 0;
-    uint32_t k = 0;
-    uint32_t m = 0;
-    uint32_t ring_dim = 0;
-    uint32_t num_cts = 0;
-    uint32_t mult_depth = 0;
-
-    // Per-phase timing (ms)
-    double phase_encode_ms = 0.0;
-    double phase_encrypt_ms = 0.0;
-    double phase_compute_ms = 0.0;
-    double phase_decrypt_ms = 0.0;
-    double total_ms = 0.0;
-
-    // Resources
-    size_t memory_bytes = 0;
-    size_t ct_size_bytes = 0;
-    size_t comm_bytes = 0;       // Total communication: 2×upload + 1×result download
-
-    // Accuracy
-    double jaccard_computed = 0.0;
-    double jaccard_expected = 0.0;
-    double jaccard_error = 0.0;
-    double jaccard_rel_error = 0.0;  // |J_hat - J_true| / J_true (-1 if J_true=0)
-
-    // Dispersion columns (R3-5)
-    size_t trials = 0;
-    double total_ms_sd = -1.0;
-    double total_ms_median = 0.0;
-    double phase_encode_ms_sd = -1.0;
-    double phase_encode_ms_median = 0.0;
-    double phase_encrypt_ms_sd = -1.0;
-    double phase_encrypt_ms_median = 0.0;
-    double phase_compute_ms_sd = -1.0;
-    double phase_compute_ms_median = 0.0;
-    double phase_decrypt_ms_sd = -1.0;
-    double phase_decrypt_ms_median = 0.0;
-    size_t rel_error_eligible_n = 0;
-
-    // ── Hash randomness provenance (task 9-1a) ────────────────────────
-    // hash_randomness: accuracy-portion mode ("resampled"/"fixed"); "" when
-    //   the row has no MinHash accuracy component (baseline/SJ16/BCG12-exact
-    //   never set it). hash_seed: CRS actually used to produce the row's
-    //   accuracy figures — on a BenchVaryUniverse row this is the timing CRS,
-    //   captured before the untimed accuracy loop reseeds the engine.
-    //   hash_root_seed: derivation root — config.seed under resampled mode;
-    //   under fixed mode there is no derivation root, so this holds the CRS
-    //   itself (never config.seed — that would be false provenance).
-    //   accuracy_trials: accuracy sample count, distinct from `trials` (which
-    //   counts timing samples on a BenchVaryUniverse row).
-    std::string hash_randomness;
-    uint64_t hash_seed = 0;
-    uint64_t hash_root_seed = 0;
-    size_t accuracy_trials = 0;
-
-    // ── Noise-flooding columns (Phase 4 benchmark pipelining) ─────────
-    // phase_flood_ms: measured Flood() cost at the protocol exit (Piccard/
-    //   piccard_sqrt only); dispersion columns follow the phases above.
-    // The remaining 5 fields are constants read from PiccardParams; non-
-    // Piccard rows (baseline/BCG12/SJ16) leave all 8 at their 0/-1 defaults.
-    double phase_flood_ms = 0.0;
-    double phase_flood_ms_sd = -1.0;
-    double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
-    uint32_t scaling_mod_size = 0;
-
-    // ── Measurement-condition symmetry (plan 13-2, 13-4) ──────────────
-    // measurement_kind: "measured" for every existing row (the default below
-    //   covers all current construction sites with no code change); SJ16's
-    //   extrapolated-row path (FinalizeSJ16Extrapolated, sj16_adapter.h) is
-    //   the only writer that sets "extrapolated". Stored as strings (not
-    //   sentinel doubles) so the four extrapolation_* fields render as a
-    //   literally EMPTY CSV cell on measured rows, distinguishable from a
-    //   genuine zero.
-    std::string measurement_kind = "measured";
-    std::string extrapolation_alpha;
-    std::string extrapolation_beta;
-    std::string extrapolation_residual;
-    std::string extrapolation_source;
-};
-
 // SJ16 adapter (Phase 4) — owns the SJ16 per-trial timing + aggregation. Kept
 // out of this shared file; included here because it maps onto ComparisonResult
 // above. Compiled out entirely when GMP/piccard_baselines is absent.
@@ -190,28 +96,6 @@ struct ComparisonResult {
 // ============================================================================
 // CSV output for ComparisonResult
 // ============================================================================
-
-/// Security class of each protocol, emitted next to its cost so the comparison
-/// table can separate "same security class" from "vs. a weaker baseline".
-/// Mirrors piccard::baselines::SecurityClass; kept as a lookup on the method
-/// name so adding a protocol touches exactly one place.
-static const char* SecurityClassOf(const std::string& method) {
-    if (method == "piccard" || method == "piccard_sqrt") return "CPA/no-leakage";
-    // "baseline" here is the FHE-IND comparator implemented in
-    // baseline_engine.h: not a faithful reimplementation of ZLG+24/EPSet;
-    // this is a universe-sized BFV indicator-vector protocol.
-    if (method == "baseline") return "KPA/leakage";
-    // BCG12: prefix match so per-variant names (bcg12_mh_ff, bcg12_exact_ec, ...) resolve.
-    if (method.rfind("bcg12", 0) == 0 || method.rfind("sj16", 0) == 0) return "AHE/no-leakage";
-    return "unknown";
-}
-
-// BCG12: protocol model, orthogonal to security class. 2-party = both data owners
-// interact per query; 3-party = data outsourced to an untrusted server.
-static const char* ModelOf(const std::string& method) {
-    if (method.rfind("bcg12", 0) == 0 || method.rfind("sj16", 0) == 0) return "2-party";
-    return "3-party-outsourced";   // piccard, piccard_sqrt, baseline
-}
 
 // Measurement thread count at the moment this row is written (task 13-4).
 // Not a per-row-construction field: OMP_NUM_THREADS/omp_set_num_threads is
@@ -231,95 +115,11 @@ public:
     ComparisonCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "scenario,method,security_class,"
-              << "universe_size,set_size,k,m,ring_dim,num_cts,mult_depth,"
-              << "phase_encode_ms,phase_encrypt_ms,phase_compute_ms,"
-              << "phase_decrypt_ms,total_ms,"
-              << "memory_bytes,ct_size_bytes,comm_bytes,"
-              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-              // Dispersion columns (R3-5)
-              << "trials,"
-              << "total_ms_sd,total_ms_median,"
-              << "phase_encode_ms_sd,phase_encode_ms_median,"
-              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
-              << "phase_compute_ms_sd,phase_compute_ms_median,"
-              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-              << "rel_error_eligible_n,"
-              << "model,"  // BCG12: trailing column (2-party vs 3-party-outsourced)
-              // Hash randomness provenance (task 9-1a), appended after model
-              // so no existing column changes position.
-              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
-              // Noise-flooding columns, appended so no existing column
-              // changes position.
-              << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-              << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-              << "flood_noise_bits,scaling_mod_size,"
-              // Measurement-condition symmetry columns (plan 13), appended
-              // at the end so no existing column changes position.
-              << "measurement_kind,extrapolation_alpha,extrapolation_beta,"
-              << "extrapolation_residual,extrapolation_source,"
-              << "omp_threads\n";
+        *out_ << SerializeComparisonHeader();
     }
 
     void WriteRow(const ComparisonResult& r) {
-        *out_ << r.scenario << ","
-              << r.method << ","
-              << SecurityClassOf(r.method) << ","
-              << r.universe_size << ","
-              << r.set_size << ","
-              << r.k << ","
-              << r.m << ","
-              << r.ring_dim << ","
-              << r.num_cts << ","
-              << r.mult_depth << ","
-              << std::fixed << std::setprecision(3)
-              << r.phase_encode_ms << ","
-              << r.phase_encrypt_ms << ","
-              << r.phase_compute_ms << ","
-              << r.phase_decrypt_ms << ","
-              << r.total_ms << ","
-              << r.memory_bytes << ","
-              << r.ct_size_bytes << ","
-              << r.comm_bytes << ","
-              << std::fixed << std::setprecision(6)
-              << r.jaccard_computed << ","
-              << r.jaccard_expected << ","
-              << r.jaccard_error << ","
-              << r.jaccard_rel_error << ","
-              // Dispersion columns
-              << r.trials << ","
-              << std::fixed << std::setprecision(3)
-              << r.total_ms_sd << ","
-              << r.total_ms_median << ","
-              << r.phase_encode_ms_sd << ","
-              << r.phase_encode_ms_median << ","
-              << r.phase_encrypt_ms_sd << ","
-              << r.phase_encrypt_ms_median << ","
-              << r.phase_compute_ms_sd << ","
-              << r.phase_compute_ms_median << ","
-              << r.phase_decrypt_ms_sd << ","
-              << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << ","
-              << ModelOf(r.method) << ","  // BCG12: trailing column
-              << r.hash_randomness << ","
-              << r.hash_seed << ","
-              << r.hash_root_seed << ","
-              << r.accuracy_trials << ","
-              << std::fixed << std::setprecision(3)
-              << r.phase_flood_ms << ","
-              << r.phase_flood_ms_sd << ","
-              << r.phase_flood_ms_median << ","
-              << r.flood_lambda_stat << ","
-              << r.flood_eval_noise_bits << ","
-              << r.flood_margin_bits << ","
-              << r.flood_noise_bits << ","
-              << r.scaling_mod_size << ","
-              << r.measurement_kind << ","
-              << r.extrapolation_alpha << ","
-              << r.extrapolation_beta << ","
-              << r.extrapolation_residual << ","
-              << r.extrapolation_source << ","
-              << CurrentOmpThreads() << "\n";
+        *out_ << SerializeComparisonRow(r, CurrentOmpThreads());
     }
 
 private:
@@ -340,6 +140,7 @@ static ComparisonResult RunPiccardTimed(
 {
     Timer timer;
     ComparisonResult cr;
+    cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     cr.scenario = scenario;
     cr.method = "piccard";
     cr.universe_size = universe_size;
@@ -419,6 +220,7 @@ static ComparisonResult RunBaselineTimed(
 {
     Timer timer;
     ComparisonResult cr;
+    cr.estimator_model = EstimatorModel::NotApplicable;
     cr.scenario = scenario;
     cr.method = "baseline";
     cr.universe_size = engine.GetParams().universe_size;
@@ -512,6 +314,7 @@ static ComparisonResult RunMultiTrialPiccard(
     double n = static_cast<double>(num_trials);
 
     ComparisonResult r;
+    r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     r.scenario = scenario; r.method = "piccard";
     r.universe_size = universe_size; r.set_size = set_x.size();
     r.k = engine.GetParams().k; r.m = engine.GetParams().m;
@@ -585,6 +388,7 @@ static ComparisonResult RunMultiTrialBaseline(
     double n = static_cast<double>(num_trials);
 
     ComparisonResult r;
+    r.estimator_model = EstimatorModel::NotApplicable;
     r.scenario = scenario; r.method = "baseline";
     r.universe_size = engine.GetParams().universe_size;
     r.set_size = set_x.size(); r.k = 0; r.m = 0;
@@ -636,7 +440,9 @@ static ComparisonResult RunBCG12MultiTrial(
     auto de=ComputeDispersion(enc), dr=ComputeDispersion(encr), dc=ComputeDispersion(comp),
          dd=ComputeDispersion(dec), dt=ComputeDispersion(tot);
     double n=static_cast<double>(trials);
-    ComparisonResult cr; cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
+    ComparisonResult cr;
+    cr.estimator_model = EstimatorModel::NotApplicable;
+    cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
     cr.set_size=x.size(); cr.k=k; cr.m=0; cr.ring_dim=0; cr.num_cts=0; cr.mult_depth=0;
     cr.trials=trials;
     cr.phase_encode_ms=de.mean;  cr.phase_encode_ms_sd=de.sd;  cr.phase_encode_ms_median=de.median;
@@ -682,6 +488,7 @@ static ComparisonResult RunSqrtPiccardTimed(
 {
     Timer timer;
     ComparisonResult cr;
+    cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     cr.scenario = scenario;
     cr.method = "piccard_sqrt";
     cr.universe_size = universe_size;
@@ -804,6 +611,7 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
     double n = static_cast<double>(num_trials);
 
     ComparisonResult r;
+    r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     r.scenario = scenario; r.method = "piccard_sqrt";
     r.universe_size = universe_size; r.set_size = set_x.size();
     r.k = engine.GetParams().k; r.m = engine.GetParams().m;
@@ -1091,6 +899,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             if (sj16_extrap.authorized) {
                 auto er = FinalizeSJ16Extrapolated(sj16_extrap, u, scenario,
                                                     config.set_size);
+                er.estimator_model = EstimatorModel::NotApplicable;
                 csv.WriteRow(er);
             }
         }
@@ -1319,6 +1128,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             auto d_tot = ComputeDispersion(p_total);
 
             ComparisonResult pr;
+            pr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
             pr.scenario = scenario; pr.method = "piccard";
             pr.universe_size = u; pr.set_size = config.set_size;
             pr.k = piccard.GetParams().k; pr.m = piccard.GetParams().m;
@@ -1373,6 +1183,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             auto d_tot = ComputeDispersion(s_total);
 
             ComparisonResult sr;
+            sr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
             sr.scenario = scenario; sr.method = "piccard_sqrt";
             sr.universe_size = u; sr.set_size = config.set_size;
             sr.k = s_last.k; sr.m = s_last.m;
@@ -1427,6 +1238,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             double n = static_cast<double>(config.trials);
 
             ComparisonResult br;
+            br.estimator_model = EstimatorModel::NotApplicable;
             br.scenario = scenario; br.method = "baseline";
             br.universe_size = u; br.set_size = config.set_size;
             br.k = 0; br.m = 0;
@@ -1469,7 +1281,9 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             using piccard::benchmark::ComputeDispersion;
             auto de=ComputeDispersion(ve),dr=ComputeDispersion(vr),dc=ComputeDispersion(vc),
                  dd=ComputeDispersion(vd),dt=ComputeDispersion(vt);
-            ComparisonResult r; r.scenario=scenario; r.method=method; r.universe_size=u;
+            ComparisonResult r;
+            r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+            r.scenario=scenario; r.method=method; r.universe_size=u;
             r.set_size=config.set_size; r.k=config.k; r.m=0; r.ring_dim=0; r.num_cts=0; r.mult_depth=0;
             r.trials=config.trials;
             r.phase_encode_ms=de.mean;  r.phase_encode_ms_sd=de.sd;  r.phase_encode_ms_median=de.median;
@@ -1503,6 +1317,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         // error). Labeled a LOWER BOUND: shares only, secure division excluded.
         if (sj16_active && !sj16_trials.empty()) {
             auto sr = FinalizeSJ16(sj16_trials, u, scenario, config.set_size);
+            sr.estimator_model = EstimatorModel::NotApplicable;
             csv.WriteRow(sr);
 
             std::cerr << "  U=" << u

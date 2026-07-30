@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <unordered_map>
 
+#include "benchmark_estimator_provenance.h"
 #include "util/params.h"
 #include "openfhe.h"
 
@@ -112,110 +113,6 @@ enum class HashRandomness { Resampled, Fixed };
 inline const char* HashRandomnessName(HashRandomness r) {
     return r == HashRandomness::Fixed ? "fixed" : "resampled";
 }
-
-// ============================================================================
-// BenchmarkResult - Result data structure
-// ============================================================================
-
-struct BenchmarkResult {
-    std::string label;
-
-    // Parameters
-    uint32_t param_k = 0;
-    uint32_t param_m = 0;
-    size_t param_set_size = 0;
-    uint32_t param_ring_dim = 0;
-
-    // Total and per-phase timing (ms)
-    double time_ms = 0.0;
-    double phase_minhash_ms = 0.0;
-    double phase_encode_ms = 0.0;
-    double phase_encrypt_ms = 0.0;
-    double phase_multiply_ms = 0.0;
-    double phase_rotate_sum_ms = 0.0;
-    double phase_decrypt_ms = 0.0;
-    double phase_bias_correction_ms = 0.0;
-
-    // Resources
-    size_t memory_bytes = 0;
-    size_t ct_size_bytes = 0;
-
-    // Accuracy
-    double jaccard_computed = 0.0;
-    double jaccard_expected = 0.0;
-    double jaccard_error = 0.0;
-    double jaccard_rel_error = 0.0;  // |J_hat - J_true| / J_true (-1 if J_true=0)
-
-    // Combined-mode accuracy statistics (percentile-based)
-    double accuracy_median = 0.0;
-    double accuracy_p25 = 0.0;
-    double accuracy_p75 = 0.0;
-    double accuracy_p95 = 0.0;
-    double accuracy_max = 0.0;
-
-    // Encoding comparison fields (added for sqrt integration)
-    std::string encoding;              // "onehot", "sqrt", or "" (legacy)
-    uint32_t param_mult_depth = 0;
-    uint32_t param_num_cts = 0;
-    size_t comm_bytes = 0;
-
-    // Sqrt-specific sub-phase timing (0.0 for one-hot)
-    double phase_intra_digit_rotate_ms = 0.0;
-    double phase_digit_and_ms = 0.0;
-    double phase_cross_k_sum_ms = 0.0;
-
-    // ── Dispersion columns (added for R3-5) ──────────────────────────
-    // Authoritative count of measured trials for this row (0 = skipped/unmeasured).
-    size_t trials = 0;
-    // Bare timing columns above hold the mean across trials.
-    // _sd  = sample standard deviation (n-1); sentinel -1.0 when n < 2.
-    // _median = median across trials.
-    double time_ms_sd = -1.0;
-    double time_ms_median = 0.0;
-    double phase_minhash_ms_sd = -1.0;
-    double phase_minhash_ms_median = 0.0;
-    double phase_encode_ms_sd = -1.0;
-    double phase_encode_ms_median = 0.0;
-    double phase_encrypt_ms_sd = -1.0;
-    double phase_encrypt_ms_median = 0.0;
-    double phase_multiply_ms_sd = -1.0;
-    double phase_multiply_ms_median = 0.0;
-    double phase_rotate_sum_ms_sd = -1.0;
-    double phase_rotate_sum_ms_median = 0.0;
-    double phase_decrypt_ms_sd = -1.0;
-    double phase_decrypt_ms_median = 0.0;
-    double phase_bias_correction_ms_sd = -1.0;
-    double phase_bias_correction_ms_median = 0.0;
-    // Size of the nonzero-denominator subset backing jaccard_rel_error.
-    size_t rel_error_eligible_n = 0;
-
-    // ── Hash randomness provenance (R3-1, R3-2) ──────────────────────
-    // hash_randomness: accuracy-portion mode ("resampled"/"fixed"); "" when the
-    //   row has no accuracy component. The default is empty on purpose: a
-    //   writer that never sets it must not claim a mode it did not use.
-    // hash_seed: CRS actually used; on a combined row, the timing CRS.
-    // hash_root_seed: root the per-trial hash seeds derive from.
-    // accuracy_trials: accuracy sample count, separate from `trials`, which on
-    //   a combined row counts timing trials instead.
-    std::string hash_randomness;
-    uint64_t hash_seed = 0;
-    uint64_t hash_root_seed = 0;
-    size_t accuracy_trials = 0;
-
-    // ── Noise-flooding columns (Phase 4 benchmark pipelining) ─────────
-    // phase_flood_ms: measured Flood() cost at the protocol exit; dispersion
-    //   columns follow the same convention as the phases above.
-    // The remaining 5 fields are constants read from PiccardParams (not
-    // measured per trial), so they have no _sd/_median siblings.
-    double phase_flood_ms = 0.0;
-    double phase_flood_ms_sd = -1.0;
-    double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
-    uint32_t scaling_mod_size = 0;
-};
 
 // ============================================================================
 // DispersionStats - Mean, sample SD (n-1), median, and n for a phase vector
@@ -337,103 +234,11 @@ public:
     }
 
     void WriteHeader() {
-        *out_ << "label,k,m,set_size,ring_dim,"
-              << "time_ms,phase_minhash_ms,phase_encode_ms,phase_encrypt_ms,"
-              << "phase_multiply_ms,phase_rotate_sum_ms,phase_decrypt_ms,"
-              << "phase_bias_correction_ms,"
-              << "memory_bytes,ct_size_bytes,"
-              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-              << "accuracy_median,accuracy_p25,accuracy_p75,accuracy_p95,accuracy_max,"
-              << "encoding,mult_depth,num_cts,comm_bytes,"
-              << "phase_intra_digit_rotate_ms,phase_digit_and_ms,phase_cross_k_sum_ms,"
-              // Dispersion columns (R3-5): bare columns above hold the mean.
-              << "trials,"
-              << "time_ms_sd,time_ms_median,"
-              << "phase_minhash_ms_sd,phase_minhash_ms_median,"
-              << "phase_encode_ms_sd,phase_encode_ms_median,"
-              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
-              << "phase_multiply_ms_sd,phase_multiply_ms_median,"
-              << "phase_rotate_sum_ms_sd,phase_rotate_sum_ms_median,"
-              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-              << "phase_bias_correction_ms_sd,phase_bias_correction_ms_median,"
-              << "rel_error_eligible_n,"
-              // Hash randomness provenance (R3-1/R3-2), appended so no
-              // existing column changes position.
-              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
-              // Noise-flooding columns (Phase 4 benchmark pipelining),
-              // appended so no existing column changes position.
-              << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-              << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-              << "flood_noise_bits,scaling_mod_size\n";
+        *out_ << SerializeBenchmarkHeader();
     }
 
     void WriteRow(const BenchmarkResult& result) {
-        *out_ << result.label << ","
-              << result.param_k << ","
-              << result.param_m << ","
-              << result.param_set_size << ","
-              << result.param_ring_dim << ","
-              << std::fixed << std::setprecision(3)
-              << result.time_ms << ","
-              << result.phase_minhash_ms << ","
-              << result.phase_encode_ms << ","
-              << result.phase_encrypt_ms << ","
-              << result.phase_multiply_ms << ","
-              << result.phase_rotate_sum_ms << ","
-              << result.phase_decrypt_ms << ","
-              << result.phase_bias_correction_ms << ","
-              << result.memory_bytes << ","
-              << result.ct_size_bytes << ","
-              << std::fixed << std::setprecision(6)
-              << result.jaccard_computed << ","
-              << result.jaccard_expected << ","
-              << result.jaccard_error << ","
-              << result.jaccard_rel_error << ","
-              << result.accuracy_median << ","
-              << result.accuracy_p25 << ","
-              << result.accuracy_p75 << ","
-              << result.accuracy_p95 << ","
-              << result.accuracy_max << ","
-              << result.encoding << ","
-              << result.param_mult_depth << ","
-              << result.param_num_cts << ","
-              << result.comm_bytes << ","
-              << std::fixed << std::setprecision(3)
-              << result.phase_intra_digit_rotate_ms << ","
-              << result.phase_digit_and_ms << ","
-              << result.phase_cross_k_sum_ms << ","
-              // Dispersion columns
-              << result.trials << ","
-              << result.time_ms_sd << ","
-              << result.time_ms_median << ","
-              << result.phase_minhash_ms_sd << ","
-              << result.phase_minhash_ms_median << ","
-              << result.phase_encode_ms_sd << ","
-              << result.phase_encode_ms_median << ","
-              << result.phase_encrypt_ms_sd << ","
-              << result.phase_encrypt_ms_median << ","
-              << result.phase_multiply_ms_sd << ","
-              << result.phase_multiply_ms_median << ","
-              << result.phase_rotate_sum_ms_sd << ","
-              << result.phase_rotate_sum_ms_median << ","
-              << result.phase_decrypt_ms_sd << ","
-              << result.phase_decrypt_ms_median << ","
-              << result.phase_bias_correction_ms_sd << ","
-              << result.phase_bias_correction_ms_median << ","
-              << result.rel_error_eligible_n << ","
-              << result.hash_randomness << ","
-              << result.hash_seed << ","
-              << result.hash_root_seed << ","
-              << result.accuracy_trials << ","
-              << std::fixed << std::setprecision(3)
-              << result.phase_flood_ms << ","
-              << result.phase_flood_ms_sd << ","
-              << result.phase_flood_ms_median << ","
-              << result.flood_lambda_stat << ","
-              << result.flood_eval_noise_bits << ","
-              << result.flood_margin_bits << ","
-              << result.flood_noise_bits << ","
-              << result.scaling_mod_size << "\n";
+        *out_ << SerializeBenchmarkRow(result);
     }
 };
 

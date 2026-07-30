@@ -65,6 +65,7 @@ static BenchmarkResult RunTimedProtocol(
 {
     Timer timer;
     BenchmarkResult br;
+    br.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     br.label = label;
     br.param_k = engine.GetParams().k;
     br.param_m = engine.GetParams().m;
@@ -195,6 +196,7 @@ static BenchmarkResult RunMultiTrial(
     auto d_bias     = ComputeDispersion(v_bias);
 
     BenchmarkResult result;
+    result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     result.label          = label;
     result.param_k        = engine.GetParams().k;
     result.param_m        = engine.GetParams().m;
@@ -331,6 +333,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         double n = static_cast<double>(config.trials);
 
         BenchmarkResult result;
+        result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
         result.label = "vary_k_" + std::to_string(k);
         result.param_k = params.k; result.param_m = params.m;
         result.param_set_size = config.set_size; result.param_ring_dim = params.ring_dim;
@@ -444,6 +447,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         double n = static_cast<double>(config.trials);
 
         BenchmarkResult result;
+        result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
         result.label = "vary_m_" + std::to_string(m);
         result.param_k = params.k; result.param_m = params.m;
         result.param_set_size = config.set_size; result.param_ring_dim = params.ring_dim;
@@ -552,6 +556,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         double n = static_cast<double>(config.trials);
 
         BenchmarkResult result;
+        result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
         result.label = "vary_size_" + std::to_string(sz);
         result.param_k = params.k; result.param_m = params.m;
         result.param_set_size = sz; result.param_ring_dim = params.ring_dim;
@@ -635,6 +640,8 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                 count_all++;
 
                 BenchmarkResult br;
+                br.estimator_model =
+                    EstimatorModel::Sha256RandomRankingPocV1;
                 br.label = "accuracy_k" + std::to_string(k) +
                            "_" + std::to_string(frac) +
                            "_t" + std::to_string(t);
@@ -704,6 +711,8 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
                 count_all++;
 
                 BenchmarkResult br;
+                br.estimator_model =
+                    EstimatorModel::Sha256RandomRankingPocV1;
                 br.label = "accuracy_m" + std::to_string(m) +
                            "_" + std::to_string(frac) +
                            "_t" + std::to_string(t);
@@ -771,6 +780,8 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
                 count_all++;
 
                 BenchmarkResult br;
+                br.estimator_model =
+                    EstimatorModel::Sha256RandomRankingPocV1;
                 br.label = "accuracy_size" + std::to_string(sz) +
                            "_" + std::to_string(frac) +
                            "_t" + std::to_string(t);

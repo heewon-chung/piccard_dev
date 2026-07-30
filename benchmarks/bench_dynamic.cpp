@@ -57,141 +57,17 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction) {
 // Dynamic result struct & CSV writer
 // ============================================================================
 
-struct DynamicResult {
-    std::string label;
-    uint32_t k = 0;
-    uint32_t m = 0;
-    size_t set_size = 0;
-    uint32_t ring_dim = 0;
-    uint32_t depth = 0;
-
-    double phase_init_ms = 0.0;
-    double phase_insert_ms = 0.0;
-    double phase_delete_ms = 0.0;
-    double phase_signature_ms = 0.0;
-    double phase_encode_ms = 0.0;
-    double phase_encrypt_ms = 0.0;
-    double phase_compute_ms = 0.0;
-    double phase_decrypt_ms = 0.0;
-    double total_ms = 0.0;
-
-    size_t memory_bytes = 0;
-    size_t ct_size_bytes = 0;
-
-    double jaccard_computed = 0.0;
-    double jaccard_expected = 0.0;
-    double jaccard_error = 0.0;
-    double jaccard_rel_error = 0.0;  // -1 if J_true=0
-
-    double ops_insert_per_sec = 0.0;
-    double ops_delete_per_sec = 0.0;
-
-    // Dispersion columns (additive — sibling branches inherit)
-    size_t trials = 0;
-    double total_ms_sd = -1.0;            double total_ms_median = 0.0;
-    double phase_init_ms_sd = -1.0;       double phase_init_ms_median = 0.0;
-    double phase_insert_ms_sd = -1.0;     double phase_insert_ms_median = 0.0;
-    double phase_delete_ms_sd = -1.0;     double phase_delete_ms_median = 0.0;
-    double phase_signature_ms_sd = -1.0;  double phase_signature_ms_median = 0.0;
-    double phase_encode_ms_sd = -1.0;     double phase_encode_ms_median = 0.0;
-    double phase_encrypt_ms_sd = -1.0;    double phase_encrypt_ms_median = 0.0;
-    double phase_compute_ms_sd = -1.0;    double phase_compute_ms_median = 0.0;
-    double phase_decrypt_ms_sd = -1.0;    double phase_decrypt_ms_median = 0.0;
-    size_t rel_error_eligible_n = 0;
-
-    // Hash randomness provenance (R3-1/R3-2); see BenchmarkResult for the
-    // meaning of each field.
-    std::string hash_randomness;  // "" until a writer sets it; see BenchmarkResult
-    uint64_t hash_seed = 0;
-    uint64_t hash_root_seed = 0;
-    size_t accuracy_trials = 0;
-
-    // ── Noise-flooding columns (Phase 4 benchmark pipelining) ─────────
-    // See BenchmarkResult in benchmark_utils.h for the meaning of each field.
-    double phase_flood_ms = 0.0;
-    double phase_flood_ms_sd = -1.0;
-    double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
-    uint32_t scaling_mod_size = 0;
-};
-
 class DynamicCSVWriter {
     std::ostream* out_;
 public:
     DynamicCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
-        *out_ << "label,k,m,set_size,ring_dim,depth,"
-              << "phase_init_ms,phase_insert_ms,phase_delete_ms,"
-              << "phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
-              << "phase_compute_ms,phase_decrypt_ms,total_ms,"
-              << "memory_bytes,ct_size_bytes,"
-              << "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-              << "ops_insert_per_sec,ops_delete_per_sec,"
-              // dispersion columns (additive)
-              << "trials,"
-              << "total_ms_sd,total_ms_median,"
-              << "phase_init_ms_sd,phase_init_ms_median,"
-              << "phase_insert_ms_sd,phase_insert_ms_median,"
-              << "phase_delete_ms_sd,phase_delete_ms_median,"
-              << "phase_signature_ms_sd,phase_signature_ms_median,"
-              << "phase_encode_ms_sd,phase_encode_ms_median,"
-              << "phase_encrypt_ms_sd,phase_encrypt_ms_median,"
-              << "phase_compute_ms_sd,phase_compute_ms_median,"
-              << "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-              << "rel_error_eligible_n,"
-              << "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
-              // Noise-flooding columns, appended so no existing column
-              // changes position.
-              << "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-              << "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-              << "flood_noise_bits,scaling_mod_size\n";
+        *out_ << SerializeDynamicHeader();
     }
 
     void WriteRow(const DynamicResult& r) {
-        *out_ << r.label << ","
-              << r.k << "," << r.m << "," << r.set_size << "," << r.ring_dim << "," << r.depth << ","
-              << std::fixed << std::setprecision(3)
-              << r.phase_init_ms << "," << r.phase_insert_ms << ","
-              << r.phase_delete_ms << "," << r.phase_signature_ms << ","
-              << r.phase_encode_ms << "," << r.phase_encrypt_ms << ","
-              << r.phase_compute_ms << "," << r.phase_decrypt_ms << ","
-              << r.total_ms << ","
-              << r.memory_bytes << "," << r.ct_size_bytes << ","
-              << std::fixed << std::setprecision(6)
-              << r.jaccard_computed << "," << r.jaccard_expected << ","
-              << r.jaccard_error << "," << r.jaccard_rel_error << ","
-              << std::fixed << std::setprecision(1)
-              << r.ops_insert_per_sec << "," << r.ops_delete_per_sec << ","
-              // dispersion columns
-              << r.trials << ","
-              << std::fixed << std::setprecision(3)
-              << r.total_ms_sd << "," << r.total_ms_median << ","
-              << r.phase_init_ms_sd << "," << r.phase_init_ms_median << ","
-              << r.phase_insert_ms_sd << "," << r.phase_insert_ms_median << ","
-              << r.phase_delete_ms_sd << "," << r.phase_delete_ms_median << ","
-              << r.phase_signature_ms_sd << "," << r.phase_signature_ms_median << ","
-              << r.phase_encode_ms_sd << "," << r.phase_encode_ms_median << ","
-              << r.phase_encrypt_ms_sd << "," << r.phase_encrypt_ms_median << ","
-              << r.phase_compute_ms_sd << "," << r.phase_compute_ms_median << ","
-              << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << ","
-              << r.hash_randomness << ","
-              << r.hash_seed << ","
-              << r.hash_root_seed << ","
-              << r.accuracy_trials << ","
-              << std::fixed << std::setprecision(3)
-              << r.phase_flood_ms << ","
-              << r.phase_flood_ms_sd << ","
-              << r.phase_flood_ms_median << ","
-              << r.flood_lambda_stat << ","
-              << r.flood_eval_noise_bits << ","
-              << r.flood_margin_bits << ","
-              << r.flood_noise_bits << ","
-              << r.scaling_mod_size << "\n";
+        *out_ << SerializeDynamicRow(r);
     }
 };
 
@@ -209,6 +85,7 @@ static DynamicResult RunTimedDynamic(
 {
     Timer timer;
     DynamicResult dr;
+    dr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     dr.label = label;
     dr.k = engine.GetParams().k;
     dr.m = engine.GetParams().m;
@@ -354,6 +231,7 @@ static DynamicResult RunMultiTrialDynamic(
     double n = static_cast<double>(trials);
 
     DynamicResult result;
+    result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     result.label = label;
     result.k = engine.GetParams().k;
     result.m = engine.GetParams().m;
@@ -563,6 +441,8 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                     count_all++;
 
                     DynamicResult dr;
+                    dr.estimator_model =
+                        EstimatorModel::Sha256RandomRankingPocV1;
                     dr.label = "accuracy_k" + std::to_string(k) +
                                "_" + std::to_string(frac) +
                                "_t" + std::to_string(t);
@@ -648,6 +528,8 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                     count_all++;
 
                     DynamicResult dr;
+                    dr.estimator_model =
+                        EstimatorModel::Sha256RandomRankingPocV1;
                     dr.label = "accuracy_m" + std::to_string(m) +
                                "_" + std::to_string(frac) +
                                "_t" + std::to_string(t);
@@ -729,6 +611,8 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                     count_all++;
 
                     DynamicResult dr;
+                    dr.estimator_model =
+                        EstimatorModel::Sha256RandomRankingPocV1;
                     dr.label = "accuracy_size" + std::to_string(sz) +
                                "_" + std::to_string(frac) +
                                "_t" + std::to_string(t);

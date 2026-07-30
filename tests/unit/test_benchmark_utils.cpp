@@ -4,6 +4,7 @@
 // which a 2-trial quick run cannot catch on its own.
 
 #include "benchmark_utils.h"
+#include "benchmark_estimator_provenance.h"
 #include <gtest/gtest.h>
 #include <cmath>
 #include <set>
@@ -154,4 +155,22 @@ TEST(BenchmarkUtils, LegacyInvocationStillParses) {
     EXPECT_EQ(cfg.mode, "accuracy");
     EXPECT_EQ(cfg.seed, 7ULL);
     EXPECT_EQ(cfg.hash_randomness, HashRandomness::Resampled);
+}
+
+// A wrong model literal would make benchmark rows claim a different deployed
+// estimator than the implementation actually uses.
+TEST(BenchmarkUtils, EstimatorModelNamesAreStable) {
+    EXPECT_STREQ(EstimatorModelName(
+                     EstimatorModel::Sha256RandomRankingPocV1),
+                 "sha256-random-ranking-poc-v1");
+    EXPECT_STREQ(EstimatorModelName(EstimatorModel::NotApplicable),
+                 "not-applicable");
+}
+
+// A serializer-side fallback would hide a missed row-construction assignment.
+// Missing provenance must therefore be rejected rather than guessed.
+TEST(BenchmarkUtils, BenchmarkSerializerRejectsMissingEstimatorModel) {
+    BenchmarkResult row;
+    row.label = "missing-provenance";
+    EXPECT_THROW(SerializeBenchmarkRow(row), std::logic_error);
 }

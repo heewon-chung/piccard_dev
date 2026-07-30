@@ -129,6 +129,7 @@ static BenchmarkResult RunTimedProtocol(
 {
     Timer timer;
     BenchmarkResult br;
+    br.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     br.label = label;
     br.encoding = encoding_name;
     br.param_mult_depth = mult_depth;
@@ -468,6 +469,8 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         // OneHot accuracy stats
         auto oh_stats = ComputeAccuracyStats(oh_estimates);
         BenchmarkResult oh_br;
+        oh_br.estimator_model =
+            EstimatorModel::Sha256RandomRankingPocV1;
         oh_br.label = scenario;
         oh_br.encoding = "onehot";
         oh_br.param_mult_depth = 1;
@@ -496,6 +499,8 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         // Sqrt accuracy stats
         auto sq_stats = ComputeAccuracyStats(sq_estimates);
         BenchmarkResult sq_br;
+        sq_br.estimator_model =
+            EstimatorModel::Sha256RandomRankingPocV1;
         sq_br.label = scenario;
         sq_br.encoding = "sqrt";
         sq_br.param_mult_depth = 3;

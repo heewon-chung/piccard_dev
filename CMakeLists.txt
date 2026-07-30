@@ -89,6 +89,16 @@ if(OpenFHE_FOUND)
     link_directories(${OpenFHE_LIBDIR})
 endif()
 
+# Shared deterministic serializers for all non-threshold benchmark schemas.
+add_library(
+    piccard_benchmark_serializers
+    benchmarks/benchmark_estimator_provenance.cpp
+)
+target_include_directories(
+    piccard_benchmark_serializers
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+
 # =============================================================================
 # piccard_core: Pure math modules (no OpenFHE dependency)
 # =============================================================================
@@ -283,9 +293,33 @@ if(BUILD_TESTS)
 
             # Benchmark utility tests (DispersionStats / ComputeDispersion)
             add_executable(test_benchmark_utils tests/unit/test_benchmark_utils.cpp)
-            target_link_libraries(test_benchmark_utils piccard_fhe test_main)
+            target_link_libraries(
+                test_benchmark_utils
+                piccard_fhe
+                piccard_benchmark_serializers
+                test_main
+            )
             target_include_directories(test_benchmark_utils PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
             add_test(NAME BenchmarkUtils COMMAND test_benchmark_utils)
+
+            add_executable(
+                test_estimator_provenance_serializers
+                tests/unit/test_estimator_provenance_serializers.cpp
+            )
+            target_link_libraries(
+                test_estimator_provenance_serializers
+                piccard_fhe
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_estimator_provenance_serializers
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(
+                NAME EstimatorProvenanceSerializers
+                COMMAND test_estimator_provenance_serializers
+            )
 
             # Integration test
             add_executable(test_piccard_e2e tests/integration/test_piccard_e2e.cpp)
@@ -339,11 +373,19 @@ option(BUILD_BENCHMARKS "Build benchmark executables" ON)
 
 if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     add_executable(bench_piccard benchmarks/bench_piccard.cpp)
-    target_link_libraries(bench_piccard piccard_fhe)
+    target_link_libraries(
+        bench_piccard
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_piccard PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_comparison benchmarks/bench_comparison.cpp)
-    target_link_libraries(bench_comparison piccard_fhe)
+    target_link_libraries(
+        bench_comparison
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     if(HAVE_PICCARD_BASELINES)                              # BCG12: enable baseline rows
         target_link_libraries(bench_comparison piccard_baselines)
     endif()
@@ -360,7 +402,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     endif()
 
     add_executable(bench_dynamic benchmarks/bench_dynamic.cpp)
-    target_link_libraries(bench_dynamic piccard_fhe)
+    target_link_libraries(
+        bench_dynamic
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_dynamic PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_threshold benchmarks/bench_threshold.cpp)
@@ -368,15 +414,27 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     target_include_directories(bench_threshold PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_sqrt_comparison benchmarks/bench_sqrt_comparison.cpp)
-    target_link_libraries(bench_sqrt_comparison piccard_fhe)
+    target_link_libraries(
+        bench_sqrt_comparison
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_sqrt_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_onehot_sqrt benchmarks/bench_onehot_sqrt.cpp)
-    target_link_libraries(bench_onehot_sqrt piccard_fhe)
+    target_link_libraries(
+        bench_onehot_sqrt
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_onehot_sqrt PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_crossover benchmarks/bench_crossover.cpp)
-    target_link_libraries(bench_crossover piccard_fhe)
+    target_link_libraries(
+        bench_crossover
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_crossover PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     # Decryption-noise calibration for noise flooding (R2-W6). Not a timing
