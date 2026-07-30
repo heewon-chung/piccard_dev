@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
+#include "protocol/dynamic_piccard.h"
 #include "protocol/piccard.h"
 
 #include <cmath>
+#include <stdexcept>
 #include <string>
 
 using namespace piccard;
@@ -85,6 +87,42 @@ TEST_F(PiccardEngineTest, EvaluateFloodsAndEvaluateRawDoesNot) {
 
     RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
     EXPECT_TRUE(differs);
+    EXPECT_EQ(flooded->GetLevel(), raw->GetLevel())
+        << "the protocol must return immediately after flooding";
+}
+
+TEST_F(PiccardEngineTest, KeyGenAdoptsVerifiedRuntimeRingDimension) {
+    EXPECT_EQ(engine->GetParams().ring_dim,
+              engine->GetBFVContext().GetSlotCount());
+    EXPECT_EQ(engine->GetParams().RequestedRingDim(),
+              params.RequestedRingDim());
+    EXPECT_NO_THROW(engine->GetParams().FloodNoiseBits());
+
+    PiccardParams already_adopted = engine->GetParams();
+    EXPECT_THROW(
+        already_adopted.AdoptVerifiedRuntimeRingDim(
+            engine->GetBFVContext().GetSlotCount()),
+        std::logic_error);
+}
+
+TEST_F(PiccardEngineTest, DynamicExitUsesTheAdoptedFloodedBasePath) {
+    DynamicPiccard dynamic(params);
+    dynamic.KeyGen();
+
+    PiccardParams already_adopted = dynamic.GetParams();
+    EXPECT_THROW(
+        already_adopted.AdoptVerifiedRuntimeRingDim(
+            dynamic.GetBFVContext().GetSlotCount()),
+        std::logic_error);
+
+    std::vector<uint64_t> set = {1, 2, 3, 4, 5};
+    auto bottom = dynamic.InitSet(set);
+    auto ct = dynamic.Encrypt(*bottom);
+    auto raw = dynamic.EvaluateRaw(ct, ct);
+    auto flooded = dynamic.Evaluate(ct, ct);
+    EXPECT_NE(raw->GetElements()[0], flooded->GetElements()[0]);
+    EXPECT_EQ(flooded->GetLevel(), raw->GetLevel())
+        << "the dynamic protocol must return immediately after flooding";
 }
 
 TEST_F(PiccardEngineTest, DisjointSets) {
@@ -269,3 +307,45 @@ TEST_F(PiccardEngineTest, SingleElementIdenticalSets) {
     EXPECT_EQ(result.match_count, static_cast<int64_t>(params.k));
     EXPECT_NEAR(result.jaccard_estimate, 1.0, 0.01);
 }
+
+#ifdef PICCARD_GROWN_RING_FIXTURE
+TEST(PiccardGrownRing, OneHotUsesRequested8192AndRuntime16384) {
+    PiccardParams params;
+    params.k = 128;
+    params.m = 64;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    ASSERT_EQ(params.RequestedRingDim(), 8192u);
+    ASSERT_EQ(params.SelectedCalibratedRingDim(), 16384u);
+    ASSERT_EQ(params.CoefficientStatBits(), 74u);
+
+    Piccard engine(params);
+    engine.KeyGen();
+
+    EXPECT_EQ(engine.GetParams().RequestedRingDim(), 8192u);
+    EXPECT_EQ(engine.GetParams().SelectedCalibratedRingDim(), 16384u);
+    EXPECT_EQ(engine.GetParams().ring_dim, 16384u);
+    EXPECT_EQ(engine.GetBFVContext().GetSlotCount(), 16384u);
+    EXPECT_EQ(engine.GetParams().FloodNoiseBits(), 144u);
+    RecordProperty("input_requested_ring_dim", 8192);
+    RecordProperty("output_selected_calibrated_ring_dim", 16384);
+    RecordProperty("output_runtime_ring_dim",
+                   static_cast<int>(engine.GetBFVContext().GetSlotCount()));
+    RecordProperty("output_flood_noise_bits",
+                   static_cast<int>(engine.GetParams().FloodNoiseBits()));
+
+    const std::vector<uint64_t> set = {1, 2, 3, 5, 8, 13};
+    auto signature = engine.ComputeSignature(set);
+    auto feature = engine.EncodeSignature(signature);
+    ASSERT_EQ(feature.size(), 16384u);
+    RecordProperty("output_encoded_slots", static_cast<int>(feature.size()));
+    auto ct = engine.EncryptFeature(feature);
+    EXPECT_EQ(engine.Decrypt(engine.Evaluate(ct, ct)).match_count,
+              static_cast<int64_t>(params.k));
+
+    auto& mutated = const_cast<PiccardParams&>(engine.GetParams());
+    mutated.ring_dim = 8192;
+    EXPECT_THROW(mutated.FloodNoiseBits(), std::logic_error);
+}
+#endif

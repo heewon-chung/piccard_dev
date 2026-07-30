@@ -42,10 +42,15 @@ struct BaselineParams {
     uint32_t num_ciphertexts = 0;  // ceil(U_set / ring_dim)
     uint32_t mult_depth = 1;
 
+    uint32_t RequestedFeatureDim() const {
+        return requested_feature_dim_;
+    }
+
     void Validate() {
         if (universe_size == 0) {
             throw std::invalid_argument("universe_size must be > 0");
         }
+        requested_feature_dim_ = universe_size;
 
         uint32_t min_ring = MinRingDimForSecurity(security);
         ring_dim = NextPowerOf2(universe_size);
@@ -63,6 +68,28 @@ struct BaselineParams {
         num_ciphertexts = (universe_size + ring_dim - 1) / ring_dim;
         mult_depth = 1;
     }
+
+    void AdoptRuntimeRingDim(uint32_t actual) {
+        if (requested_feature_dim_ == 0) {
+            throw std::logic_error(
+                "baseline runtime adoption requires validated parameters");
+        }
+        if (actual == 0 || (actual & (actual - 1)) != 0) {
+            throw std::invalid_argument(
+                "baseline runtime ring dimension must be a power of two");
+        }
+        if (actual < requested_feature_dim_) {
+            throw std::invalid_argument(
+                "baseline runtime ring dimension does not cover the requested "
+                "feature dimension");
+        }
+        ring_dim = actual;
+        num_ciphertexts =
+            (requested_feature_dim_ + ring_dim - 1) / ring_dim;
+    }
+
+private:
+    uint32_t requested_feature_dim_ = 0;
 };
 
 // ============================================================================
@@ -76,7 +103,7 @@ static inline PiccardParams MakeBFVParams(const BaselineParams& bp) {
     pp.m = bp.universe_size;
     pp.security = bp.security;
     // Set derived fields directly (bypass Validate)
-    pp.feature_dim = bp.ring_dim;
+    pp.feature_dim = bp.RequestedFeatureDim();
     pp.ring_dim = bp.ring_dim;
     pp.plaintext_mod = bp.plaintext_mod;
     pp.mult_depth = bp.mult_depth;
@@ -98,14 +125,10 @@ public:
         bfv_ctx_ = std::make_unique<BFVContext>(pp);
         bfv_ctx_->Initialize();
 
-        // OpenFHE may select a larger ring_dim; propagate it so
-        // binary-vector encoding and rotate-and-sum use the correct dimension.
+        // Baseline runtime adoption is intentionally independent of the
+        // sanitizer profile/fingerprint path.
         uint32_t actual = bfv_ctx_->GetSlotCount();
-        if (actual != params_.ring_dim) {
-            params_.ring_dim = actual;
-            params_.num_ciphertexts =
-                (params_.universe_size + params_.ring_dim - 1) / params_.ring_dim;
-        }
+        params_.AdoptRuntimeRingDim(actual);
     }
 
     /// Encode a set as binary vector chunks (one vector per ciphertext).

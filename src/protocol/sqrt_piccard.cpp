@@ -20,7 +20,7 @@ void SqrtPiccard::KeyGen() {
 
     bfv_ = std::make_unique<BFVContext>(params_);
     bfv_->Initialize();
-    params_.ring_dim = bfv_->GetSlotCount();
+    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
 
     encoder_ = std::make_unique<SqrtEncoder>(params_);
 }

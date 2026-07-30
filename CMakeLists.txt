@@ -339,6 +339,65 @@ if(BUILD_TESTS)
             target_link_libraries(test_sqrt_piccard piccard_fhe test_main)
             add_test(NAME SqrtPiccard COMMAND test_sqrt_piccard)
 
+            # Work 2 Phase 3: compile the production params adapter against a
+            # toy requested-8192 / realized-16384 calibration fixture. This
+            # target intentionally does not link piccard_core or piccard_fhe,
+            # because both contain the normal params.cpp object.
+            add_library(
+                piccard_params_grown_fixture
+                OBJECT src/util/params.cpp
+            )
+            target_compile_definitions(
+                piccard_params_grown_fixture
+                PRIVATE
+                    PICCARD_NOISE_CALIBRATION_FILE=\"tests/fixtures/noise_calibration_grown_rows.inc\"
+            )
+            target_include_directories(
+                piccard_params_grown_fixture
+                PRIVATE
+                    ${CMAKE_SOURCE_DIR}
+                    ${CMAKE_SOURCE_DIR}/include
+            )
+
+            add_executable(
+                test_piccard_grown_ring
+                tests/unit/test_piccard_engine.cpp
+                tests/unit/test_sqrt_piccard.cpp
+                src/util/params_calibration.cpp
+                src/core/minhash.cpp
+                src/core/onehot_encoder.cpp
+                src/core/sqrt_encoder.cpp
+                src/core/bottom_structure.cpp
+                src/fhe/bfv_context.cpp
+                src/protocol/piccard.cpp
+                src/protocol/dynamic_piccard.cpp
+                src/protocol/sqrt_piccard.cpp
+                $<TARGET_OBJECTS:piccard_params_grown_fixture>
+            )
+            target_compile_definitions(
+                test_piccard_grown_ring
+                PRIVATE PICCARD_GROWN_RING_FIXTURE
+            )
+            target_link_libraries(
+                test_piccard_grown_ring
+                PRIVATE
+                    test_main
+                    piccard_security_profile
+                    OpenSSL::Crypto
+                    ${OpenFHE_LIBRARIES}
+            )
+            if(OpenMP_CXX_FOUND)
+                target_link_libraries(
+                    piccard_params_grown_fixture
+                    PRIVATE OpenMP::OpenMP_CXX
+                )
+                target_link_libraries(
+                    test_piccard_grown_ring
+                    PRIVATE OpenMP::OpenMP_CXX
+                )
+            endif()
+            add_test(NAME PiccardGrownRing COMMAND test_piccard_grown_ring)
+
             # Benchmark utility tests (DispersionStats / ComputeDispersion)
             add_executable(test_benchmark_utils tests/unit/test_benchmark_utils.cpp)
             target_link_libraries(

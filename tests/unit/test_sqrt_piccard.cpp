@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 
 using namespace piccard;
@@ -222,6 +223,26 @@ TEST_F(SqrtPiccardTest, EvaluateFloodsAndEvaluateRawDoesNot) {
 
     RecordProperty("output_raw_differs_from_flooded", differs ? "true" : "false");
     EXPECT_TRUE(differs);
+    EXPECT_EQ(flooded->GetLevel(), raw->GetLevel())
+        << "the protocol must return immediately after flooding";
+}
+
+TEST_F(SqrtPiccardTest, KeyGenAdoptsVerifiedRuntimeRingDimension) {
+    params.ValidateSqrt();
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    EXPECT_EQ(engine.GetParams().ring_dim,
+              engine.GetBFVContext().GetSlotCount());
+    EXPECT_EQ(engine.GetParams().RequestedRingDim(),
+              params.RequestedRingDim());
+    EXPECT_NO_THROW(engine.GetParams().FloodNoiseBits());
+
+    PiccardParams already_adopted = engine.GetParams();
+    EXPECT_THROW(
+        already_adopted.AdoptVerifiedRuntimeRingDim(
+            engine.GetBFVContext().GetSlotCount()),
+        std::logic_error);
 }
 
 // ── Shared CRS across encodings (§"벤치마크 난수 계약") ───────────────────────
@@ -278,3 +299,41 @@ TEST_F(SqrtPiccardTest, ReseedingBothEnginesKeepsSignaturesPaired) {
         seen.push_back(onehot_sig);
     }
 }
+
+#ifdef PICCARD_GROWN_RING_FIXTURE
+TEST(PiccardGrownRing, SqrtUsesRequested8192AndRuntime16384) {
+    PiccardParams params;
+    params.k = 256;
+    params.m = 256;
+    params.security = SecurityLevel::TOY;
+    params.ValidateSqrt();
+
+    ASSERT_EQ(params.RequestedRingDim(), 8192u);
+    ASSERT_EQ(params.SelectedCalibratedRingDim(), 16384u);
+    ASSERT_EQ(params.CoefficientStatBits(), 74u);
+
+    SqrtPiccard engine(params);
+    engine.KeyGen();
+
+    EXPECT_EQ(engine.GetParams().RequestedRingDim(), 8192u);
+    EXPECT_EQ(engine.GetParams().SelectedCalibratedRingDim(), 16384u);
+    EXPECT_EQ(engine.GetParams().ring_dim, 16384u);
+    EXPECT_EQ(engine.GetBFVContext().GetSlotCount(), 16384u);
+    EXPECT_EQ(engine.GetParams().FloodNoiseBits(), 179u);
+    RecordProperty("input_requested_ring_dim", 8192);
+    RecordProperty("output_selected_calibrated_ring_dim", 16384);
+    RecordProperty("output_runtime_ring_dim",
+                   static_cast<int>(engine.GetBFVContext().GetSlotCount()));
+    RecordProperty("output_flood_noise_bits",
+                   static_cast<int>(engine.GetParams().FloodNoiseBits()));
+
+    const std::vector<uint64_t> set = {1, 2, 3, 5, 8, 13};
+    auto signature = engine.ComputeSignature(set);
+    auto feature = engine.EncodeSignature(signature);
+    ASSERT_EQ(feature.size(), 16384u);
+    RecordProperty("output_encoded_slots", static_cast<int>(feature.size()));
+    auto ct = engine.EncryptFeature(feature);
+    EXPECT_EQ(engine.Decrypt(engine.Evaluate(ct, ct)).match_count,
+              static_cast<int64_t>(params.k));
+}
+#endif

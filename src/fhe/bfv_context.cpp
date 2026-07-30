@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -78,7 +79,24 @@ lbcrypto::DCRTPoly SampleFloodingNoise(
 
 } // namespace
 
-BFVContext::BFVContext(const PiccardParams& params) : params_(params) {}
+BFVContext::BFVContext(const PiccardParams& params)
+    : params_(params), runtime_ring_dim_(params.ring_dim) {}
+
+uint32_t BFVContext::RequiredFloodBudgetBits() const {
+    // FloodNoiseBits() first revalidates the complete Phase 2 fingerprint.
+    const uint32_t selected_flood_bits = params_.FloodNoiseBits();
+    const uint64_t required =
+        static_cast<uint64_t>(params_.eval_noise_bits) +
+        static_cast<uint64_t>(params_.CoefficientStatBits()) +
+        static_cast<uint64_t>(params_.flood_margin_bits) + UINT64_C(2);
+    if (required > std::numeric_limits<uint32_t>::max() ||
+        required != static_cast<uint64_t>(selected_flood_bits) + 2) {
+        throw std::logic_error(
+            "runtime flooding budget disagrees with the selected sanitizer "
+            "profile");
+    }
+    return static_cast<uint32_t>(required);
+}
 
 void BFVContext::Initialize() {
     lbcrypto::CCParams<lbcrypto::CryptoContextBFVRNS> bfv_params;
@@ -93,13 +111,20 @@ void BFVContext::Initialize() {
         bfv_params.SetScalingModSize(params_.scaling_mod_size);
     }
 
-    // The minimum ring_dim our protocol needs (feature_dim slots).
+    // A sized sanitizer may have selected a measured context larger than the
+    // immutable requested N. Unsized baseline copies keep their independent
+    // runtime request and never enter the sanitizer-adoption path.
+    const uint32_t configured_ring_dim =
+        params_.FloodingSized()
+            ? params_.SelectedCalibratedRingDim()
+            : params_.ring_dim;
     uint32_t needed_ring_dim = NextPowerOf2(params_.feature_dim);
+    needed_ring_dim = std::max(needed_ring_dim, configured_ring_dim);
 
     switch (params_.security) {
         case SecurityLevel::TOY:
             bfv_params.SetSecurityLevel(lbcrypto::HEStd_NotSet);
-            bfv_params.SetRingDim(params_.ring_dim);
+            bfv_params.SetRingDim(needed_ring_dim);
             break;
         case SecurityLevel::STD128:
             bfv_params.SetSecurityLevel(lbcrypto::HEStd_128_classic);
@@ -128,24 +153,13 @@ void BFVContext::Initialize() {
         cc_ = lbcrypto::GenCryptoContext(bfv_params);
     }
 
-    // Record the ring_dim OpenFHE actually selected.
-    params_.ring_dim = cc_->GetRingDimension();
+    runtime_ring_dim_ = cc_->GetRingDimension();
 
-    // The parameters came from measurements; this is the first point where the
-    // context they predicted actually exists, so verify the prediction here.
-    //
-    // ring_dim_natural is what this circuit needs with no flooding headroom.
-    // For the threshold variant it already exceeds the slot requirement,
-    // because a degree-k polynomial needs a long modulus chain either way --
-    // so growth is judged against it, not against the slot count. Growing past
-    // it would double every runtime, which is not something to do implicitly.
-    if (params_.ring_dim_natural != 0 &&
-        params_.ring_dim > params_.ring_dim_natural) {
-        throw std::runtime_error(
-            "ring dimension grew to " + std::to_string(params_.ring_dim) +
-            " past the calibrated " + std::to_string(params_.ring_dim_natural) +
-            " while making room for noise flooding; every timing would double. "
-            "Re-run `bench_noise --sweep` for this configuration.");
+    // This is the first point where the measured context actually exists.
+    // Adoption verifies requested, selected, and actual N before any keys or
+    // size-dependent rotation plans are created.
+    if (params_.FloodingSized()) {
+        params_.AdoptVerifiedRuntimeRingDim(runtime_ring_dim_);
     }
 
     if (params_.FloodingSized()) {
@@ -154,9 +168,8 @@ void BFVContext::Initialize() {
             std::log2(elem_params->GetModulus().ConvertToDouble());
         const double log_delta =
             log_q - std::log2(static_cast<double>(params_.plaintext_mod));
-        const double required = static_cast<double>(params_.eval_noise_bits) +
-                                params_.flood_margin_bits +
-                                params_.LegacyFloodCoefficientBits() + 2.0;
+        const double required =
+            static_cast<double>(RequiredFloodBudgetBits());
         if (required > log_delta) {
             throw std::runtime_error(
                 "noise flooding does not fit: needs " +
@@ -178,7 +191,7 @@ void BFVContext::Initialize() {
 
     // Generate rotation keys for powers of 2 (for rotate-and-sum)
     std::vector<int> rotation_indices;
-    for (uint32_t i = 1; i < params_.ring_dim; i *= 2) {
+    for (uint32_t i = 1; i < runtime_ring_dim_; i *= 2) {
         rotation_indices.push_back(static_cast<int>(i));
     }
     cc_->EvalRotateKeyGen(key_pair_.secretKey, rotation_indices);
@@ -194,7 +207,7 @@ std::vector<int64_t>
 BFVContext::Decrypt(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const {
     lbcrypto::Plaintext pt;
     cc_->Decrypt(key_pair_.secretKey, ct, &pt);
-    pt->SetLength(params_.ring_dim);
+    pt->SetLength(runtime_ring_dim_);
     return pt->GetPackedValue();
 }
 
@@ -227,7 +240,7 @@ BFVContext::MultiplyPlain(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
 lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
 BFVContext::MultiplyScalar(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
                            int64_t scalar) const {
-    std::vector<int64_t> plain(params_.ring_dim, scalar);
+    std::vector<int64_t> plain(runtime_ring_dim_, scalar);
     auto pt = cc_->MakePackedPlaintext(plain);
     return cc_->EvalMult(ct, pt);
 }
@@ -255,7 +268,7 @@ BFVContext::EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
 
     // Degree 0: just a constant
     if (degree == 0) {
-        std::vector<int64_t> c(params_.ring_dim, coeffs[0]);
+        std::vector<int64_t> c(runtime_ring_dim_, coeffs[0]);
         return Encrypt(c);
     }
 
@@ -307,7 +320,7 @@ BFVContext::EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
         // Add constant term (j=0) as plaintext to preserve ciphertext level
         uint32_t const_idx = i * s;
         if (const_idx < coeffs.size() && coeffs[const_idx] != 0) {
-            std::vector<int64_t> c(params_.ring_dim, coeffs[const_idx]);
+            std::vector<int64_t> c(runtime_ring_dim_, coeffs[const_idx]);
             if (!chunk_initialized) {
                 // Only constant in this chunk: create zero ct at baby-step level
                 chunk = MultiplyScalar(powers[1], 0);
@@ -345,12 +358,9 @@ BFVContext::Flood(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const {
     // smaller than the evaluation noise it is supposed to hide.
     const uint32_t bits = params_.FloodNoiseBits();
 
-    // Re-randomize first. Smudging c0 hides the phase, but leaves c1 a
-    // deterministic function of both operands -- and the receiver never saw
-    // the sender's. Adding a fresh encryption of zero makes the pair itself
-    // simulatable, which is what appendix.tex's "fresh encryption" claims.
-    // Its own noise is negligible beside the mask added below.
-    std::vector<int64_t> zeros(params_.ring_dim, 0);
+    // Re-randomize computationally with a fresh Enc(0). Its ordinary-width
+    // noise is negligible beside the independently sampled phase mask below.
+    std::vector<int64_t> zeros(runtime_ring_dim_, 0);
     auto out = cc_->EvalAdd(ct, Encrypt(zeros));
 
     auto elem_params = cc_->GetCryptoParameters()->GetElementParams();

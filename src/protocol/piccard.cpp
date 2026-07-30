@@ -23,7 +23,7 @@ void Piccard::KeyGen() {
     // that still satisfies the requested security level).
     bfv_ = std::make_unique<BFVContext>(params_);
     bfv_->Initialize();
-    params_.ring_dim = bfv_->GetSlotCount();
+    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
 
     // Create encoder AFTER BFV init so it uses the actual ring_dim
     // for output vector sizing.

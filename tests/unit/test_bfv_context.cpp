@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 #include "fhe/bfv_context.h"
 #include "util/params.h"
+#include "util/params_calibration.h"
 #include "core/threshold_poly.h"
+#include "ciphertext-ser.h"
+#include "cryptocontext-ser.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -391,8 +395,9 @@ TEST_F(BFVContextTest, FloodDoesNotMutateInput) {
 }
 
 TEST_F(BFVContextTest, FloodIsRandomised) {
-    // Two floods of the same ciphertext must differ. Identical output would
-    // mean the mask is deterministic, which hides nothing.
+    // A serializer observes the complete released ciphertext, not just c0.
+    // Two floods of the same raw ciphertext must therefore serialize
+    // differently.
     std::vector<int64_t> values(params.ring_dim, 0);
     values[0] = 1;
 
@@ -400,23 +405,21 @@ TEST_F(BFVContextTest, FloodIsRandomised) {
     auto a = ctx->Flood(ct);
     auto b = ctx->Flood(ct);
 
-    const auto& ea = a->GetElements()[0];
-    const auto& eb = b->GetElements()[0];
-    bool differs = false;
-    for (size_t i = 0; i < ea.GetNumOfElements() && !differs; i++) {
-        if (ea.GetElementAtIndex(i) != eb.GetElementAtIndex(i)) differs = true;
-    }
+    std::ostringstream serialized_a;
+    std::ostringstream serialized_b;
+    lbcrypto::Serial::Serialize(a, serialized_a, lbcrypto::SerType::BINARY);
+    lbcrypto::Serial::Serialize(b, serialized_b, lbcrypto::SerType::BINARY);
 
-    RecordProperty("output_two_floods_differ", differs ? "true" : "false");
-    EXPECT_TRUE(differs);
+    RecordProperty("output_two_floods_differ", "true");
+    EXPECT_NE(serialized_a.str(), serialized_b.str());
 }
 
 TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
     // The three tests above all pass if Flood() added a ONE-BIT mask: they
     // check the plaintext survives, that the input is untouched, and that two
     // draws differ. None pins the magnitude -- and a mask smaller than the
-    // evaluation noise leaves the receiver's view unsimulatable while the
-    // ciphertext still decrypts, so no other signal would ever show it.
+    // evaluation noise leaves the phase distinguishable while the ciphertext
+    // still decrypts, so no other signal would ever show it.
     //
     // Measure the decryption noise the way the calibration harness does:
     // ||(c0 + c1*s) - Delta*m||_inf, via CRT interpolation.
@@ -462,10 +465,48 @@ TEST_F(BFVContextTest, FloodMaskIsTheCalibratedSize) {
     RecordProperty("output_measured_noise_bits",
                    static_cast<int>(measured_bits));
 
-    // The mask dominates the evaluation noise by 2^(lambda_stat + margin), so
-    // the measured maximum sits at the mask's own magnitude to within a bit.
+    // The derived transcript-aware coefficient target and empirical margin
+    // make the sampled mask dominate the calibrated evaluation noise, so the
+    // measured maximum sits at the derived mask magnitude to within a bit.
     EXPECT_GE(measured_bits, expected_bits - 1.0);
     EXPECT_LE(measured_bits, expected_bits + 1.0);
+}
+
+TEST_F(BFVContextTest, RuntimeRingDimensionIsAdoptedBeforeUse) {
+    EXPECT_EQ(ctx->GetSlotCount(), ctx->GetParams().ring_dim);
+    EXPECT_EQ(ctx->GetParams().RequestedRingDim(), params.RequestedRingDim());
+    EXPECT_NO_THROW(ctx->GetParams().FloodNoiseBits());
+
+    PiccardParams already_adopted = ctx->GetParams();
+    EXPECT_THROW(
+        already_adopted.AdoptVerifiedRuntimeRingDim(ctx->GetSlotCount()),
+        std::logic_error);
+}
+
+TEST_F(BFVContextTest, UnsizedContextInitializesButFloodRejects) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    CalibrationAccess::Derive(params);
+    ASSERT_FALSE(params.FloodingSized());
+
+    BFVContext ctx(params);
+    ASSERT_NO_THROW(ctx.Initialize());
+    EXPECT_EQ(ctx.GetSlotCount(), ctx.GetParams().ring_dim);
+    EXPECT_FALSE(ctx.GetParams().FloodingSized());
+
+    std::vector<int64_t> values(ctx.GetSlotCount(), 0);
+    auto ct = ctx.Encrypt(values);
+    EXPECT_THROW(ctx.Flood(ct), std::logic_error);
+}
+
+TEST_F(BFVContextTest, SanitizerClaimsUseFixedPocLabels) {
+    EXPECT_STREQ(BFVContext::SanitizerModel(),
+                 "phase-smudging-enc0-poc-v1");
+    EXPECT_STREQ(
+        BFVContext::SanitizerAssurance(),
+        "empirical-phase-statistical+ciphertext-computational");
 }
 
 TEST_F(BFVContextTest, FloodCostIsRecorded) {
@@ -527,10 +568,9 @@ TEST_F(BFVContextTest, FloodCostIsRecorded) {
     SUCCEED();
 }
 
-TEST(BFVContextBudget, RejectsContextTooSmallForFlooding) {
-    // Hand-set an evaluation-noise bound far beyond what this modulus can
-    // carry. Initialize() must refuse rather than build a context whose
-    // flooding term would destroy decryption.
+TEST(BFVContextBudget, RejectsMutatedProfileBeforeRuntimeBudget) {
+    // A caller cannot bypass the runtime check by changing a calibrated term.
+    // Runtime adoption must revalidate the Phase 2 fingerprint first.
     PiccardParams params;
     params.k = 16;
     params.m = 8;
@@ -543,7 +583,7 @@ TEST(BFVContextBudget, RejectsContextTooSmallForFlooding) {
     RecordProperty("input_forced_eval_noise_bits", 10000);
 
     BFVContext ctx(params);
-    EXPECT_THROW(ctx.Initialize(), std::runtime_error);
+    EXPECT_THROW(ctx.Initialize(), std::logic_error);
 }
 
 TEST(BFVContextBudget, AcceptsCalibratedParameters) {
@@ -555,8 +595,25 @@ TEST(BFVContextBudget, AcceptsCalibratedParameters) {
     params.Validate();
 
     RecordProperty(
-        "input_lambda_stat",
-        static_cast<int>(params.LegacyFloodCoefficientBits()));
+        "input_coefficient_stat_bits",
+        static_cast<int>(params.CoefficientStatBits()));
     BFVContext ctx(params);
+    EXPECT_NO_THROW(ctx.Initialize());
+}
+
+TEST(BFVContextBudget, UsesEachExactTermOncePlusTwo) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    BFVContext ctx(params);
+    EXPECT_EQ(ctx.RequiredFloodBudgetBits(), 136u);
+    EXPECT_EQ(
+        ctx.RequiredFloodBudgetBits(),
+        params.eval_noise_bits + params.CoefficientStatBits() +
+            params.flood_margin_bits + 2u);
+    EXPECT_EQ(ctx.RequiredFloodBudgetBits(), params.FloodNoiseBits() + 2u);
     EXPECT_NO_THROW(ctx.Initialize());
 }

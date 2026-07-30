@@ -5,6 +5,7 @@
 
 #include "benchmark_utils.h"
 #include "benchmark_estimator_provenance.h"
+#include "baseline_engine.h"
 #include <gtest/gtest.h>
 #include <cmath>
 #include <set>
@@ -12,6 +13,10 @@
 #include <vector>
 
 using namespace piccard::benchmark;
+using piccard::SecurityLevel;
+using piccard::baseline::BaselineEngine;
+using piccard::baseline::BaselineParams;
+using piccard::baseline::MakeBFVParams;
 
 // ── Empty vector ─────────────────────────────────────────────────────
 
@@ -173,4 +178,61 @@ TEST(BenchmarkUtils, BenchmarkSerializerRejectsMissingEstimatorModel) {
     BenchmarkResult row;
     row.label = "missing-provenance";
     EXPECT_THROW(SerializeBenchmarkRow(row), std::logic_error);
+}
+
+TEST(BaselineParams, AdoptsPowerOfTwoRuntimeAndPreservesRequestedDimension) {
+    BaselineParams params;
+    params.universe_size = 1500;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    EXPECT_EQ(params.RequestedFeatureDim(), 1500u);
+    params.AdoptRuntimeRingDim(4096);
+    EXPECT_EQ(params.RequestedFeatureDim(), 1500u);
+    EXPECT_EQ(params.universe_size, 1500u);
+    EXPECT_EQ(params.ring_dim, 4096u);
+    EXPECT_EQ(params.num_ciphertexts, 1u);
+}
+
+TEST(BaselineParams, RejectsInvalidSmallOrNonPowerOfTwoRuntimeRing) {
+    BaselineParams params;
+    params.universe_size = 1500;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    EXPECT_THROW(params.AdoptRuntimeRingDim(0), std::invalid_argument);
+    EXPECT_THROW(params.AdoptRuntimeRingDim(1024), std::invalid_argument);
+    EXPECT_THROW(params.AdoptRuntimeRingDim(3000), std::invalid_argument);
+}
+
+TEST(BaselineParams, BridgeRemainsSanitizerUnsized) {
+    BaselineParams params;
+    params.universe_size = 64;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    auto bridge = MakeBFVParams(params);
+    EXPECT_FALSE(bridge.FloodingSized());
+    EXPECT_THROW(bridge.FloodNoiseBits(), std::logic_error);
+}
+
+TEST(BaselineEngine, ReportsActualRuntimeButFloodRemainsUnavailable) {
+    BaselineParams params;
+    params.universe_size = 64;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    BaselineEngine engine(params);
+    engine.Initialize();
+
+    EXPECT_EQ(engine.GetParams().RequestedFeatureDim(), 64u);
+    EXPECT_EQ(engine.GetParams().ring_dim,
+              engine.GetBFVContext().GetSlotCount());
+
+    auto chunks = engine.EncodeBinaryVectors({1, 2, 3});
+    auto ciphertexts = engine.EncryptChunks(chunks);
+    ASSERT_FALSE(ciphertexts.empty());
+    EXPECT_THROW(
+        engine.GetBFVContext().Flood(ciphertexts.front()),
+        std::logic_error);
 }

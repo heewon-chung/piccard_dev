@@ -34,7 +34,10 @@ struct NoiseCalibration {
     double   log_delta;
 };
 
-#include "util/noise_calibration.inc"
+#ifndef PICCARD_NOISE_CALIBRATION_FILE
+#define PICCARD_NOISE_CALIBRATION_FILE "util/noise_calibration.inc"
+#endif
+#include PICCARD_NOISE_CALIBRATION_FILE
 
 const char* SecurityName(SecurityLevel s) {
     switch (s) {
