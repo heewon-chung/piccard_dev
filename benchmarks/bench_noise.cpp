@@ -41,9 +41,11 @@
 #include "fhe/bfv_context.h"
 #include "util/params.h"
 #include "util/params_calibration.h"
+#include "util/security_profile.h"
 
 #include "benchmark_utils.h"
 #include "noise_calibration_schema.h"
+#include "util/noise_profile_matrix.h"
 #include "openfhe.h"
 
 // Required for CiphertextSizer: serialized size is what the paper's
@@ -60,6 +62,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -668,6 +671,24 @@ static uint32_t DiscoverNaturalRingDimension(
     return context.GetSlotCount();
 }
 
+static uint32_t DiscoverNaturalRingDimensionContextOnly(
+    Circuit circuit,
+    SecurityLevel security,
+    uint32_t k,
+    uint32_t m) {
+    PiccardParams params = BuildParams(
+        circuit,
+        security,
+        k,
+        m,
+        0,
+        0,
+        false);
+    BFVContext context(params);
+    context.InitializeContextOnly();
+    return context.GetSlotCount();
+}
+
 // ============================================================================
 // Output
 // ============================================================================
@@ -956,6 +977,421 @@ static int ReportPreThresholdCoverage() {
     return 0;
 }
 
+static std::string ReadBytes(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        throw std::runtime_error("failed to open " + path);
+    }
+    return std::string(
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>());
+}
+
+static std::string JsonString(const std::string& value) {
+    std::ostringstream out;
+    out << '"';
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    out << "\\u00" << std::hex << std::setw(2)
+                        << std::setfill('0') << static_cast<int>(ch)
+                        << std::dec << std::setfill(' ');
+                } else {
+                    out << static_cast<char>(ch);
+                }
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+static piccard::benchmark::noise_calibration::EvidenceIdentity
+BuildEvidenceIdentity(
+    const piccard::benchmark::noise_calibration::EvidenceOptions& options) {
+    piccard::benchmark::noise_calibration::EvidenceIdentity identity;
+    identity.profile_id = options.profile;
+    identity.key_id = options.key_id;
+    identity.circuit = options.circuit;
+    identity.shape_id = options.shape_id;
+    identity.security = options.security;
+    identity.requested_ring_dim = options.requested_ring_dim;
+    identity.natural_depth = options.natural_depth;
+    identity.consumer_points = options.consumer_points;
+    identity.consumer_set_sha256 = options.consumer_set_sha256;
+    identity.openfhe_version = options.openfhe_version;
+    identity.source_commit = options.source_commit;
+    return identity;
+}
+
+static Circuit ParseEvidenceCircuit(const std::string& value) {
+    if (value == "onehot") {
+        return Circuit::OneHot;
+    }
+    if (value == "sqrt") {
+        return Circuit::Sqrt;
+    }
+    throw std::invalid_argument("evidence circuit must be onehot or sqrt");
+}
+
+static SecurityLevel ParseEvidenceSecurity(const std::string& value) {
+    if (value == "STD128") {
+        return SecurityLevel::STD128;
+    }
+    if (value == "STD192") {
+        return SecurityLevel::STD192;
+    }
+    throw std::invalid_argument("evidence security must be STD128 or STD192");
+}
+
+static std::string PreflightJson(
+    const piccard::benchmark::noise_calibration::EvidenceOptions& options,
+    uint32_t natural_ring_dim) {
+    std::ostringstream output;
+    output
+        << "{\"source_commit\":\"" << options.source_commit
+        << "\",\"openfhe_version\":\"" << options.openfhe_version
+        << "\",\"key_id\":\"" << options.key_id
+        << "\",\"profile_id\":\"" << options.profile
+        << "\",\"circuit\":\"" << options.circuit
+        << "\",\"shape_id\":\"" << options.shape_id
+        << "\",\"security\":\"" << options.security
+        << "\",\"requested_ring_dim\":" << options.requested_ring_dim
+        << ",\"natural_depth\":" << options.natural_depth
+        << ",\"consumer_set_sha256\":\""
+        << options.consumer_set_sha256
+        << "\",\"natural_ring_dim\":" << natural_ring_dim
+        << "}\n";
+    return output.str();
+}
+
+static int RunPreflightContext(
+    const piccard::benchmark::noise_calibration::EvidenceOptions& options) {
+    namespace nc = piccard::benchmark::noise_calibration;
+    const std::string manifest = ReadBytes(options.profile_manifest);
+    nc::ValidateEvidenceIdentity(BuildEvidenceIdentity(options), manifest);
+    const Circuit circuit = ParseEvidenceCircuit(options.circuit);
+    const SecurityLevel security =
+        ParseEvidenceSecurity(options.security);
+    const auto& representative = options.consumer_points.front();
+    PiccardParams derived = BuildParams(
+        circuit,
+        security,
+        representative.k,
+        representative.m,
+        0,
+        0,
+        false);
+    if (derived.ring_dim != options.requested_ring_dim ||
+        derived.natural_mult_depth != options.natural_depth) {
+        throw std::invalid_argument(
+            "preflight production derivation disagrees with logical key");
+    }
+    const uint32_t natural_ring_dim =
+        DiscoverNaturalRingDimensionContextOnly(
+            circuit,
+            security,
+            representative.k,
+            representative.m);
+    std::cout << PreflightJson(options, natural_ring_dim);
+    return 0;
+}
+
+static piccard::benchmark::noise_calibration::DetailRow ToDetailRow(
+    const piccard::benchmark::noise_calibration::EvidenceOptions& options,
+    const std::string& candidate_id,
+    const piccard::noise_profile::ConsumerPoint& consumer,
+    const std::string& pattern,
+    uint32_t rep_index,
+    uint64_t rep_seed,
+    uint32_t natural_ring_dim,
+    uint32_t calibrated_ring_dim,
+    const CalibResult& result) {
+    namespace nc = piccard::benchmark::noise_calibration;
+    nc::DetailRow row;
+    row.profile = options.profile;
+    row.key_id = options.key_id;
+    row.candidate_id = candidate_id;
+    row.circuit = options.circuit;
+    row.shape_id = options.shape_id;
+    row.security = options.security;
+    row.consumer_k = consumer.k;
+    row.consumer_m = consumer.m;
+    row.pattern = pattern;
+    row.rep_index = rep_index;
+    row.rep_seed = rep_seed;
+    row.requested_ring_dim = options.requested_ring_dim;
+    row.natural_ring_dim = natural_ring_dim;
+    row.ring_dim_calibrated = calibrated_ring_dim;
+    row.realized_ring_dim =
+        result.ok ? result.ring_dim : calibrated_ring_dim;
+    row.ring_growth_factor =
+        static_cast<double>(calibrated_ring_dim) /
+        static_cast<double>(natural_ring_dim);
+    row.natural_depth = options.natural_depth;
+    row.provisioned_depth =
+        result.ok ? result.mult_depth : options.natural_depth;
+    row.scaling_mod_size = result.scaling_mod_size;
+    row.max_queries = options.max_queries;
+    row.flood_margin_bits = options.margin;
+    row.openfhe_version = options.openfhe_version;
+    row.source_commit = options.source_commit;
+    if (!result.ok) {
+        row.status_code = nc::StatusCode::ContextError;
+        row.error_message = result.error;
+        return row;
+    }
+    row.num_limbs = result.num_limbs;
+    row.plaintext_mod = result.plaintext_mod;
+    row.log_q = result.log_q;
+    row.log_delta = result.log_delta;
+    row.eval_noise_bits = result.eval_noise_bits;
+    row.headroom_bits = result.headroom_bits;
+    row.decrypt_ok = result.decrypt_ok;
+    row.saturated = result.saturated;
+    row.ct_bytes = result.ct_bytes;
+    if (!result.decrypt_ok) {
+        row.status_code = nc::StatusCode::DecryptFail;
+        row.error_message = "decryption result mismatch";
+    } else if (result.saturated) {
+        row.status_code = nc::StatusCode::Saturated;
+        row.error_message = "noise measurement saturated";
+    }
+    const SanitizerProfile profile = DeriveSanitizerProfile(
+        options.transcript_stat_bits,
+        options.max_queries,
+        result.ring_dim,
+        static_cast<uint32_t>(std::ceil(result.eval_noise_bits)),
+        options.margin);
+    row.query_stat_bits = profile.query_stat_bits;
+    row.coefficient_stat_bits = profile.coefficient_stat_bits;
+    row.flood_noise_bits = profile.flood_noise_bits;
+    return row;
+}
+
+static int RunStrictEvidence(
+    const piccard::benchmark::noise_calibration::EvidenceOptions& options) {
+    namespace fs = std::filesystem;
+    namespace nc = piccard::benchmark::noise_calibration;
+    const std::string manifest = ReadBytes(options.profile_manifest);
+    nc::ValidateEvidenceIdentity(BuildEvidenceIdentity(options), manifest);
+    const Circuit circuit = ParseEvidenceCircuit(options.circuit);
+    const SecurityLevel security =
+        ParseEvidenceSecurity(options.security);
+    const auto& representative = options.consumer_points.front();
+    const uint32_t natural_ring_dim =
+        DiscoverNaturalRingDimensionContextOnly(
+            circuit,
+            security,
+            representative.k,
+            representative.m);
+    const ExplicitRingCandidateSet ring_set = BuildExplicitRingCandidateSet(
+        ExplicitRingCandidateRequest{
+            options.profile,
+            security,
+            natural_ring_dim,
+            options.ring_candidates,
+        },
+        options.transcript_stat_bits,
+        options.max_queries,
+        options.margin);
+    if (!fs::is_directory(options.detail_dir)) {
+        throw std::invalid_argument(
+            "--detail_dir must name an existing directory");
+    }
+
+    std::ofstream aggregate_output(
+        options.aggregate_csv, std::ios::binary | std::ios::trunc);
+    if (!aggregate_output.is_open()) {
+        throw std::runtime_error("failed to open aggregate CSV");
+    }
+    aggregate_output << nc::AggregateCsvHeader() << '\n';
+
+    std::vector<std::tuple<std::string, std::string, std::string, uint64_t>>
+        candidate_records;
+    for (uint32_t calibrated_ring_dim : ring_set.candidates) {
+        for (uint32_t depth_delta = 0;
+             depth_delta <= options.max_depth_delta;
+             ++depth_delta) {
+            for (uint32_t scaling_mod_size :
+                 options.scaling_mod_grid) {
+                const uint32_t provisioned_depth =
+                    options.natural_depth + depth_delta;
+                const std::string candidate_id =
+                    "N" + std::to_string(calibrated_ring_dim) +
+                    "-d" + std::to_string(provisioned_depth) +
+                    "-s" + std::to_string(scaling_mod_size);
+                std::vector<nc::DetailRow> details;
+                for (const auto& consumer : options.consumer_points) {
+                    for (Pattern pattern :
+                         {Pattern::AllMatch,
+                          Pattern::NoMatch,
+                          Pattern::Random}) {
+                        for (uint32_t rep = 0; rep < options.reps; ++rep) {
+                            const std::string pattern_name =
+                                PatternName(pattern);
+                            const uint64_t rep_seed =
+                                nc::DeriveEvidenceSeed(
+                                    options.seed,
+                                    options.key_id,
+                                    candidate_id,
+                                    consumer.k,
+                                    consumer.m,
+                                    pattern_name,
+                                    rep);
+                            const auto measured = RunOne(
+                                circuit,
+                                security,
+                                consumer.k,
+                                consumer.m,
+                                depth_delta,
+                                scaling_mod_size,
+                                {pattern},
+                                rep_seed,
+                                1,
+                                natural_ring_dim,
+                                true,
+                                calibrated_ring_dim);
+                            details.push_back(ToDetailRow(
+                                options,
+                                candidate_id,
+                                consumer,
+                                pattern_name,
+                                rep,
+                                rep_seed,
+                                natural_ring_dim,
+                                calibrated_ring_dim,
+                                measured.front()));
+                        }
+                    }
+                }
+                details = nc::CanonicalizeDetailRows(std::move(details));
+                const fs::path detail_path =
+                    fs::path(options.detail_dir) /
+                    (candidate_id + ".csv");
+                std::ofstream detail_output(
+                    detail_path, std::ios::binary | std::ios::trunc);
+                if (!detail_output.is_open()) {
+                    throw std::runtime_error(
+                        "failed to open candidate detail CSV");
+                }
+                detail_output << nc::DetailCsvHeader() << '\n';
+                for (const auto& detail : details) {
+                    detail_output << nc::SerializeDetailCsvRow(detail)
+                                  << '\n';
+                }
+                detail_output.close();
+
+                nc::AggregateRow aggregate;
+                aggregate.profile = options.profile;
+                aggregate.circuit = options.circuit;
+                aggregate.shape_id = options.shape_id;
+                aggregate.security = options.security;
+                aggregate.consumer_count =
+                    static_cast<uint32_t>(
+                        options.consumer_points.size());
+                aggregate.consumer_set_sha256 =
+                    options.consumer_set_sha256;
+                aggregate.seed = options.seed;
+                aggregate.requested_ring_dim =
+                    options.requested_ring_dim;
+                aggregate.natural_ring_dim = natural_ring_dim;
+                aggregate.realized_ring_dim = calibrated_ring_dim;
+                aggregate.ring_growth_factor =
+                    static_cast<double>(calibrated_ring_dim) /
+                    static_cast<double>(natural_ring_dim);
+                aggregate.ring_dim_calibrated =
+                    calibrated_ring_dim;
+                aggregate.natural_depth = options.natural_depth;
+                aggregate.provisioned_depth = provisioned_depth;
+                aggregate.scaling_mod_size = scaling_mod_size;
+                if (!details.empty()) {
+                    aggregate.num_limbs = details.front().num_limbs;
+                    aggregate.plaintext_mod = details.front().plaintext_mod;
+                    aggregate.log_q = details.front().log_q;
+                    aggregate.log_delta = details.front().log_delta;
+                }
+                aggregate.max_queries = options.max_queries;
+                aggregate.flood_margin_bits = options.margin;
+                aggregate.openfhe_version = options.openfhe_version;
+                aggregate.source_commit = options.source_commit;
+                aggregate = nc::ReduceCandidate(
+                    std::move(aggregate),
+                    details,
+                    options.transcript_stat_bits);
+                aggregate_output
+                    << nc::SerializeAggregateCsvRow(aggregate) << '\n';
+                candidate_records.emplace_back(
+                    candidate_id,
+                    nc::StatusName(aggregate.status_code),
+                    aggregate.detail_sha256,
+                    aggregate.detail_row_count);
+            }
+        }
+    }
+    aggregate_output.close();
+
+    std::ofstream candidate_manifest(
+        options.candidate_manifest,
+        std::ios::binary | std::ios::trunc);
+    if (!candidate_manifest.is_open()) {
+        throw std::runtime_error("failed to open candidate manifest");
+    }
+    candidate_manifest
+        << "{\"schema\":\"piccard-candidate-manifest\","
+        << "\"version\":1,\"key_id\":\"" << options.key_id
+        << "\",\"source_commit\":\"" << options.source_commit
+        << "\",\"openfhe_version\":\"" << options.openfhe_version
+        << "\",\"profile_id\":\"" << options.profile
+        << "\",\"circuit\":\"" << options.circuit
+        << "\",\"shape_id\":\"" << options.shape_id
+        << "\",\"security\":\"" << options.security
+        << "\",\"requested_ring_dim\":" << options.requested_ring_dim
+        << ",\"natural_depth\":" << options.natural_depth
+        << ",\"consumer_points\":[";
+    for (size_t index = 0; index < options.consumer_points.size(); ++index) {
+        candidate_manifest
+            << "{\"k\":" << options.consumer_points[index].k
+            << ",\"m\":" << options.consumer_points[index].m << "}";
+        if (index + 1 != options.consumer_points.size()) {
+            candidate_manifest << ',';
+        }
+    }
+    candidate_manifest
+        << "],\"consumer_set_sha256\":\""
+        << options.consumer_set_sha256 << "\",\"command\":[";
+    for (size_t index = 0; index < options.command.size(); ++index) {
+        candidate_manifest << JsonString(options.command[index]);
+        if (index + 1 != options.command.size()) {
+            candidate_manifest << ',';
+        }
+    }
+    candidate_manifest
+        << "],\"candidate_count\":" << candidate_records.size()
+        << ",\"candidates\":[";
+    for (size_t index = 0; index < candidate_records.size(); ++index) {
+        const auto& [candidate_id, status, detail_hash, row_count] =
+            candidate_records[index];
+        candidate_manifest
+            << "{\"candidate_id\":\"" << candidate_id
+            << "\",\"status_code\":\"" << status
+            << "\",\"detail_sha256\":\"" << detail_hash
+            << "\",\"detail_row_count\":" << row_count << "}";
+        if (index + 1 != candidate_records.size()) {
+            candidate_manifest << ',';
+        }
+    }
+    candidate_manifest << "]}\n";
+    return 0;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1001,6 +1437,18 @@ int main(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         raw_args.emplace_back(argv[index]);
     }
+    if (raw_args.size() == 1 &&
+        raw_args.front() == "--print_profile_manifest") {
+        std::cout << piccard::noise_profile::CanonicalManifestJson();
+        return 0;
+    }
+    if (raw_args.size() == 1 &&
+        raw_args.front() == "--print_source_commit") {
+        std::cout
+            << piccard::benchmark::noise_calibration::EmbeddedSourceCommit()
+            << '\n';
+        return 0;
+    }
 
     piccard::benchmark::noise_calibration::EvidenceOptions evidence;
     try {
@@ -1014,6 +1462,22 @@ int main(int argc, char** argv) {
     }
     if (evidence.pre_threshold && evidence.coverage) {
         return ReportPreThresholdCoverage();
+    }
+    if (evidence.preflight_context) {
+        try {
+            return RunPreflightContext(evidence);
+        } catch (const std::exception& error) {
+            std::cerr << "Preflight failed: " << error.what() << "\n";
+            return 1;
+        }
+    }
+    if (evidence.pre_threshold && !evidence.consumer_points.empty()) {
+        try {
+            return RunStrictEvidence(evidence);
+        } catch (const std::exception& error) {
+            std::cerr << "Evidence run failed: " << error.what() << "\n";
+            return 1;
+        }
     }
 
     bool sweep = false;

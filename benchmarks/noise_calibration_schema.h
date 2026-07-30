@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/noise_profile_matrix.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,11 +18,22 @@ struct EvidenceOptions {
     bool pre_threshold = false;
     bool coverage = false;
     bool smoke = false;
+    bool preflight_context = false;
     std::string profile_manifest;
     std::string profile;
     std::string key_id;
     std::string circuit;
+    std::string shape_id;
     std::string security;
+    uint32_t requested_ring_dim = 0;
+    uint32_t natural_depth = 0;
+    std::vector<noise_profile::ConsumerPoint> consumer_points;
+    std::string consumer_set_sha256;
+    std::string openfhe_version;
+    std::string source_commit;
+    std::string aggregate_csv;
+    std::string detail_dir;
+    std::string candidate_manifest;
     std::vector<uint32_t> scaling_mod_grid;
     uint32_t max_depth_delta = 0;
     std::vector<uint32_t> ring_candidates;
@@ -30,6 +43,7 @@ struct EvidenceOptions {
     uint32_t margin = 0;
     uint32_t reps = 0;
     uint64_t seed = 0;
+    std::vector<std::string> command;
 };
 
 /**
@@ -42,6 +56,23 @@ struct CoverageEntry {
     bool operator==(const CoverageEntry& other) const {
         return circuit == other.circuit && security == other.security;
     }
+};
+
+/**
+ * @brief Complete eight-field logical identity plus frozen source provenance.
+ */
+struct EvidenceIdentity {
+    std::string profile_id;
+    std::string key_id;
+    std::string circuit;
+    std::string shape_id;
+    std::string security;
+    uint32_t requested_ring_dim = 0;
+    uint32_t natural_depth = 0;
+    std::vector<noise_profile::ConsumerPoint> consumer_points;
+    std::string consumer_set_sha256;
+    std::string openfhe_version;
+    std::string source_commit;
 };
 
 /**
@@ -147,6 +178,27 @@ struct AggregateRow {
 
 /** @brief Parses and validates pre-threshold evidence arguments. */
 EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args);
+
+/** @brief Strictly parses a canonical comma-separated k:m consumer list. */
+std::vector<noise_profile::ConsumerPoint> ParseConsumerPoints(
+    const std::string& text);
+
+/**
+ * @brief Validates identity against the byte-exact compiled profile manifest.
+ */
+noise_profile::ProfilePartition ValidateEvidenceIdentity(
+    const EvidenceIdentity& identity,
+    const std::string& manifest_bytes);
+
+/** @brief Derives a deterministic seed from every row-identity component. */
+uint64_t DeriveEvidenceSeed(
+    uint64_t root_seed,
+    const std::string& key_id,
+    const std::string& candidate_id,
+    uint32_t consumer_k,
+    uint32_t consumer_m,
+    const std::string& pattern,
+    uint32_t rep_index);
 
 /** @brief Returns the exact OneHot/Sqrt STD128/STD192 coverage matrix. */
 std::vector<CoverageEntry> PreThresholdCoverageMatrix();

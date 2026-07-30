@@ -641,6 +641,20 @@ TEST(BFVContextPreThreshold, ReproducesNormalAndGrownMeasuredContracts) {
     }
 }
 
+TEST(BFVContextPreThreshold, ContextOnlyInitializationGeneratesNoKeys) {
+    PiccardParams params;
+    params.k = 128;
+    params.m = 64;
+    params.security = SecurityLevel::STD128;
+    CalibrationAccess::Derive(params);
+
+    BFVContext context(params);
+    ASSERT_NO_THROW(context.InitializeContextOnly());
+    EXPECT_TRUE(context.GetCryptoContext());
+    EXPECT_EQ(context.GetSlotCount(), 8192u);
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
 TEST(BFVContextPreThreshold, RejectsStaleOpenFHEVersionBeforeContextOrKeys) {
     MeasuredSelection measured = BuildMeasuredSelection(8192);
     measured.row.key.openfhe_version = "stale-openfhe";

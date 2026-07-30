@@ -1,5 +1,6 @@
 #include "noise_calibration_schema.h"
 
+#include "util/noise_profile_matrix.h"
 #include "util/params_calibration.h"
 #include "util/security_profile.h"
 
@@ -21,6 +22,9 @@
 
 #ifndef PICCARD_SOURCE_COMMIT
 #define PICCARD_SOURCE_COMMIT "unknown"
+#endif
+#ifndef PICCARD_OPENFHE_VERSION
+#define PICCARD_OPENFHE_VERSION "unknown"
 #endif
 
 namespace piccard {
@@ -203,8 +207,7 @@ bool SameCandidateContext(
                left.max_queries,
                left.query_stat_bits,
                left.coefficient_stat_bits,
-               left.flood_margin_bits,
-               left.flood_noise_bits) ==
+               left.flood_margin_bits) ==
                std::tie(
                    right.profile,
                    right.key_id,
@@ -227,8 +230,7 @@ bool SameCandidateContext(
                    right.max_queries,
                    right.query_stat_bits,
                    right.coefficient_stat_bits,
-                   right.flood_margin_bits,
-                   right.flood_noise_bits) &&
+                   right.flood_margin_bits) &&
            EffectiveOpenFHEVersion(left) ==
                EffectiveOpenFHEVersion(right) &&
            EffectiveSourceCommit(left) ==
@@ -320,6 +322,7 @@ std::string ConsumerResultsSha256(
 
 EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
     EvidenceOptions options;
+    options.command = args;
     options.pre_threshold =
         std::find(args.begin(), args.end(), "--pre_threshold") != args.end();
     if (!options.pre_threshold) {
@@ -330,7 +333,17 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
     bool saw_profile = false;
     bool saw_key_id = false;
     bool saw_circuit = false;
+    bool saw_shape_id = false;
     bool saw_security = false;
+    bool saw_requested_ring_dim = false;
+    bool saw_natural_depth = false;
+    bool saw_consumer_points = false;
+    bool saw_consumer_set_sha256 = false;
+    bool saw_openfhe_version = false;
+    bool saw_source_commit = false;
+    bool saw_aggregate_csv = false;
+    bool saw_detail_dir = false;
+    bool saw_candidate_manifest = false;
     bool saw_scaling_grid = false;
     bool saw_depth_delta = false;
     bool saw_ring_candidates = false;
@@ -352,6 +365,10 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
         }
         if (arg == "--smoke") {
             options.smoke = true;
+            continue;
+        }
+        if (arg == "--preflight_context") {
+            options.preflight_context = true;
             continue;
         }
 
@@ -377,10 +394,68 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
             saw_circuit = true;
             options.circuit = value;
         } else if (!(value = OptionValue(
+                         args, &index, "--shape_id")).empty()) {
+            Require(!saw_shape_id, "duplicate --shape_id");
+            saw_shape_id = true;
+            options.shape_id = value;
+        } else if (!(value = OptionValue(
                          args, &index, "--security")).empty()) {
             Require(!saw_security, "duplicate --security");
             saw_security = true;
             options.security = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--requested_ring_dim")).empty()) {
+            Require(
+                !saw_requested_ring_dim,
+                "duplicate --requested_ring_dim");
+            saw_requested_ring_dim = true;
+            options.requested_ring_dim =
+                ParseUint32(value, "--requested_ring_dim");
+        } else if (!(value = OptionValue(
+                         args, &index, "--natural_depth")).empty()) {
+            Require(!saw_natural_depth, "duplicate --natural_depth");
+            saw_natural_depth = true;
+            options.natural_depth =
+                ParseUint32(value, "--natural_depth");
+        } else if (!(value = OptionValue(
+                         args, &index, "--consumer_points")).empty()) {
+            Require(!saw_consumer_points, "duplicate --consumer_points");
+            saw_consumer_points = true;
+            options.consumer_points = ParseConsumerPoints(value);
+        } else if (!(value = OptionValue(
+                         args, &index, "--consumer_set_sha256")).empty()) {
+            Require(
+                !saw_consumer_set_sha256,
+                "duplicate --consumer_set_sha256");
+            saw_consumer_set_sha256 = true;
+            options.consumer_set_sha256 = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--openfhe_version")).empty()) {
+            Require(!saw_openfhe_version, "duplicate --openfhe_version");
+            saw_openfhe_version = true;
+            options.openfhe_version = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--source_commit")).empty()) {
+            Require(!saw_source_commit, "duplicate --source_commit");
+            saw_source_commit = true;
+            options.source_commit = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--aggregate_csv")).empty()) {
+            Require(!saw_aggregate_csv, "duplicate --aggregate_csv");
+            saw_aggregate_csv = true;
+            options.aggregate_csv = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--detail_dir")).empty()) {
+            Require(!saw_detail_dir, "duplicate --detail_dir");
+            saw_detail_dir = true;
+            options.detail_dir = value;
+        } else if (!(value = OptionValue(
+                         args, &index, "--candidate_manifest")).empty()) {
+            Require(
+                !saw_candidate_manifest,
+                "duplicate --candidate_manifest");
+            saw_candidate_manifest = true;
+            options.candidate_manifest = value;
         } else if (!(value = OptionValue(
                          args, &index, "--scaling_mod_grid")).empty()) {
             Require(!saw_scaling_grid, "duplicate --scaling_mod_grid");
@@ -466,6 +541,32 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
     Require(saw_reps, "--reps is required");
     Require(saw_seed, "--seed is required");
 
+    const bool strict_phase3 =
+        options.preflight_context || saw_consumer_points ||
+        saw_aggregate_csv || saw_detail_dir || saw_candidate_manifest;
+    if (strict_phase3) {
+        Require(saw_shape_id, "--shape_id is required");
+        Require(
+            saw_requested_ring_dim,
+            "--requested_ring_dim is required");
+        Require(saw_natural_depth, "--natural_depth is required");
+        Require(saw_consumer_points, "--consumer_points is required");
+        Require(
+            saw_consumer_set_sha256,
+            "--consumer_set_sha256 is required");
+        Require(
+            saw_openfhe_version,
+            "--openfhe_version is required");
+        Require(saw_source_commit, "--source_commit is required");
+        if (!options.preflight_context) {
+            Require(saw_aggregate_csv, "--aggregate_csv is required");
+            Require(saw_detail_dir, "--detail_dir is required");
+            Require(
+                saw_candidate_manifest,
+                "--candidate_manifest is required");
+        }
+    }
+
     Require(
         options.circuit == "onehot" || options.circuit == "sqrt",
         "--pre_threshold accepts only --circuit=onehot|sqrt");
@@ -503,6 +604,125 @@ std::vector<CoverageEntry> PreThresholdCoverageMatrix() {
         {"sqrt", "STD128"},
         {"sqrt", "STD192"},
     };
+}
+
+std::vector<noise_profile::ConsumerPoint> ParseConsumerPoints(
+    const std::string& text) {
+    if (text.empty()) {
+        throw std::invalid_argument("--consumer_points requires a value");
+    }
+    std::vector<noise_profile::ConsumerPoint> consumers;
+    size_t begin = 0;
+    while (begin <= text.size()) {
+        const size_t comma = text.find(',', begin);
+        const std::string token = text.substr(
+            begin,
+            comma == std::string::npos ? std::string::npos : comma - begin);
+        const size_t colon = token.find(':');
+        if (colon == std::string::npos ||
+            colon == 0 ||
+            colon + 1 == token.size() ||
+            token.find(':', colon + 1) != std::string::npos) {
+            throw std::invalid_argument(
+                "--consumer_points requires canonical k:m entries");
+        }
+        const noise_profile::ConsumerPoint consumer{
+            ParseUint32(token.substr(0, colon), "--consumer_points"),
+            ParseUint32(token.substr(colon + 1), "--consumer_points"),
+        };
+        if (consumer.k == 0 || consumer.m == 0) {
+            throw std::invalid_argument(
+                "--consumer_points values must be positive");
+        }
+        if (std::find(consumers.begin(), consumers.end(), consumer) !=
+            consumers.end()) {
+            throw std::invalid_argument(
+                "--consumer_points contains a duplicate");
+        }
+        consumers.push_back(consumer);
+        if (comma == std::string::npos) {
+            break;
+        }
+        begin = comma + 1;
+    }
+    if (!std::is_sorted(consumers.begin(), consumers.end())) {
+        throw std::invalid_argument(
+            "--consumer_points must be in canonical sorted order");
+    }
+    return consumers;
+}
+
+noise_profile::ProfilePartition ValidateEvidenceIdentity(
+    const EvidenceIdentity& identity,
+    const std::string& manifest_bytes) {
+    std::string expected_manifest =
+        noise_profile::CanonicalManifestJson();
+    const std::string sentinel = "runtime-source-commit";
+    const size_t source_position = expected_manifest.find(sentinel);
+    if (source_position == std::string::npos) {
+        throw std::logic_error(
+            "canonical profile manifest has no runtime source sentinel");
+    }
+    expected_manifest.replace(
+        source_position, sentinel.size(), identity.source_commit);
+    if (manifest_bytes != expected_manifest) {
+        throw std::invalid_argument(
+            "profile manifest is malformed, stale, or manually modified");
+    }
+    if (identity.source_commit != EmbeddedSourceCommit()) {
+        throw std::invalid_argument(
+            "evidence source commit does not match the compiled binary");
+    }
+    if (identity.openfhe_version != CurrentOpenFHEVersion()) {
+        throw std::invalid_argument(
+            "evidence OpenFHE version does not match the compiled binary");
+    }
+
+    const auto matrix = noise_profile::CompileMatrix(
+        CurrentOpenFHEVersion(), EmbeddedSourceCommit());
+    const auto found = std::find_if(
+        matrix.begin(),
+        matrix.end(),
+        [&](const noise_profile::ProfilePartition& partition) {
+            return partition.key_id == identity.key_id;
+        });
+    if (found == matrix.end()) {
+        throw std::invalid_argument("unknown evidence key_id");
+    }
+    const std::string expected_circuit =
+        noise_profile::CircuitName(found->circuit);
+    if (identity.profile_id != found->profile_id ||
+        identity.circuit != expected_circuit ||
+        identity.shape_id != found->shape_id ||
+        identity.security != found->security ||
+        identity.requested_ring_dim != found->requested_ring_dim ||
+        identity.natural_depth != found->natural_depth ||
+        identity.consumer_points != found->consumer_points ||
+        identity.consumer_set_sha256 != found->consumer_set_sha256 ||
+        identity.openfhe_version != found->openfhe_version) {
+        throw std::invalid_argument(
+            "evidence identity does not match the full logical key");
+    }
+    return *found;
+}
+
+uint64_t DeriveEvidenceSeed(
+    uint64_t root_seed,
+    const std::string& key_id,
+    const std::string& candidate_id,
+    uint32_t consumer_k,
+    uint32_t consumer_m,
+    const std::string& pattern,
+    uint32_t rep_index) {
+    std::ostringstream canonical;
+    canonical << root_seed << '\n'
+              << key_id << '\n'
+              << candidate_id << '\n'
+              << consumer_k << ':' << consumer_m << '\n'
+              << pattern << '\n'
+              << rep_index << '\n';
+    const std::string digest = Sha256Hex(canonical.str());
+    return std::stoull(digest.substr(0, 16), nullptr, 16);
 }
 
 const std::string& AggregateCsvHeader() {
@@ -841,7 +1061,7 @@ const char* StatusName(StatusCode status) {
 }
 
 std::string CurrentOpenFHEVersion() {
-    return GetOPENFHEVersion();
+    return PICCARD_OPENFHE_VERSION;
 }
 
 std::string EmbeddedSourceCommit() {
@@ -850,4 +1070,343 @@ std::string EmbeddedSourceCommit() {
 
 }  // namespace noise_calibration
 }  // namespace benchmark
+}  // namespace piccard
+
+namespace piccard {
+namespace noise_profile {
+namespace {
+
+using BaseKey = std::tuple<
+    std::string,
+    Circuit,
+    std::string,
+    std::string,
+    uint32_t,
+    uint32_t,
+    std::string>;
+
+std::string SecurityName(SecurityLevel security) {
+    switch (security) {
+        case SecurityLevel::STD128:
+            return "STD128";
+        case SecurityLevel::STD192:
+            return "STD192";
+        case SecurityLevel::TOY:
+            return "TOY";
+        case SecurityLevel::STD256:
+            return "STD256";
+    }
+    throw std::logic_error("unknown security level");
+}
+
+std::string JsonEscape(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '"':
+                out << "\\\"";
+                break;
+            case '\\':
+                out << "\\\\";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4)
+                        << std::setfill('0') << static_cast<unsigned int>(ch)
+                        << std::dec;
+                } else {
+                    out << static_cast<char>(ch);
+                }
+        }
+    }
+    return out.str();
+}
+
+std::string ConsumerSerialization(
+    const std::vector<ConsumerPoint>& consumers) {
+    std::ostringstream out;
+    for (const auto& consumer : consumers) {
+        out << consumer.k << ':' << consumer.m << '\n';
+    }
+    return out.str();
+}
+
+std::string FullKeySerialization(
+    const ProfilePartition& partition) {
+    std::ostringstream out;
+    out << partition.profile_id << '\n'
+        << CircuitName(partition.circuit) << '\n'
+        << partition.shape_id << '\n'
+        << partition.security << '\n'
+        << partition.requested_ring_dim << '\n'
+        << partition.natural_depth << '\n'
+        << partition.consumer_set_sha256 << '\n'
+        << partition.openfhe_version << '\n';
+    return out.str();
+}
+
+struct DerivedConsumer {
+    uint32_t requested_ring_dim;
+    uint32_t natural_depth;
+    std::string shape_id;
+};
+
+DerivedConsumer Derive(
+    Circuit circuit,
+    SecurityLevel security,
+    const ConsumerPoint& consumer) {
+    PiccardParams params;
+    params.k = consumer.k;
+    params.m = consumer.m;
+    params.security = security;
+    if (circuit == Circuit::Sqrt) {
+        CalibrationAccess::DeriveSqrt(params);
+    } else if (circuit == Circuit::OneHot) {
+        CalibrationAccess::Derive(params);
+    } else {
+        throw std::invalid_argument(
+            "noise profile matrix accepts only OneHot and Sqrt");
+    }
+    return {
+        params.ring_dim,
+        params.natural_mult_depth,
+        circuit == Circuit::OneHot
+            ? "onehot-v1"
+            : "sqrt-b" + std::to_string(params.sqrt_base) + "-v1",
+    };
+}
+
+void AddProfile(
+    std::map<BaseKey, std::vector<ConsumerPoint>>* grouped,
+    const std::string& profile_id,
+    Circuit circuit,
+    SecurityLevel security,
+    const std::vector<ConsumerPoint>& consumers,
+    const std::string& openfhe_version) {
+    for (const auto& consumer : consumers) {
+        const auto derived = Derive(circuit, security, consumer);
+        (*grouped)[{
+            profile_id,
+            circuit,
+            derived.shape_id,
+            SecurityName(security),
+            derived.requested_ring_dim,
+            derived.natural_depth,
+            openfhe_version,
+        }].push_back(consumer);
+    }
+}
+
+}  // namespace
+
+const char* CircuitName(Circuit circuit) {
+    switch (circuit) {
+        case Circuit::OneHot:
+            return "onehot";
+        case Circuit::Sqrt:
+            return "sqrt";
+        case Circuit::Threshold:
+            return "threshold";
+    }
+    return "unknown";
+}
+
+std::vector<ProfilePolicy> ProfilePolicies() {
+    return {
+        {"feasibility128", 128, UINT64_C(1) << 20, 8, 5, 4},
+        {"primary40", 40, UINT64_C(1) << 20, 8, 5, 2},
+        {"sensitivity64", 64, UINT64_C(1) << 20, 8, 5, 2},
+    };
+}
+
+std::vector<ConsumerPoint> PrimaryConsumerDeclarations(Circuit circuit) {
+    if (circuit != Circuit::OneHot && circuit != Circuit::Sqrt) {
+        throw std::invalid_argument(
+            "primary declarations accept only OneHot and Sqrt");
+    }
+    std::set<ConsumerPoint> canonical;
+    for (uint32_t k : kKSweep) {
+        canonical.insert({k, 64});
+    }
+    if (circuit == Circuit::OneHot) {
+        for (uint32_t m : kOneHotMSweep) {
+            canonical.insert({128, m});
+        }
+    } else {
+        for (uint32_t m : kSqrtMSweep) {
+            canonical.insert({128, m});
+        }
+    }
+    for (uint32_t k : kCrossoverK) {
+        for (uint32_t m : kCrossoverM) {
+            canonical.insert({k, m});
+        }
+    }
+    canonical.insert(kSqrtComparison.begin(), kSqrtComparison.end());
+    return {canonical.begin(), canonical.end()};
+}
+
+std::vector<ProfilePartition> CompileMatrix(
+    const std::string& openfhe_version,
+    const std::string& source_commit) {
+    if (openfhe_version.empty() || source_commit.empty()) {
+        throw std::invalid_argument(
+            "matrix provenance values must be non-empty");
+    }
+
+    std::map<BaseKey, std::vector<ConsumerPoint>> grouped;
+    for (SecurityLevel security :
+         {SecurityLevel::STD128, SecurityLevel::STD192}) {
+        AddProfile(
+            &grouped,
+            "primary40",
+            Circuit::OneHot,
+            security,
+            PrimaryConsumerDeclarations(Circuit::OneHot),
+            openfhe_version);
+        AddProfile(
+            &grouped,
+            "primary40",
+            Circuit::Sqrt,
+            security,
+            PrimaryConsumerDeclarations(Circuit::Sqrt),
+            openfhe_version);
+        AddProfile(
+            &grouped,
+            "sensitivity64",
+            Circuit::OneHot,
+            security,
+            {{128, 64}},
+            openfhe_version);
+        AddProfile(
+            &grouped,
+            "sensitivity64",
+            Circuit::Sqrt,
+            security,
+            {{128, 64}},
+            openfhe_version);
+        AddProfile(
+            &grouped,
+            "feasibility128",
+            Circuit::OneHot,
+            security,
+            {{128, 64}},
+            openfhe_version);
+    }
+
+    std::vector<ProfilePartition> matrix;
+    matrix.reserve(grouped.size());
+    for (auto& [key, consumers] : grouped) {
+        std::sort(consumers.begin(), consumers.end());
+        consumers.erase(
+            std::unique(consumers.begin(), consumers.end()),
+            consumers.end());
+        ProfilePartition partition;
+        partition.profile_id = std::get<0>(key);
+        partition.circuit = std::get<1>(key);
+        partition.shape_id = std::get<2>(key);
+        partition.security = std::get<3>(key);
+        partition.requested_ring_dim = std::get<4>(key);
+        partition.natural_depth = std::get<5>(key);
+        partition.openfhe_version = std::get<6>(key);
+        partition.consumer_points = std::move(consumers);
+        partition.consumer_set_sha256 =
+            benchmark::noise_calibration::Sha256Hex(
+                ConsumerSerialization(partition.consumer_points));
+        partition.candidate_count_cap =
+            partition.profile_id == "feasibility128" ? 147 : 98;
+        partition.key_id =
+            "key-" + benchmark::noise_calibration::Sha256Hex(
+                         FullKeySerialization(partition));
+        matrix.push_back(std::move(partition));
+    }
+    return matrix;
+}
+
+std::string CanonicalManifestJson() {
+    const std::string openfhe_version =
+        benchmark::noise_calibration::CurrentOpenFHEVersion();
+    const std::string source_commit = "runtime-source-commit";
+    const auto policies = ProfilePolicies();
+    const auto matrix = CompileMatrix(openfhe_version, source_commit);
+
+    std::ostringstream out;
+    out << "{\n"
+        << "  \"schema\":\"piccard-noise-profile-matrix\",\n"
+        << "  \"version\":1,\n"
+        << "  \"source_commit\":\"" << JsonEscape(source_commit) << "\",\n"
+        << "  \"openfhe_version\":\"" << JsonEscape(openfhe_version)
+        << "\",\n"
+        << "  \"root_seed\":20260729,\n"
+        << "  \"patterns\":[\"all_match\",\"no_match\",\"random\"],\n"
+        << "  \"search\":{\"scaling_mod_grid\":[40,45,50,52,54,58,60],"
+           "\"depth_delta_min\":0,\"depth_delta_max\":6,"
+           "\"absolute_ring_dim_cap\":1048576,"
+           "\"timeouts\":[[32768,2700],[65536,7200],[131072,21600],"
+           "[262144,43200],[1048576,86400]]},\n"
+        << "  \"profiles\":[\n";
+    for (size_t index = 0; index < policies.size(); ++index) {
+        const auto& policy = policies[index];
+        out << "    {\"profile_id\":\"" << policy.profile_id
+            << "\",\"transcript_stat_bits\":" << policy.transcript_stat_bits
+            << ",\"max_queries\":" << policy.max_queries
+            << ",\"flood_margin_bits\":" << policy.flood_margin_bits
+            << ",\"repetitions\":" << policy.repetitions
+            << ",\"max_ring_growth\":" << policy.max_ring_growth << "}";
+        out << (index + 1 == policies.size() ? "\n" : ",\n");
+    }
+    out << "  ],\n"
+        << "  \"partitions\":[\n";
+    for (size_t index = 0; index < matrix.size(); ++index) {
+        const auto& partition = matrix[index];
+        out << "    {\"key_id\":\"" << partition.key_id
+            << "\",\"profile_id\":\"" << partition.profile_id
+            << "\",\"circuit\":\"" << CircuitName(partition.circuit)
+            << "\",\"shape_id\":\"" << partition.shape_id
+            << "\",\"security\":\"" << partition.security
+            << "\",\"requested_ring_dim\":"
+            << partition.requested_ring_dim
+            << ",\"natural_depth\":" << partition.natural_depth
+            << ",\"consumer_set_sha256\":\""
+            << partition.consumer_set_sha256
+            << "\",\"openfhe_version\":\""
+            << JsonEscape(partition.openfhe_version)
+            << "\",\"candidate_count_cap\":"
+            << partition.candidate_count_cap
+            << ",\"consumer_points\":[";
+        for (size_t consumer_index = 0;
+             consumer_index < partition.consumer_points.size();
+             ++consumer_index) {
+            const auto& consumer =
+                partition.consumer_points[consumer_index];
+            out << "{\"k\":" << consumer.k << ",\"m\":" << consumer.m
+                << "}";
+            if (consumer_index + 1 != partition.consumer_points.size()) {
+                out << ',';
+            }
+        }
+        out << "]}";
+        out << (index + 1 == matrix.size() ? "\n" : ",\n");
+    }
+    out << "  ]\n"
+        << "}\n";
+    return out.str();
+}
+
+}  // namespace noise_profile
 }  // namespace piccard

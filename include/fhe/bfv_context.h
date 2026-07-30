@@ -13,6 +13,13 @@ class BFVContext {
 public:
     explicit BFVContext(const PiccardParams& params);
 
+    /**
+     * @brief Constructs and validates the OpenFHE context without keygen.
+     *
+     * This calibration-only seam performs no encryption or file I/O.
+     */
+    void InitializeContextOnly();
+
     void Initialize();
 
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>

@@ -1,15 +1,23 @@
 #include "noise_calibration_schema.h"
+#include "util/noise_profile_matrix.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <fstream>
+#include <functional>
+#include <iterator>
+#include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace nc = piccard::benchmark::noise_calibration;
+namespace npm = piccard::noise_profile;
 
 namespace {
 
@@ -335,6 +343,130 @@ TEST(NoiseEvidenceParser, RequiresEvidenceIdentityAndSearchInputs) {
     }
 }
 
+TEST(NoiseEvidenceParser, ParsesCanonicalConsumerPointsStrictly) {
+    EXPECT_EQ(
+        nc::ParseConsumerPoints("128:64,256:64"),
+        (std::vector<npm::ConsumerPoint>{{128, 64}, {256, 64}}));
+    for (const std::string malformed : {
+             "",
+             "128:64,",
+             "128",
+             "128:64:1",
+             "0:64",
+             "128:0",
+             "128:64,128:64",
+             "4294967296:64",
+         }) {
+        EXPECT_THROW(
+            nc::ParseConsumerPoints(malformed),
+            std::invalid_argument)
+            << malformed;
+    }
+}
+
+TEST(NoiseEvidenceParser, ValidatesTheCompleteManifestBoundLogicalKey) {
+    const auto matrix = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+    const auto partition = std::find_if(
+        matrix.begin(),
+        matrix.end(),
+        [](const npm::ProfilePartition& candidate) {
+            return candidate.profile_id == "sensitivity64" &&
+                   candidate.circuit == piccard::Circuit::OneHot &&
+                   candidate.security == "STD128";
+        });
+    ASSERT_NE(partition, matrix.end());
+
+    nc::EvidenceIdentity identity;
+    identity.profile_id = partition->profile_id;
+    identity.key_id = partition->key_id;
+    identity.circuit = "onehot";
+    identity.shape_id = partition->shape_id;
+    identity.security = partition->security;
+    identity.requested_ring_dim = partition->requested_ring_dim;
+    identity.natural_depth = partition->natural_depth;
+    identity.consumer_points = partition->consumer_points;
+    identity.consumer_set_sha256 = partition->consumer_set_sha256;
+    identity.openfhe_version = partition->openfhe_version;
+    identity.source_commit = nc::EmbeddedSourceCommit();
+    std::string resolved_manifest = npm::CanonicalManifestJson();
+    const std::string sentinel = "runtime-source-commit";
+    const size_t source_position = resolved_manifest.find(sentinel);
+    ASSERT_NE(source_position, std::string::npos);
+    resolved_manifest.replace(
+        source_position, sentinel.size(), nc::EmbeddedSourceCommit());
+
+    EXPECT_EQ(
+        nc::ValidateEvidenceIdentity(
+            identity, resolved_manifest),
+        *partition);
+
+    const std::vector<std::function<void(nc::EvidenceIdentity&)>> mutations = {
+        [](nc::EvidenceIdentity& value) { value.key_id += "x"; },
+        [](nc::EvidenceIdentity& value) { value.source_commit[0] = '0'; },
+        [](nc::EvidenceIdentity& value) {
+            value.openfhe_version = "stale";
+        },
+        [](nc::EvidenceIdentity& value) { value.requested_ring_dim *= 2; },
+        [](nc::EvidenceIdentity& value) {
+            value.consumer_set_sha256[0] =
+                value.consumer_set_sha256[0] == '0' ? '1' : '0';
+        },
+    };
+    for (const auto& mutate : mutations) {
+        auto changed = identity;
+        mutate(changed);
+        EXPECT_THROW(
+            nc::ValidateEvidenceIdentity(
+                changed, resolved_manifest),
+            std::invalid_argument);
+    }
+    EXPECT_THROW(
+        nc::ValidateEvidenceIdentity(identity, "{malformed"),
+        std::invalid_argument);
+}
+
+TEST(NoiseCalibrationSchema, DerivesPerRowSeedsFromTheFullRowIdentity) {
+    const uint64_t first = nc::DeriveEvidenceSeed(
+        20260729,
+        "key-a",
+        "N8192-d1-s40",
+        128,
+        64,
+        "random",
+        0);
+    EXPECT_EQ(
+        first,
+        nc::DeriveEvidenceSeed(
+            20260729,
+            "key-a",
+            "N8192-d1-s40",
+            128,
+            64,
+            "random",
+            0));
+    EXPECT_NE(
+        first,
+        nc::DeriveEvidenceSeed(
+            20260729,
+            "key-a",
+            "N8192-d1-s40",
+            128,
+            64,
+            "random",
+            1));
+    EXPECT_NE(
+        first,
+        nc::DeriveEvidenceSeed(
+            20260729,
+            "key-a",
+            "N8192-d1-s40",
+            256,
+            64,
+            "random",
+            0));
+}
+
 TEST(NoiseCoverage, PreThresholdMatrixContainsOnlyRevisionPairs) {
     const auto matrix = nc::PreThresholdCoverageMatrix();
     ASSERT_EQ(matrix.size(), 4u);
@@ -562,6 +694,14 @@ TEST(NoiseCalibrationSchema, RejectsMixedCandidateContextOrProvenance) {
         std::invalid_argument);
 }
 
+TEST(NoiseCalibrationSchema, AllowsPerRowFloodNoiseToTrackMeasuredNoise) {
+    auto details = CompleteDetails();
+    details[0].flood_noise_bits =
+        *details[0].flood_noise_bits + 1u;
+    EXPECT_NO_THROW(
+        nc::ReduceCandidate(AggregateTemplate(), details, 40));
+}
+
 TEST(NoiseCalibrationSchema, AppliesCanonicalFailurePrecedence) {
     auto details = CompleteDetails();
     details[0].status_code = nc::StatusCode::Saturated;
@@ -643,4 +783,165 @@ TEST(NoiseCalibrationSchema, UsesBuildProvenanceRatherThanPlaceholders) {
             return (ch >= '0' && ch <= '9') ||
                    (ch >= 'a' && ch <= 'f');
         }));
+}
+
+TEST(NoiseProfileMatrix, PrimaryConsumersPartitionExactlyOncePerSecurity) {
+    const auto matrix = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+
+    for (piccard::Circuit circuit :
+         {piccard::Circuit::OneHot, piccard::Circuit::Sqrt}) {
+        std::set<std::pair<uint32_t, uint32_t>> declared;
+        for (uint32_t k : {16u, 32u, 64u, 128u, 256u, 512u}) {
+            declared.insert({k, 64});
+        }
+        const std::vector<uint32_t> m_sweep =
+            circuit == piccard::Circuit::OneHot
+                ? std::vector<uint32_t>{16, 32, 64, 128, 256}
+                : std::vector<uint32_t>{4, 16, 64, 256};
+        for (uint32_t m : m_sweep) {
+            declared.insert({128, m});
+        }
+        for (uint32_t k : {32u, 64u, 128u, 256u, 512u}) {
+            for (uint32_t m : {4u, 16u, 64u, 256u, 1024u}) {
+                declared.insert({k, m});
+            }
+        }
+        for (const auto& consumer :
+             std::set<std::pair<uint32_t, uint32_t>>{
+                 {128, 64}, {256, 64}, {512, 64}, {1024, 64},
+                 {128, 256}, {128, 1024}}) {
+            declared.insert(consumer);
+        }
+        for (const std::string security : {"STD128", "STD192"}) {
+            std::map<std::pair<uint32_t, uint32_t>, uint32_t> seen;
+            for (const auto& partition : matrix) {
+                if (partition.profile_id != "primary40" ||
+                    partition.circuit != circuit ||
+                    partition.security != security) {
+                    continue;
+                }
+                for (const auto& consumer : partition.consumer_points) {
+                    ++seen[{consumer.k, consumer.m}];
+                }
+            }
+            ASSERT_EQ(seen.size(), declared.size());
+            for (const auto& consumer : declared) {
+                EXPECT_EQ(seen[consumer], 1u);
+            }
+        }
+    }
+}
+
+TEST(NoiseProfileMatrix, DerivesRequestedRingDepthAndShapeFromProductionLogic) {
+    const auto matrix = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+
+    auto onehot_partition_for = [&](uint32_t k, uint32_t m)
+        -> const npm::ProfilePartition& {
+        for (const auto& partition : matrix) {
+            if (partition.profile_id != "primary40" ||
+                partition.circuit != piccard::Circuit::OneHot ||
+                partition.security != "STD128") {
+                continue;
+            }
+            if (std::find(
+                    partition.consumer_points.begin(),
+                    partition.consumer_points.end(),
+                    npm::ConsumerPoint{k, m}) !=
+                partition.consumer_points.end()) {
+                return partition;
+            }
+        }
+        throw std::runtime_error("missing OneHot partition");
+    };
+
+    for (uint32_t k : {16u, 32u, 64u, 128u}) {
+        const auto& partition = onehot_partition_for(k, 64);
+        EXPECT_EQ(partition.requested_ring_dim, 8192u);
+        EXPECT_EQ(partition.natural_depth, 1u);
+        EXPECT_EQ(partition.shape_id, "onehot-v1");
+    }
+    EXPECT_EQ(onehot_partition_for(256, 64).requested_ring_dim, 16384u);
+    EXPECT_EQ(onehot_partition_for(512, 64).requested_ring_dim, 32768u);
+
+    std::set<std::string> sqrt_shapes;
+    for (const auto& partition : matrix) {
+        if (partition.profile_id == "primary40" &&
+            partition.circuit == piccard::Circuit::Sqrt) {
+            EXPECT_EQ(partition.natural_depth, 3u);
+            sqrt_shapes.insert(partition.shape_id);
+        }
+    }
+    EXPECT_GT(sqrt_shapes.size(), 1u);
+    EXPECT_TRUE(sqrt_shapes.count("sqrt-b2-v1"));
+    EXPECT_TRUE(sqrt_shapes.count("sqrt-b32-v1"));
+}
+
+TEST(NoiseProfileMatrix, SpecialProfilesHaveOnlyExactSingletonKeys) {
+    const auto matrix = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+    uint32_t sensitivity = 0;
+    uint32_t feasibility = 0;
+    for (const auto& partition : matrix) {
+        EXPECT_NE(partition.security, "TOY");
+        EXPECT_NE(partition.security, "STD256");
+        EXPECT_NE(partition.circuit, piccard::Circuit::Threshold);
+        if (partition.profile_id == "sensitivity64") {
+            ++sensitivity;
+            ASSERT_EQ(partition.consumer_points.size(), 1u);
+            EXPECT_EQ(partition.consumer_points.front(),
+                      (npm::ConsumerPoint{128, 64}));
+        } else if (partition.profile_id == "feasibility128") {
+            ++feasibility;
+            EXPECT_EQ(partition.circuit, piccard::Circuit::OneHot);
+            ASSERT_EQ(partition.consumer_points.size(), 1u);
+            EXPECT_EQ(partition.consumer_points.front(),
+                      (npm::ConsumerPoint{128, 64}));
+        }
+    }
+    EXPECT_EQ(sensitivity, 4u);
+    EXPECT_EQ(feasibility, 2u);
+}
+
+TEST(NoiseProfileMatrix, ConsumerOrderHashAndManifestAreDeterministicGoldens) {
+    const auto first = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+    const auto second = npm::CompileMatrix(
+        nc::CurrentOpenFHEVersion(), nc::EmbeddedSourceCommit());
+    ASSERT_EQ(first, second);
+
+    for (const auto& partition : first) {
+        EXPECT_TRUE(std::is_sorted(
+            partition.consumer_points.begin(),
+            partition.consumer_points.end()));
+        std::string serialized;
+        for (const auto& consumer : partition.consumer_points) {
+            serialized += std::to_string(consumer.k) + ":" +
+                          std::to_string(consumer.m) + "\n";
+        }
+        EXPECT_EQ(partition.consumer_set_sha256, nc::Sha256Hex(serialized));
+    }
+
+    const std::string generated = npm::CanonicalManifestJson();
+    EXPECT_EQ(generated, npm::CanonicalManifestJson());
+    ASSERT_FALSE(generated.empty());
+    EXPECT_EQ(generated.back(), '\n');
+
+    std::ifstream tracked(
+        std::string(PICCARD_SOURCE_DIR) + "/scripts/noise_profiles.json",
+        std::ios::binary);
+    ASSERT_TRUE(tracked.is_open());
+    const std::string tracked_bytes{
+        std::istreambuf_iterator<char>(tracked),
+        std::istreambuf_iterator<char>()};
+    EXPECT_EQ(generated, tracked_bytes);
+}
+
+TEST(NoiseProfileMatrix, TrackedManifestUsesRuntimeSourceSentinel) {
+    const std::string manifest = npm::CanonicalManifestJson();
+    EXPECT_NE(
+        manifest.find("\"source_commit\":\"runtime-source-commit\""),
+        std::string::npos);
+    EXPECT_EQ(manifest.find(nc::EmbeddedSourceCommit()), std::string::npos);
 }

@@ -112,6 +112,7 @@ if(OpenFHE_FOUND)
         piccard_noise_calibration_schema
         PRIVATE
             OPENFHE_VERSION=${BASE_OPENFHE_VERSION}
+            PICCARD_OPENFHE_VERSION="${BASE_OPENFHE_VERSION}"
             PICCARD_SOURCE_COMMIT="${PICCARD_SOURCE_COMMIT}"
     )
     target_link_libraries(
@@ -475,6 +476,10 @@ if(BUILD_TESTS)
                 test_noise_calibration_schema
                 PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
             )
+            target_compile_definitions(
+                test_noise_calibration_schema
+                PRIVATE PICCARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+            )
             add_test(
                 NAME NoiseCalibrationSchema
                 COMMAND test_noise_calibration_schema
@@ -543,6 +548,10 @@ if(BUILD_TESTS)
     add_test(NAME SanitizerRunnerForwarding
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_sanitizer_runner_forwarding
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME NoiseProfileRunner
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_noise_profiles
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

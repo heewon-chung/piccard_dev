@@ -112,7 +112,10 @@ uint32_t BFVContext::RequiredFloodBudgetBits() const {
     return static_cast<uint32_t>(required);
 }
 
-void BFVContext::Initialize() {
+void BFVContext::InitializeContextOnly() {
+    if (cc_) {
+        throw std::logic_error("BFV context was already initialized");
+    }
     const PreThresholdCalibrationRow* measured_row = nullptr;
     if (params_.UsesPreThresholdCalibration()) {
         measured_row = &params_.SelectedPreThresholdCalibration();
@@ -247,6 +250,11 @@ void BFVContext::Initialize() {
                 "include/util/noise_calibration.inc.");
         }
     }
+
+}
+
+void BFVContext::Initialize() {
+    InitializeContextOnly();
 
     cc_->Enable(lbcrypto::PKE);
     cc_->Enable(lbcrypto::KEYSWITCH);
