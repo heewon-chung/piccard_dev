@@ -653,6 +653,59 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
     return {};
 }
 
+using OpenFHEContextImpl =
+    lbcrypto::CryptoContextImpl<lbcrypto::DCRTPoly>;
+using OpenFHEContextFactory =
+    lbcrypto::CryptoContextFactory<lbcrypto::DCRTPoly>;
+
+struct OpenFHEStaticStateCounts {
+    size_t mult = 0;
+    size_t automorphism = 0;
+    size_t contexts = 0;
+
+    bool IsEmpty() const {
+        return mult == 0 && automorphism == 0 && contexts == 0;
+    }
+    bool operator==(const OpenFHEStaticStateCounts& other) const {
+        return mult == other.mult &&
+               automorphism == other.automorphism &&
+               contexts == other.contexts;
+    }
+};
+
+static OpenFHEStaticStateCounts GetOpenFHEStaticStateCounts() {
+    return {
+        OpenFHEContextImpl::GetAllEvalMultKeys().size(),
+        OpenFHEContextImpl::GetAllEvalAutomorphismKeys().size(),
+        static_cast<size_t>(OpenFHEContextFactory::GetContextCount()),
+    };
+}
+
+static void ClearStrictMeasurementOpenFHEState() noexcept {
+    try { OpenFHEContextImpl::ClearEvalMultKeys(); } catch (...) {}
+    try { OpenFHEContextImpl::ClearEvalAutomorphismKeys(); } catch (...) {}
+    try { OpenFHEContextFactory::ReleaseAllContexts(); } catch (...) {}
+}
+
+class StrictMeasurementOpenFHECleanup final {
+public:
+    StrictMeasurementOpenFHECleanup() = default;
+    StrictMeasurementOpenFHECleanup(
+        const StrictMeasurementOpenFHECleanup&) = delete;
+    StrictMeasurementOpenFHECleanup& operator=(
+        const StrictMeasurementOpenFHECleanup&) = delete;
+    ~StrictMeasurementOpenFHECleanup() noexcept {
+        ClearStrictMeasurementOpenFHEState();
+    }
+};
+
+template <typename Measurement>
+static auto RunWithStrictMeasurementCleanup(Measurement&& measurement)
+    -> decltype(std::forward<Measurement>(measurement)()) {
+    StrictMeasurementOpenFHECleanup cleanup;
+    return std::forward<Measurement>(measurement)();
+}
+
 static uint32_t DiscoverNaturalRingDimension(
     Circuit circuit,
     SecurityLevel security,
@@ -1276,19 +1329,22 @@ static int RunStrictEvidence(
                                     consumer.m,
                                     pattern_name,
                                     rep);
-                            const auto measured = RunOne(
-                                circuit,
-                                security,
-                                consumer.k,
-                                consumer.m,
-                                depth_delta,
-                                scaling_mod_size,
-                                {pattern},
-                                rep_seed,
-                                1,
-                                natural_ring_dim,
-                                true,
-                                calibrated_ring_dim);
+                            const auto measured =
+                                RunWithStrictMeasurementCleanup([&] {
+                                    return RunOne(
+                                        circuit,
+                                        security,
+                                        consumer.k,
+                                        consumer.m,
+                                        depth_delta,
+                                        scaling_mod_size,
+                                        {pattern},
+                                        rep_seed,
+                                        1,
+                                        natural_ring_dim,
+                                        true,
+                                        calibrated_ring_dim);
+                                });
                             details.push_back(ToDetailRow(
                                 options,
                                 candidate_id,
@@ -1422,6 +1478,99 @@ static int RunStrictEvidence(
     return 0;
 }
 
+static void RequireProbe(bool condition, const char* message) {
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
+static int RunStrictCleanupProbe() {
+    ClearStrictMeasurementOpenFHEState();
+    RequireProbe(
+        GetOpenFHEStaticStateCounts().IsEmpty(),
+        "OpenFHE static state was not empty after initial cleanup");
+
+    constexpr uint32_t probe_k = 16;
+    constexpr uint32_t probe_m = 8;
+    const uint32_t probe_ring_dim = std::max(
+        NextPowerOf2(probe_k * probe_m),
+        MinRingDimForSecurity(SecurityLevel::TOY));
+    RequireProbe(probe_ring_dim == 1024,
+                 "unexpected TOY probe ring dimension");
+
+    for (uint32_t iteration = 0; iteration < 3; ++iteration) {
+        const OpenFHEStaticStateCounts before =
+            GetOpenFHEStaticStateCounts();
+        RequireProbe(before.IsEmpty(),
+                     "OpenFHE static state was not empty before wrapper");
+
+        bool caught_expected_unwind = false;
+        try {
+            const auto rows = RunWithStrictMeasurementCleanup([&] {
+                auto measured = RunOne(
+                    Circuit::OneHot,
+                    SecurityLevel::TOY,
+                    probe_k,
+                    probe_m,
+                    0,
+                    0,
+                    {Pattern::AllMatch},
+                    20260729 + iteration,
+                    1,
+                    probe_ring_dim,
+                    true,
+                    probe_ring_dim);
+                const OpenFHEStaticStateCounts inside =
+                    GetOpenFHEStaticStateCounts();
+                RequireProbe(inside.mult > before.mult,
+                             "eval-multiplication keys were not populated");
+                RequireProbe(
+                    inside.automorphism > before.automorphism,
+                    "eval-automorphism keys were not populated");
+                RequireProbe(inside.contexts > before.contexts,
+                             "context registry was not populated");
+                if (iteration == 2) {
+                    throw std::runtime_error("probe unwind");
+                }
+                return measured;
+            });
+
+            RequireProbe(iteration != 2,
+                         "exceptional probe did not unwind");
+            RequireProbe(
+                rows.size() == 1,
+                "normal probe did not return exactly one row");
+            RequireProbe(rows.front().ok, "normal probe row failed");
+            RequireProbe(
+                rows.front().decrypt_ok,
+                "normal probe row did not decrypt");
+            RequireProbe(
+                rows.front().pre_threshold_evidence,
+                "normal probe did not use strict evidence parameters");
+        } catch (const std::runtime_error& error) {
+            if (iteration != 2 ||
+                std::string(error.what()) != "probe unwind") {
+                throw;
+            }
+            caught_expected_unwind = true;
+        }
+
+        if (iteration == 2) {
+            RequireProbe(caught_expected_unwind,
+                         "exceptional probe did not catch expected unwind");
+        }
+        const OpenFHEStaticStateCounts after =
+            GetOpenFHEStaticStateCounts();
+        RequireProbe(after == before,
+                     "OpenFHE static state changed across wrapper");
+        RequireProbe(after.IsEmpty(),
+                     "OpenFHE static state was not empty after wrapper");
+    }
+
+    std::cout << "strict cleanup probe passed: iterations=3\n";
+    return 0;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1466,6 +1615,16 @@ int main(int argc, char** argv) {
     raw_args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
     for (int index = 1; index < argc; ++index) {
         raw_args.emplace_back(argv[index]);
+    }
+    if (raw_args.size() == 1 &&
+        raw_args.front() == "--strict_cleanup_probe") {
+        try {
+            return RunStrictCleanupProbe();
+        } catch (const std::exception& error) {
+            std::cerr << "strict cleanup probe failed: "
+                      << error.what() << '\n';
+            return 1;
+        }
     }
     if (raw_args.size() == 1 &&
         raw_args.front() == "--print_profile_manifest") {

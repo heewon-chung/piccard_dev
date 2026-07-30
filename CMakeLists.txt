@@ -722,6 +722,18 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     target_include_directories(bench_noise PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
     if(BUILD_TESTS)
         add_test(
+            NAME NoiseStrictMeasurementCleanup
+            COMMAND bench_noise --strict_cleanup_probe
+        )
+        set_tests_properties(
+            NoiseStrictMeasurementCleanup
+            PROPERTIES
+                FAIL_REGULAR_EXPRESSION "strict cleanup probe failed"
+                PASS_REGULAR_EXPRESSION
+                    "strict cleanup probe passed: iterations=3"
+                TIMEOUT 60
+        )
+        add_test(
             NAME NoisePreThresholdCoverage
             COMMAND bench_noise --coverage --pre_threshold
         )
