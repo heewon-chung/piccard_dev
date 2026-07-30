@@ -166,6 +166,55 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+option(BUILD_TESTS "Build unit and integration tests" ON)
+if(BUILD_TESTS)
+    # Work 3 Phase 4: compile the frozen params.cpp in both current and
+    # staged-v2 table modes. The v2 object intentionally does not link
+    # piccard_core because that library contains the current-mode params.cpp.
+    add_executable(
+        noise_calibration_cutover_probe_current
+        tests/fixtures/noise_calibration_cutover_probe.cpp
+    )
+    target_link_libraries(
+        noise_calibration_cutover_probe_current
+        PRIVATE piccard_core
+    )
+
+    add_library(
+        piccard_params_calibration_v2_fixture
+        OBJECT src/util/params.cpp
+    )
+    target_compile_definitions(
+        piccard_params_calibration_v2_fixture
+        PRIVATE
+            PICCARD_NOISE_CALIBRATION_FILE=\"scripts/templates/noise_calibration_wrapper.inc\"
+            PICCARD_PRE_THRESHOLD_CALIBRATION_ROWS_FILE=\"tests/fixtures/noise_calibration_pre_threshold_rows.inc\"
+    )
+    target_include_directories(
+        piccard_params_calibration_v2_fixture
+        PRIVATE
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/include
+    )
+
+    add_executable(
+        noise_calibration_cutover_probe_v2
+        tests/fixtures/noise_calibration_cutover_probe.cpp
+        src/util/params_calibration.cpp
+        $<TARGET_OBJECTS:piccard_params_calibration_v2_fixture>
+    )
+    target_compile_definitions(
+        noise_calibration_cutover_probe_v2
+        PRIVATE PICCARD_PRE_THRESHOLD_CALIBRATION_V2=1
+    )
+    target_link_libraries(
+        noise_calibration_cutover_probe_v2
+        PRIVATE
+            OpenSSL::Crypto
+            piccard_security_profile
+    )
+endif()
+
 add_library(
     piccard_estimator_diagnostic
     benchmarks/estimator_diagnostic.cpp
@@ -254,10 +303,16 @@ endif()
 # Tests
 # =============================================================================
 
-option(BUILD_TESTS "Build unit and integration tests" ON)
-
 if(BUILD_TESTS)
     enable_testing()
+    add_test(
+        NAME NoiseCalibrationCutoverProbeCurrent
+        COMMAND noise_calibration_cutover_probe_current
+    )
+    add_test(
+        NAME NoiseCalibrationCutoverProbeV2
+        COMMAND noise_calibration_cutover_probe_v2
+    )
     find_package(GTest QUIET)
 
     if(GTest_FOUND)
@@ -552,6 +607,18 @@ if(BUILD_TESTS)
     add_test(NAME NoiseProfileRunner
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_noise_profiles
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME CalibrationTableGenerator
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_make_calibration_table
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME CalibrationCutover
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_apply_calibration_cutover
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME CalibrationArchive
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_make_calibration_archive
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

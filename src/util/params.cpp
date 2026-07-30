@@ -3,11 +3,13 @@
 #include "util/params_calibration.h"
 #include "util/security_profile.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace piccard {
 
@@ -61,6 +63,139 @@ const char* CircuitName(Circuit c) {
 constexpr uint32_t kThresholdLegacyCoefficientBits = 64;
 
 } // namespace
+
+LegacyCalibrationTableCoverage InspectLegacyCalibrationTableCoverage() {
+    LegacyCalibrationTableCoverage result{0, 0, 0, 0, 0, {}};
+    std::vector<
+        std::tuple<Circuit, SecurityLevel, uint32_t, uint32_t>
+    > keys;
+    const auto record = [&](Circuit circuit, SecurityLevel security,
+                            uint32_t requested, uint32_t depth) {
+            ++result.rows;
+            if (security == SecurityLevel::TOY) {
+                ++result.toy_rows;
+            }
+            if (circuit == Circuit::Threshold) {
+                ++result.threshold_rows;
+            }
+            if (
+                security != SecurityLevel::TOY
+                && circuit != Circuit::Threshold
+            ) {
+                ++result.invalid_role_rows;
+            }
+            const auto key = std::make_tuple(
+                circuit, security, requested, depth);
+            if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+                keys.push_back(key);
+            }
+    };
+#ifdef PICCARD_PRE_THRESHOLD_CALIBRATION_V2
+    ForEachNoiseCalibrationCandidate(
+        [&](const NoiseCalibrationCandidateView& candidate) {
+            if (candidate.expanded == nullptr) {
+                record(
+                    candidate.circuit,
+                    candidate.security,
+                    candidate.ring_dim_requested,
+                    candidate.natural_mult_depth);
+            }
+        });
+#else
+    for (const auto& row : kNoiseCalibration) {
+        if (
+            row.security == SecurityLevel::TOY
+            || row.circuit == Circuit::Threshold
+        ) {
+            record(
+                row.circuit, row.security, row.ring_dim_requested,
+                row.natural_mult_depth);
+        }
+    }
+#endif
+    result.distinct_selection_keys = static_cast<uint32_t>(keys.size());
+    for (const auto& key : keys) {
+        result.selection_keys.push_back(LegacyCalibrationSelectionKey{
+            std::get<0>(key),
+            std::get<1>(key),
+            std::get<2>(key),
+            std::get<3>(key),
+        });
+    }
+    return result;
+}
+
+PreThresholdTableCoverage InspectPreThresholdCalibrationCoverage(
+    const std::vector<PreThresholdCalibrationRequest>& required,
+    const std::vector<PreThresholdCalibrationRequest>& accepted_infeasible) {
+#ifdef PICCARD_PRE_THRESHOLD_CALIBRATION_V2
+    PreThresholdTableCoverage result{
+        true,
+        static_cast<uint32_t>(required.size()),
+        0,
+        0,
+        0,
+        {},
+    };
+    ForEachNoiseCalibrationCandidate(
+        [&](const NoiseCalibrationCandidateView& candidate) {
+            if (candidate.expanded == nullptr) return;
+            const auto& key = candidate.expanded->key;
+            bool duplicate = false;
+            for (const auto& prior : result.selected_keys) {
+                if (prior == key) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) result.selected_keys.push_back(key);
+        });
+    for (const auto& key : required) {
+        bool selected = false;
+        for (const auto& present : result.selected_keys) {
+            if (present == key) {
+                selected = true;
+                break;
+            }
+        }
+        if (selected) {
+            ++result.selected;
+            continue;
+        }
+        bool infeasible = false;
+        for (const auto& accepted : accepted_infeasible) {
+            if (accepted == key) {
+                infeasible = true;
+                break;
+            }
+        }
+        if (infeasible) {
+            ++result.infeasible;
+        } else {
+            ++result.missing_required;
+        }
+    }
+    return result;
+#else
+    (void)required;
+    (void)accepted_infeasible;
+    return PreThresholdTableCoverage{false, 0, 0, 0, 0, {}};
+#endif
+}
+
+std::vector<PreThresholdCalibrationRow>
+InspectPreThresholdCalibrationRows() {
+    std::vector<PreThresholdCalibrationRow> rows;
+#ifdef PICCARD_PRE_THRESHOLD_CALIBRATION_V2
+    ForEachNoiseCalibrationCandidate(
+        [&](const NoiseCalibrationCandidateView& candidate) {
+            if (candidate.expanded != nullptr) {
+                rows.push_back(*candidate.expanded);
+            }
+        });
+#endif
+    return rows;
+}
 
 uint32_t NextPowerOf2(uint32_t n) {
     if (n <= 1) return 1;
@@ -319,6 +454,39 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
     bool key_exists = false;
     double best_capacity = -std::numeric_limits<double>::infinity();
     std::string best_infeasible;
+
+#ifdef PICCARD_PRE_THRESHOLD_CALIBRATION_V2
+    if (circuit != Circuit::Threshold &&
+        (security == SecurityLevel::STD128 ||
+         security == SecurityLevel::STD192)) {
+        std::vector<PreThresholdCalibrationRow> candidates;
+        const std::string expected_shape =
+            circuit == Circuit::OneHot
+                ? "onehot-v1"
+                : "sqrt-b" + std::to_string(sqrt_base) + "-v1";
+        ForEachNoiseCalibrationCandidate(
+            [&](const NoiseCalibrationCandidateView& candidate) {
+                if (candidate.expanded == nullptr) return;
+                const auto& row = *candidate.expanded;
+                if (row.key.circuit != circuit ||
+                    row.key.shape_id != expected_shape ||
+                    row.key.security != security ||
+                    row.key.requested_ring_dim != ring_dim ||
+                    row.key.natural_depth != natural_depth ||
+                    row.transcript_stat_bits != transcript_stat_bits ||
+                    row.max_queries != max_queries ||
+                    row.flood_margin_bits != flood_margin_bits) {
+                    return;
+                }
+                candidates.push_back(row);
+            });
+        if (!candidates.empty()) {
+            *this = SelectPreThresholdCalibration(
+                *this, candidates.front().key, candidates);
+            return;
+        }
+    }
+#endif
 
     // Threshold remains an exact private coefficient-level compatibility path
     // until its separate branch. It does not claim transcript-level assurance.

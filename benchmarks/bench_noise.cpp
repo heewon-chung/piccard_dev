@@ -967,14 +967,44 @@ static int ReportCoverage() {
 }
 
 static int ReportPreThresholdCoverage() {
-    const auto matrix =
-        piccard::benchmark::noise_calibration::PreThresholdCoverageMatrix();
-    std::cout << "pre-threshold coverage matrix: " << matrix.size()
-              << " circuit/security pair(s)\n";
-    for (const auto& entry : matrix) {
-        std::cout << "  " << entry.circuit << " " << entry.security << "\n";
+    const auto matrix = piccard::noise_profile::CompileMatrix(
+        piccard::benchmark::noise_calibration::CurrentOpenFHEVersion(),
+        piccard::benchmark::noise_calibration::EmbeddedSourceCommit());
+    std::vector<PreThresholdCalibrationRequest> required;
+    std::vector<PreThresholdCalibrationRequest> accepted_infeasible;
+    required.reserve(matrix.size());
+    for (const auto& partition : matrix) {
+        const SecurityLevel security =
+            partition.security == "STD192"
+                ? SecurityLevel::STD192
+                : SecurityLevel::STD128;
+        PreThresholdCalibrationRequest request{
+            partition.profile_id,
+            partition.circuit,
+            partition.shape_id,
+            security,
+            partition.requested_ring_dim,
+            partition.natural_depth,
+            partition.consumer_set_sha256,
+            partition.openfhe_version,
+        };
+        required.push_back(request);
+        if (partition.profile_id == "feasibility128") {
+            accepted_infeasible.push_back(request);
+        }
     }
-    return 0;
+    const auto coverage = InspectPreThresholdCalibrationCoverage(
+        required, accepted_infeasible);
+    if (!coverage.active) {
+        std::cout << "V2 table coverage inactive; current calibration table "
+                     "remains authoritative\n";
+        return 0;
+    }
+    std::cout << "V2 table coverage required=" << coverage.required
+              << " selected=" << coverage.selected
+              << " infeasible=" << coverage.infeasible
+              << " missing=" << coverage.missing_required << "\n";
+    return coverage.missing_required == 0 ? 0 : 1;
 }
 
 static std::string ReadBytes(const std::string& path) {

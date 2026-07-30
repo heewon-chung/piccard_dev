@@ -72,6 +72,49 @@ struct PreThresholdProfilePolicy {
     uint32_t maximum_ring_growth;
 };
 
+/** @brief Read-only summary of the compiled schema-v2 calibration table. */
+struct PreThresholdTableCoverage {
+    bool active;
+    uint32_t required;
+    uint32_t selected;
+    uint32_t infeasible;
+    uint32_t missing_required;
+    std::vector<PreThresholdCalibrationRequest> selected_keys;
+};
+
+/** @brief Exhaustive topology summary for the frozen legacy table. */
+struct LegacyCalibrationSelectionKey {
+    Circuit circuit;
+    SecurityLevel security;
+    uint32_t requested_ring_dim;
+    uint32_t natural_depth;
+};
+
+struct LegacyCalibrationTableCoverage {
+    uint32_t rows;
+    uint32_t distinct_selection_keys;
+    uint32_t toy_rows;
+    uint32_t threshold_rows;
+    uint32_t invalid_role_rows;
+    std::vector<LegacyCalibrationSelectionKey> selection_keys;
+};
+
+LegacyCalibrationTableCoverage InspectLegacyCalibrationTableCoverage();
+
+/**
+ * @brief Compares the compiled expanded table with canonical required keys.
+ *
+ * Current/legacy builds return `active=false`. Schema-v2 builds count an
+ * explicitly accepted infeasible key separately from missing required keys.
+ */
+PreThresholdTableCoverage InspectPreThresholdCalibrationCoverage(
+    const std::vector<PreThresholdCalibrationRequest>& required,
+    const std::vector<PreThresholdCalibrationRequest>& accepted_infeasible);
+
+/** @brief Returns the compiled schema-v2 rows for read-only cutover probes. */
+std::vector<PreThresholdCalibrationRow>
+InspectPreThresholdCalibrationRows();
+
 /**
  * @brief Resolves one of the three canonical pre-threshold profile policies.
  *

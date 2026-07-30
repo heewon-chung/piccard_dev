@@ -140,7 +140,6 @@ bool IsCompleteMatchingFeasibleRow(
         row.scaling_mod_size == 0 ||
         row.num_limbs == 0 ||
         row.plaintext_mod == 0 ||
-        row.plaintext_mod != profile.plaintext_mod ||
         row.ct_bytes == 0 ||
         !std::isfinite(row.log_q) ||
         !std::isfinite(row.log_delta) ||
@@ -444,6 +443,7 @@ PiccardParams SelectPreThresholdCalibration(
     profile.coefficient_stat_bits_ = selected->coefficient_stat_bits;
     profile.flood_noise_bits_ = selected->flood_noise_bits;
     profile.selected_log2_q_over_t_ = selected->log_delta;
+    profile.plaintext_mod = selected->plaintext_mod;
     profile.selected_circuit_ = request.circuit;
     profile.selected_pre_threshold_calibration_ =
         std::make_shared<const PreThresholdCalibrationRow>(*selected);

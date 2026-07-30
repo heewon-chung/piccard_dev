@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -17,7 +18,7 @@ MATRIX = REPO / "scripts" / "noise_profiles.json"
 
 
 FAKE_BENCH = r"""#!/usr/bin/env python3
-import csv, hashlib, json, os, pathlib, signal, sys, time
+import csv, hashlib, json, math, os, pathlib, signal, sys, time
 
 args = sys.argv[1:]
 value = lambda name, default="": next(
@@ -81,6 +82,12 @@ if "--preflight_context" in args:
 
 if mode == "measurement_hang":
     hang()
+if mode == "replace_binary":
+    benchmark_path = pathlib.Path(os.environ["FAKE_BENCH_PATH"])
+    replacement = benchmark_path.with_name(benchmark_path.name + ".replacement")
+    replacement.write_bytes(benchmark_path.read_bytes() + b"\n# replaced\n")
+    replacement.chmod(0o755)
+    replacement.replace(benchmark_path)
 if mode == "crash":
     raise RuntimeError("fake crash")
 if mode == "signal":
@@ -124,6 +131,30 @@ candidate_manifest_path = pathlib.Path(value("--candidate_manifest"))
 
 candidates = []
 aggregate_rows = []
+
+def is_prime(number):
+    if number < 2:
+        return False
+    if number < 4:
+        return True
+    if number % 2 == 0 or number % 3 == 0:
+        return False
+    divisor = 5
+    while divisor * divisor <= number:
+        if number % divisor == 0 or number % (divisor + 2) == 0:
+            return False
+        divisor += 6
+    return True
+
+def plaintext_modulus(ring):
+    multiplier = 1
+    largest_k = max(k for k, _ in consumers)
+    while 1 + 2 * ring * multiplier <= largest_k:
+        multiplier += 1
+    while not is_prime(1 + 2 * ring * multiplier):
+        multiplier += 1
+    return 1 + 2 * ring * multiplier
+
 for ring in rings:
     for delta in range(max_delta + 1):
         for sms in sms_values:
@@ -147,12 +178,38 @@ for ring in rings:
                             str(partition["natural_depth"]),
                             str(partition["natural_depth"] + delta), str(sms),
                         ]
+                        finalization_no_numeric = (
+                            mode == "finalization"
+                            and partition["profile_id"] == "feasibility128"
+                            and partition["security"] == "STD192"
+                        )
                         row_status = (
                             "CONTEXT_ERROR" if mode == "infeasible" else
                             "PROCESS_ERROR" if mode == "detail_error" else
                             "PARAMETER_GENERATION_FAILED"
                             if mode == "undeclared_status" else "OK"
                         )
+                        if mode == "finalization" and not finalization_no_numeric:
+                            plaintext = plaintext_modulus(ring)
+                            log_q = 300.0
+                            log_delta = log_q - math.log2(plaintext)
+                            eval_noise = 40.25
+                            query_bits = int(value("--transcript_stat_bits")) + (
+                                int(value("--max_queries")) - 1).bit_length()
+                            coefficient_bits = query_bits + (ring - 1).bit_length()
+                            flood_bits = (
+                                math.ceil(eval_noise) + coefficient_bits
+                                + int(value("--margin"))
+                            )
+                            fields[19:30] = [
+                                "6", str(plaintext), str(log_q),
+                                format(log_delta, ".17g"),
+                                str(eval_noise),
+                                format(log_delta - eval_noise, ".17g"),
+                                value("--max_queries"), str(query_bits),
+                                str(coefficient_bits), value("--margin"),
+                                str(flood_bits),
+                            ]
                         fields[30:37] = [
                             "1", "0", "4096", manifest["openfhe_version"],
                             manifest["source_commit"], row_status, "",
@@ -180,10 +237,25 @@ for ring in rings:
             ]
             aggregate_status = (
                 "OK" if mode == "detail_error" else row_status)
-            consumer_canonical = "".join(
-                f"{k},{m},,,1,0,4096,{row_status}\n"
-                for k, m in sorted(consumers)
-            )
+            if mode == "finalization" and not finalization_no_numeric:
+                numeric = rows[0]
+                ordered_consumers = sorted(consumers)
+                fields[6:8] = [
+                    str(ordered_consumers[0][0]),
+                    str(ordered_consumers[0][1]),
+                ]
+                fields[21:32] = numeric[19:30]
+                consumer_canonical = "".join(
+                    f"{k},{m},{format(float(numeric[23]), '.17g')},"
+                    f"{format(float(numeric[24]), '.17g')},1,0,4096,"
+                    f"{row_status}\n"
+                    for k, m in ordered_consumers
+                )
+            else:
+                consumer_canonical = "".join(
+                    f"{k},{m},,,1,0,4096,{row_status}\n"
+                    for k, m in sorted(consumers)
+                )
             consumer_hash = hashlib.sha256(
                 consumer_canonical.encode()).hexdigest()
             fields[32:40] = [
@@ -275,6 +347,7 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["FAKE_SIGNAL_LOG"] = str(self.signal_log)
         self.env["FAKE_BENCH_IMPL"] = str(self.fake_impl)
+        self.env["FAKE_BENCH_PATH"] = str(self.fake)
         self.ready_dir = self.root / "ready"
         self.ready_dir.mkdir()
         self.env["PICCARD_TEST_READY_DIR"] = str(self.ready_dir)
@@ -310,7 +383,98 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             env=env,
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=60 if mode == "finalization" else 10,
+        )
+
+    def build_finalizable_root(self):
+        roots = {}
+        for profile in (
+            "primary40", "sensitivity64", "feasibility128"
+        ):
+            profile_root = self.root / ("full-" + profile)
+            result = self.run_runner(
+                f"--profile={profile}",
+                f"--results-root={profile_root}",
+                mode="finalization",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            roots[profile] = profile_root
+        combined = roots["primary40"]
+        run_path = combined / "run_manifest.json"
+        run = json.loads(run_path.read_text())
+        run["source_tree_dirty"] = False
+        run_path.write_text(
+            json.dumps(run, sort_keys=True, separators=(",", ":")) + "\n")
+        for profile in ("sensitivity64", "feasibility128"):
+            source = roots[profile] / "profiles" / profile
+            destination = combined / "profiles" / profile
+            shutil.copytree(source, destination)
+            shard_hashes = {}
+            for shard in sorted(destination.glob("key-*")):
+                candidate_path = shard / "candidates.json"
+                candidate = json.loads(candidate_path.read_text())
+                candidate["run_nonce"] = run["run_nonce"]
+                candidate["benchmark_sha256"] = run["benchmark_sha256"]
+                candidate["command"] = [
+                    argument.replace(
+                        str(roots[profile]), str(combined))
+                    for argument in candidate["command"]
+                ]
+                candidate_path.write_text(
+                    json.dumps(
+                        candidate, sort_keys=True, separators=(",", ":"))
+                    + "\n")
+                shard_path = shard / "shard_manifest.json"
+                shard_value = json.loads(shard_path.read_text())
+                shard_value["run_nonce"] = run["run_nonce"]
+                shard_value["benchmark_sha256"] = run["benchmark_sha256"]
+                for field in ("measurement_command", "executed_command"):
+                    shard_value[field] = [
+                        argument.replace(
+                            str(roots[profile]), str(combined))
+                        for argument in shard_value[field]
+                    ]
+                shard_value["files"]["candidates.json"] = hashlib.sha256(
+                    candidate_path.read_bytes()).hexdigest()
+                shard_path.write_text(
+                    json.dumps(
+                        shard_value, sort_keys=True, separators=(",", ":"))
+                    + "\n")
+                shard_hashes[shard.name] = hashlib.sha256(
+                    shard_path.read_bytes()).hexdigest()
+            profile_path = destination / "profile_manifest.json"
+            profile_value = json.loads(profile_path.read_text())
+            profile_value["shard_manifest_sha256"] = shard_hashes
+            profile_path.write_text(
+                json.dumps(
+                    profile_value, sort_keys=True, separators=(",", ":"))
+                + "\n")
+            seal_path = destination / "completion_seal.json"
+            seal = json.loads(seal_path.read_text())
+            seal["run_nonce"] = run["run_nonce"]
+            seal["profile_manifest_sha256"] = hashlib.sha256(
+                profile_path.read_bytes()).hexdigest()
+            seal["shard_manifest_sha256"] = shard_hashes
+            seal_path.chmod(0o644)
+            seal_path.write_text(
+                json.dumps(seal, sort_keys=True, separators=(",", ":"))
+                + "\n")
+            seal_path.chmod(0o444)
+        return combined
+
+    def run_finalize(self, result_root, final_dir, *extra):
+        return subprocess.run(
+            [
+                str(RUNNER),
+                f"--results-root={result_root}",
+                f"--finalize-dir={final_dir}",
+                *extra,
+            ],
+            cwd=REPO,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=120,
         )
 
     def smoke_args(self, result_root):
@@ -552,6 +716,57 @@ class NoiseProfileRunnerTest(unittest.TestCase):
              "profile_manifest.json").read_text())
         self.assertEqual(profile["profile_verdict"], "FAIL_INCOMPLETE")
 
+    def test_timeout_and_process_error_shards_resume_to_completion(self):
+        for mode in ("measurement_hang", "crash"):
+            with self.subTest(mode=mode):
+                result_root = self.root / ("recover-" + mode)
+                failed = self.run_runner(
+                    *self.smoke_args(result_root), mode=mode)
+                self.assertEqual(failed.returncode, 2)
+                resumed = self.run_runner(
+                    "--profile=sensitivity64", "--smoke", "--resume",
+                    f"--results-root={result_root}",
+                )
+                self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                profile = json.loads(
+                    (result_root / "profiles" / "sensitivity64" /
+                     "profile_manifest.json").read_text())
+                self.assertEqual(profile["profile_verdict"], "PASS")
+                self.assertEqual(len(profile["key_verdicts"]), 4)
+
+    def test_resume_recovers_when_interrupted_before_profile_receipt(self):
+        result_root = self.root / "missing-receipt"
+        first = self.run_runner(*self.smoke_args(result_root))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        profile_dir = result_root / "profiles" / "sensitivity64"
+        run = json.loads((result_root / "run_manifest.json").read_text())
+        interrupted_key = sorted(profile_dir.glob("key-*"))[0]
+        key_id = interrupted_key.name
+        shutil.rmtree(interrupted_key)
+        staged = profile_dir / (
+            "." + key_id
+            + ".piccard-shard-v1.tmp-" + run["run_nonce"])
+        staged.mkdir()
+        (staged / ".piccard-shard-owner.json").write_text(
+            json.dumps({
+                "key_id": key_id,
+                "profile_id": "sensitivity64",
+                "run_nonce": run["run_nonce"],
+                "schema": "piccard-shard-owner",
+                "version": 1,
+            }, sort_keys=True, separators=(",", ":")) + "\n")
+        (staged / "partial").write_text("interrupted\n")
+        (profile_dir / "profile_manifest.json").unlink()
+        (profile_dir / "completion_seal.json").unlink()
+        resumed = self.run_runner(
+            "--profile=sensitivity64", "--smoke", "--resume",
+            f"--results-root={result_root}",
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(resumed.stdout.count("SKIP "), 3)
+        self.assertFalse(staged.exists())
+        self.assertEqual(len(list(profile_dir.glob("key-*"))), 4)
+
     def test_process_failures_never_disappear(self):
         for mode in (
             "crash",
@@ -574,6 +789,31 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(len(rows[1]), 40)
                 self.assertEqual(rows[1][37], "PROCESS_ERROR")
+
+    def test_binary_replacement_is_detected_and_shards_bind_run_identity(self):
+        original_benchmark = self.fake.read_bytes()
+        replaced_root = self.root / "binary-replaced"
+        replaced = self.run_runner(
+            *self.smoke_args(replaced_root), mode="replace_binary")
+        self.assertEqual(replaced.returncode, 2)
+        self.assertIn("benchmark", replaced.stderr.lower())
+
+        # Restore the fixture benchmark, then prove successful shard evidence
+        # carries both immutable run bindings.
+        self.fake.write_bytes(original_benchmark)
+        self.fake.chmod(0o755)
+        bound_root = self.root / "binary-bound"
+        completed = self.run_runner(*self.smoke_args(bound_root))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run = json.loads((bound_root / "run_manifest.json").read_text())
+        shard_dir = next(
+            (bound_root / "profiles" / "sensitivity64").glob("key-*"))
+        shard = json.loads((shard_dir / "shard_manifest.json").read_text())
+        candidate = json.loads((shard_dir / "candidates.json").read_text())
+        for value in (shard, candidate):
+            self.assertEqual(value["run_nonce"], run["run_nonce"])
+            self.assertEqual(
+                value["benchmark_sha256"], run["benchmark_sha256"])
 
     def test_root_and_timing_overrides_fail_closed(self):
         relative = self.run_runner(
@@ -981,6 +1221,121 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                     f"--results-root={root}")
                 self.assertEqual(resumed.returncode, 2)
                 self.assertIn("reduction", resumed.stderr.lower())
+
+    def test_finalization_is_deterministic_atomic_and_immutable(self):
+        result_root = self.build_finalizable_root()
+        first = self.root / "finalized-a"
+        second = self.root / "finalized-b"
+        finalized = self.run_finalize(result_root, first)
+        self.assertEqual(finalized.returncode, 0, finalized.stderr)
+        repeated = self.run_finalize(result_root, second)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(
+            sorted(path.name for path in first.iterdir()),
+            ["manifest.json", "selected-shards.tar.zst"],
+        )
+        self.assertEqual(
+            (first / "manifest.json").read_bytes(),
+            (second / "manifest.json").read_bytes(),
+        )
+        self.assertEqual(
+            (first / "selected-shards.tar.zst").read_bytes(),
+            (second / "selected-shards.tar.zst").read_bytes(),
+        )
+        combined = json.loads((first / "manifest.json").read_text())
+        infeasible = next(
+            key for key in combined["keys"]
+            if key["frontier_verdict"] == "INFEASIBLE"
+        )
+        self.assertEqual(
+            infeasible["measurement_key_verdict"], "SELECTED")
+        self.assertEqual(
+            infeasible["infeasibility"]["reason"],
+            "NO_COMPLETE_NUMERIC_OK_CANDIDATE",
+        )
+        self.assertTrue(all(
+            infeasible["infeasibility"][field] is None
+            for field in (
+                "shortfall_bits", "best_candidate_id",
+                "best_measured_eval_noise_bits",
+                "required_capacity_bits", "log_delta",
+            )
+        ))
+        immutable = self.run_finalize(result_root, first)
+        self.assertNotEqual(immutable.returncode, 0)
+        self.assertIn("final directory", immutable.stderr.lower())
+
+        missing_profile = result_root / "profiles" / "feasibility128"
+        saved_profile = result_root / "profiles" / ".saved-feasibility128"
+        missing_profile.rename(saved_profile)
+        failed = self.root / "failed-missing-profile"
+        missing = self.run_finalize(result_root, failed)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("profile", missing.stderr.lower())
+        self.assertFalse(failed.exists())
+        saved_profile.rename(missing_profile)
+
+        detail = next(result_root.rglob("details/*.csv"))
+        saved_detail = detail.with_suffix(".saved")
+        detail.rename(saved_detail)
+        corrupt = self.root / "failed-shard"
+        mismatch = self.run_finalize(result_root, corrupt)
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("shard", mismatch.stderr.lower())
+        self.assertFalse(corrupt.exists())
+        saved_detail.rename(detail)
+
+        blocked = self.root / "blocked-final"
+        sibling = blocked.with_name(
+            "." + blocked.name + ".piccard-finalize-v1.tmp-unowned")
+        sibling.mkdir()
+        (sibling / ".piccard-finalize-owner.json").write_text("{}\n")
+        collision = self.run_finalize(result_root, blocked)
+        self.assertNotEqual(collision.returncode, 0)
+        self.assertIn("owned", collision.stderr.lower())
+        self.assertFalse(blocked.exists())
+        self.assertEqual(
+            (sibling / ".piccard-finalize-owner.json").read_text(), "{}\n")
+
+    def test_finalization_never_removes_owned_marker_with_wrong_temp_name(self):
+        result_root = self.build_finalizable_root()
+        final_dir = self.root / "owned-name-probe"
+        run = json.loads((result_root / "run_manifest.json").read_text())
+        wrong = final_dir.with_name(
+            "." + final_dir.name
+            + ".piccard-finalize-v1.tmp-wrong-suffix")
+        wrong.mkdir()
+        owner = {
+            "final_dir_realpath": str(final_dir.resolve(strict=False)),
+            "results_root_realpath": str(result_root.resolve(strict=True)),
+            "run_nonce": run["run_nonce"],
+            "schema": "piccard-finalize-owner",
+            "version": 1,
+        }
+        (wrong / ".piccard-finalize-owner.json").write_text(
+            json.dumps(owner, sort_keys=True, separators=(",", ":")) + "\n")
+        sentinel = wrong / "sentinel"
+        sentinel.write_text("must survive\n")
+        result = self.run_finalize(result_root, final_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(final_dir.exists())
+        self.assertEqual(sentinel.read_text(), "must survive\n")
+
+    def test_finalization_cli_is_exclusive_and_removed_modes_are_unknown(self):
+        result_root = self.root / "unused-results"
+        final_dir = self.root / "unused-final"
+        for extra in (
+            "--profile=primary40",
+            "--resume",
+            "--smoke",
+            f"--bench-noise={self.fake}",
+            "--finalize-manifest=legacy.json",
+            "--archive=legacy.tar.zst",
+        ):
+            with self.subTest(extra=extra):
+                result = self.run_finalize(
+                    result_root, final_dir, extra)
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

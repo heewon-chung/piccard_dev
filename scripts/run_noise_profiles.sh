@@ -5,13 +5,16 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 exec python3 - "$SCRIPT_DIR" "$@" <<'PY'
 import csv
 import hashlib
+import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import shutil
 import signal
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,6 +59,17 @@ def sha256_bytes(data):
 
 def sha256_file(path):
     return sha256_bytes(path.read_bytes())
+
+
+def verify_benchmark_binary(path, expected_sha256):
+    try:
+        info = path.lstat()
+    except FileNotFoundError as error:
+        raise ValueError("benchmark binary disappeared") from error
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise ValueError("benchmark binary is not a direct regular file")
+    if sha256_file(path) != expected_sha256:
+        raise ValueError("benchmark binary SHA changed during the run")
 
 
 def atomic_json(path, value):
@@ -109,11 +123,13 @@ def parse_cli(arguments):
         "resume": False,
         "bench_noise": None,
         "smoke": False,
+        "finalize_dir": None,
     }
     names = {
         "--results-root": "results_root",
         "--profile": "profile",
         "--bench-noise": "bench_noise",
+        "--finalize-dir": "finalize_dir",
     }
     index = 0
     while index < len(arguments):
@@ -151,6 +167,18 @@ def parse_cli(arguments):
             if not matched:
                 fail("unknown runner argument: " + argument)
         index += 1
+    if result["finalize_dir"] is not None:
+        if (
+            result["results_root"] is None
+            or result["profile"] is not None
+            or result["resume"]
+            or result["bench_noise"] is not None
+            or result["smoke"]
+        ):
+            fail(
+                "--finalize-dir requires only one --results-root and "
+                "cannot be mixed with execution options")
+        return result
     if result["profile"] not in {
         "primary40", "sensitivity64", "feasibility128"
     }:
@@ -370,6 +398,8 @@ def expected_identity(partition, source_commit):
         "consumer_set_sha256": partition["consumer_set_sha256"],
         "source_commit": source_commit,
         "openfhe_version": matrix["openfhe_version"],
+        "run_nonce": runtime_run_nonce,
+        "benchmark_sha256": runtime_benchmark_sha256,
     }
 
 
@@ -428,7 +458,9 @@ def validate_command(
         raise ValueError("candidate command missing/unknown/extra option")
     for key, value in expected.items():
         if values.get(key) != value:
-            raise ValueError("candidate command mismatch for " + key)
+            raise ValueError(
+                "candidate command mismatch for " + key + ": "
+                + repr(values.get(key)) + " != " + repr(value))
 
 
 def validate_shard(shard, partition, parent_digest):
@@ -848,11 +880,16 @@ def write_failure_atomic(
         "schema": "piccard-shard-manifest",
         "version": 1,
         "key_id": partition["key_id"],
+        "profile_id": partition["profile_id"],
         "status": "INCOMPLETE",
         "key_verdict": "INCOMPLETE",
         "candidate_count": 0,
         "smoke_only": smoke,
         "table_eligible": False,
+        "source_commit": runtime_source_commit,
+        "openfhe_version": matrix["openfhe_version"],
+        "run_nonce": runtime_run_nonce,
+        "benchmark_sha256": runtime_benchmark_sha256,
         "files": {
             "aggregate.csv": sha256_file(temporary / "aggregate.csv"),
             "failure.json": sha256_file(temporary / "failure.json"),
@@ -867,9 +904,660 @@ def write_failure_atomic(
     )
 
 
+INCOMPLETE_SHARD_FIELDS = {
+    "schema", "version", "key_id", "profile_id", "status", "key_verdict",
+    "candidate_count", "smoke_only", "table_eligible", "source_commit",
+    "openfhe_version", "run_nonce", "benchmark_sha256", "files",
+}
+
+
+def validate_incomplete_shard(shard, partition):
+    info = shard.lstat()
+    if shard.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("incomplete shard is not a direct real directory")
+    manifest = load_json_exact(
+        shard / "shard_manifest.json",
+        INCOMPLETE_SHARD_FIELDS,
+        "incomplete shard manifest",
+    )
+    expected = expected_identity(partition, runtime_source_commit)
+    identity_fields = (
+        "key_id", "profile_id", "source_commit", "openfhe_version",
+        "run_nonce", "benchmark_sha256",
+    )
+    if (
+        manifest["schema"] != "piccard-shard-manifest"
+        or manifest["version"] != 1
+        or manifest["status"] != "INCOMPLETE"
+        or manifest["key_verdict"] != "INCOMPLETE"
+        or manifest["candidate_count"] != 0
+        or manifest["smoke_only"] != options["smoke"]
+        or manifest["table_eligible"] is not False
+        or any(manifest[field] != expected[field] for field in identity_fields)
+        or set(manifest["files"]) != {"aggregate.csv", "failure.json"}
+    ):
+        raise ValueError("incomplete shard identity/schema mismatch")
+    for relative, digest in manifest["files"].items():
+        path = shard / relative
+        if not path.is_file() or path.is_symlink() or sha256_file(path) != digest:
+            raise ValueError("incomplete shard payload hash mismatch")
+    if {path.name for path in shard.iterdir()} != {
+        "aggregate.csv", "failure.json", "shard_manifest.json"
+    }:
+        raise ValueError("incomplete shard payload topology mismatch")
+
+
+def validate_owned_shard_temporary(path, profile_dir, partition):
+    expected_name = (
+        "." + partition["key_id"]
+        + ".piccard-shard-v1.tmp-" + runtime_run_nonce
+    )
+    if path.parent != profile_dir or path.name != expected_name:
+        raise ValueError("unowned shard temporary basename")
+    info = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("unowned shard temporary")
+    marker = path / ".piccard-shard-owner.json"
+    marker_info = marker.lstat()
+    if (
+        marker.is_symlink()
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_nlink != 1
+    ):
+        raise ValueError("unowned shard temporary marker")
+    expected = {
+        "key_id": partition["key_id"],
+        "profile_id": partition["profile_id"],
+        "run_nonce": runtime_run_nonce,
+        "schema": "piccard-shard-owner",
+        "version": 1,
+    }
+    data = marker.read_bytes()
+    rendered = (
+        json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if data != rendered:
+        raise ValueError("unowned shard temporary marker")
+
+
+RUN_MANIFEST_FIELDS = {
+    "schema", "version", "source_commit", "git_head",
+    "source_tree_dirty", "openfhe_version", "matrix_sha256",
+    "resolved_matrix_sha256", "benchmark_sha256", "command_policy",
+    "python_version", "platform", "smoke_only", "table_eligible",
+    "run_nonce",
+}
+PROFILE_MANIFEST_FIELDS = {
+    "schema", "version", "profile_id", "key_count", "key_verdicts",
+    "profile_verdict", "source_commit", "openfhe_version", "smoke_only",
+    "table_eligible", "shard_manifest_sha256",
+}
+SEAL_FIELDS = {
+    "schema", "version", "run_nonce", "profile_id",
+    "profile_manifest_sha256", "shard_manifest_sha256",
+}
+SHARD_MANIFEST_FIELDS = {
+    "schema", "version", "key_id", "profile_id", "status",
+    "key_verdict", "candidate_count", "expected_detail_rows",
+    "natural_ring_dim", "largest_candidate_ring_dim", "timeout_seconds",
+    "measurement_command", "executed_command", "circuit", "shape_id",
+    "security", "requested_ring_dim", "natural_depth", "consumer_points",
+    "consumer_set_sha256", "source_commit", "openfhe_version",
+    "run_nonce", "benchmark_sha256",
+    "ring_candidates", "scaling_mod_grid", "max_depth_delta",
+    "repetitions", "smoke_only", "table_eligible", "files",
+}
+CANDIDATE_MANIFEST_FIELDS = {
+    "schema", "version", "key_id", "source_commit", "openfhe_version",
+    "profile_id", "circuit", "shape_id", "security",
+    "requested_ring_dim", "natural_depth", "consumer_points",
+    "consumer_set_sha256", "command", "candidate_count", "candidates",
+    "run_nonce", "benchmark_sha256",
+}
+CANDIDATE_RECEIPT_FIELDS = {
+    "candidate_id", "status_code", "detail_sha256", "detail_row_count",
+}
+
+
+def load_json_exact(path, fields, label):
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(label + " is missing or non-regular")
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(label + " schema mismatch")
+    return value
+
+
+def numeric_field(row, name, *, integer=False):
+    value = row.get(name, "")
+    if value == "":
+        raise ValueError("unavailable numeric candidate field " + name)
+    try:
+        parsed = int(value) if integer else float(value)
+    except ValueError as error:
+        raise ValueError("malformed numeric candidate field " + name) from error
+    if (
+        isinstance(parsed, float) and not math.isfinite(parsed)
+    ) or parsed <= 0:
+        raise ValueError("non-positive numeric candidate field " + name)
+    return parsed
+
+
+def finalized_candidate(row, shard, shard_path):
+    if (
+        row["status_code"] != "OK"
+        or row["decrypt_ok"] != "1"
+        or row["saturated"] != "0"
+        or row["pattern_count"] != "3"
+        or int(row["repetitions_per_pattern"]) < 5
+    ):
+        return None
+    required_numeric_fields = (
+        "natural_ring_dim", "ring_dim_calibrated", "provisioned_depth",
+        "scaling_mod_size", "num_limbs", "plaintext_mod", "log_q",
+        "log_delta", "eval_noise_bits", "ct_bytes", "max_queries",
+        "query_stat_bits", "coefficient_stat_bits", "flood_margin_bits",
+        "flood_noise_bits", "pattern_count", "repetitions_per_pattern",
+        "detail_row_count",
+    )
+    if any(row.get(field, "") == "" for field in required_numeric_fields):
+        return None
+    measured = numeric_field(row, "eval_noise_bits")
+    compiled = math.ceil(measured)
+    if compiled <= 0 or compiled > 0xFFFFFFFF:
+        raise ValueError("compiled eval-noise uint32 conversion failed")
+    candidate_id = (
+        f"N{row['ring_dim_calibrated']}-d"
+        f"{row['provisioned_depth']}-s{row['scaling_mod_size']}")
+    record = {
+        "candidate_id": candidate_id,
+        "natural_ring_dim":
+            numeric_field(row, "natural_ring_dim", integer=True),
+        "ring_dim_calibrated":
+            numeric_field(row, "ring_dim_calibrated", integer=True),
+        "provisioned_depth":
+            numeric_field(row, "provisioned_depth", integer=True),
+        "scaling_mod_size":
+            numeric_field(row, "scaling_mod_size", integer=True),
+        "num_limbs": numeric_field(row, "num_limbs", integer=True),
+        "plaintext_mod":
+            numeric_field(row, "plaintext_mod", integer=True),
+        "log_q": numeric_field(row, "log_q"),
+        "log_delta": numeric_field(row, "log_delta"),
+        "measured_eval_noise_bits": measured,
+        "eval_noise_bits": compiled,
+        "ct_bytes": numeric_field(row, "ct_bytes", integer=True),
+        "transcript_stat_bits": policy["transcript_stat_bits"],
+        "max_queries": numeric_field(row, "max_queries", integer=True),
+        "query_stat_bits":
+            numeric_field(row, "query_stat_bits", integer=True),
+        "coefficient_stat_bits":
+            numeric_field(row, "coefficient_stat_bits", integer=True),
+        "flood_margin_bits":
+            numeric_field(row, "flood_margin_bits", integer=True),
+        "flood_noise_bits":
+            numeric_field(row, "flood_noise_bits", integer=True),
+        "pattern_count": numeric_field(row, "pattern_count", integer=True),
+        "repetitions_per_pattern":
+            numeric_field(row, "repetitions_per_pattern", integer=True),
+        "detail_row_count":
+            numeric_field(row, "detail_row_count", integer=True),
+        "detail_sha256": row["detail_sha256"],
+        "consumer_results_sha256": row["consumer_results_sha256"],
+        "aggregate_csv_sha256":
+            sha256_file(shard_path / "aggregate.csv"),
+        "candidate_manifest_sha256":
+            sha256_file(shard_path / "candidates.json"),
+        "shard_manifest_sha256":
+            sha256_file(shard_path / "shard_manifest.json"),
+    }
+    if (
+        abs(
+            record["log_delta"]
+            - (
+                record["log_q"]
+                - math.log2(record["plaintext_mod"])
+            )
+        )
+        > 1e-6
+    ):
+        raise ValueError("candidate log_delta mismatch")
+    required = record["flood_noise_bits"] + 2
+    record["_required_capacity_bits"] = required
+    record["_feasible"] = required <= record["log_delta"]
+    return record
+
+
+def choose_frontier(rows, shard, shard_path):
+    candidates = []
+    for row in rows:
+        candidate = finalized_candidate(row, shard, shard_path)
+        if candidate is not None:
+            candidates.append(candidate)
+    feasible = [candidate for candidate in candidates if candidate["_feasible"]]
+    if feasible:
+        by_cost = {}
+        for candidate in feasible:
+            cost = (
+                candidate["ring_dim_calibrated"],
+                candidate["log_q"],
+                candidate["ct_bytes"],
+                candidate["provisioned_depth"],
+                candidate["scaling_mod_size"],
+            )
+            public = {
+                key: value for key, value in candidate.items()
+                if not key.startswith("_")
+            }
+            if cost in by_cost and by_cost[cost] != public:
+                raise ValueError("conflicting equal-cost frontier candidates")
+            by_cost[cost] = public
+        return min(by_cost.items(), key=lambda item: item[0])[1], None
+    if candidates:
+        best = min(
+            candidates,
+            key=lambda candidate:
+                candidate["_required_capacity_bits"]
+                - candidate["log_delta"],
+        )
+        shortfall = (
+            best["_required_capacity_bits"] - best["log_delta"])
+        return None, {
+            "shortfall_bits": shortfall,
+            "reason": "INSUFFICIENT_CAPACITY",
+            "best_candidate_id": best["candidate_id"],
+            "best_measured_eval_noise_bits":
+                best["measured_eval_noise_bits"],
+            "required_capacity_bits": best["_required_capacity_bits"],
+            "log_delta": best["log_delta"],
+        }
+    return None, {
+        "shortfall_bits": None,
+        "reason": "NO_COMPLETE_NUMERIC_OK_CANDIDATE",
+        "best_candidate_id": None,
+        "best_measured_eval_noise_bits": None,
+        "required_capacity_bits": None,
+        "log_delta": None,
+    }
+
+
+def validate_owned_finalization_sibling(
+    sibling, final_dir, results_root, run_nonce
+):
+    expected_name = (
+        "." + final_dir.name
+        + ".piccard-finalize-v1.tmp-" + run_nonce
+    )
+    if sibling.parent != final_dir.parent or sibling.name != expected_name:
+        raise ValueError("unowned finalization temp sibling basename")
+    info = sibling.lstat()
+    if sibling.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("unowned finalization temp sibling")
+    marker = sibling / ".piccard-finalize-owner.json"
+    marker_info = marker.lstat()
+    if (
+        marker.is_symlink()
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_nlink != 1
+    ):
+        raise ValueError("unowned finalization temp marker")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(marker, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != marker_info.st_dev
+            or opened.st_ino != marker_info.st_ino
+        ):
+            raise ValueError("replaced finalization owner marker")
+        data = b""
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(descriptor)
+    owner = json.loads(data)
+    expected = {
+        "final_dir_realpath": str(final_dir.resolve(strict=False)),
+        "results_root_realpath": str(results_root.resolve(strict=True)),
+        "run_nonce": run_nonce,
+        "schema": "piccard-finalize-owner",
+        "version": 1,
+    }
+    rendered = (
+        json.dumps(owner, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if owner != expected or data != rendered:
+        raise ValueError("unowned finalization temp marker")
+
+
+def finalize_results(script_dir, repo_root, options):
+    global matrix
+    global runtime_source_commit
+    global runtime_run_nonce
+    global runtime_benchmark_sha256
+    global resolved_manifest_path
+    global policy
+
+    results_argument = Path(options["results_root"])
+    final_argument = Path(options["finalize_dir"])
+    if not results_argument.is_absolute() or not final_argument.is_absolute():
+        fail("finalization paths must be absolute")
+    if not results_argument.is_dir() or results_argument.is_symlink():
+        fail("finalization results root must be a direct real directory")
+    results_root = results_argument.resolve(strict=True)
+    final_dir = final_argument.resolve(strict=False)
+    if final_dir.exists() or final_dir.is_symlink():
+        fail("final directory already exists")
+    if not final_dir.parent.is_dir():
+        fail("final directory parent must exist")
+
+    run_path = results_root / "run_manifest.json"
+    run = load_json_exact(
+        run_path, RUN_MANIFEST_FIELDS, "run manifest")
+    if (
+        run["schema"] != "piccard-noise-run"
+        or run["version"] != 1
+        or run["source_tree_dirty"] is not False
+        or run["smoke_only"] is not False
+        or run["table_eligible"] is not True
+        or run["source_commit"] != run["git_head"]
+    ):
+        fail("run is smoke/noneligible, dirty, or mixed-source")
+    matrix_path = script_dir / "noise_profiles.json"
+    matrix_bytes = matrix_path.read_bytes()
+    if sha256_bytes(matrix_bytes) != run["matrix_sha256"]:
+        fail("run matrix hash mismatch")
+    resolved_manifest_path = results_root / "resolved_noise_profiles.json"
+    resolved_bytes = resolved_manifest_path.read_bytes()
+    if sha256_bytes(resolved_bytes) != run["resolved_matrix_sha256"]:
+        fail("resolved profile matrix hash mismatch")
+    expected_resolved = matrix_bytes.replace(
+        b'"source_commit":"runtime-source-commit"',
+        ('"source_commit":"' + run["source_commit"] + '"').encode(),
+        1,
+    )
+    if resolved_bytes != expected_resolved:
+        fail("resolved profile matrix identity mismatch")
+    matrix = json.loads(resolved_bytes)
+    runtime_source_commit = run["source_commit"]
+    runtime_run_nonce = run["run_nonce"]
+    runtime_benchmark_sha256 = run["benchmark_sha256"]
+    options["smoke"] = False
+    partitions_by_profile = {
+        profile_id: [
+            partition for partition in matrix["partitions"]
+            if partition["profile_id"] == profile_id
+        ]
+        for profile_id in (
+            "primary40", "sensitivity64", "feasibility128")
+    }
+    if sum(map(len, partitions_by_profile.values())) != 34:
+        fail("resolved profile matrix must contain exactly 34 keys")
+    profiles_root = results_root / "profiles"
+    actual_profiles = {
+        path.name for path in profiles_root.iterdir()
+        if path.is_dir() and not path.is_symlink()
+    }
+    expected_profiles = set(partitions_by_profile)
+    if actual_profiles != expected_profiles:
+        fail("missing, duplicate, or unknown profile directory")
+
+    finalized_profiles = []
+    finalized_keys = []
+    archive_members = []
+    for profile_id in (
+        "primary40", "sensitivity64", "feasibility128"
+    ):
+        options["profile"] = profile_id
+        policy = profile_policy(matrix, profile_id)
+        partitions = partitions_by_profile[profile_id]
+        profile_dir = profiles_root / profile_id
+        profile_path = profile_dir / "profile_manifest.json"
+        seal_path = profile_dir / "completion_seal.json"
+        profile_value = load_json_exact(
+            profile_path, PROFILE_MANIFEST_FIELDS, "profile manifest")
+        seal = load_json_exact(
+            seal_path, SEAL_FIELDS, "completion seal")
+        expected_key_ids = {
+            partition["key_id"] for partition in partitions}
+        if (
+            profile_value["schema"] != "piccard-profile-run"
+            or profile_value["version"] != 1
+            or profile_value["profile_id"] != profile_id
+            or profile_value["key_count"] != len(partitions)
+            or set(profile_value["key_verdicts"]) != expected_key_ids
+            or set(profile_value["shard_manifest_sha256"])
+            != expected_key_ids
+            or profile_value["source_commit"] != run["source_commit"]
+            or profile_value["openfhe_version"]
+            != run["openfhe_version"]
+            or profile_value["smoke_only"] is not False
+            or profile_value["table_eligible"] is not True
+        ):
+            fail("profile manifest identity/topology mismatch")
+        allowed_profile_verdicts = (
+            {"PASS"} if profile_id != "feasibility128"
+            else {"PASS", "PASS_FEASIBILITY_WITH_INFEASIBLE"}
+        )
+        if profile_value["profile_verdict"] not in allowed_profile_verdicts:
+            fail("profile measurement verdict is not acceptable")
+        if (
+            seal["schema"] != "piccard-profile-completion-seal"
+            or seal["version"] != 1
+            or seal["run_nonce"] != run["run_nonce"]
+            or seal["profile_id"] != profile_id
+            or seal["profile_manifest_sha256"] != sha256_file(profile_path)
+            or seal["shard_manifest_sha256"]
+            != profile_value["shard_manifest_sha256"]
+        ):
+            fail("profile completion seal mismatch")
+        expected_children = expected_key_ids | {
+            "profile_manifest.json", "completion_seal.json"}
+        if {path.name for path in profile_dir.iterdir()} != expected_children:
+            fail("profile directory topology mismatch")
+        archive_members.extend([
+            profile_path.relative_to(results_root).as_posix(),
+            seal_path.relative_to(results_root).as_posix(),
+        ])
+        profile_shards = []
+        frontier_verdicts = []
+        for partition in partitions:
+            shard_path = profile_dir / partition["key_id"]
+            parent_digest = profile_value[
+                "shard_manifest_sha256"][partition["key_id"]]
+            try:
+                shard = validate_shard(
+                    shard_path, partition, parent_digest)
+            except Exception as error:
+                fail("shard semantic validation failed: " + str(error))
+            if set(shard) != SHARD_MANIFEST_FIELDS:
+                fail("shard manifest exhaustive schema mismatch")
+            candidate_path = shard_path / "candidates.json"
+            candidate_manifest = load_json_exact(
+                candidate_path,
+                CANDIDATE_MANIFEST_FIELDS,
+                "candidate manifest",
+            )
+            if (
+                candidate_manifest["schema"]
+                != "piccard-candidate-manifest"
+                or candidate_manifest["version"] != 1
+                or any(
+                    not isinstance(receipt, dict)
+                    or set(receipt) != CANDIDATE_RECEIPT_FIELDS
+                    for receipt in candidate_manifest["candidates"]
+                )
+            ):
+                fail("candidate manifest exhaustive schema mismatch")
+            with (shard_path / "aggregate.csv").open(newline="") as source:
+                rows = list(csv.DictReader(source))
+            selected, infeasibility = choose_frontier(
+                rows, shard, shard_path)
+            frontier = (
+                "SELECTED" if selected is not None else "INFEASIBLE")
+            if profile_id != "feasibility128" and frontier != "SELECTED":
+                fail("required profile key has no feasible frontier")
+            frontier_verdicts.append(frontier)
+            finalized_keys.append({
+                "profile_id": partition["profile_id"],
+                "circuit": partition["circuit"],
+                "shape_id": partition["shape_id"],
+                "security": partition["security"],
+                "requested_ring_dim": partition["requested_ring_dim"],
+                "natural_depth": partition["natural_depth"],
+                "consumer_set_sha256":
+                    partition["consumer_set_sha256"],
+                "openfhe_version": partition["openfhe_version"],
+                "key_id": partition["key_id"],
+                "measurement_key_verdict": shard["key_verdict"],
+                "frontier_verdict": frontier,
+                "shard_manifest_sha256": parent_digest,
+                "selected_row": selected,
+                "infeasibility": infeasibility,
+            })
+            profile_shards.append({
+                "key_id": partition["key_id"],
+                "shard_manifest_sha256": parent_digest,
+            })
+            archive_members.append(
+                (shard_path / "shard_manifest.json")
+                .relative_to(results_root).as_posix())
+            archive_members.extend(
+                (shard_path / relative)
+                .relative_to(results_root).as_posix()
+                for relative in shard["files"]
+            )
+        final_profile_verdict = (
+            "PASS_FEASIBILITY_WITH_INFEASIBLE"
+            if (
+                profile_id == "feasibility128"
+                and "INFEASIBLE" in frontier_verdicts
+            )
+            else "PASS"
+        )
+        finalized_profiles.append({
+            "profile_id": profile_id,
+            "measurement_profile_verdict":
+                profile_value["profile_verdict"],
+            "finalization_profile_verdict": final_profile_verdict,
+            "profile_manifest_sha256": sha256_file(profile_path),
+            "completion_seal_sha256": sha256_file(seal_path),
+            "shards": sorted(
+                profile_shards, key=lambda value: value["key_id"]),
+        })
+
+    matches = [
+        path for path in final_dir.parent.iterdir()
+        if path.name.startswith(
+            "." + final_dir.name + ".piccard-finalize-v1.tmp-")
+    ]
+    if len(matches) > 1:
+        fail("more than one finalization temp sibling exists")
+    if matches:
+        try:
+            validate_owned_finalization_sibling(
+                matches[0], final_dir, results_root, run["run_nonce"])
+        except Exception as error:
+            fail("owned finalization temp validation failed: " + str(error))
+        shutil.rmtree(matches[0])
+
+    temporary = final_dir.with_name(
+        "." + final_dir.name
+        + ".piccard-finalize-v1.tmp-" + run["run_nonce"])
+    if temporary.exists() or temporary.is_symlink():
+        fail("finalization temp collision")
+    owned = False
+    try:
+        temporary.mkdir(mode=0o700)
+        owned = True
+        owner = {
+            "final_dir_realpath": str(final_dir.resolve(strict=False)),
+            "results_root_realpath":
+                str(results_root.resolve(strict=True)),
+            "run_nonce": run["run_nonce"],
+            "schema": "piccard-finalize-owner",
+            "version": 1,
+        }
+        owner_path = temporary / ".piccard-finalize-owner.json"
+        descriptor = os.open(
+            owner_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            data = (
+                json.dumps(owner, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+            os.write(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        archive_module_path = script_dir / "make_calibration_archive.py"
+        archive_spec = importlib.util.spec_from_file_location(
+            "piccard_make_calibration_archive", archive_module_path)
+        archive_module = importlib.util.module_from_spec(archive_spec)
+        archive_spec.loader.exec_module(archive_module)
+        archive_path = temporary / "selected-shards.tar.zst"
+        archive = archive_module.build_archive(
+            results_root, sorted(archive_members), archive_path)
+        archive_module.verify_archive(archive_path, archive)
+
+        combined = {
+            "schema": "piccard-calibration-finalized",
+            "version": 1,
+            "table_eligible": True,
+            "run": {
+                **run,
+                "run_manifest_sha256": sha256_file(run_path),
+            },
+            "profiles": finalized_profiles,
+            "keys": sorted(
+                finalized_keys, key=lambda value: value["key_id"]),
+            "archive": archive,
+        }
+        table_module_path = script_dir / "make_calibration_table.py"
+        table_spec = importlib.util.spec_from_file_location(
+            "piccard_make_calibration_table", table_module_path)
+        table_module = importlib.util.module_from_spec(table_spec)
+        table_spec.loader.exec_module(table_module)
+        table_module.validate_finalized_manifest(combined)
+        manifest_path = temporary / "manifest.json"
+        atomic_json(manifest_path, combined)
+        with manifest_path.open("rb") as source:
+            os.fsync(source.fileno())
+        owner_path.unlink()
+        directory_descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        os.replace(temporary, final_dir)
+        owned = False
+        parent_descriptor = os.open(final_dir.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    except Exception:
+        if owned:
+            shutil.rmtree(temporary)
+        raise
+    print("FINALIZED " + str(final_dir))
+
+
 script_dir = Path(sys.argv[1]).resolve()
 repo_root = script_dir.parent
 options = parse_cli(sys.argv[2:])
+if options["finalize_dir"] is not None:
+    try:
+        finalize_results(script_dir, repo_root, options)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        fail("finalization failed: " + str(error), 2)
+    raise SystemExit(0)
 matrix_path = script_dir / "noise_profiles.json"
 matrix_bytes = matrix_path.read_bytes()
 matrix = json.loads(matrix_bytes)
@@ -884,28 +1572,33 @@ bench = Path(
 ).resolve()
 if not bench.is_file() or not os.access(bench, os.X_OK):
     fail("benchmark path must be an executable file")
+initial_benchmark_sha256 = sha256_file(bench)
 default_timeout_ms, grace_ms, test_timing = resolve_timing(bench)
 
 environment = os.environ.copy()
 environment["PICCARD_PROFILE_MANIFEST"] = str(matrix_path)
+verify_benchmark_binary(bench, initial_benchmark_sha256)
 printer = supervise(
     [str(bench), "--print_profile_manifest"],
     120000,
     grace_ms,
     environment,
 )
+verify_benchmark_binary(bench, initial_benchmark_sha256)
 if (
     printer["timed_out"]
     or printer["returncode"] != 0
     or printer["stdout"].encode() != matrix_bytes
 ):
     fail("benchmark profile printer does not match tracked JSON")
+verify_benchmark_binary(bench, initial_benchmark_sha256)
 source_printer = supervise(
     [str(bench), "--print_source_commit"],
     120000,
     grace_ms,
     environment,
 )
+verify_benchmark_binary(bench, initial_benchmark_sha256)
 runtime_source_commit = source_printer["stdout"].strip()
 if (
     source_printer["timed_out"]
@@ -985,7 +1678,7 @@ run_identity = {
     "openfhe_version": matrix["openfhe_version"],
     "matrix_sha256": matrix_sha,
     "resolved_matrix_sha256": sha256_bytes(resolved_matrix_bytes),
-    "benchmark_sha256": sha256_file(bench),
+    "benchmark_sha256": initial_benchmark_sha256,
     "command_policy": "phase3-v1",
     "python_version": platform.python_version(),
     "platform": platform.platform(),
@@ -1040,6 +1733,8 @@ else:
         os.replace(temporary_resolved, resolved_manifest_path)
 
 environment["PICCARD_PROFILE_MANIFEST"] = str(resolved_manifest_path)
+runtime_run_nonce = run_identity.get("run_nonce", "0" * 32)
+runtime_benchmark_sha256 = run_identity["benchmark_sha256"]
 
 partitions = [
     partition for partition in matrix["partitions"]
@@ -1060,36 +1755,43 @@ if not dry_run:
 
 profile_manifest_path = profile_dir / "profile_manifest.json"
 parent_digests = {}
+prior_profile_manifest = None
 if options["resume"]:
     try:
         seal_path = profile_dir / "completion_seal.json"
-        seal = json.loads(seal_path.read_text())
-        if set(seal) != {
-            "schema", "version", "run_nonce", "profile_id",
-            "profile_manifest_sha256", "shard_manifest_sha256"
-        }:
-            fail("resume completion seal schema mismatch", 2)
-        if (
-            seal["schema"] != "piccard-profile-completion-seal"
-            or seal["version"] != 1
-            or seal["run_nonce"] != run_identity["run_nonce"]
-            or seal["profile_id"] != options["profile"]
-            or seal["profile_manifest_sha256"]
-            != sha256_file(profile_manifest_path)
-        ):
-            fail("resume completion seal mismatch", 2)
-        prior_profile_manifest = json.loads(profile_manifest_path.read_text())
-        if (
-            prior_profile_manifest.get("profile_id") != options["profile"]
-            or prior_profile_manifest.get("source_commit")
-            != runtime_source_commit
-            or prior_profile_manifest.get("smoke_only") != options["smoke"]
-        ):
-            fail("resume profile manifest identity mismatch", 2)
-        parent_digests = prior_profile_manifest.get(
-            "shard_manifest_sha256", {})
-        if seal["shard_manifest_sha256"] != parent_digests:
-            fail("resume completion seal shard digest mismatch", 2)
+        receipt_exists = profile_manifest_path.exists()
+        seal_exists = seal_path.exists()
+        if receipt_exists != seal_exists:
+            fail("resume receipt/seal presence mismatch", 2)
+        if receipt_exists:
+            seal = json.loads(seal_path.read_text())
+            if set(seal) != SEAL_FIELDS:
+                fail("resume completion seal schema mismatch", 2)
+            if (
+                seal["schema"] != "piccard-profile-completion-seal"
+                or seal["version"] != 1
+                or seal["run_nonce"] != run_identity["run_nonce"]
+                or seal["profile_id"] != options["profile"]
+                or seal["profile_manifest_sha256"]
+                != sha256_file(profile_manifest_path)
+            ):
+                fail("resume completion seal mismatch", 2)
+            prior_profile_manifest = load_json_exact(
+                profile_manifest_path,
+                PROFILE_MANIFEST_FIELDS,
+                "resume profile manifest",
+            )
+            if (
+                prior_profile_manifest["profile_id"] != options["profile"]
+                or prior_profile_manifest["source_commit"]
+                != runtime_source_commit
+                or prior_profile_manifest["smoke_only"] != options["smoke"]
+            ):
+                fail("resume profile manifest identity mismatch", 2)
+            parent_digests = prior_profile_manifest[
+                "shard_manifest_sha256"]
+            if seal["shard_manifest_sha256"] != parent_digests:
+                fail("resume completion seal shard digest mismatch", 2)
     except (OSError, ValueError) as error:
         fail("resume profile manifest is missing or malformed: " + str(error), 2)
 
@@ -1097,11 +1799,38 @@ any_incomplete = False
 key_verdicts = {}
 for partition in partitions:
     target = profile_dir / partition["key_id"]
+    owned_temporary = (
+        profile_dir /
+        (
+            "." + partition["key_id"]
+            + ".piccard-shard-v1.tmp-" + runtime_run_nonce
+        )
+    )
+    if not dry_run and (owned_temporary.exists() or owned_temporary.is_symlink()):
+        if not options["resume"]:
+            fail("pre-existing shard temporary collision", 2)
+        try:
+            validate_owned_shard_temporary(
+                owned_temporary, profile_dir, partition)
+        except Exception as error:
+            fail("owned shard temporary validation failed: " + str(error), 2)
+        shutil.rmtree(owned_temporary)
     if options["resume"] and target.exists():
         try:
-            prior = validate_shard(
-                target, partition, parent_digests.get(partition["key_id"]))
-            key_verdicts[partition["key_id"]] = prior["key_verdict"]
+            stored = json.loads(
+                (target / "shard_manifest.json").read_text())
+            if stored.get("status") == "INCOMPLETE":
+                validate_incomplete_shard(target, partition)
+                shutil.rmtree(target)
+            else:
+                parent_digest = parent_digests.get(
+                    partition["key_id"],
+                    sha256_file(target / "shard_manifest.json"),
+                )
+                prior = validate_shard(target, partition, parent_digest)
+                key_verdicts[partition["key_id"]] = prior["key_verdict"]
+                print("SKIP " + partition["key_id"])
+                continue
         except Exception as error:
             print(
                 f"resume shard hash validation failed: {error}",
@@ -1109,8 +1838,6 @@ for partition in partitions:
             )
             any_incomplete = True
             break
-        print("SKIP " + partition["key_id"])
-        continue
     if target.exists():
         fail("refusing to overwrite prior shard " + partition["key_id"])
 
@@ -1127,14 +1854,17 @@ for partition in partitions:
     ]
     if options["smoke"]:
         preflight_command.append("--smoke")
-    preflight = supervise(
-        preflight_command,
-        default_timeout_ms if test_timing else 120000,
-        grace_ms,
-        environment,
-        test_readiness=test_timing,
-    )
+    preflight = None
     try:
+        verify_benchmark_binary(bench, runtime_benchmark_sha256)
+        preflight = supervise(
+            preflight_command,
+            default_timeout_ms if test_timing else 120000,
+            grace_ms,
+            environment,
+            test_readiness=test_timing,
+        )
+        verify_benchmark_binary(bench, runtime_benchmark_sha256)
         if preflight["timed_out"]:
             raise TimeoutError("preflight wall timeout")
         if preflight["returncode"] != 0:
@@ -1143,6 +1873,11 @@ for partition in partitions:
         natural_ring_dim = validate_preflight(
             json.loads(preflight["stdout"]), partition, matrix)
     except Exception as error:
+        if preflight is None:
+            preflight = {
+                "returncode": None, "timed_out": False,
+                "term_sent": False, "kill_sent": False, "elapsed_ms": 0,
+            }
         if not dry_run:
             failure_status = (
                 "TIMEOUT" if preflight["timed_out"] else "PROCESS_ERROR")
@@ -1170,8 +1905,7 @@ for partition in partitions:
     timeout_seconds = timeout_for(largest_n)
 
     temporary_path = (
-        profile_dir / ("." + partition["key_id"] + ".tmp-" + str(os.getpid()))
-        if not dry_run else
+        owned_temporary if not dry_run else
         resolved_root / "profiles" / options["profile"] /
         ("." + partition["key_id"] + ".dry-run")
     )
@@ -1203,16 +1937,39 @@ for partition in partitions:
         continue
 
     temporary_path.mkdir()
+    atomic_json(temporary_path / ".piccard-shard-owner.json", {
+        "key_id": partition["key_id"],
+        "profile_id": partition["profile_id"],
+        "run_nonce": runtime_run_nonce,
+        "schema": "piccard-shard-owner",
+        "version": 1,
+    })
     (temporary_path / "details").mkdir()
-    measurement = supervise(
-        measurement_command,
-        default_timeout_ms
-        if test_timing
-        else timeout_seconds * 1000,
-        grace_ms,
-        environment,
-        test_readiness=test_timing,
-    )
+    try:
+        verify_benchmark_binary(bench, runtime_benchmark_sha256)
+        measurement = supervise(
+            measurement_command,
+            default_timeout_ms
+            if test_timing
+            else timeout_seconds * 1000,
+            grace_ms,
+            environment,
+            test_readiness=test_timing,
+        )
+        verify_benchmark_binary(bench, runtime_benchmark_sha256)
+    except Exception as error:
+        shutil.rmtree(temporary_path)
+        write_failure_atomic(
+            profile_dir, partition, "PROCESS_ERROR",
+            "benchmark binding failed: " + str(error),
+            {
+                "returncode": None, "timed_out": False,
+                "term_sent": False, "kill_sent": False, "elapsed_ms": 0,
+            },
+            options["smoke"], natural_ring_dim)
+        any_incomplete = True
+        break
+    (temporary_path / ".piccard-shard-owner.json").unlink()
     if measurement["timed_out"] or measurement["returncode"] != 0:
         status = "TIMEOUT" if measurement["timed_out"] else "PROCESS_ERROR"
         detail = (
@@ -1246,6 +2003,8 @@ for partition in partitions:
         candidate_value = json.loads(
             (temporary_path / "candidates.json").read_text())
         candidate_value["command"] = measurement_command[1:]
+        candidate_value["run_nonce"] = runtime_run_nonce
+        candidate_value["benchmark_sha256"] = runtime_benchmark_sha256
         atomic_json(temporary_path / "candidates.json", candidate_value)
     except Exception as error:
         shutil.rmtree(temporary_path)
@@ -1357,19 +2116,34 @@ if not dry_run:
         "table_eligible": False if options["smoke"] else True,
         "shard_manifest_sha256": shard_digests,
     }
-    if options["resume"]:
+    seal_value = {
+        "schema": "piccard-profile-completion-seal",
+        "version": 1,
+        "run_nonce": run_identity["run_nonce"],
+        "profile_id": options["profile"],
+        "profile_manifest_sha256": None,
+        "shard_manifest_sha256": shard_digests,
+    }
+    if (
+        options["resume"]
+        and prior_profile_manifest is not None
+        and prior_profile_manifest["profile_verdict"] not in {
+            "FAIL_INCOMPLETE", "FAIL_REQUIRED"
+        }
+    ):
         if prior_profile_manifest != profile_value:
             fail("resume profile manifest semantics mismatch", 2)
+    elif options["resume"]:
+        atomic_json(profile_manifest_path, profile_value)
+        seal_value["profile_manifest_sha256"] = sha256_file(
+            profile_manifest_path)
+        atomic_json(profile_dir / "completion_seal.json", seal_value)
     else:
         atomic_json(profile_manifest_path, profile_value)
-        write_once_json(profile_dir / "completion_seal.json", {
-            "schema": "piccard-profile-completion-seal",
-            "version": 1,
-            "run_nonce": run_identity["run_nonce"],
-            "profile_id": options["profile"],
-            "profile_manifest_sha256": sha256_file(profile_manifest_path),
-            "shard_manifest_sha256": shard_digests,
-        })
+        seal_value["profile_manifest_sha256"] = sha256_file(
+            profile_manifest_path)
+        write_once_json(
+            profile_dir / "completion_seal.json", seal_value)
 
 required_failure = (
     not dry_run
