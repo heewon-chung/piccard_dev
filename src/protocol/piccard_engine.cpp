@@ -9,7 +9,8 @@ namespace piccard {
 PiccardEngine::PiccardEngine(const PiccardParams& params) : params_(params) {}
 
 void PiccardEngine::Initialize() {
-    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range);
+    hasher_ = std::make_unique<MinHasher>(
+        params_.k, params_.hash_range, params_.hash_seed);
 
     // Initialize BFV first: OpenFHE may select a different ring_dim than
     // what PiccardParams::Validate() computed (e.g. a smaller ring_dim
@@ -101,7 +102,7 @@ PiccardEngine::ComputeJaccard(const std::vector<uint64_t>& set_x,
 std::unique_ptr<BottomStructure>
 PiccardEngine::CreateBottomStructure(const std::vector<uint64_t>& set) const {
     auto bottom = std::make_unique<BottomStructure>(
-        params_.k, params_.bottom_depth, params_.hash_range);
+        params_.k, params_.bottom_depth, params_.hash_range, params_.hash_seed);
     bottom->Initialize(set);
     return bottom;
 }

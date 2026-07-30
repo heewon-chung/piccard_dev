@@ -25,10 +25,10 @@ struct PiccardParams {
     uint32_t k = 128;                          // Number of MinHash functions
     uint32_t m = 64;                           // One-hot bucket size
     SecurityLevel security = SecurityLevel::STD128;
-    uint64_t hash_range = UINT64_MAX;          // MinHash range R; UINT64_MAX means use
-                                               // full Mersenne prime range (~2^61)
-    // Public CRS seed. The hash family H = ((a_i,b_i))_{i=1..k} is Expand(hash_seed);
-    // this seed is the reproducible serialized handle for that public parameter.
+    uint64_t hash_range = UINT64_MAX;          // UINT64_MAX keeps the full SHA-256
+                                               // rank; finite values are compatibility
+                                               // mode and reduce rank modulo this range.
+    // Public SHA-256 CRS seed serialized as uint64_be in every coordinate rank.
     // Every uint64_t value is valid, so Validate() does not range-check it.
     uint64_t hash_seed = 42;
 

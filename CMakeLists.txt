@@ -72,11 +72,9 @@ else()
     set(GMP_FOUND FALSE)
 endif()
 
-# BCG12/SJ16: OpenSSL is REQUIRED by the baseline lib (TagHash + EC backend).
-find_package(OpenSSL)
-if(OpenSSL_FOUND)
-    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
-endif()
+# SHA-256 MinHash and the BCG12/SJ16 baselines require OpenSSL Crypto.
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -106,6 +104,7 @@ set(PICCARD_CORE_SOURCES
 
 add_library(piccard_core ${PICCARD_CORE_SOURCES})
 target_include_directories(piccard_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(piccard_core PUBLIC OpenSSL::Crypto)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -254,6 +253,21 @@ if(BUILD_TESTS)
             add_executable(test_piccard_engine tests/unit/test_piccard_engine.cpp)
             target_link_libraries(test_piccard_engine piccard_fhe test_main)
             add_test(NAME PiccardEngine COMMAND test_piccard_engine)
+
+            add_executable(
+                test_piccard_engine_legacy_compile
+                tests/unit/test_piccard_engine_legacy_compile.cpp
+                src/protocol/piccard_engine.cpp
+            )
+            target_link_libraries(
+                test_piccard_engine_legacy_compile
+                piccard_fhe
+                test_main
+            )
+            add_test(
+                NAME PiccardEngineLegacyCompile
+                COMMAND test_piccard_engine_legacy_compile
+            )
 
             add_executable(test_dynamic_engine tests/unit/test_dynamic_engine.cpp)
             target_link_libraries(test_dynamic_engine piccard_fhe test_main)

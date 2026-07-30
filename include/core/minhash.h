@@ -24,24 +24,20 @@ public:
 
     uint32_t GetK() const { return k_; }
 
-    // The public CRS seed this hasher was expanded from.
+    // The public CRS seed serialized into each SHA-256 rank input.
     uint64_t GetSeed() const { return seed_; }
+
+    // Stable name for the byte-level random-ranking contract.
+    static constexpr const char* ModelName() noexcept {
+        return "sha256-random-ranking-poc-v1";
+    }
 
 private:
     uint32_t k_;
     uint64_t hash_range_;
     uint64_t seed_;
 
-    // Mersenne prime P = 2^61 - 1 for universal hash family
-    static constexpr uint64_t kMersennePrime = (1ULL << 61) - 1;
-
-    // Hash coefficients: h_i(x) = ((a_i * x + b_i) mod P) mod R
-    std::vector<uint64_t> a_;
-    std::vector<uint64_t> b_;
-
-    // Modular multiplication mod Mersenne prime (avoids overflow)
-    static uint64_t MulModMersenne(uint64_t a, uint64_t b);
-    static uint64_t ModMersenne(uint64_t val);
+    uint64_t HashRank(uint32_t coordinate, uint64_t elem) const;
 };
 
 } // namespace piccard
