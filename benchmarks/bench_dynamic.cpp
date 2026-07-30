@@ -267,7 +267,8 @@ static DynamicResult RunMultiTrialDynamic(
     result.hash_randomness = "fixed";
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
-    result.flood_lambda_stat = engine.GetParams().lambda_stat;
+    result.flood_lambda_stat =
+        engine.GetParams().LegacyFloodCoefficientBits();
     result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
     result.flood_margin_bits = engine.GetParams().flood_margin_bits;
     result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -462,7 +463,8 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_lambda_stat =
+                        engine.GetParams().LegacyFloodCoefficientBits();
                     dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
                     dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
                     dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -549,7 +551,8 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_lambda_stat =
+                        engine.GetParams().LegacyFloodCoefficientBits();
                     dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
                     dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
                     dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -632,7 +635,8 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat = engine.GetParams().lambda_stat;
+                    dr.flood_lambda_stat =
+                        engine.GetParams().LegacyFloodCoefficientBits();
                     dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
                     dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
                     dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();

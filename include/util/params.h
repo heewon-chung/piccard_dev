@@ -20,6 +20,13 @@ enum class Circuit {
     Threshold   // one-hot followed by a degree-k polynomial
 };
 
+struct CalibrationCandidate;
+struct PiccardParams;
+
+PiccardParams SelectSanitizerCandidate(
+    PiccardParams profile,
+    const CalibrationCandidate& candidate);
+
 struct PiccardParams {
     // User-configurable
     uint32_t k = 128;                          // Number of MinHash functions
@@ -39,22 +46,19 @@ struct PiccardParams {
     bool threshold_mode = false;               // Enable threshold polynomial evaluation
     uint32_t threshold_tau = 0;                // Threshold value τ (match count threshold)
 
-    // ── Noise flooding (R2-W6) ───────────────────────────────────
+    // ── Transcript-aware phase smudging ──────────────────────────
     //
-    // The security proof simulates the receiver's view by flooding: before the
-    // server returns the result it adds masking noise 2^lambda_stat times the
-    // evaluation-noise bound, so an evaluated ciphertext is statistically
-    // indistinguishable (within 2^-lambda_stat) from a fresh one.
+    // Supported transcript targets are exactly 40, 64, and 128. The selector
+    // adjusts this target for max_queries and the selected realized ring
+    // dimension; it never treats this field as a coefficient-level target.
+    uint32_t transcript_stat_bits = 40;
 
-    // Statistical security parameter. 40 is also supported: Validate() consults
-    // the calibration frontier with whatever is set here and picks the cheapest
-    // parameters that still cover it, so lowering this genuinely lowers cost.
-    uint32_t lambda_stat = 64;
+    // Maximum number of released sanitizer transcripts covered by the target.
+    uint64_t max_queries = UINT64_C(1) << 20;
 
     // Safety margin on the measured evaluation-noise bound. The smudging
-    // argument needs B_flood / B_eval_actual >= 2^lambda_stat, so an
-    // underestimated B_eval costs security rather than only correctness. The
-    // margin therefore inflates the assumed bound; it is not modulus padding.
+    // argument needs the calibrated evaluation bound, coefficient-adjusted
+    // transcript target, and this empirical margin to fit independently.
     uint32_t flood_margin_bits = 8;
 
     // Ciphertext modulus shaping, selected by Validate() from the calibration
@@ -81,19 +85,49 @@ struct PiccardParams {
     // ring_dim.
     uint32_t ring_dim_natural = 0;
 
-    // log2 of the uniform flooding bound the server adds to the result.
-    //
-    // Throws unless the flooding term has actually been sized. Returning a
-    // number from an unsized parameter set would be worse than failing: with
-    // eval_noise_bits still 0 the answer is lambda_stat + margin, which for the
-    // default (128, 64) configuration is 72 -- below the 79 bits of evaluation
-    // noise that circuit really carries. Flooding with less noise than the
-    // evaluation noise leaves the receiver's view unsimulatable while the
-    // ciphertext still decrypts, so nothing downstream would notice.
+    /** @brief Returns the requested ring dimension captured during selection. */
+    uint32_t RequestedRingDim() const { return requested_ring_dim_; }
+
+    /** @brief Returns the calibration row's realized ring dimension. */
+    uint32_t SelectedCalibratedRingDim() const {
+        return selected_calibrated_ring_dim_;
+    }
+
+    /** @brief Returns the query-adjusted transcript target. */
+    uint32_t QueryStatBits() const { return query_stat_bits_; }
+
+    /** @brief Returns the coefficient-adjusted transcript target. */
+    uint32_t CoefficientStatBits() const { return coefficient_stat_bits_; }
+
+    /**
+     * @brief Read-only bridge for pre-Phase-3/4 consumers.
+     *
+     * Non-threshold paths return CoefficientStatBits(). The threshold
+     * compatibility path returns its pinned private coefficient target, never
+     * a transcript-level assurance.
+     */
+    uint32_t LegacyFloodCoefficientBits() const {
+        return coefficient_stat_bits_;
+    }
+
+    /**
+     * @brief Returns log2 of the selected uniform flooding bound.
+     *
+     * @throws std::logic_error unless flooding was successfully sized.
+     */
     uint32_t FloodNoiseBits() const;
 
     // Whether the flooding term has been sized against the calibration table.
     bool FloodingSized() const { return flooding_sized_; }
+
+    /**
+     * @brief Adopts the runtime ring dimension verified against calibration.
+     *
+     * @throws std::logic_error before selection, after source mutation, or on a
+     *         second call.
+     * @throws std::invalid_argument if runtime_n differs from the calibrated N.
+     */
+    void AdoptVerifiedRuntimeRingDim(uint32_t runtime_n);
 
     // Derived by Validate()
     uint32_t feature_dim = 0;                  // k * m
@@ -109,6 +143,41 @@ struct PiccardParams {
     void ValidateSqrt();
 
 private:
+    struct ValidationSnapshot {
+        uint32_t k;
+        uint32_t m;
+        SecurityLevel security;
+        bool threshold_mode;
+        uint32_t transcript_stat_bits;
+        uint64_t max_queries;
+        uint32_t flood_margin_bits;
+        uint32_t eval_noise_bits;
+        uint32_t ring_dim;
+        uint64_t plaintext_mod;
+        uint32_t natural_mult_depth;
+        uint32_t ring_dim_natural;
+        uint32_t mult_depth;
+        uint32_t scaling_mod_size;
+        uint32_t feature_dim;
+        uint32_t sqrt_base;
+        uint32_t sqrt_feature_dim;
+        uint32_t requested_ring_dim;
+        uint32_t selected_calibrated_ring_dim;
+        uint32_t query_stat_bits;
+        uint32_t coefficient_stat_bits;
+        uint32_t flood_noise_bits;
+        double selected_log2_q_over_t;
+        Circuit selected_circuit;
+        bool runtime_adopted;
+
+        bool operator==(const ValidationSnapshot& other) const;
+    };
+
+    void ClearFloodingSelection();
+    ValidationSnapshot CurrentValidationSnapshot() const;
+    void CaptureValidationSnapshot();
+    void VerifyValidationSnapshot() const;
+
     // Derive feature_dim / ring_dim / plaintext_mod / natural_mult_depth for the
     // circuit WITHOUT sizing the flooding term.
     //
@@ -121,19 +190,28 @@ private:
     void DeriveWithoutFlooding();
     void DeriveSqrtWithoutFlooding();
 
-    // Set only by SelectFloodingParams, cleared by the derive-only entry
-    // points. Guards FloodNoiseBits() against reporting a bound for a
-    // parameter set whose evaluation noise was never looked up.
+    // Set only by a successful calibration selection and cleared by derive-only
+    // entry points.
     bool flooding_sized_ = false;
+    uint32_t requested_ring_dim_ = 0;
+    uint32_t selected_calibrated_ring_dim_ = 0;
+    uint32_t query_stat_bits_ = 0;
+    uint32_t coefficient_stat_bits_ = 0;
+    uint32_t flood_noise_bits_ = 0;
+    double selected_log2_q_over_t_ = 0.0;
+    Circuit selected_circuit_ = Circuit::OneHot;
+    bool runtime_adopted_ = false;
+    bool validation_snapshot_valid_ = false;
+    ValidationSnapshot validation_snapshot_{};
 
     friend struct CalibrationAccess;
+    friend PiccardParams SelectSanitizerCandidate(
+        PiccardParams profile,
+        const CalibrationCandidate& candidate);
 
     // Look up the calibration frontier for (circuit, ring_dim, natural_depth)
-    // and adopt the cheapest measured parameters that leave room for
-    // 2^lambda_stat flooding. Throws when the configuration was never
-    // calibrated, or when no measured cell covers the requested lambda_stat --
-    // failing closed, because silently flooding with too little noise weakens
-    // the security claim without any visible symptom.
+    // and adopt the cheapest measured parameters that leave room for the
+    // requested transcript profile.
     void SelectFloodingParams(Circuit circuit, uint32_t natural_depth);
 };
 

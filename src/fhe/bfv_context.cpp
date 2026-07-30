@@ -156,7 +156,7 @@ void BFVContext::Initialize() {
             log_q - std::log2(static_cast<double>(params_.plaintext_mod));
         const double required = static_cast<double>(params_.eval_noise_bits) +
                                 params_.flood_margin_bits +
-                                params_.lambda_stat + 2.0;
+                                params_.LegacyFloodCoefficientBits() + 2.0;
         if (required > log_delta) {
             throw std::runtime_error(
                 "noise flooding does not fit: needs " +

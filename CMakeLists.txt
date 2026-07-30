@@ -111,6 +111,7 @@ target_include_directories(
 
 set(PICCARD_CORE_SOURCES
     src/util/params.cpp
+    src/util/params_calibration.cpp
     src/core/minhash.cpp
     src/core/onehot_encoder.cpp
     src/core/sqrt_encoder.cpp

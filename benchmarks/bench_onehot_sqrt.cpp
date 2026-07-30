@@ -265,7 +265,8 @@ static BenchmarkResult RunMultiTrial(
     result.memory_bytes = MemoryTracker::GetPeakRSS();
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
-    result.flood_lambda_stat = engine.GetParams().lambda_stat;
+    result.flood_lambda_stat =
+        engine.GetParams().LegacyFloodCoefficientBits();
     result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
     result.flood_margin_bits = engine.GetParams().flood_margin_bits;
     result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -489,7 +490,8 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         oh_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
                               ? pp.hash_seed : 0;
         oh_br.hash_root_seed = config.seed;
-        oh_br.flood_lambda_stat = onehot.GetParams().lambda_stat;
+        oh_br.flood_lambda_stat =
+            onehot.GetParams().LegacyFloodCoefficientBits();
         oh_br.flood_eval_noise_bits = onehot.GetParams().eval_noise_bits;
         oh_br.flood_margin_bits = onehot.GetParams().flood_margin_bits;
         oh_br.flood_noise_bits = onehot.GetParams().FloodNoiseBits();
@@ -519,7 +521,8 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
         sq_br.hash_seed = (config.hash_randomness == HashRandomness::Fixed)
                               ? sp.hash_seed : 0;
         sq_br.hash_root_seed = config.seed;
-        sq_br.flood_lambda_stat = sqrt_eng.GetParams().lambda_stat;
+        sq_br.flood_lambda_stat =
+            sqrt_eng.GetParams().LegacyFloodCoefficientBits();
         sq_br.flood_eval_noise_bits = sqrt_eng.GetParams().eval_noise_bits;
         sq_br.flood_margin_bits = sqrt_eng.GetParams().flood_margin_bits;
         sq_br.flood_noise_bits = sqrt_eng.GetParams().FloodNoiseBits();

@@ -1,9 +1,13 @@
 #include "util/params.h"
 
+#include "util/params_calibration.h"
+#include "util/security_profile.h"
+
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace piccard {
 
@@ -50,6 +54,8 @@ const char* CircuitName(Circuit c) {
     }
     return "?";
 }
+
+constexpr uint32_t kThresholdLegacyCoefficientBits = 64;
 
 } // namespace
 
@@ -101,6 +107,162 @@ uint64_t FindPlaintextModulus(uint32_t min_val, uint32_t modulus) {
     throw std::runtime_error("Failed to find suitable plaintext modulus");
 }
 
+bool PiccardParams::ValidationSnapshot::operator==(
+    const ValidationSnapshot& other) const {
+    return std::tie(
+               k,
+               m,
+               security,
+               threshold_mode,
+               transcript_stat_bits,
+               max_queries,
+               flood_margin_bits,
+               eval_noise_bits,
+               ring_dim,
+               plaintext_mod,
+               natural_mult_depth,
+               ring_dim_natural,
+               mult_depth,
+               scaling_mod_size,
+               feature_dim,
+               sqrt_base,
+               sqrt_feature_dim,
+               requested_ring_dim,
+               selected_calibrated_ring_dim,
+               query_stat_bits,
+               coefficient_stat_bits,
+               flood_noise_bits,
+               selected_log2_q_over_t,
+               selected_circuit,
+               runtime_adopted) ==
+           std::tie(
+               other.k,
+               other.m,
+               other.security,
+               other.threshold_mode,
+               other.transcript_stat_bits,
+               other.max_queries,
+               other.flood_margin_bits,
+               other.eval_noise_bits,
+               other.ring_dim,
+               other.plaintext_mod,
+               other.natural_mult_depth,
+               other.ring_dim_natural,
+               other.mult_depth,
+               other.scaling_mod_size,
+               other.feature_dim,
+               other.sqrt_base,
+               other.sqrt_feature_dim,
+               other.requested_ring_dim,
+               other.selected_calibrated_ring_dim,
+               other.query_stat_bits,
+               other.coefficient_stat_bits,
+               other.flood_noise_bits,
+               other.selected_log2_q_over_t,
+               other.selected_circuit,
+               other.runtime_adopted);
+}
+
+PiccardParams::ValidationSnapshot
+PiccardParams::CurrentValidationSnapshot() const {
+    return ValidationSnapshot{
+        k,
+        m,
+        security,
+        threshold_mode,
+        transcript_stat_bits,
+        max_queries,
+        flood_margin_bits,
+        eval_noise_bits,
+        ring_dim,
+        plaintext_mod,
+        natural_mult_depth,
+        ring_dim_natural,
+        mult_depth,
+        scaling_mod_size,
+        feature_dim,
+        sqrt_base,
+        sqrt_feature_dim,
+        requested_ring_dim_,
+        selected_calibrated_ring_dim_,
+        query_stat_bits_,
+        coefficient_stat_bits_,
+        flood_noise_bits_,
+        selected_log2_q_over_t_,
+        selected_circuit_,
+        runtime_adopted_,
+    };
+}
+
+void PiccardParams::CaptureValidationSnapshot() {
+    validation_snapshot_ = CurrentValidationSnapshot();
+    validation_snapshot_valid_ = true;
+}
+
+void PiccardParams::VerifyValidationSnapshot() const {
+    if (!validation_snapshot_valid_) {
+        throw std::logic_error(
+            "sanitizer validation snapshot is unavailable");
+    }
+    if (!(CurrentValidationSnapshot() == validation_snapshot_)) {
+        throw std::logic_error(
+            "sanitizer parameter state changed after calibration selection");
+    }
+
+    try {
+        if (selected_circuit_ == Circuit::Threshold) {
+            const uint32_t eval_and_legacy_coefficient = CheckedAddBits(
+                eval_noise_bits,
+                kThresholdLegacyCoefficientBits,
+                SanitizerProfileField::FloodNoiseBits);
+            const uint32_t recomputed_flood_bits = CheckedAddBits(
+                eval_and_legacy_coefficient,
+                flood_margin_bits,
+                SanitizerProfileField::FloodNoiseBits);
+            const uint32_t required_capacity = CheckedAddBits(
+                recomputed_flood_bits,
+                2,
+                SanitizerProfileField::FloodNoiseBits);
+            if (query_stat_bits_ != 0 ||
+                coefficient_stat_bits_ !=
+                    kThresholdLegacyCoefficientBits ||
+                recomputed_flood_bits != flood_noise_bits_ ||
+                static_cast<double>(required_capacity) >
+                    selected_log2_q_over_t_) {
+                throw std::logic_error(
+                    "threshold legacy derived state no longer matches its "
+                    "calibration");
+            }
+            return;
+        }
+
+        const SanitizerProfile recomputed = DeriveSanitizerProfile(
+            transcript_stat_bits,
+            max_queries,
+            selected_calibrated_ring_dim_,
+            eval_noise_bits,
+            flood_margin_bits);
+        const uint32_t required_capacity = CheckedAddBits(
+            recomputed.flood_noise_bits,
+            2,
+            SanitizerProfileField::FloodNoiseBits);
+        if (recomputed.query_stat_bits != query_stat_bits_ ||
+            recomputed.coefficient_stat_bits != coefficient_stat_bits_ ||
+            recomputed.flood_noise_bits != flood_noise_bits_ ||
+            static_cast<double>(required_capacity) >
+                selected_log2_q_over_t_) {
+            throw std::logic_error(
+                "sanitizer derived state no longer matches its calibration");
+        }
+    } catch (const std::logic_error&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw std::logic_error(
+            std::string("sanitizer state revalidation failed: ") +
+            error.what());
+    }
+}
+
 uint32_t PiccardParams::FloodNoiseBits() const {
     if (!flooding_sized_) {
         throw std::logic_error(
@@ -109,28 +271,102 @@ uint32_t PiccardParams::FloodNoiseBits() const {
             "points exist for the calibration harness and leave "
             "eval_noise_bits at 0, which would understate the flooding bound.");
     }
-    return eval_noise_bits + flood_margin_bits + lambda_stat;
+    if (validation_snapshot_valid_) {
+        VerifyValidationSnapshot();
+    }
+    return flood_noise_bits_;
+}
+
+void PiccardParams::AdoptVerifiedRuntimeRingDim(uint32_t runtime_n) {
+    if (!flooding_sized_ || !validation_snapshot_valid_) {
+        throw std::logic_error(
+            "runtime ring dimension adoption requires prior sanitizer selection");
+    }
+    VerifyValidationSnapshot();
+    if (runtime_adopted_) {
+        throw std::logic_error(
+            "runtime ring dimension was already adopted");
+    }
+    if (runtime_n != selected_calibrated_ring_dim_) {
+        throw std::invalid_argument(
+            "runtime ring dimension " + std::to_string(runtime_n) +
+            " does not match selected calibrated ring dimension " +
+            std::to_string(selected_calibrated_ring_dim_));
+    }
+
+    ring_dim = runtime_n;
+    runtime_adopted_ = true;
+    CaptureValidationSnapshot();
 }
 
 void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth) {
-    if (lambda_stat == 0) {
-        throw std::invalid_argument(
-            "lambda_stat must be > 0: the security proof's receiver-view "
-            "simulation requires flooding, and there is no unflooded path");
-    }
-
-    // The budget a cell must have: the flooding noise is
-    // 2^(eval_noise_bits + flood_margin_bits + lambda_stat), and decryption
-    // stays correct while the total is below Delta/2. The +2 keeps the sum
-    // clear of the rounding boundary.
-    const double required = static_cast<double>(lambda_stat) +
-                            static_cast<double>(flood_margin_bits) + 2.0;
-
     bool key_exists = false;
     double best_capacity = -std::numeric_limits<double>::infinity();
+    std::string best_infeasible;
 
-    // Rows are emitted in cost order within a key, so the first match is also
-    // the cheapest parameter set that covers this lambda_stat.
+    // Threshold remains an exact private coefficient-level compatibility path
+    // until its separate branch. It does not claim transcript-level assurance.
+    if (circuit == Circuit::Threshold) {
+        for (const auto& row : kNoiseCalibration) {
+            if (row.circuit != circuit) continue;
+            if (row.security != security) continue;
+            if (row.ring_dim_requested != ring_dim) continue;
+            if (row.natural_mult_depth != natural_depth) continue;
+
+            key_exists = true;
+            const uint32_t eval_and_coefficient = CheckedAddBits(
+                row.eval_noise_bits,
+                kThresholdLegacyCoefficientBits,
+                SanitizerProfileField::FloodNoiseBits);
+            const uint32_t flood_bits = CheckedAddBits(
+                eval_and_coefficient,
+                flood_margin_bits,
+                SanitizerProfileField::FloodNoiseBits);
+            const uint32_t required_capacity = CheckedAddBits(
+                flood_bits,
+                2,
+                SanitizerProfileField::FloodNoiseBits);
+            const double capacity = row.log_delta - row.eval_noise_bits - 2.0;
+            if (capacity > best_capacity) best_capacity = capacity;
+
+            if (static_cast<double>(required_capacity) <= row.log_delta) {
+                flooding_sized_ = true;
+                requested_ring_dim_ = row.ring_dim_requested;
+                selected_calibrated_ring_dim_ = row.ring_dim_natural;
+                query_stat_bits_ = 0;
+                coefficient_stat_bits_ = kThresholdLegacyCoefficientBits;
+                flood_noise_bits_ = flood_bits;
+                selected_log2_q_over_t_ = row.log_delta;
+                selected_circuit_ = Circuit::Threshold;
+                runtime_adopted_ = false;
+                mult_depth = row.mult_depth;
+                scaling_mod_size = row.scaling_mod_size;
+                eval_noise_bits = row.eval_noise_bits;
+                ring_dim_natural = row.ring_dim_natural;
+                CaptureValidationSnapshot();
+                return;
+            }
+        }
+
+        const std::string where =
+            std::string(CircuitName(circuit)) + " / " +
+            SecurityName(security) + " / requested N " +
+            std::to_string(ring_dim) + " / natural depth " +
+            std::to_string(natural_depth);
+        if (!key_exists) {
+            throw std::invalid_argument(
+                "missing threshold legacy calibration for " + where);
+        }
+        throw std::invalid_argument(
+            "infeasible threshold legacy calibration for " + where +
+            ": private coefficient target 64, margin " +
+            std::to_string(flood_margin_bits) +
+            ", best available coefficient-and-margin capacity " +
+            std::to_string(best_capacity));
+    }
+
+    // Rows are emitted in cost order within a key, so the first feasible pure
+    // selection is the cheapest measured parameter set for this profile.
     for (const auto& row : kNoiseCalibration) {
         if (row.circuit != circuit) continue;
         if (row.security != security) continue;
@@ -139,45 +375,72 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
 
         key_exists = true;
         double capacity = row.log_delta - row.eval_noise_bits - 2.0;
-        if (capacity > best_capacity) best_capacity = capacity;
+        CalibrationCandidate candidate{};
+        candidate.circuit = row.circuit;
+        candidate.security = row.security;
+        candidate.requested_ring_dim = row.ring_dim_requested;
+        candidate.natural_ring_dim = row.ring_dim_natural;
+        // The current generated table has no independently measured grown-row
+        // field. Until Work 3 supplies it, realized N is the measured natural N.
+        candidate.calibrated_ring_dim = row.ring_dim_natural;
+        candidate.natural_mult_depth = row.natural_mult_depth;
+        candidate.selected_mult_depth = row.mult_depth;
+        candidate.scaling_mod_size = row.scaling_mod_size;
+        candidate.eval_noise_bits = row.eval_noise_bits;
+        candidate.log2_q_over_t = row.log_delta;
 
-        if (row.eval_noise_bits + required <= row.log_delta) {
-            flooding_sized_  = true;
-            mult_depth       = row.mult_depth;
-            scaling_mod_size = row.scaling_mod_size;
-            eval_noise_bits  = row.eval_noise_bits;
-            ring_dim_natural = row.ring_dim_natural;
+        try {
+            *this = SelectSanitizerCandidate(*this, candidate);
             return;
+        } catch (const SanitizerCandidateInfeasible& error) {
+            if (capacity > best_capacity) {
+                best_capacity = capacity;
+                best_infeasible = error.what();
+            }
         }
     }
 
     const std::string where = std::string(CircuitName(circuit)) + " / " +
                               SecurityName(security) +
-                              " at ring_dim " + std::to_string(ring_dim) +
-                              " (natural depth " + std::to_string(natural_depth) + ")";
+                              " / requested N " + std::to_string(ring_dim) +
+                              " / natural depth " +
+                              std::to_string(natural_depth);
 
     if (!key_exists) {
         throw std::invalid_argument(
-            "no noise calibration for " + where +
-            "; noise flooding cannot be sized for this configuration. Measure "
-            "it with `bench_noise --sweep` (add the (k, m) to the grid if "
-            "needed), regenerate with `scripts/make_calibration_table.py "
-            "--emit-cpp include/util/noise_calibration.inc`, and rebuild.");
+            "missing sanitizer calibration for " + where +
+            ": transcript target " + std::to_string(transcript_stat_bits) +
+            ", query cap " + std::to_string(max_queries) +
+            ", margin " + std::to_string(flood_margin_bits) +
+            ". Measure the exact calibration key with `bench_noise --sweep`, "
+            "regenerate include/util/noise_calibration.inc, and rebuild.");
     }
 
     throw std::invalid_argument(
-        "lambda_stat=" + std::to_string(lambda_stat) + " with margin " +
-        std::to_string(flood_margin_bits) + " needs " +
-        std::to_string(static_cast<int>(required)) +
-        " bits of budget for " + where + ", but the widest measured cell "
-        "carries only " + std::to_string(static_cast<int>(best_capacity)) +
-        ". Lower lambda_stat, lower flood_margin_bits, or extend the "
-        "calibration sweep -- raising the ring dimension would double every "
-        "runtime and is not done implicitly.");
+        best_infeasible.empty()
+            ? "infeasible sanitizer calibration for " + where
+            : best_infeasible);
+}
+
+void PiccardParams::ClearFloodingSelection() {
+    flooding_sized_ = false;
+    requested_ring_dim_ = 0;
+    selected_calibrated_ring_dim_ = 0;
+    query_stat_bits_ = 0;
+    coefficient_stat_bits_ = 0;
+    flood_noise_bits_ = 0;
+    selected_log2_q_over_t_ = 0.0;
+    selected_circuit_ = Circuit::OneHot;
+    runtime_adopted_ = false;
+    validation_snapshot_valid_ = false;
+    validation_snapshot_ = ValidationSnapshot{};
+    scaling_mod_size = 0;
+    eval_noise_bits = 0;
+    ring_dim_natural = 0;
 }
 
 void PiccardParams::DeriveWithoutFlooding() {
-    flooding_sized_ = false;
+    ClearFloodingSelection();
     if (k == 0) throw std::invalid_argument("k must be > 0");
     if (m < 2) throw std::invalid_argument("m must be >= 2");
 
@@ -233,7 +496,7 @@ void PiccardParams::Validate() {
 }
 
 void PiccardParams::DeriveSqrtWithoutFlooding() {
-    flooding_sized_ = false;
+    ClearFloodingSelection();
     if (k == 0) throw std::invalid_argument("k must be > 0");
     if (m < 4) throw std::invalid_argument("m must be >= 4 for sqrt encoding");
 

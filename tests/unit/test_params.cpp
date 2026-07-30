@@ -1,9 +1,97 @@
 #include <gtest/gtest.h>
 #include "util/params.h"
+#include "util/params_calibration.h"
 
+#include <functional>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 using namespace piccard;
+
+namespace {
+
+CalibrationCandidate GrownOneHotCandidate(double log2_q_over_t = 200.0) {
+    CalibrationCandidate candidate{};
+    candidate.circuit = Circuit::OneHot;
+    candidate.security = SecurityLevel::STD128;
+    candidate.requested_ring_dim = 8192;
+    candidate.natural_ring_dim = 8192;
+    candidate.calibrated_ring_dim = 16384;
+    candidate.natural_mult_depth = 1;
+    candidate.selected_mult_depth = 3;
+    candidate.scaling_mod_size = 40;
+    candidate.eval_noise_bits = 60;
+    candidate.log2_q_over_t = log2_q_over_t;
+    return candidate;
+}
+
+PiccardParams DerivedDefaultOneHotProfile() {
+    PiccardParams params;
+    CalibrationAccess::Derive(params);
+    return params;
+}
+
+PiccardParams SelectedGrownOneHotProfile() {
+    return SelectSanitizerCandidate(
+        DerivedDefaultOneHotProfile(),
+        GrownOneHotCandidate());
+}
+
+PiccardParams SelectedThresholdCompatibilityProfile() {
+    PiccardParams params;
+    params.k = 64;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.threshold_mode = true;
+    params.threshold_tau = 32;
+    params.Validate();
+    return params;
+}
+
+std::string InvalidArgumentMessage(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const std::invalid_argument& error) {
+        return error.what();
+    }
+    return {};
+}
+
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const PiccardParams&>().RequestedRingDim()),
+        uint32_t>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const PiccardParams&>().SelectedCalibratedRingDim()),
+        uint32_t>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const PiccardParams&>().QueryStatBits()),
+        uint32_t>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const PiccardParams&>().CoefficientStatBits()),
+        uint32_t>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<const PiccardParams&>().FloodNoiseBits()),
+        uint32_t>);
+static_assert(
+    !std::is_reference_v<
+        decltype(std::declval<const PiccardParams&>().RequestedRingDim())>);
+static_assert(
+    !std::is_reference_v<
+        decltype(std::declval<const PiccardParams&>().SelectedCalibratedRingDim())>);
+static_assert(
+    !std::is_reference_v<
+        decltype(std::declval<const PiccardParams&>().QueryStatBits())>);
+static_assert(
+    !std::is_reference_v<
+        decltype(std::declval<const PiccardParams&>().CoefficientStatBits())>);
+
+}  // namespace
 
 TEST(NextPowerOf2, EdgeCases) {
     struct Case { uint32_t input; uint32_t expected; };
@@ -88,6 +176,362 @@ TEST(PiccardParams, DefaultValidation) {
     // circuit's own requirement is natural_mult_depth.
     EXPECT_EQ(params.natural_mult_depth, 1u);
     EXPECT_GE(params.mult_depth, params.natural_mult_depth);
+}
+
+TEST(PiccardParams, SanitizerDefaultsResolveToTranscriptAndQueryCap) {
+    PiccardParams params;
+
+    EXPECT_EQ(params.transcript_stat_bits, 40u);
+    EXPECT_EQ(params.max_queries, UINT64_C(1) << 20);
+
+    params.Validate();
+
+    EXPECT_EQ(params.RequestedRingDim(), 8192u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 8192u);
+    EXPECT_EQ(params.QueryStatBits(), 60u);
+    EXPECT_EQ(params.CoefficientStatBits(), 73u);
+}
+
+TEST(PiccardParams, FloodNoiseUsesEvalCoefficientAndMarginExactlyOnce) {
+    PiccardParams params;
+    params.Validate();
+
+    EXPECT_EQ(
+        params.FloodNoiseBits(),
+        params.eval_noise_bits + 73u + params.flood_margin_bits);
+}
+
+TEST(SanitizerCandidate, RealizedRingDimensionDrivesCoefficientBits) {
+    const PiccardParams profile = DerivedDefaultOneHotProfile();
+    const PiccardParams selected =
+        SelectSanitizerCandidate(profile, GrownOneHotCandidate());
+
+    RecordProperty("requested_ring_dim", selected.RequestedRingDim());
+    RecordProperty(
+        "selected_calibrated_ring_dim",
+        selected.SelectedCalibratedRingDim());
+    RecordProperty("query_stat_bits", selected.QueryStatBits());
+    RecordProperty(
+        "coefficient_stat_bits",
+        selected.CoefficientStatBits());
+    RecordProperty("flood_noise_bits", selected.FloodNoiseBits());
+    EXPECT_EQ(selected.RequestedRingDim(), 8192u);
+    EXPECT_EQ(selected.SelectedCalibratedRingDim(), 16384u);
+    EXPECT_EQ(selected.QueryStatBits(), 60u);
+    EXPECT_EQ(selected.CoefficientStatBits(), 74u);
+    EXPECT_EQ(selected.FloodNoiseBits(), 142u);
+}
+
+TEST(SanitizerCandidate, RejectsCellThatOnlyFitsOldCoefficientFormula) {
+    const PiccardParams profile = DerivedDefaultOneHotProfile();
+    const CalibrationCandidate old_formula_only = GrownOneHotCandidate(120.0);
+
+    // Hand-check the fixture's boundary: the old coefficient-only target 40
+    // would require 60 + 40 + 8 + 2 = 110, while the transcript-aware target
+    // uses coefficient bits 74 and requires 144.
+    ASSERT_LE(110.0, old_formula_only.log2_q_over_t);
+    ASSERT_GT(144.0, old_formula_only.log2_q_over_t);
+
+    const std::string message = InvalidArgumentMessage([&] {
+        (void)SelectSanitizerCandidate(profile, old_formula_only);
+    });
+
+    ASSERT_FALSE(message.empty());
+    RecordProperty("infeasible_diagnostic", message);
+    EXPECT_NE(message.find("infeasible sanitizer calibration"), std::string::npos);
+    EXPECT_NE(message.find("required capacity 144"), std::string::npos);
+    EXPECT_NE(message.find("available log2(q/t) 120"), std::string::npos);
+}
+
+TEST(PiccardParams, MissingCalibrationIsAHardDistinctFailure) {
+    PiccardParams params;
+    params.security = SecurityLevel::STD192;
+
+    const std::string message =
+        InvalidArgumentMessage([&] { params.Validate(); });
+
+    ASSERT_FALSE(message.empty());
+    RecordProperty("missing_diagnostic", message);
+    EXPECT_NE(message.find("missing sanitizer calibration"), std::string::npos);
+    EXPECT_EQ(message.find("infeasible sanitizer calibration"), std::string::npos);
+    EXPECT_NE(message.find("one-hot / STD192"), std::string::npos);
+}
+
+TEST(PiccardParams, DeriveOnlyCalibrationAccessLeavesFloodingUnsized) {
+    PiccardParams one_hot;
+    CalibrationAccess::Derive(one_hot);
+    EXPECT_FALSE(one_hot.FloodingSized());
+    EXPECT_THROW(one_hot.FloodNoiseBits(), std::logic_error);
+
+    PiccardParams sqrt;
+    CalibrationAccess::DeriveSqrt(sqrt);
+    EXPECT_FALSE(sqrt.FloodingSized());
+    EXPECT_THROW(sqrt.FloodNoiseBits(), std::logic_error);
+}
+
+TEST(SanitizerCandidate, ExactTranscriptTargetsRemainDistinct) {
+    const CalibrationCandidate candidate = GrownOneHotCandidate(1000.0);
+
+    PiccardParams forty = DerivedDefaultOneHotProfile();
+    forty.transcript_stat_bits = 40;
+    const PiccardParams selected_forty =
+        SelectSanitizerCandidate(forty, candidate);
+
+    PiccardParams sixty_four = DerivedDefaultOneHotProfile();
+    sixty_four.transcript_stat_bits = 64;
+    const PiccardParams selected_sixty_four =
+        SelectSanitizerCandidate(sixty_four, candidate);
+
+    PiccardParams one_twenty_eight = DerivedDefaultOneHotProfile();
+    one_twenty_eight.transcript_stat_bits = 128;
+    const PiccardParams selected_one_twenty_eight =
+        SelectSanitizerCandidate(one_twenty_eight, candidate);
+
+    EXPECT_EQ(selected_forty.QueryStatBits(), 60u);
+    EXPECT_EQ(selected_forty.CoefficientStatBits(), 74u);
+    EXPECT_EQ(selected_sixty_four.QueryStatBits(), 84u);
+    EXPECT_EQ(selected_sixty_four.CoefficientStatBits(), 98u);
+    EXPECT_EQ(selected_one_twenty_eight.QueryStatBits(), 148u);
+    EXPECT_EQ(selected_one_twenty_eight.CoefficientStatBits(), 162u);
+}
+
+TEST(SanitizerCandidate, UnsupportedTranscriptTargetIsRejectedExactly) {
+    PiccardParams profile = DerivedDefaultOneHotProfile();
+    profile.transcript_stat_bits = 41;
+
+    const std::string message = InvalidArgumentMessage([&] {
+        (void)SelectSanitizerCandidate(profile, GrownOneHotCandidate());
+    });
+
+    ASSERT_FALSE(message.empty());
+    EXPECT_NE(
+        message.find("transcript_stat_bits must be exactly 40, 64, or 128"),
+        std::string::npos);
+}
+
+TEST(PiccardParams, RuntimeAdoptionRequiresPriorSelection) {
+    PiccardParams never_derived;
+    EXPECT_THROW(
+        never_derived.AdoptVerifiedRuntimeRingDim(8192),
+        std::logic_error);
+
+    PiccardParams derived_only = DerivedDefaultOneHotProfile();
+    EXPECT_THROW(
+        derived_only.AdoptVerifiedRuntimeRingDim(8192),
+        std::logic_error);
+}
+
+TEST(PiccardParams, GrownRuntimeAdoptionPreservesRequestedDimension) {
+    PiccardParams selected = SelectedGrownOneHotProfile();
+
+    EXPECT_THROW(
+        selected.AdoptVerifiedRuntimeRingDim(8192),
+        std::invalid_argument);
+    EXPECT_EQ(selected.RequestedRingDim(), 8192u);
+    EXPECT_EQ(selected.SelectedCalibratedRingDim(), 16384u);
+    EXPECT_EQ(selected.ring_dim, 8192u);
+    EXPECT_EQ(selected.FloodNoiseBits(), 142u);
+
+    EXPECT_NO_THROW(selected.AdoptVerifiedRuntimeRingDim(16384));
+    EXPECT_EQ(selected.RequestedRingDim(), 8192u);
+    EXPECT_EQ(selected.SelectedCalibratedRingDim(), 16384u);
+    EXPECT_EQ(selected.ring_dim, 16384u);
+    EXPECT_EQ(selected.FloodNoiseBits(), 142u);
+}
+
+TEST(PiccardParams, RuntimeAdoptionIsOneTime) {
+    PiccardParams selected = SelectedGrownOneHotProfile();
+    selected.AdoptVerifiedRuntimeRingDim(16384);
+
+    EXPECT_THROW(
+        selected.AdoptVerifiedRuntimeRingDim(16384),
+        std::logic_error);
+}
+
+TEST(PiccardParams, StaleSourceBeforeAdoptionFailsClosed) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PiccardParams&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"eval_noise_bits", [](PiccardParams& params) {
+             ++params.eval_noise_bits;
+         }},
+        {"flood_margin_bits", [](PiccardParams& params) {
+             ++params.flood_margin_bits;
+         }},
+        {"transcript_stat_bits", [](PiccardParams& params) {
+             params.transcript_stat_bits = 64;
+         }},
+        {"max_queries", [](PiccardParams& params) {
+             ++params.max_queries;
+         }},
+        {"ring_dim", [](PiccardParams& params) {
+             params.ring_dim = 16384;
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PiccardParams selected = SelectedGrownOneHotProfile();
+        mutation.apply(selected);
+        EXPECT_THROW(selected.FloodNoiseBits(), std::logic_error);
+    }
+}
+
+TEST(PiccardParams, StaleSourcePreventsRuntimeAdoption) {
+    PiccardParams selected = SelectedGrownOneHotProfile();
+    ++selected.flood_margin_bits;
+
+    EXPECT_THROW(
+        selected.AdoptVerifiedRuntimeRingDim(16384),
+        std::logic_error);
+    EXPECT_EQ(selected.ring_dim, 8192u);
+}
+
+TEST(PiccardParams, StaleSourceAfterAdoptionFailsClosed) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PiccardParams&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"eval_noise_bits", [](PiccardParams& params) {
+             ++params.eval_noise_bits;
+         }},
+        {"flood_margin_bits", [](PiccardParams& params) {
+             ++params.flood_margin_bits;
+         }},
+        {"transcript_stat_bits", [](PiccardParams& params) {
+             params.transcript_stat_bits = 64;
+         }},
+        {"max_queries", [](PiccardParams& params) {
+             ++params.max_queries;
+         }},
+        {"ring_dim", [](PiccardParams& params) {
+             params.ring_dim = 8192;
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PiccardParams selected = SelectedGrownOneHotProfile();
+        selected.AdoptVerifiedRuntimeRingDim(16384);
+        mutation.apply(selected);
+        EXPECT_THROW(selected.FloodNoiseBits(), std::logic_error);
+    }
+}
+
+TEST(PiccardParams, ThresholdCompatibilityUsesPrivateCoefficientTarget) {
+    const PiccardParams selected = SelectedThresholdCompatibilityProfile();
+
+    EXPECT_EQ(selected.RequestedRingDim(), 1024u);
+    EXPECT_EQ(selected.SelectedCalibratedRingDim(), 1024u);
+    EXPECT_EQ(selected.QueryStatBits(), 0u);
+    EXPECT_EQ(selected.CoefficientStatBits(), 64u);
+    EXPECT_EQ(
+        selected.FloodNoiseBits(),
+        selected.eval_noise_bits + 64u + selected.flood_margin_bits);
+}
+
+TEST(PiccardParams, ThresholdCompatibilityAdoptsSelectedRuntimeOnce) {
+    PiccardParams selected = SelectedThresholdCompatibilityProfile();
+
+    EXPECT_THROW(
+        selected.AdoptVerifiedRuntimeRingDim(2048),
+        std::invalid_argument);
+    EXPECT_EQ(selected.ring_dim, 1024u);
+
+    EXPECT_NO_THROW(selected.AdoptVerifiedRuntimeRingDim(1024));
+    EXPECT_EQ(selected.RequestedRingDim(), 1024u);
+    EXPECT_EQ(selected.SelectedCalibratedRingDim(), 1024u);
+    EXPECT_EQ(selected.ring_dim, 1024u);
+    EXPECT_EQ(selected.QueryStatBits(), 0u);
+    EXPECT_EQ(selected.CoefficientStatBits(), 64u);
+    EXPECT_EQ(
+        selected.FloodNoiseBits(),
+        selected.eval_noise_bits + 64u + selected.flood_margin_bits);
+
+    EXPECT_THROW(
+        selected.AdoptVerifiedRuntimeRingDim(1024),
+        std::logic_error);
+}
+
+TEST(PiccardParams, ThresholdCompatibilityMutationsFailClosedBeforeAdoption) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PiccardParams&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"eval_noise_bits", [](PiccardParams& params) {
+             ++params.eval_noise_bits;
+         }},
+        {"flood_margin_bits", [](PiccardParams& params) {
+             ++params.flood_margin_bits;
+         }},
+        {"transcript_stat_bits", [](PiccardParams& params) {
+             params.transcript_stat_bits = 64;
+         }},
+        {"max_queries", [](PiccardParams& params) {
+             ++params.max_queries;
+         }},
+        {"ring_dim", [](PiccardParams& params) {
+             params.ring_dim = 2048;
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PiccardParams selected = SelectedThresholdCompatibilityProfile();
+        mutation.apply(selected);
+        EXPECT_THROW(selected.FloodNoiseBits(), std::logic_error);
+    }
+}
+
+TEST(PiccardParams, ThresholdCompatibilityMutationsFailClosedAfterAdoption) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PiccardParams&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"eval_noise_bits", [](PiccardParams& params) {
+             ++params.eval_noise_bits;
+         }},
+        {"flood_margin_bits", [](PiccardParams& params) {
+             ++params.flood_margin_bits;
+         }},
+        {"transcript_stat_bits", [](PiccardParams& params) {
+             params.transcript_stat_bits = 64;
+         }},
+        {"max_queries", [](PiccardParams& params) {
+             ++params.max_queries;
+         }},
+        {"ring_dim", [](PiccardParams& params) {
+             params.ring_dim = 2048;
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PiccardParams selected = SelectedThresholdCompatibilityProfile();
+        selected.AdoptVerifiedRuntimeRingDim(1024);
+        mutation.apply(selected);
+        EXPECT_THROW(selected.FloodNoiseBits(), std::logic_error);
+    }
+}
+
+TEST(PiccardParams, Infeasible128IsNotReportedAsMissingCalibration) {
+    PiccardParams params;
+    params.transcript_stat_bits = 128;
+
+    const std::string message =
+        InvalidArgumentMessage([&] { params.Validate(); });
+
+    ASSERT_FALSE(message.empty());
+    RecordProperty("infeasible_128_diagnostic", message);
+    EXPECT_NE(message.find("infeasible sanitizer calibration"), std::string::npos);
+    EXPECT_EQ(message.find("missing sanitizer calibration"), std::string::npos);
+    EXPECT_NE(message.find("transcript target 128"), std::string::npos);
+    EXPECT_NE(message.find("query cap 1048576"), std::string::npos);
 }
 
 TEST(PiccardParams, ToySecuritySmallRing) {

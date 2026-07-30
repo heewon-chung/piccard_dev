@@ -334,7 +334,8 @@ static ComparisonResult RunMultiTrialPiccard(
     r.jaccard_error = sum_j_err / n;
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
-    r.flood_lambda_stat = engine.GetParams().lambda_stat;
+    r.flood_lambda_stat =
+        engine.GetParams().LegacyFloodCoefficientBits();
     r.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
     r.flood_margin_bits = engine.GetParams().flood_margin_bits;
     r.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -631,7 +632,8 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
     r.jaccard_error = sum_j_err / n;
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
-    r.flood_lambda_stat = engine.GetParams().lambda_stat;
+    r.flood_lambda_stat =
+        engine.GetParams().LegacyFloodCoefficientBits();
     r.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
     r.flood_margin_bits = engine.GetParams().flood_margin_bits;
     r.flood_noise_bits = engine.GetParams().FloodNoiseBits();
@@ -1154,7 +1156,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             size_t p_rel = (acc_p_jtrue_last > 0.0) ? config.accuracy_trials : 0;
             pr.jaccard_rel_error = (p_rel > 0) ? (pr.jaccard_error / pr.jaccard_expected) : -1.0;
             pr.rel_error_eligible_n = p_rel;
-            pr.flood_lambda_stat = piccard.GetParams().lambda_stat;
+            pr.flood_lambda_stat =
+                piccard.GetParams().LegacyFloodCoefficientBits();
             pr.flood_eval_noise_bits = piccard.GetParams().eval_noise_bits;
             pr.flood_margin_bits = piccard.GetParams().flood_margin_bits;
             pr.flood_noise_bits = piccard.GetParams().FloodNoiseBits();
@@ -1209,7 +1212,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                 sr.jaccard_rel_error = (s_rel > 0) ? (sr.jaccard_error / sr.jaccard_expected) : -1.0;
                 sr.rel_error_eligible_n = s_rel;
             }
-            sr.flood_lambda_stat = sqrt_eng->GetParams().lambda_stat;
+            sr.flood_lambda_stat =
+                sqrt_eng->GetParams().LegacyFloodCoefficientBits();
             sr.flood_eval_noise_bits = sqrt_eng->GetParams().eval_noise_bits;
             sr.flood_margin_bits = sqrt_eng->GetParams().flood_margin_bits;
             sr.flood_noise_bits = sqrt_eng->GetParams().FloodNoiseBits();

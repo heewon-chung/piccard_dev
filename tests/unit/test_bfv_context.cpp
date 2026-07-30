@@ -554,7 +554,9 @@ TEST(BFVContextBudget, AcceptsCalibratedParameters) {
     params.security = SecurityLevel::TOY;
     params.Validate();
 
-    RecordProperty("input_lambda_stat", static_cast<int>(params.lambda_stat));
+    RecordProperty(
+        "input_lambda_stat",
+        static_cast<int>(params.LegacyFloodCoefficientBits()));
     BFVContext ctx(params);
     EXPECT_NO_THROW(ctx.Initialize());
 }
