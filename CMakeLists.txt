@@ -103,6 +103,12 @@ target_include_directories(
 # piccard_core: Pure math modules (no OpenFHE dependency)
 # =============================================================================
 
+add_library(piccard_security_profile src/util/security_profile.cpp)
+target_include_directories(
+    piccard_security_profile
+    PUBLIC ${CMAKE_SOURCE_DIR}/include
+)
+
 set(PICCARD_CORE_SOURCES
     src/util/params.cpp
     src/core/minhash.cpp
@@ -114,7 +120,12 @@ set(PICCARD_CORE_SOURCES
 
 add_library(piccard_core ${PICCARD_CORE_SOURCES})
 target_include_directories(piccard_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(piccard_core PUBLIC OpenSSL::Crypto)
+target_link_libraries(
+    piccard_core
+    PUBLIC
+        OpenSSL::Crypto
+        piccard_security_profile
+)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -224,6 +235,17 @@ if(BUILD_TESTS)
         add_executable(test_params tests/unit/test_params.cpp)
         target_link_libraries(test_params piccard_core test_main)
         add_test(NAME Params COMMAND test_params)
+
+        add_executable(
+            test_security_profile
+            tests/unit/test_security_profile.cpp
+        )
+        target_link_libraries(
+            test_security_profile
+            piccard_security_profile
+            test_main
+        )
+        add_test(NAME SecurityProfile COMMAND test_security_profile)
 
         add_executable(test_minhash tests/unit/test_minhash.cpp)
         target_link_libraries(test_minhash piccard_core test_main)
@@ -505,7 +527,7 @@ endif()
 # Installation
 # =============================================================================
 
-install(TARGETS piccard_core
+install(TARGETS piccard_core piccard_security_profile
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
