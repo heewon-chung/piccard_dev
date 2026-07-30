@@ -30,13 +30,79 @@ SECURITY_LEVELS=("STD128")
 TIMING_TRIALS=10
 ACCURACY_TRIALS=50
 TAG="paper"
+TRANSCRIPT_STAT_BITS=40
+MAX_QUERIES=1048576
+saw_transcript=0
+saw_max_queries=0
 
-if [[ "${1:-}" == "--quick" ]]; then
-    SECURITY_LEVELS=("TOY")
-    TIMING_TRIALS=2
-    ACCURACY_TRIALS=5
-    TAG="quick"
+validate_max_queries() {
+    local value="$1"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    while [[ ${#value} -gt 1 && "$value" == 0* ]]; do
+        value="${value#0}"
+    done
+    [[ "$value" != "0" ]] || return 1
+    local maximum="9223372036854775808"
+    [[ ${#value} -lt ${#maximum} ]] ||
+        [[ ${#value} -eq ${#maximum} &&
+           ( "$value" == "$maximum" || "$value" < "$maximum" ) ]]
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quick)
+            SECURITY_LEVELS=("TOY")
+            TIMING_TRIALS=2
+            ACCURACY_TRIALS=5
+            TAG="quick"
+            ;;
+        --transcript_stat_bits=*)
+            [[ $saw_transcript -eq 0 ]] ||
+                { echo "Duplicate --transcript_stat_bits" >&2; exit 2; }
+            saw_transcript=1
+            TRANSCRIPT_STAT_BITS="${1#*=}"
+            case "$TRANSCRIPT_STAT_BITS" in
+                40|64|128) ;;
+                *) echo "Invalid --transcript_stat_bits" >&2; exit 2 ;;
+            esac
+            ;;
+        --max_queries=*)
+            [[ $saw_max_queries -eq 0 ]] ||
+                { echo "Duplicate --max_queries" >&2; exit 2; }
+            saw_max_queries=1
+            MAX_QUERIES="${1#*=}"
+            validate_max_queries "$MAX_QUERIES" ||
+                { echo "Invalid --max_queries" >&2; exit 2; }
+            ;;
+        *)
+            echo "Unknown runner option: $1" >&2
+            exit 2
+            ;;
+    esac
     shift
+done
+SANITIZER_FLAGS=(
+    "--transcript_stat_bits=$TRANSCRIPT_STAT_BITS"
+    "--max_queries=$MAX_QUERIES"
+)
+
+BENCH_RESULTS_ROOT="${BENCH_RESULTS_ROOT:-$PROJECT_DIR/scripts/results}"
+case "$BENCH_RESULTS_ROOT" in
+    /*) ;;
+    *) BENCH_RESULTS_ROOT="$PWD/$BENCH_RESULTS_ROOT" ;;
+esac
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "Command plan:"
+    for SECURITY in "${SECURITY_LEVELS[@]}"; do
+        echo "  bench_piccard --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000 ${SANITIZER_FLAGS[*]}"
+        echo "  bench_piccard --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000 ${SANITIZER_FLAGS[*]}"
+        echo "  bench_piccard --mode=combined --security=$SECURITY --trials=$TIMING_TRIALS --accuracy_trials=$ACCURACY_TRIALS --overlap=0.3 --set_size=1000 ${SANITIZER_FLAGS[*]}"
+        echo "  bench_comparison --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000 ${SANITIZER_FLAGS[*]}"
+    done
+    echo "Resolved sanitizer profile: transcript_stat_bits=$TRANSCRIPT_STAT_BITS max_queries=$MAX_QUERIES"
+    echo "Resolved results root: $BENCH_RESULTS_ROOT"
+    exit 0
 fi
 
 # ── Verify binaries ─────────────────────────────────────────────────
@@ -49,7 +115,7 @@ fi
 
 # ── Output directory ────────────────────────────────────────────────
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-OUT_DIR="$PROJECT_DIR/scripts/results/${TIMESTAMP}_${TAG}"
+OUT_DIR="$BENCH_RESULTS_ROOT/${TIMESTAMP}_${TAG}"
 CSV_DIR="$OUT_DIR/csv"
 TABLE_DIR="$OUT_DIR/tables"
 mkdir -p "$CSV_DIR" "$TABLE_DIR"
@@ -141,13 +207,15 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
     run_bench "Piccard timing ($SECURITY)" \
         "$BUILD_DIR/bench_piccard" \
         "$CSV_DIR/piccard_timing_${SECURITY}.csv" \
-        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
+        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 \
+        "${SANITIZER_FLAGS[@]}"
 
     # ── 2. bench_piccard: accuracy ──────────────────────────────────
     run_bench "Piccard accuracy ($SECURITY)" \
         "$BUILD_DIR/bench_piccard" \
         "$CSV_DIR/piccard_accuracy_${SECURITY}.csv" \
-        --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000
+        --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000 \
+        "${SANITIZER_FLAGS[@]}"
 
     # ── 3. bench_piccard: combined ──────────────────────────────────
     run_bench "Piccard combined ($SECURITY)" \
@@ -155,13 +223,14 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         "$CSV_DIR/piccard_combined_${SECURITY}.csv" \
         --mode=combined --security="$SECURITY" \
         --trials="$TIMING_TRIALS" --accuracy_trials="$ACCURACY_TRIALS" \
-        --overlap=0.3 --set_size=1000
+        --overlap=0.3 --set_size=1000 "${SANITIZER_FLAGS[@]}"
 
     # ── 4. bench_comparison: timing ─────────────────────────────────
     run_bench "Comparison timing ($SECURITY)" \
         "$BUILD_DIR/bench_comparison" \
         "$CSV_DIR/comparison_timing_${SECURITY}.csv" \
-        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
+        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 \
+        "${SANITIZER_FLAGS[@]}"
 done
 
 # ── Summary ─────────────────────────────────────────────────────────

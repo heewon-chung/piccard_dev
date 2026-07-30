@@ -66,19 +66,66 @@ SECURITY_LEVELS=("STD128")
 TIMING_TRIALS=30
 ACCURACY_TRIALS=50
 TAG="paper"
+TRANSCRIPT_STAT_BITS=40
+MAX_QUERIES=1048576
+saw_transcript=0
+saw_max_queries=0
 
-if [[ "${1:-}" == "--quick" ]]; then
-    SECURITY_LEVELS=("TOY")
-    TIMING_TRIALS=2
-    ACCURACY_TRIALS=5
-    TAG="quick"
+validate_max_queries() {
+    local value="$1"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    while [[ ${#value} -gt 1 && "$value" == 0* ]]; do
+        value="${value#0}"
+    done
+    [[ "$value" != "0" ]] || return 1
+    local maximum="9223372036854775808"
+    [[ ${#value} -lt ${#maximum} ]] ||
+        [[ ${#value} -eq ${#maximum} &&
+           ( "$value" == "$maximum" || "$value" < "$maximum" ) ]]
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quick)
+            SECURITY_LEVELS=("TOY")
+            TIMING_TRIALS=2
+            ACCURACY_TRIALS=5
+            TAG="quick"
+            ;;
+        --transcript_stat_bits=*)
+            [[ $saw_transcript -eq 0 ]] ||
+                { echo "Duplicate --transcript_stat_bits" >&2; exit 2; }
+            saw_transcript=1
+            TRANSCRIPT_STAT_BITS="${1#*=}"
+            case "$TRANSCRIPT_STAT_BITS" in
+                40|64|128) ;;
+                *) echo "Invalid --transcript_stat_bits" >&2; exit 2 ;;
+            esac
+            ;;
+        --max_queries=*)
+            [[ $saw_max_queries -eq 0 ]] ||
+                { echo "Duplicate --max_queries" >&2; exit 2; }
+            saw_max_queries=1
+            MAX_QUERIES="${1#*=}"
+            validate_max_queries "$MAX_QUERIES" ||
+                { echo "Invalid --max_queries" >&2; exit 2; }
+            ;;
+        *)
+            echo "Unknown runner option: $1" >&2
+            exit 2
+            ;;
+    esac
     shift
-fi
+done
+SANITIZER_FLAGS=(
+    "--transcript_stat_bits=$TRANSCRIPT_STAT_BITS"
+    "--max_queries=$MAX_QUERIES"
+)
 
 # ── Quick-mode extra flags for new benchmarks ─────────────────────
 DYNAMIC_EXTRA_FLAGS=""
 if [[ "$TAG" == "quick" ]]; then
-    DYNAMIC_EXTRA_FLAGS="--depth=5 --set_size=1000"
+    DYNAMIC_EXTRA_FLAGS="--depth=5"
 fi
 
 # ── Results root (overridable) ──────────────────────────────────────
@@ -151,7 +198,8 @@ plan_comparison() {
     local csv="$CSV_DIR/comparison_timing_${security}.csv"
 
     local args=(--mode=timing --security="$security" --trials="$TIMING_TRIALS" \
-                --set_size=1000 --accuracy_trials="$ACCURACY_TRIALS")
+                --set_size=1000 --accuracy_trials="$ACCURACY_TRIALS" \
+                "${SANITIZER_FLAGS[@]}")
     if [[ "$TAG" != "quick" ]]; then
         # --sj16, paper-grade only. SJ16 at 3072-bit costs ~4.9 min/query at
         # 2^14 and ~19.5 min at 2^16, single-threaded (design doc
@@ -185,8 +233,16 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "Command plan:"
     print_env_line
     for SECURITY in "${SECURITY_LEVELS[@]}"; do
+        echo "  bench_piccard --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000 ${SANITIZER_FLAGS[*]}"
+        echo "  bench_piccard --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000 ${SANITIZER_FLAGS[*]}"
+        echo "  bench_piccard --mode=combined --security=$SECURITY --trials=$TIMING_TRIALS --accuracy_trials=$ACCURACY_TRIALS --overlap=0.3 --set_size=1000 ${SANITIZER_FLAGS[*]}"
         plan_comparison "$SECURITY"
+        echo "  bench_dynamic --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000${DYNAMIC_EXTRA_FLAGS:+ $DYNAMIC_EXTRA_FLAGS} ${SANITIZER_FLAGS[*]}"
+        echo "  bench_dynamic --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000${DYNAMIC_EXTRA_FLAGS:+ $DYNAMIC_EXTRA_FLAGS} ${SANITIZER_FLAGS[*]}"
+        echo "  bench_threshold --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000"
+        echo "  bench_threshold --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000"
     done
+    echo "Resolved sanitizer profile: transcript_stat_bits=$TRANSCRIPT_STAT_BITS max_queries=$MAX_QUERIES"
     echo "Resolved results root: $BENCH_RESULTS_ROOT"
     exit 0
 fi
@@ -279,13 +335,15 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
     run_bench "Piccard timing ($SECURITY)" \
         "$BUILD_DIR/bench_piccard" \
         "$CSV_DIR/piccard_timing_${SECURITY}.csv" \
-        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000
+        --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 \
+        "${SANITIZER_FLAGS[@]}"
 
     # ── 2. bench_piccard: accuracy ──────────────────────────────────
     run_bench "Piccard accuracy ($SECURITY)" \
         "$BUILD_DIR/bench_piccard" \
         "$CSV_DIR/piccard_accuracy_${SECURITY}.csv" \
-        --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000
+        --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000 \
+        "${SANITIZER_FLAGS[@]}"
 
     # ── 3. bench_piccard: combined ──────────────────────────────────
     run_bench "Piccard combined ($SECURITY)" \
@@ -293,7 +351,7 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         "$CSV_DIR/piccard_combined_${SECURITY}.csv" \
         --mode=combined --security="$SECURITY" \
         --trials="$TIMING_TRIALS" --accuracy_trials="$ACCURACY_TRIALS" \
-        --overlap=0.3 --set_size=1000
+        --overlap=0.3 --set_size=1000 "${SANITIZER_FLAGS[@]}"
 
     # ── 4. bench_comparison: timing (+ SJ16 postcondition, paper-grade only)
     plan_comparison "$SECURITY"
@@ -303,13 +361,15 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         run_bench "Dynamic timing ($SECURITY)" \
             "$BUILD_DIR/bench_dynamic" \
             "$CSV_DIR/dynamic_timing_${SECURITY}.csv" \
-            --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 $DYNAMIC_EXTRA_FLAGS
+            --mode=timing --security="$SECURITY" --trials="$TIMING_TRIALS" --set_size=1000 \
+            $DYNAMIC_EXTRA_FLAGS "${SANITIZER_FLAGS[@]}"
 
         # ── 6. bench_dynamic: accuracy ──────────────────────────────
         run_bench "Dynamic accuracy ($SECURITY)" \
             "$BUILD_DIR/bench_dynamic" \
             "$CSV_DIR/dynamic_accuracy_${SECURITY}.csv" \
-            --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000 $DYNAMIC_EXTRA_FLAGS
+            --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000 \
+            $DYNAMIC_EXTRA_FLAGS "${SANITIZER_FLAGS[@]}"
     else
         echo "  (bench_dynamic not built, skipping)"
     fi

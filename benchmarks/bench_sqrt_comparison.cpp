@@ -35,6 +35,7 @@ struct BenchResult {
     uint32_t mult_depth;
     double jaccard_est;
     double jaccard_true;
+    SanitizerMetadata sanitizer;
 };
 
 template <typename Engine>
@@ -44,6 +45,7 @@ BenchResult RunBench(Engine& engine, const std::vector<uint64_t>& set_x,
     r.ring_dim = engine.GetParams().ring_dim;
     r.mult_depth = engine.GetParams().mult_depth;
     r.jaccard_true = j_true;
+    r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
 
     // Encode
     auto t0 = Clock::now();
@@ -124,6 +126,7 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
 
     SqrtComparisonResult row;
     row.encoding = name;
+    row.security = "TOY";
     row.k = k;
     row.m = m;
     row.ring_dim = results[0].ring_dim;
@@ -139,6 +142,7 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
     row.has_relative_error = !rel_errs.empty();
     row.jaccard_rel_error = s_rel.mean;
     row.jaccard_rel_error_sd = s_rel.stddev;
+    row.sanitizer = results[0].sanitizer;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     std::cout << SerializeSqrtComparisonRow(row);
 }
@@ -146,18 +150,10 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
 int main(int argc, char** argv) {
     const uint32_t n = 500;
 
-    // Parse optional flags
-    uint64_t seed = 0;
-    int num_trials = 5;
-    for (int i = 1; i < argc; i++) {
-        std::string arg(argv[i]);
-        if (arg.find("--seed=") == 0)
-            seed = std::stoull(arg.substr(7));
-        else if (arg.find("--trials=") == 0)
-            num_trials = std::stoi(arg.substr(9));
-    }
-    if (seed == 0) seed = std::random_device{}();
-    if (num_trials < 1) num_trials = 1;
+    const SqrtComparisonConfig config =
+        ResolveSqrtComparisonConfig(argc, argv);
+    const uint64_t seed = config.seed;
+    const int num_trials = config.trials;
 
     std::mt19937_64 rng(seed);
 
@@ -192,7 +188,9 @@ int main(int argc, char** argv) {
                 PiccardParams p;
                 p.k = cfg.k;
                 p.m = cfg.m;
-                p.security = SecurityLevel::TOY;
+                p.security = config.sanitizer.security_level;
+                ApplySanitizerConfig(config.sanitizer, p);
+                p.flood_margin_bits = config.flood_margin_bits;
                 p.Validate();
 
                 Piccard engine(p);
@@ -205,7 +203,9 @@ int main(int argc, char** argv) {
                 PiccardParams p;
                 p.k = cfg.k;
                 p.m = cfg.m;
-                p.security = SecurityLevel::TOY;
+                p.security = config.sanitizer.security_level;
+                ApplySanitizerConfig(config.sanitizer, p);
+                p.flood_margin_bits = config.flood_margin_bits;
                 p.ValidateSqrt();
 
                 SqrtPiccard engine(p);

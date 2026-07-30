@@ -141,6 +141,7 @@ static ComparisonResult RunPiccardTimed(
     Timer timer;
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     cr.scenario = scenario;
     cr.method = "piccard";
     cr.universe_size = universe_size;
@@ -221,6 +222,7 @@ static ComparisonResult RunBaselineTimed(
     Timer timer;
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::NotApplicable;
+    cr.sanitizer = NotApplicableSanitizerMetadata();
     cr.scenario = scenario;
     cr.method = "baseline";
     cr.universe_size = engine.GetParams().universe_size;
@@ -334,11 +336,7 @@ static ComparisonResult RunMultiTrialPiccard(
     r.jaccard_error = sum_j_err / n;
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
-    r.flood_lambda_stat =
-        engine.GetParams().LegacyFloodCoefficientBits();
-    r.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-    r.flood_margin_bits = engine.GetParams().flood_margin_bits;
-    r.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     r.scaling_mod_size = engine.GetParams().scaling_mod_size;
     // Provenance (task 9-1a): this sweep never reseeds — every trial reuses
     // the engine's construction-time CRS — so hash_seed and hash_root_seed
@@ -390,6 +388,7 @@ static ComparisonResult RunMultiTrialBaseline(
 
     ComparisonResult r;
     r.estimator_model = EstimatorModel::NotApplicable;
+    r.sanitizer = NotApplicableSanitizerMetadata();
     r.scenario = scenario; r.method = "baseline";
     r.universe_size = engine.GetParams().universe_size;
     r.set_size = set_x.size(); r.k = 0; r.m = 0;
@@ -443,6 +442,7 @@ static ComparisonResult RunBCG12MultiTrial(
     double n=static_cast<double>(trials);
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::NotApplicable;
+    cr.sanitizer = NotApplicableSanitizerMetadata();
     cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
     cr.set_size=x.size(); cr.k=k; cr.m=0; cr.ring_dim=0; cr.num_cts=0; cr.mult_depth=0;
     cr.trials=trials;
@@ -490,6 +490,7 @@ static ComparisonResult RunSqrtPiccardTimed(
     Timer timer;
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     cr.scenario = scenario;
     cr.method = "piccard_sqrt";
     cr.universe_size = universe_size;
@@ -632,11 +633,7 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
     r.jaccard_error = sum_j_err / n;
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
-    r.flood_lambda_stat =
-        engine.GetParams().LegacyFloodCoefficientBits();
-    r.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-    r.flood_margin_bits = engine.GetParams().flood_margin_bits;
-    r.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     r.scaling_mod_size = engine.GetParams().scaling_mod_size;
     // Provenance (task 9-1a): this sweep never reseeds, same rationale as
     // RunMultiTrialPiccard above.
@@ -725,6 +722,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
         pp.k = k;
         pp.m = config.m;
         pp.security = config.security_level;
+        ApplySanitizerConfig(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -740,6 +738,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
             sp.k = k;
             sp.m = config.m;
             sp.security = config.security_level;
+            ApplySanitizerConfig(config, sp);
             sp.ValidateSqrt();
 
             SqrtPiccard sqrt_eng(sp);
@@ -804,6 +803,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
         pp.k = config.k;
         pp.m = m;
         pp.security = config.security_level;
+        ApplySanitizerConfig(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -819,6 +819,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
             sp.k = config.k;
             sp.m = m;
             sp.security = config.security_level;
+            ApplySanitizerConfig(config, sp);
             sp.ValidateSqrt();
 
             SqrtPiccard sqrt_eng(sp);
@@ -902,6 +903,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                 auto er = FinalizeSJ16Extrapolated(sj16_extrap, u, scenario,
                                                     config.set_size);
                 er.estimator_model = EstimatorModel::NotApplicable;
+                er.sanitizer = NotApplicableSanitizerMetadata();
                 csv.WriteRow(er);
             }
         }
@@ -913,6 +915,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         pp.k = config.k;
         pp.m = config.m;
         pp.security = config.security_level;
+        ApplySanitizerConfig(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -927,6 +930,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             sp.k = config.k;
             sp.m = config.m;
             sp.security = config.security_level;
+            ApplySanitizerConfig(config, sp);
             sp.ValidateSqrt();
             sqrt_eng = std::make_unique<SqrtPiccard>(sp);
             sqrt_eng->KeyGen();
@@ -1156,11 +1160,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             size_t p_rel = (acc_p_jtrue_last > 0.0) ? config.accuracy_trials : 0;
             pr.jaccard_rel_error = (p_rel > 0) ? (pr.jaccard_error / pr.jaccard_expected) : -1.0;
             pr.rel_error_eligible_n = p_rel;
-            pr.flood_lambda_stat =
-                piccard.GetParams().LegacyFloodCoefficientBits();
-            pr.flood_eval_noise_bits = piccard.GetParams().eval_noise_bits;
-            pr.flood_margin_bits = piccard.GetParams().flood_margin_bits;
-            pr.flood_noise_bits = piccard.GetParams().FloodNoiseBits();
+            pr.sanitizer = MakeSanitizerMetadata(piccard.GetParams());
             pr.scaling_mod_size = piccard.GetParams().scaling_mod_size;
             pr.hash_randomness = HashRandomnessName(config.hash_randomness);
             pr.hash_seed = timing_crs;
@@ -1212,11 +1212,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                 sr.jaccard_rel_error = (s_rel > 0) ? (sr.jaccard_error / sr.jaccard_expected) : -1.0;
                 sr.rel_error_eligible_n = s_rel;
             }
-            sr.flood_lambda_stat =
-                sqrt_eng->GetParams().LegacyFloodCoefficientBits();
-            sr.flood_eval_noise_bits = sqrt_eng->GetParams().eval_noise_bits;
-            sr.flood_margin_bits = sqrt_eng->GetParams().flood_margin_bits;
-            sr.flood_noise_bits = sqrt_eng->GetParams().FloodNoiseBits();
+            sr.sanitizer =
+                MakeSanitizerMetadata(sqrt_eng->GetParams());
             sr.scaling_mod_size = sqrt_eng->GetParams().scaling_mod_size;
             sr.hash_randomness = HashRandomnessName(config.hash_randomness);
             sr.hash_seed = timing_crs;
@@ -1243,6 +1240,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
 
             ComparisonResult br;
             br.estimator_model = EstimatorModel::NotApplicable;
+            br.sanitizer = NotApplicableSanitizerMetadata();
             br.scenario = scenario; br.method = "baseline";
             br.universe_size = u; br.set_size = config.set_size;
             br.k = 0; br.m = 0;
@@ -1287,6 +1285,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                  dd=ComputeDispersion(vd),dt=ComputeDispersion(vt);
             ComparisonResult r;
             r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+            r.sanitizer = NotApplicableSanitizerMetadata();
             r.scenario=scenario; r.method=method; r.universe_size=u;
             r.set_size=config.set_size; r.k=config.k; r.m=0; r.ring_dim=0; r.num_cts=0; r.mult_depth=0;
             r.trials=config.trials;
@@ -1322,6 +1321,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         if (sj16_active && !sj16_trials.empty()) {
             auto sr = FinalizeSJ16(sj16_trials, u, scenario, config.set_size);
             sr.estimator_model = EstimatorModel::NotApplicable;
+            sr.sanitizer = NotApplicableSanitizerMetadata();
             csv.WriteRow(sr);
 
             std::cerr << "  U=" << u
@@ -1349,6 +1349,7 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
     pp.k = config.k;
     pp.m = config.m;
     pp.security = config.security_level;
+    ApplySanitizerConfig(config, pp);
     pp.Validate();
 
     Piccard piccard(pp);
@@ -1362,6 +1363,7 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
         sp.k = config.k;
         sp.m = config.m;
         sp.security = config.security_level;
+        ApplySanitizerConfig(config, sp);
         sp.ValidateSqrt();
         sqrt_eng = std::make_unique<SqrtPiccard>(sp);
         sqrt_eng->KeyGen();

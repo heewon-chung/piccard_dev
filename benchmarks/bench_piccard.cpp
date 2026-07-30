@@ -245,11 +245,7 @@ static BenchmarkResult RunMultiTrial(
 
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
-    result.flood_lambda_stat =
-        engine.GetParams().LegacyFloodCoefficientBits();
-    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
-    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     double n = static_cast<double>(num_trials);
@@ -280,6 +276,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -354,11 +351,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
-        result.flood_lambda_stat =
-            engine.GetParams().LegacyFloodCoefficientBits();
-        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
-        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): this sweep is --mode=timing and never
@@ -395,6 +388,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -469,11 +463,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
-        result.flood_lambda_stat =
-            engine.GetParams().LegacyFloodCoefficientBits();
-        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
-        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
@@ -504,6 +494,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
+    ApplySanitizerConfig(config, params);
     params.Validate();
 
     Piccard engine(params);
@@ -579,11 +570,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_error    = sum_j_err / n;
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
-        result.flood_lambda_stat =
-            engine.GetParams().LegacyFloodCoefficientBits();
-        result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-        result.flood_margin_bits = engine.GetParams().flood_margin_bits;
-        result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+        result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
@@ -616,6 +603,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -662,11 +650,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
-                br.flood_lambda_stat =
-                    engine.GetParams().LegacyFloodCoefficientBits();
-                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -690,6 +674,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -734,11 +719,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
-                br.flood_lambda_stat =
-                    engine.GetParams().LegacyFloodCoefficientBits();
-                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -761,6 +742,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
+    ApplySanitizerConfig(config, params);
     params.Validate();
 
     Piccard engine(params);
@@ -804,11 +786,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
                 br.hash_randomness = HashRandomnessName(config.hash_randomness);
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
-                br.flood_lambda_stat =
-                    engine.GetParams().LegacyFloodCoefficientBits();
-                br.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                br.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                br.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -888,6 +866,7 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.hash_seed = config.seed;
         params.Validate();
 
@@ -944,6 +923,7 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
+        ApplySanitizerConfig(config, params);
         params.hash_seed = config.seed;
         params.Validate();
 
@@ -997,6 +977,7 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
+    ApplySanitizerConfig(config, params);
     params.hash_seed = config.seed;
     params.Validate();
 

@@ -6,6 +6,9 @@
 #include <string>
 
 namespace piccard {
+
+struct PiccardParams;
+
 namespace benchmark {
 
 /**
@@ -20,6 +23,25 @@ enum class EstimatorModel {
  * @brief Return the stable CSV spelling for an explicitly selected estimator.
  */
 const char* EstimatorModelName(EstimatorModel model);
+
+enum class SanitizerModel {
+    PhaseSmudgingEnc0PocV1,
+    NotApplicable,
+};
+
+struct SanitizerMetadata {
+    std::optional<SanitizerModel> model;
+    std::optional<uint32_t> transcript_stat_bits;
+    std::optional<uint64_t> max_queries;
+    std::optional<uint32_t> query_stat_bits;
+    std::optional<uint32_t> coefficient_stat_bits;
+    std::optional<uint32_t> flood_margin_bits;
+    std::optional<uint32_t> eval_noise_bits;
+    std::optional<uint32_t> flood_noise_bits;
+};
+
+SanitizerMetadata MakeSanitizerMetadata(const PiccardParams& params);
+SanitizerMetadata NotApplicableSanitizerMetadata();
 
 /**
  * @brief Result row shared by Piccard and onehot/sqrt benchmarks.
@@ -91,14 +113,11 @@ struct BenchmarkResult {
     double phase_flood_ms = 0.0;
     double phase_flood_ms_sd = -1.0;
     double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
     uint32_t scaling_mod_size = 0;
 
     // Deliberately unset by default. Serializers reject missing provenance.
     std::optional<EstimatorModel> estimator_model;
+    SanitizerMetadata sanitizer;
 };
 
 /**
@@ -162,13 +181,10 @@ struct DynamicResult {
     double phase_flood_ms = 0.0;
     double phase_flood_ms_sd = -1.0;
     double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
     uint32_t scaling_mod_size = 0;
 
     std::optional<EstimatorModel> estimator_model;
+    SanitizerMetadata sanitizer;
 };
 
 /**
@@ -222,10 +238,6 @@ struct ComparisonResult {
     double phase_flood_ms = 0.0;
     double phase_flood_ms_sd = -1.0;
     double phase_flood_ms_median = 0.0;
-    uint32_t flood_lambda_stat = 0;
-    uint32_t flood_eval_noise_bits = 0;
-    uint32_t flood_margin_bits = 0;
-    uint32_t flood_noise_bits = 0;
     uint32_t scaling_mod_size = 0;
 
     std::string measurement_kind = "measured";
@@ -235,6 +247,7 @@ struct ComparisonResult {
     std::string extrapolation_source;
 
     std::optional<EstimatorModel> estimator_model;
+    SanitizerMetadata sanitizer;
 };
 
 /**
@@ -251,6 +264,13 @@ struct CrossoverResult {
     double sqrt_total_ms = 0.0;
     bool sqrt_faster = false;
     double speedup_ratio = 0.0;
+    SanitizerMetadata sanitizer;
+    std::optional<uint32_t> onehot_coefficient_stat_bits;
+    std::optional<uint32_t> onehot_eval_noise_bits;
+    std::optional<uint32_t> onehot_flood_noise_bits;
+    std::optional<uint32_t> sqrt_coefficient_stat_bits;
+    std::optional<uint32_t> sqrt_eval_noise_bits;
+    std::optional<uint32_t> sqrt_flood_noise_bits;
     std::optional<EstimatorModel> estimator_model;
 };
 
@@ -259,6 +279,7 @@ struct CrossoverResult {
  */
 struct SqrtComparisonResult {
     std::string encoding;
+    std::string security;
     uint32_t k = 0;
     uint32_t m = 0;
     uint32_t ring_dim = 0;
@@ -274,6 +295,7 @@ struct SqrtComparisonResult {
     bool has_relative_error = false;
     double jaccard_rel_error = 0.0;
     double jaccard_rel_error_sd = 0.0;
+    SanitizerMetadata sanitizer;
     std::optional<EstimatorModel> estimator_model;
 };
 

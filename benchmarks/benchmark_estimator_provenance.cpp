@@ -1,5 +1,7 @@
 #include "benchmark_estimator_provenance.h"
 
+#include "util/params.h"
+
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +17,90 @@ const char* RequireEstimatorModel(
             "benchmark row is missing explicit estimator_model provenance");
     }
     return EstimatorModelName(*estimator_model);
+}
+
+const char* SanitizerModelName(SanitizerModel model) {
+    switch (model) {
+        case SanitizerModel::PhaseSmudgingEnc0PocV1:
+            return "phase-smudging-enc0-poc-v1";
+        case SanitizerModel::NotApplicable:
+            return "not-applicable";
+    }
+    throw std::logic_error("unknown sanitizer model");
+}
+
+const char* SanitizerAssuranceName(SanitizerModel model) {
+    switch (model) {
+        case SanitizerModel::PhaseSmudgingEnc0PocV1:
+            return
+                "empirical-phase-statistical+ciphertext-computational";
+        case SanitizerModel::NotApplicable:
+            return "not-applicable";
+    }
+    throw std::logic_error("unknown sanitizer model");
+}
+
+bool RequireSanitizerMetadata(const SanitizerMetadata& metadata) {
+    if (!metadata.model.has_value()) {
+        throw std::logic_error(
+            "benchmark row is missing explicit sanitizer metadata");
+    }
+    const bool applicable =
+        *metadata.model == SanitizerModel::PhaseSmudgingEnc0PocV1;
+    const bool all_numeric =
+        metadata.transcript_stat_bits.has_value() &&
+        metadata.max_queries.has_value() &&
+        metadata.query_stat_bits.has_value() &&
+        metadata.coefficient_stat_bits.has_value() &&
+        metadata.flood_margin_bits.has_value() &&
+        metadata.eval_noise_bits.has_value() &&
+        metadata.flood_noise_bits.has_value();
+    const bool any_numeric =
+        metadata.transcript_stat_bits.has_value() ||
+        metadata.max_queries.has_value() ||
+        metadata.query_stat_bits.has_value() ||
+        metadata.coefficient_stat_bits.has_value() ||
+        metadata.flood_margin_bits.has_value() ||
+        metadata.eval_noise_bits.has_value() ||
+        metadata.flood_noise_bits.has_value();
+    if (applicable && !all_numeric) {
+        throw std::logic_error(
+            "applicable sanitizer metadata is missing numeric fields");
+    }
+    if (!applicable && any_numeric) {
+        throw std::logic_error(
+            "not-applicable sanitizer metadata has numeric fields");
+    }
+    return applicable;
+}
+
+template <typename T>
+void WriteOptional(std::ostringstream& out, const std::optional<T>& value) {
+    if (value.has_value()) out << *value;
+}
+
+void WriteStandardSanitizerFields(std::ostringstream& out,
+                                  const SanitizerMetadata& metadata,
+                                  uint32_t scaling_mod_size) {
+    const bool applicable = RequireSanitizerMetadata(metadata);
+    WriteOptional(out, metadata.transcript_stat_bits);
+    out << ",";
+    WriteOptional(out, metadata.max_queries);
+    out << ",";
+    WriteOptional(out, metadata.query_stat_bits);
+    out << ",";
+    WriteOptional(out, metadata.coefficient_stat_bits);
+    out << ",";
+    WriteOptional(out, metadata.flood_margin_bits);
+    out << ",";
+    WriteOptional(out, metadata.eval_noise_bits);
+    out << ",";
+    WriteOptional(out, metadata.flood_noise_bits);
+    out << ",";
+    if (applicable) out << scaling_mod_size;
+    out << ","
+        << SanitizerModelName(*metadata.model) << ","
+        << SanitizerAssuranceName(*metadata.model);
 }
 
 const char* SecurityClassOf(const std::string& method) {
@@ -49,6 +135,29 @@ const char* EstimatorModelName(EstimatorModel model) {
     throw std::logic_error("unknown estimator model");
 }
 
+SanitizerMetadata MakeSanitizerMetadata(const PiccardParams& params) {
+    if (!params.FloodingSized()) {
+        throw std::logic_error(
+            "cannot serialize sanitizer metadata before parameter selection");
+    }
+    SanitizerMetadata metadata;
+    metadata.model = SanitizerModel::PhaseSmudgingEnc0PocV1;
+    metadata.transcript_stat_bits = params.transcript_stat_bits;
+    metadata.max_queries = params.max_queries;
+    metadata.query_stat_bits = params.QueryStatBits();
+    metadata.coefficient_stat_bits = params.CoefficientStatBits();
+    metadata.flood_margin_bits = params.flood_margin_bits;
+    metadata.eval_noise_bits = params.eval_noise_bits;
+    metadata.flood_noise_bits = params.FloodNoiseBits();
+    return metadata;
+}
+
+SanitizerMetadata NotApplicableSanitizerMetadata() {
+    SanitizerMetadata metadata;
+    metadata.model = SanitizerModel::NotApplicable;
+    return metadata;
+}
+
 std::string SerializeBenchmarkHeader() {
     return
         "label,k,m,set_size,ring_dim,"
@@ -72,8 +181,10 @@ std::string SerializeBenchmarkHeader() {
         "rel_error_eligible_n,"
         "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
         "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-        "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-        "flood_noise_bits,scaling_mod_size,estimator_model\n";
+        "transcript_stat_bits,max_queries,query_stat_bits,"
+        "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
+        "flood_noise_bits,scaling_mod_size,sanitizer_model,"
+        "sanitizer_assurance,estimator_model\n";
 }
 
 std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
@@ -138,13 +249,9 @@ std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
         << std::fixed << std::setprecision(3)
         << r.phase_flood_ms << ","
         << r.phase_flood_ms_sd << ","
-        << r.phase_flood_ms_median << ","
-        << r.flood_lambda_stat << ","
-        << r.flood_eval_noise_bits << ","
-        << r.flood_margin_bits << ","
-        << r.flood_noise_bits << ","
-        << r.scaling_mod_size << ","
-        << estimator_model << "\n";
+        << r.phase_flood_ms_median << ",";
+    WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
+    out << "," << estimator_model << "\n";
     return out.str();
 }
 
@@ -170,8 +277,10 @@ std::string SerializeDynamicHeader() {
         "rel_error_eligible_n,"
         "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
         "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-        "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-        "flood_noise_bits,scaling_mod_size,estimator_model\n";
+        "transcript_stat_bits,max_queries,query_stat_bits,"
+        "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
+        "flood_noise_bits,scaling_mod_size,sanitizer_model,"
+        "sanitizer_assurance,estimator_model\n";
 }
 
 std::string SerializeDynamicRow(const DynamicResult& r) {
@@ -211,13 +320,9 @@ std::string SerializeDynamicRow(const DynamicResult& r) {
         << std::fixed << std::setprecision(3)
         << r.phase_flood_ms << ","
         << r.phase_flood_ms_sd << ","
-        << r.phase_flood_ms_median << ","
-        << r.flood_lambda_stat << ","
-        << r.flood_eval_noise_bits << ","
-        << r.flood_margin_bits << ","
-        << r.flood_noise_bits << ","
-        << r.scaling_mod_size << ","
-        << estimator_model << "\n";
+        << r.phase_flood_ms_median << ",";
+    WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
+    out << "," << estimator_model << "\n";
     return out.str();
 }
 
@@ -239,8 +344,10 @@ std::string SerializeComparisonHeader() {
         "model,"
         "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
         "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
-        "flood_lambda_stat,flood_eval_noise_bits,flood_margin_bits,"
-        "flood_noise_bits,scaling_mod_size,"
+        "transcript_stat_bits,max_queries,query_stat_bits,"
+        "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
+        "flood_noise_bits,scaling_mod_size,sanitizer_model,"
+        "sanitizer_assurance,"
         "measurement_kind,extrapolation_alpha,extrapolation_beta,"
         "extrapolation_residual,extrapolation_source,"
         "omp_threads,estimator_model\n";
@@ -295,12 +402,9 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << std::fixed << std::setprecision(3)
         << r.phase_flood_ms << ","
         << r.phase_flood_ms_sd << ","
-        << r.phase_flood_ms_median << ","
-        << r.flood_lambda_stat << ","
-        << r.flood_eval_noise_bits << ","
-        << r.flood_margin_bits << ","
-        << r.flood_noise_bits << ","
-        << r.scaling_mod_size << ","
+        << r.phase_flood_ms_median << ",";
+    WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
+    out << ","
         << r.measurement_kind << ","
         << r.extrapolation_alpha << ","
         << r.extrapolation_beta << ","
@@ -314,13 +418,29 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
 std::string SerializeCrossoverHeader() {
     return
         "k,m,onehot_feature_dim,sqrt_feature_dim,"
-        "onehot_ring_dim,sqrt_ring_dim,"
+        "onehot_N,sqrt_N,"
         "onehot_total_ms,sqrt_total_ms,"
-        "sqrt_faster,speedup_ratio,estimator_model\n";
+        "sqrt_faster,speedup_ratio,"
+        "sanitizer_model,sanitizer_assurance,transcript_stat_bits,"
+        "max_queries,query_stat_bits,flood_margin_bits,"
+        "onehot_coefficient_stat_bits,onehot_eval_noise_bits,"
+        "onehot_flood_noise_bits,sqrt_coefficient_stat_bits,"
+        "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model\n";
 }
 
 std::string SerializeCrossoverRow(const CrossoverResult& r) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
+    const bool applicable = RequireSanitizerMetadata(r.sanitizer);
+    if (!applicable ||
+        !r.onehot_coefficient_stat_bits.has_value() ||
+        !r.onehot_eval_noise_bits.has_value() ||
+        !r.onehot_flood_noise_bits.has_value() ||
+        !r.sqrt_coefficient_stat_bits.has_value() ||
+        !r.sqrt_eval_noise_bits.has_value() ||
+        !r.sqrt_flood_noise_bits.has_value()) {
+        throw std::logic_error(
+            "crossover row is missing applicable arm sanitizer metadata");
+    }
     std::ostringstream out;
     out << r.k << ","
         << r.m << ","
@@ -334,6 +454,28 @@ std::string SerializeCrossoverRow(const CrossoverResult& r) {
         << (r.sqrt_faster ? 1 : 0) << ","
         << std::setprecision(4)
         << r.speedup_ratio << ","
+        << SanitizerModelName(*r.sanitizer.model) << ","
+        << SanitizerAssuranceName(*r.sanitizer.model) << ",";
+    WriteOptional(out, r.sanitizer.transcript_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.max_queries);
+    out << ",";
+    WriteOptional(out, r.sanitizer.query_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.flood_margin_bits);
+    out << ",";
+    WriteOptional(out, r.onehot_coefficient_stat_bits);
+    out << ",";
+    WriteOptional(out, r.onehot_eval_noise_bits);
+    out << ",";
+    WriteOptional(out, r.onehot_flood_noise_bits);
+    out << ",";
+    WriteOptional(out, r.sqrt_coefficient_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sqrt_eval_noise_bits);
+    out << ",";
+    WriteOptional(out, r.sqrt_flood_noise_bits);
+    out << ","
         << estimator_model << "\n";
     return out.str();
 }
@@ -341,7 +483,10 @@ std::string SerializeCrossoverRow(const CrossoverResult& r) {
 std::string SerializeSqrtComparisonHeader() {
     return
         "encoding,k,m,N,Depth,Encode,Encrypt,Evaluate,Decrypt,Total(ms),"
-        "|err|,rel_err,estimator_model\n";
+        "|err|,rel_err,security,transcript_stat_bits,max_queries,"
+        "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
+        "eval_noise_bits,flood_noise_bits,sanitizer_model,"
+        "sanitizer_assurance,estimator_model\n";
 }
 
 std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
@@ -365,7 +510,29 @@ std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
     } else {
         out << "N/A";
     }
-    out << "," << estimator_model << "\n";
+    out << "," << r.security << ",";
+    const bool applicable = RequireSanitizerMetadata(r.sanitizer);
+    if (!applicable) {
+        throw std::logic_error(
+            "sqrt comparison requires applicable sanitizer metadata");
+    }
+    WriteOptional(out, r.sanitizer.transcript_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.max_queries);
+    out << ",";
+    WriteOptional(out, r.sanitizer.query_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.coefficient_stat_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.flood_margin_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.eval_noise_bits);
+    out << ",";
+    WriteOptional(out, r.sanitizer.flood_noise_bits);
+    out << ","
+        << SanitizerModelName(*r.sanitizer.model) << ","
+        << SanitizerAssuranceName(*r.sanitizer.model) << ","
+        << estimator_model << "\n";
     return out.str();
 }
 

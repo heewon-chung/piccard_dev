@@ -428,6 +428,24 @@ if(BUILD_TESTS)
                 COMMAND test_estimator_provenance_serializers
             )
 
+            add_executable(
+                test_threshold_profile_compat
+                tests/unit/test_threshold_profile_compat.cpp
+            )
+            target_link_libraries(
+                test_threshold_profile_compat
+                piccard_fhe
+                test_main
+            )
+            target_include_directories(
+                test_threshold_profile_compat
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(
+                NAME ThresholdProfileCompat
+                COMMAND test_threshold_profile_compat
+            )
+
             # Integration test
             add_executable(test_piccard_e2e tests/integration/test_piccard_e2e.cpp)
             target_link_libraries(test_piccard_e2e piccard_fhe test_main)
@@ -469,6 +487,10 @@ if(BUILD_TESTS)
     add_test(NAME VerifyWorkApproval
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_work_approval
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SanitizerRunnerForwarding
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_sanitizer_runner_forwarding
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

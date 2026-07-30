@@ -267,11 +267,7 @@ static DynamicResult RunMultiTrialDynamic(
     result.hash_randomness = "fixed";
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
-    result.flood_lambda_stat =
-        engine.GetParams().LegacyFloodCoefficientBits();
-    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
-    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     return result;
@@ -296,6 +292,7 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
+            ApplySanitizerConfig(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -335,6 +332,7 @@ static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
             params.m = m;
             params.bottom_depth = depth;
             params.security = config.security_level;
+            ApplySanitizerConfig(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -369,6 +367,7 @@ static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
     params.m = config.m;
     params.bottom_depth = depth;
     params.security = config.security_level;
+    ApplySanitizerConfig(config, params);
     params.Validate();
 
     DynamicPiccard engine(params);
@@ -410,6 +409,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
+            ApplySanitizerConfig(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -463,11 +463,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat =
-                        engine.GetParams().LegacyFloodCoefficientBits();
-                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
@@ -498,6 +494,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
             params.m = m;
             params.bottom_depth = depth;
             params.security = config.security_level;
+            ApplySanitizerConfig(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -551,11 +548,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat =
-                        engine.GetParams().LegacyFloodCoefficientBits();
-                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
@@ -586,6 +579,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
+            ApplySanitizerConfig(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -635,11 +629,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                         benchmark::HashRandomnessName(config.hash_randomness);
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
-                    dr.flood_lambda_stat =
-                        engine.GetParams().LegacyFloodCoefficientBits();
-                    dr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
-                    dr.flood_margin_bits = engine.GetParams().flood_margin_bits;
-                    dr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+                    dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }

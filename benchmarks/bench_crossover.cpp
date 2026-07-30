@@ -131,8 +131,10 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
             PiccardParams sp;
             try {
                 pp.k = k; pp.m = m; pp.security = config.security_level;
+                ApplySanitizerConfig(config, pp);
                 pp.Validate();
                 sp.k = k; sp.m = m; sp.security = config.security_level;
+                ApplySanitizerConfig(config, sp);
                 sp.ValidateSqrt();
             } catch (const std::exception& e) {
                 std::cerr << "WARNING: skipping k=" << k << " m=" << m
@@ -149,6 +151,17 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
             SqrtPiccard sqrt_eng(sp);
             sqrt_eng.KeyGen();
             cr.sqrt_ring_dim = sqrt_eng.GetParams().ring_dim;
+            cr.sanitizer = MakeSanitizerMetadata(onehot.GetParams());
+            cr.onehot_coefficient_stat_bits =
+                onehot.GetParams().CoefficientStatBits();
+            cr.onehot_eval_noise_bits = onehot.GetParams().eval_noise_bits;
+            cr.onehot_flood_noise_bits =
+                onehot.GetParams().FloodNoiseBits();
+            cr.sqrt_coefficient_stat_bits =
+                sqrt_eng.GetParams().CoefficientStatBits();
+            cr.sqrt_eval_noise_bits = sqrt_eng.GetParams().eval_noise_bits;
+            cr.sqrt_flood_noise_bits =
+                sqrt_eng.GetParams().FloodNoiseBits();
 
             // Warmup
             RunOneHotTotal(onehot, set_a, set_b);

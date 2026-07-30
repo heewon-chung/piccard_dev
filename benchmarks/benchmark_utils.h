@@ -9,11 +9,13 @@
  */
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <sys/resource.h>
 #include <string>
 #include <vector>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -23,6 +25,7 @@
 #include <stdexcept>
 #include <iomanip>
 #include <unordered_map>
+#include <utility>
 
 #include "benchmark_estimator_provenance.h"
 #include "util/params.h"
@@ -257,6 +260,8 @@ struct BenchmarkConfig {
     double overlap;                // Overlap fraction for combined mode
     size_t accuracy_trials;        // Number of accuracy trials in combined mode
     HashRandomness hash_randomness;  // accuracy CRS mode; timing is always fixed
+    uint32_t transcript_stat_bits; // Released-transcript statistical target
+    uint64_t max_queries;          // Maximum sanitizer transcripts released
 
     BenchmarkConfig()
         : k(128),
@@ -268,12 +273,39 @@ struct BenchmarkConfig {
           seed(0),
           overlap(0.3),
           accuracy_trials(100),
-          hash_randomness(HashRandomness::Resampled) {}
+          hash_randomness(HashRandomness::Resampled),
+          transcript_stat_bits(40),
+          max_queries(UINT64_C(1) << 20) {}
 
     // Parse known flags, ignoring unrecognized ones (so callers can
     // layer additional flags on top without triggering errors).
-    static BenchmarkConfig ParseArgs(int argc, char** argv) {
+    static BenchmarkConfig ParseArgs(
+        int argc,
+        char** argv,
+        std::function<uint64_t()> random_seed = [] {
+            return static_cast<uint64_t>(std::random_device{}());
+        }) {
         BenchmarkConfig config;
+        bool saw_transcript_stat_bits = false;
+        bool saw_max_queries = false;
+
+        auto parse_uint64 = [](const std::string& value,
+                               const char* flag) -> uint64_t {
+            if (value.empty() || value.front() == '-' ||
+                value.front() == '+') {
+                throw std::invalid_argument(
+                    std::string("Invalid ") + flag + ": " + value);
+            }
+            uint64_t parsed = 0;
+            const char* first = value.data();
+            const char* last = first + value.size();
+            const auto result = std::from_chars(first, last, parsed);
+            if (result.ec != std::errc{} || result.ptr != last) {
+                throw std::invalid_argument(
+                    std::string("Invalid ") + flag + ": " + value);
+            }
+            return parsed;
+        };
 
         for (int i = 1; i < argc; ++i) {
             std::string arg(argv[i]);
@@ -321,6 +353,38 @@ struct BenchmarkConfig {
                         "Invalid hash_randomness: " + hr +
                         " (expected 'resampled' or 'fixed')");
                 }
+            } else if (arg.find("--transcript_stat_bits=") == 0) {
+                if (saw_transcript_stat_bits) {
+                    throw std::invalid_argument(
+                        "Duplicate --transcript_stat_bits");
+                }
+                saw_transcript_stat_bits = true;
+                const uint64_t parsed = parse_uint64(
+                    arg.substr(23), "--transcript_stat_bits");
+                if (parsed != 40 && parsed != 64 && parsed != 128) {
+                    throw std::invalid_argument(
+                        "Invalid --transcript_stat_bits: " +
+                        std::to_string(parsed) +
+                        " (expected 40, 64, or 128)");
+                }
+                config.transcript_stat_bits =
+                    static_cast<uint32_t>(parsed);
+            } else if (arg.find("--max_queries=") == 0) {
+                if (saw_max_queries) {
+                    throw std::invalid_argument("Duplicate --max_queries");
+                }
+                saw_max_queries = true;
+                const uint64_t parsed =
+                    parse_uint64(arg.substr(14), "--max_queries");
+                constexpr uint64_t kMaxQueries =
+                    UINT64_C(9223372036854775808);
+                if (parsed == 0 || parsed > kMaxQueries) {
+                    throw std::invalid_argument(
+                        "Invalid --max_queries: " +
+                        std::to_string(parsed) +
+                        " (expected 1..9223372036854775808)");
+                }
+                config.max_queries = parsed;
             } else if (arg == "--help" || arg == "-h") {
                 // Handled by caller
             }
@@ -329,7 +393,7 @@ struct BenchmarkConfig {
 
         // If no seed specified, generate one from random_device
         if (config.seed == 0) {
-            config.seed = std::random_device{}();
+            config.seed = random_seed();
         }
 
         return config;
@@ -348,6 +412,8 @@ struct BenchmarkConfig {
                   << "  --overlap=F        Overlap fraction for combined mode (default: 0.3)\n"
                   << "  --accuracy_trials=N  Accuracy trials in combined mode (default: 100)\n"
                   << "  --hash_randomness=M  'resampled' or 'fixed' (default: resampled)\n"
+                  << "  --transcript_stat_bits=N  Transcript target: 40, 64, or 128 (default: 40)\n"
+                  << "  --max_queries=N     Query cap in 1..2^63 (default: 1048576)\n"
                   << "  --help, -h         Print this help message\n";
     }
 
@@ -365,9 +431,50 @@ struct BenchmarkConfig {
                   << "  Seed:      " << seed << "\n"
                   << "  Overlap:   " << overlap << "\n"
                   << "  Acc trials:" << accuracy_trials << "\n"
-                  << "  Hash rand: " << HashRandomnessName(hash_randomness) << "\n";
+                  << "  Hash rand: " << HashRandomnessName(hash_randomness) << "\n"
+                  << "  Transcript stat bits: " << transcript_stat_bits << "\n"
+                  << "  Max queries: " << max_queries << "\n";
     }
 };
+
+inline void ApplySanitizerConfig(const BenchmarkConfig& config,
+                                 PiccardParams& params) {
+    params.transcript_stat_bits = config.transcript_stat_bits;
+    params.max_queries = config.max_queries;
+}
+
+struct SqrtComparisonConfig {
+    uint64_t seed = 0;
+    int trials = 5;
+    BenchmarkConfig sanitizer;
+    uint32_t flood_margin_bits = 8;
+};
+
+inline SqrtComparisonConfig ResolveSqrtComparisonConfig(
+    int argc,
+    char** argv,
+    std::function<uint64_t()> random_seed = [] {
+        return static_cast<uint64_t>(std::random_device{}());
+    }) {
+    int legacy_trials = 5;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg.find("--trials=") == 0) {
+            legacy_trials = std::stoi(arg.substr(9));
+        }
+    }
+
+    BenchmarkConfig sanitizer =
+        BenchmarkConfig::ParseArgs(argc, argv, std::move(random_seed));
+    sanitizer.security_level = SecurityLevel::TOY;
+
+    SqrtComparisonConfig resolved;
+    resolved.seed = sanitizer.seed;
+    resolved.trials = std::max(legacy_trials, 1);
+    resolved.sanitizer = sanitizer;
+    resolved.flood_margin_bits = 8;
+    return resolved;
+}
 
 // ============================================================================
 // MakeRandomSetsWithOverlap - Randomized test data for accuracy benchmarks

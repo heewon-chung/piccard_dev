@@ -162,6 +162,185 @@ TEST(BenchmarkUtils, LegacyInvocationStillParses) {
     EXPECT_EQ(cfg.hash_randomness, HashRandomness::Resampled);
 }
 
+TEST(BenchmarkUtils, SanitizerFlagsDefaultToDiagnosticProfile) {
+    const char* argv[] = {"bench", "--seed=7"};
+    const auto cfg =
+        BenchmarkConfig::ParseArgs(2, const_cast<char**>(argv));
+
+    EXPECT_EQ(cfg.transcript_stat_bits, 40u);
+    EXPECT_EQ(cfg.max_queries, UINT64_C(1048576));
+}
+
+TEST(BenchmarkUtils, SanitizerFlagsParseCanonicalValuesExactly) {
+    struct Case {
+        const char* transcript_arg;
+        uint32_t expected_transcript_bits;
+    };
+    const Case cases[] = {
+        {"--transcript_stat_bits=40", 40u},
+        {"--transcript_stat_bits=64", 64u},
+        {"--transcript_stat_bits=128", 128u},
+    };
+
+    for (const auto& test_case : cases) {
+        const char* argv[] = {
+            "bench",
+            "--seed=7",
+            test_case.transcript_arg,
+            "--max_queries=9223372036854775808",
+        };
+        const auto cfg =
+            BenchmarkConfig::ParseArgs(4, const_cast<char**>(argv));
+        EXPECT_EQ(cfg.transcript_stat_bits,
+                  test_case.expected_transcript_bits);
+        EXPECT_EQ(cfg.max_queries, UINT64_C(9223372036854775808));
+    }
+}
+
+TEST(BenchmarkUtils, SanitizerFlagsRejectInvalidOrDuplicateInputs) {
+    const std::vector<std::vector<const char*>> invalid_args = {
+        {"bench", "--seed=7", "--transcript_stat_bits=0"},
+        {"bench", "--seed=7", "--transcript_stat_bits=41"},
+        {"bench", "--seed=7", "--transcript_stat_bits=-40"},
+        {"bench", "--seed=7", "--transcript_stat_bits=40junk"},
+        {"bench", "--seed=7", "--transcript_stat_bits=4294967296"},
+        {"bench", "--seed=7", "--max_queries=0"},
+        {"bench", "--seed=7", "--max_queries=-1"},
+        {"bench", "--seed=7", "--max_queries=1junk"},
+        {"bench", "--seed=7", "--max_queries=9223372036854775809"},
+        {"bench", "--seed=7", "--max_queries=18446744073709551616"},
+        {"bench", "--seed=7", "--transcript_stat_bits=40",
+         "--transcript_stat_bits=40"},
+        {"bench", "--seed=7", "--max_queries=1", "--max_queries=1"},
+    };
+
+    for (const auto& args : invalid_args) {
+        std::vector<char*> argv;
+        argv.reserve(args.size());
+        for (const char* arg : args) {
+            argv.push_back(const_cast<char*>(arg));
+        }
+        EXPECT_THROW(
+            BenchmarkConfig::ParseArgs(static_cast<int>(argv.size()),
+                                       argv.data()),
+            std::invalid_argument);
+    }
+}
+
+TEST(BenchmarkUtils, SanitizerConfigIsForwardedBeforeValidation) {
+    const char* argv[] = {
+        "bench",
+        "--seed=7",
+        "--transcript_stat_bits=128",
+        "--max_queries=17",
+    };
+    const auto cfg =
+        BenchmarkConfig::ParseArgs(4, const_cast<char**>(argv));
+    piccard::PiccardParams params;
+
+    ApplySanitizerConfig(cfg, params);
+
+    EXPECT_EQ(params.transcript_stat_bits, 128u);
+    EXPECT_EQ(params.max_queries, 17u);
+}
+
+TEST(BenchmarkUtils,
+     SqrtComparisonDefaultsToFiveTrialsAndInjectedRandomSeed) {
+    const char* argv[] = {"bench"};
+    size_t generator_calls = 0;
+
+    const auto resolved = ResolveSqrtComparisonConfig(
+        1, const_cast<char**>(argv), [&] {
+            ++generator_calls;
+            return UINT64_C(0x123456789abcdef0);
+        });
+
+    EXPECT_EQ(resolved.trials, 5u);
+    EXPECT_EQ(resolved.seed, UINT64_C(0x123456789abcdef0));
+    EXPECT_EQ(generator_calls, 1u);
+    EXPECT_EQ(resolved.sanitizer.security_level, SecurityLevel::TOY);
+    EXPECT_EQ(resolved.sanitizer.transcript_stat_bits, 40u);
+    EXPECT_EQ(resolved.sanitizer.max_queries, UINT64_C(1048576));
+    EXPECT_EQ(resolved.flood_margin_bits, 8u);
+}
+
+TEST(BenchmarkUtils,
+     SqrtComparisonSeedZeroUsesInjectedRandomSeed) {
+    const char* argv[] = {"bench", "--seed=0", "--trials=7"};
+    size_t generator_calls = 0;
+
+    const auto resolved = ResolveSqrtComparisonConfig(
+        3, const_cast<char**>(argv), [&] {
+            ++generator_calls;
+            return UINT64_C(424242);
+        });
+
+    EXPECT_EQ(resolved.trials, 7u);
+    EXPECT_EQ(resolved.seed, UINT64_C(424242));
+    EXPECT_EQ(generator_calls, 1u);
+}
+
+TEST(BenchmarkUtils,
+     SqrtComparisonExplicitLegacyArgsRemainExact) {
+    const char* argv[] = {"bench", "--seed=99", "--trials=3"};
+    size_t generator_calls = 0;
+
+    const auto resolved = ResolveSqrtComparisonConfig(
+        3, const_cast<char**>(argv), [&] {
+            ++generator_calls;
+            return UINT64_C(111);
+        });
+
+    EXPECT_EQ(resolved.trials, 3u);
+    EXPECT_EQ(resolved.seed, UINT64_C(99));
+    EXPECT_EQ(generator_calls, 0u);
+
+    const char* zero_trials[] = {"bench", "--seed=99", "--trials=0"};
+    const auto zero = ResolveSqrtComparisonConfig(
+        3, const_cast<char**>(zero_trials),
+        [] { return UINT64_C(1); });
+    EXPECT_EQ(zero.trials, 1);
+
+    const char* negative_trials[] = {
+        "bench", "--seed=99", "--trials=-7",
+    };
+    const auto negative = ResolveSqrtComparisonConfig(
+        3, const_cast<char**>(negative_trials),
+        [] { return UINT64_C(1); });
+    EXPECT_EQ(negative.trials, 1);
+}
+
+TEST(BenchmarkUtils,
+     SqrtComparisonDefaultsToDiagnosticTupleAndForwardsRawOverrides) {
+    const char* diagnostic_argv[] = {
+        "bench",
+        "--seed=7",
+        "--transcript_stat_bits=40",
+        "--max_queries=1048576",
+    };
+    const auto diagnostic = ResolveSqrtComparisonConfig(
+        4, const_cast<char**>(diagnostic_argv),
+        [] { return UINT64_C(1); });
+    EXPECT_EQ(diagnostic.sanitizer.security_level, SecurityLevel::TOY);
+    EXPECT_EQ(diagnostic.sanitizer.transcript_stat_bits, 40u);
+    EXPECT_EQ(diagnostic.sanitizer.max_queries, UINT64_C(1048576));
+    EXPECT_EQ(diagnostic.flood_margin_bits, 8u);
+
+    const char* custom_profile[] = {
+        "bench",
+        "--seed=7",
+        "--transcript_stat_bits=64",
+        "--max_queries=17",
+    };
+    const auto custom = ResolveSqrtComparisonConfig(
+        4, const_cast<char**>(custom_profile),
+        [] { return UINT64_C(1); });
+    EXPECT_EQ(custom.sanitizer.security_level, SecurityLevel::TOY);
+    EXPECT_EQ(custom.sanitizer.transcript_stat_bits, 64u);
+    EXPECT_EQ(custom.sanitizer.max_queries, UINT64_C(17));
+    EXPECT_EQ(custom.flood_margin_bits, 8u);
+}
+
 // A wrong model literal would make benchmark rows claim a different deployed
 // estimator than the implementation actually uses.
 TEST(BenchmarkUtils, EstimatorModelNamesAreStable) {
