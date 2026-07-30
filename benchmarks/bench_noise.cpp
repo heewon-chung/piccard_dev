@@ -42,6 +42,7 @@
 #include "util/params_calibration.h"
 
 #include "benchmark_utils.h"
+#include "noise_calibration_schema.h"
 #include "openfhe.h"
 
 // Required for CiphertextSizer: serialized size is what the paper's
@@ -527,6 +528,7 @@ static const char* CircuitName(Circuit c) {
 static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t k, uint32_t m,
                                  uint32_t depth_delta, uint32_t sms,
+                                 bool pre_threshold_evidence,
                                  uint32_t* natural_depth_out = nullptr) {
     PiccardParams params;
     params.k = k;
@@ -548,6 +550,33 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
     if (natural_depth_out) *natural_depth_out = params.natural_mult_depth;
     params.mult_depth += depth_delta;
     params.scaling_mod_size = sms;
+
+    // Work 2 made protocol KeyGen adopt only a sanitizer-selected runtime
+    // dimension. Evidence still needs the production raw circuit path, so arm
+    // that adoption guard with the natural candidate while keeping the
+    // selection deliberately minimal. EvaluateRaw never applies its flooding
+    // value; the measured result is reduced later with the requested evidence
+    // profile. Phase 2 replaces this natural-only candidate with explicit ring
+    // search.
+    if (pre_threshold_evidence) {
+        params.transcript_stat_bits = 40;
+        params.max_queries = 1;
+        params.flood_margin_bits = 0;
+        params = SelectSanitizerCandidate(
+            params,
+            CalibrationCandidate{
+                circuit,
+                sec,
+                params.ring_dim,
+                params.ring_dim,
+                params.ring_dim,
+                params.natural_mult_depth,
+                params.mult_depth,
+                params.scaling_mod_size,
+                0,
+                1.0e9,
+            });
+    }
     return params;
 }
 
@@ -559,11 +588,20 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
                                        uint32_t depth_delta, uint32_t sms,
                                        const std::vector<Pattern>& pats,
                                        uint64_t root_seed, uint32_t reps,
-                                       uint32_t baseline_ring_dim) {
+                                       uint32_t baseline_ring_dim,
+                                       bool pre_threshold_evidence) {
     try {
         uint32_t natural_depth = 0;
         PiccardParams params =
-            BuildParams(circuit, sec, k, m, depth_delta, sms, &natural_depth);
+            BuildParams(
+                circuit,
+                sec,
+                k,
+                m,
+                depth_delta,
+                sms,
+                pre_threshold_evidence,
+                &natural_depth);
         std::vector<CalibResult> rows;
         switch (circuit) {
             case Circuit::OneHot:    rows = RunOneHot(params, pats, root_seed, reps); break;
@@ -862,6 +900,17 @@ static int ReportCoverage() {
     return by_key.empty() ? 0 : 1;
 }
 
+static int ReportPreThresholdCoverage() {
+    const auto matrix =
+        piccard::benchmark::noise_calibration::PreThresholdCoverageMatrix();
+    std::cout << "pre-threshold coverage matrix: " << matrix.size()
+              << " circuit/security pair(s)\n";
+    for (const auto& entry : matrix) {
+        std::cout << "  " << entry.circuit << " " << entry.security << "\n";
+    }
+    return 0;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -871,6 +920,17 @@ static void PrintUsage() {
         << "Usage: bench_noise [options]\n"
         << "  --coverage             List keys the tests/benchmarks need but the\n"
         << "                         table does not cover, then exit\n"
+        << "  --pre_threshold        Strict OneHot/Sqrt STD128/STD192 evidence mode\n"
+        << "  --profile_manifest=P   Profile-manifest path for evidence provenance\n"
+        << "  --profile=ID           Exact evidence profile_id\n"
+        << "  --key_id=ID            Logical calibration-key identifier\n"
+        << "  --scaling_mod_grid=L   Comma-separated positive modulus sizes\n"
+        << "  --max_depth_delta=N    Largest evidence depth delta\n"
+        << "  --ring_candidates=L    Comma-separated power-of-two ring dimensions\n"
+        << "  --timeout_seconds=N    Positive per-candidate timeout\n"
+        << "  --transcript_stat_bits=N  Exactly 40, 64, or 128\n"
+        << "  --max_queries=N        Inclusive evidence range 1..2^63\n"
+        << "  --smoke                Permit fewer than five evidence repetitions\n"
         << "  --sweep                Run the calibration grid (default: single point)\n"
         << "  --circuit=C            onehot | sqrt | threshold | all (default: all)\n"
         << "  --security=S           TOY | STD128 (single-point mode; default STD128)\n"
@@ -891,6 +951,26 @@ static void PrintUsage() {
 }
 
 int main(int argc, char** argv) {
+    std::vector<std::string> raw_args;
+    raw_args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
+    for (int index = 1; index < argc; ++index) {
+        raw_args.emplace_back(argv[index]);
+    }
+
+    piccard::benchmark::noise_calibration::EvidenceOptions evidence;
+    try {
+        evidence =
+            piccard::benchmark::noise_calibration::ParseEvidenceOptions(
+                raw_args);
+    } catch (const std::exception& error) {
+        std::cerr << "Invalid pre-threshold evidence command: "
+                  << error.what() << "\n";
+        return 1;
+    }
+    if (evidence.pre_threshold && evidence.coverage) {
+        return ReportPreThresholdCoverage();
+    }
+
     bool sweep = false;
     bool include_large = false;
     bool large_only = false;
@@ -905,36 +985,48 @@ int main(int argc, char** argv) {
     uint32_t target_lambda = 64, margin = 8;
     uint64_t seed = 20260725;
 
-    for (int i = 1; i < argc; i++) {
-        std::string arg(argv[i]);
-        if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
-        else if (arg == "--sweep") sweep = true;
-        else if (arg == "--coverage") return ReportCoverage();
-        else if (arg == "--include_large") include_large = true;
-        else if (arg == "--large_only") large_only = true;
-        else if (arg.rfind("--max_delta=", 0) == 0) max_delta = std::stoul(arg.substr(12));
-        else if (arg.rfind("--reps=", 0) == 0) reps = std::stoul(arg.substr(7));
-        else if (arg.rfind("--circuit=", 0) == 0) circuit_arg = arg.substr(10);
-        else if (arg.rfind("--csv=", 0) == 0) csv_path = arg.substr(6);
-        else if (arg.rfind("--k=", 0) == 0) k = std::stoul(arg.substr(4));
-        else if (arg.rfind("--m=", 0) == 0) m = std::stoul(arg.substr(4));
-        else if (arg.rfind("--depth_delta=", 0) == 0) depth_delta = std::stoul(arg.substr(14));
-        else if (arg.rfind("--sms=", 0) == 0) sms = std::stoul(arg.substr(6));
-        else if (arg.rfind("--target_lambda=", 0) == 0) target_lambda = std::stoul(arg.substr(16));
-        else if (arg.rfind("--margin=", 0) == 0) margin = std::stoul(arg.substr(9));
-        else if (arg.rfind("--seed=", 0) == 0) seed = std::stoull(arg.substr(7));
-        else if (arg.rfind("--patterns=", 0) == 0) all_patterns = (arg.substr(11) == "all");
-        else if (arg.rfind("--security=", 0) == 0) {
-            std::string s = arg.substr(11);
-            if (s == "TOY") security = SecurityLevel::TOY;
-            else if (s == "STD128") security = SecurityLevel::STD128;
-            else if (s == "STD192") security = SecurityLevel::STD192;
-            else if (s == "STD256") security = SecurityLevel::STD256;
-            else { std::cerr << "Invalid security level: " << s << "\n"; return 1; }
-        } else {
-            std::cerr << "Unknown argument: " << arg << "\n";
-            PrintUsage();
-            return 1;
+    if (evidence.pre_threshold) {
+        circuit_arg = evidence.circuit;
+        security = evidence.security == "STD192"
+            ? SecurityLevel::STD192
+            : SecurityLevel::STD128;
+        max_delta = evidence.max_depth_delta;
+        reps = evidence.reps;
+        target_lambda = evidence.transcript_stat_bits;
+        margin = evidence.margin;
+        seed = evidence.seed;
+    } else {
+        for (int i = 1; i < argc; i++) {
+            std::string arg(argv[i]);
+            if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
+            else if (arg == "--sweep") sweep = true;
+            else if (arg == "--coverage") return ReportCoverage();
+            else if (arg == "--include_large") include_large = true;
+            else if (arg == "--large_only") large_only = true;
+            else if (arg.rfind("--max_delta=", 0) == 0) max_delta = std::stoul(arg.substr(12));
+            else if (arg.rfind("--reps=", 0) == 0) reps = std::stoul(arg.substr(7));
+            else if (arg.rfind("--circuit=", 0) == 0) circuit_arg = arg.substr(10);
+            else if (arg.rfind("--csv=", 0) == 0) csv_path = arg.substr(6);
+            else if (arg.rfind("--k=", 0) == 0) k = std::stoul(arg.substr(4));
+            else if (arg.rfind("--m=", 0) == 0) m = std::stoul(arg.substr(4));
+            else if (arg.rfind("--depth_delta=", 0) == 0) depth_delta = std::stoul(arg.substr(14));
+            else if (arg.rfind("--sms=", 0) == 0) sms = std::stoul(arg.substr(6));
+            else if (arg.rfind("--target_lambda=", 0) == 0) target_lambda = std::stoul(arg.substr(16));
+            else if (arg.rfind("--margin=", 0) == 0) margin = std::stoul(arg.substr(9));
+            else if (arg.rfind("--seed=", 0) == 0) seed = std::stoull(arg.substr(7));
+            else if (arg.rfind("--patterns=", 0) == 0) all_patterns = (arg.substr(11) == "all");
+            else if (arg.rfind("--security=", 0) == 0) {
+                std::string s = arg.substr(11);
+                if (s == "TOY") security = SecurityLevel::TOY;
+                else if (s == "STD128") security = SecurityLevel::STD128;
+                else if (s == "STD192") security = SecurityLevel::STD192;
+                else if (s == "STD256") security = SecurityLevel::STD256;
+                else { std::cerr << "Invalid security level: " << s << "\n"; return 1; }
+            } else {
+                std::cerr << "Unknown argument: " << arg << "\n";
+                PrintUsage();
+                return 1;
+            }
         }
     }
 
@@ -992,12 +1084,23 @@ int main(int argc, char** argv) {
             // the growth is its own modulus chain, not the flooding headroom.
             uint32_t baseline = 0;
             if (depth_delta != 0 || sms != 0) {
-                for (const auto& r : RunOne(c, security, k, m, 0, 0, patterns, seed, reps, 0)) {
+                for (const auto& r : RunOne(
+                         c,
+                         security,
+                         k,
+                         m,
+                         0,
+                         0,
+                         patterns,
+                         seed,
+                         reps,
+                         0,
+                         evidence.pre_threshold)) {
                     if (r.ok) { baseline = r.ring_dim; break; }
                 }
             }
             record(RunOne(c, security, k, m, depth_delta, sms, patterns, seed,
-                          reps, baseline));
+                          reps, baseline, evidence.pre_threshold));
         }
     } else {
         // OpenFHE rejects a limb layout whose total exceeds the security
@@ -1018,7 +1121,18 @@ int main(int argc, char** argv) {
                 // Establish the circuit's own ring dimension first: natural
                 // depth, OpenFHE's default limb size, no flooding headroom.
                 // Everything else is judged against this.
-                auto base_rows = RunOne(c, g.security, g.k, g.m, 0, 0, patterns, seed, reps, 0);
+                auto base_rows = RunOne(
+                    c,
+                    g.security,
+                    g.k,
+                    g.m,
+                    0,
+                    0,
+                    patterns,
+                    seed,
+                    reps,
+                    0,
+                    evidence.pre_threshold);
                 uint32_t baseline = 0;
                 for (const auto& r : base_rows) {
                     if (r.ok) { baseline = r.ring_dim; break; }
@@ -1046,7 +1160,7 @@ int main(int argc, char** argv) {
                     for (uint32_t s : sms_grid) {
                         if (d == 0 && s == 0) continue;   // already measured
                         record(RunOne(c, g.security, g.k, g.m, d, s, patterns, seed,
-                                      reps, baseline));
+                                      reps, baseline, evidence.pre_threshold));
                     }
                 }
             }

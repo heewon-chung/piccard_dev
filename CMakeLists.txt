@@ -89,6 +89,39 @@ if(OpenFHE_FOUND)
     link_directories(${OpenFHE_LIBDIR})
 endif()
 
+# Pure schema/parser support shared by bench_noise and its unit tests.
+if(OpenFHE_FOUND)
+    execute_process(
+        COMMAND git rev-parse HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE PICCARD_SOURCE_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    add_library(
+        piccard_noise_calibration_schema
+        benchmarks/noise_calibration_schema.cpp
+    )
+    target_include_directories(
+        piccard_noise_calibration_schema
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}/benchmarks
+            ${CMAKE_SOURCE_DIR}/include
+    )
+    target_compile_definitions(
+        piccard_noise_calibration_schema
+        PRIVATE
+            OPENFHE_VERSION=${BASE_OPENFHE_VERSION}
+            PICCARD_SOURCE_COMMIT="${PICCARD_SOURCE_COMMIT}"
+    )
+    target_link_libraries(
+        piccard_noise_calibration_schema
+        PUBLIC
+            OpenSSL::Crypto
+            piccard_security_profile
+    )
+endif()
+
 # Shared deterministic serializers for all non-threshold benchmark schemas.
 add_library(
     piccard_benchmark_serializers
@@ -429,6 +462,24 @@ if(BUILD_TESTS)
             )
 
             add_executable(
+                test_noise_calibration_schema
+                tests/unit/test_noise_calibration_schema.cpp
+            )
+            target_link_libraries(
+                test_noise_calibration_schema
+                piccard_noise_calibration_schema
+                test_main
+            )
+            target_include_directories(
+                test_noise_calibration_schema
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(
+                NAME NoiseCalibrationSchema
+                COMMAND test_noise_calibration_schema
+            )
+
+            add_executable(
                 test_threshold_profile_compat
                 tests/unit/test_threshold_profile_compat.cpp
             )
@@ -586,8 +637,72 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     # flooding term, and emits the calibration table the parameter selection
     # in params.cpp is built from.
     add_executable(bench_noise benchmarks/bench_noise.cpp)
-    target_link_libraries(bench_noise piccard_fhe)
+    target_link_libraries(
+        bench_noise
+        piccard_fhe
+        piccard_noise_calibration_schema
+    )
     target_include_directories(bench_noise PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    if(BUILD_TESTS)
+        add_test(
+            NAME NoisePreThresholdCoverage
+            COMMAND bench_noise --coverage --pre_threshold
+        )
+        add_test(
+            NAME NoisePreThresholdRejectsThreshold
+            COMMAND
+                bench_noise
+                --pre_threshold
+                --profile_manifest=profiles.json
+                --profile=primary40
+                --key_id=primary40:threshold:STD128
+                --circuit=threshold
+                --security=STD128
+                --scaling_mod_grid=40
+                --max_depth_delta=0
+                --ring_candidates=8192
+                --timeout_seconds=1
+                --transcript_stat_bits=40
+                --max_queries=1
+                --margin=8
+                --reps=5
+                --seed=20260729
+        )
+        add_test(
+            NAME NoisePreThresholdSmoke
+            COMMAND
+                bench_noise
+                --pre_threshold
+                --smoke
+                --profile_manifest=profiles.json
+                --profile=primary40
+                --key_id=primary40:onehot:STD128
+                --circuit=onehot
+                --security=STD128
+                --scaling_mod_grid=40
+                --max_depth_delta=0
+                --ring_candidates=8192
+                --timeout_seconds=30
+                --transcript_stat_bits=40
+                --max_queries=1048576
+                --margin=8
+                --reps=1
+                --seed=20260729
+        )
+        set_tests_properties(
+            NoisePreThresholdRejectsThreshold
+            PROPERTIES
+                WILL_FAIL TRUE
+                TIMEOUT 5
+        )
+        set_tests_properties(
+            NoisePreThresholdSmoke
+            PROPERTIES
+                FAIL_REGULAR_EXPRESSION "FAILED:"
+                PASS_REGULAR_EXPRESSION "dec-OK"
+                TIMEOUT 30
+        )
+    endif()
 
     # SJ16 calibration tool (Phase 3): own CLI, not a ctest. Needs the SJ16
     # engine (piccard_baselines pulls SJ16 + Paillier + GMP + OpenFHE) and OpenMP.
