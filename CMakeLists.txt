@@ -119,6 +119,16 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+add_library(
+    piccard_estimator_diagnostic
+    benchmarks/estimator_diagnostic.cpp
+)
+target_link_libraries(piccard_estimator_diagnostic PUBLIC piccard_core)
+target_include_directories(
+    piccard_estimator_diagnostic
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+
 # =============================================================================
 # piccard_fhe: BFV context + engine (requires OpenFHE)
 # =============================================================================
@@ -218,6 +228,21 @@ if(BUILD_TESTS)
         add_executable(test_minhash tests/unit/test_minhash.cpp)
         target_link_libraries(test_minhash piccard_core test_main)
         add_test(NAME MinHash COMMAND test_minhash)
+
+        add_executable(
+            test_estimator_diagnostic
+            tests/unit/test_estimator_diagnostic.cpp
+        )
+        target_link_libraries(
+            test_estimator_diagnostic
+            piccard_estimator_diagnostic
+            test_main
+        )
+        target_include_directories(
+            test_estimator_diagnostic
+            PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+        )
+        add_test(NAME EstimatorDiagnostic COMMAND test_estimator_diagnostic)
 
         add_executable(test_onehot_encoder tests/unit/test_onehot_encoder.cpp)
         target_link_libraries(test_onehot_encoder piccard_core test_main)
@@ -370,6 +395,21 @@ endif()
 # =============================================================================
 
 option(BUILD_BENCHMARKS "Build benchmark executables" ON)
+
+if(BUILD_BENCHMARKS)
+    add_executable(
+        bench_estimator_bias
+        benchmarks/bench_estimator_bias.cpp
+    )
+    target_link_libraries(
+        bench_estimator_bias
+        piccard_estimator_diagnostic
+    )
+    target_include_directories(
+        bench_estimator_bias
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+endif()
 
 if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     add_executable(bench_piccard benchmarks/bench_piccard.cpp)
