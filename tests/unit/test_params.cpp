@@ -3,9 +3,11 @@
 #include "util/params_calibration.h"
 
 #include <functional>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using namespace piccard;
 
@@ -24,6 +26,44 @@ CalibrationCandidate GrownOneHotCandidate(double log2_q_over_t = 200.0) {
     candidate.eval_noise_bits = 60;
     candidate.log2_q_over_t = log2_q_over_t;
     return candidate;
+}
+
+PreThresholdCalibrationRequest PrimaryOneHotRequest() {
+    return PreThresholdCalibrationRequest{
+        "primary40",
+        Circuit::OneHot,
+        "onehot-v1",
+        SecurityLevel::STD128,
+        8192,
+        1,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "OpenFHE-test",
+    };
+}
+
+PreThresholdCalibrationRow PrimaryOneHotRow(
+    uint32_t calibrated_ring_dim = 8192) {
+    const uint32_t coefficient_bits =
+        calibrated_ring_dim == 8192 ? 73u : 74u;
+    return PreThresholdCalibrationRow{
+        PrimaryOneHotRequest(),
+        8192,
+        calibrated_ring_dim,
+        3,
+        40,
+        5,
+        65537,
+        200.0,
+        183.9999779867,
+        60,
+        4096,
+        40,
+        UINT64_C(1) << 20,
+        60,
+        coefficient_bits,
+        8,
+        60u + coefficient_bits + 8u,
+    };
 }
 
 PiccardParams DerivedDefaultOneHotProfile() {
@@ -307,6 +347,547 @@ TEST(SanitizerCandidate, UnsupportedTranscriptTargetIsRejectedExactly) {
     EXPECT_NE(
         message.find("transcript_stat_bits must be exactly 40, 64, or 128"),
         std::string::npos);
+}
+
+TEST(PreThresholdCalibration, StoresEveryLogicalKeyAndMeasuredField) {
+    const PreThresholdCalibrationRow row = PrimaryOneHotRow();
+
+    EXPECT_EQ(row.key.profile_id, "primary40");
+    EXPECT_EQ(row.key.circuit, Circuit::OneHot);
+    EXPECT_EQ(row.key.shape_id, "onehot-v1");
+    EXPECT_EQ(row.key.security, SecurityLevel::STD128);
+    EXPECT_EQ(row.key.requested_ring_dim, 8192u);
+    EXPECT_EQ(row.key.natural_depth, 1u);
+    EXPECT_EQ(
+        row.key.consumer_set_sha256,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    EXPECT_EQ(row.key.openfhe_version, "OpenFHE-test");
+    EXPECT_EQ(row.natural_ring_dim, 8192u);
+    EXPECT_EQ(row.ring_dim_calibrated, 8192u);
+    EXPECT_EQ(row.provisioned_depth, 3u);
+    EXPECT_EQ(row.scaling_mod_size, 40u);
+    EXPECT_EQ(row.num_limbs, 5u);
+    EXPECT_EQ(row.plaintext_mod, 65537u);
+    EXPECT_DOUBLE_EQ(row.log_q, 200.0);
+    EXPECT_DOUBLE_EQ(row.log_delta, 183.9999779867);
+    EXPECT_EQ(row.eval_noise_bits, 60u);
+    EXPECT_EQ(row.ct_bytes, 4096u);
+    EXPECT_EQ(row.transcript_stat_bits, 40u);
+    EXPECT_EQ(row.max_queries, UINT64_C(1) << 20);
+    EXPECT_EQ(row.query_stat_bits, 60u);
+    EXPECT_EQ(row.coefficient_stat_bits, 73u);
+    EXPECT_EQ(row.flood_margin_bits, 8u);
+    EXPECT_EQ(row.flood_noise_bits, 141u);
+}
+
+TEST(PreThresholdCalibration, RejectsEveryLogicalKeyMutation) {
+    const PreThresholdCalibrationRequest request = PrimaryOneHotRequest();
+    struct Mutation {
+        const char* name;
+        std::function<void(PreThresholdCalibrationRow&)>
+            apply;
+    };
+    const Mutation mutations[] = {
+        {"profile_id", [](PreThresholdCalibrationRow& row) {
+             row.key.profile_id = "sensitivity64";
+         }},
+        {"circuit", [](PreThresholdCalibrationRow& row) {
+             row.key.circuit = Circuit::Sqrt;
+         }},
+        {"shape_id", [](PreThresholdCalibrationRow& row) {
+             row.key.shape_id = "sqrt-b8-v1";
+         }},
+        {"security", [](PreThresholdCalibrationRow& row) {
+             row.key.security = SecurityLevel::STD192;
+         }},
+        {"requested_ring_dim", [](PreThresholdCalibrationRow& row) {
+             row.key.requested_ring_dim = 16384;
+         }},
+        {"natural_depth", [](PreThresholdCalibrationRow& row) {
+             row.key.natural_depth = 2;
+         }},
+        {"consumer_set_sha256", [](PreThresholdCalibrationRow& row) {
+             row.key.consumer_set_sha256 =
+                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+         }},
+        {"openfhe_version", [](PreThresholdCalibrationRow& row) {
+             row.key.openfhe_version = "stale";
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PreThresholdCalibrationRow row = PrimaryOneHotRow();
+        mutation.apply(row);
+        EXPECT_THROW(
+            (void)SelectPreThresholdCalibration(
+                DerivedDefaultOneHotProfile(), request, {row}),
+            std::invalid_argument);
+    }
+}
+
+TEST(PreThresholdProfilePolicy, ResolvesOnlyCanonicalPolicies) {
+    const auto primary = ResolvePreThresholdProfilePolicy("primary40");
+    EXPECT_EQ(primary.transcript_stat_bits, 40u);
+    EXPECT_EQ(primary.max_queries, UINT64_C(1) << 20);
+    EXPECT_EQ(primary.flood_margin_bits, 8u);
+    EXPECT_EQ(primary.maximum_ring_growth, 2u);
+
+    const auto sensitivity =
+        ResolvePreThresholdProfilePolicy("sensitivity64");
+    EXPECT_EQ(sensitivity.transcript_stat_bits, 64u);
+    EXPECT_EQ(sensitivity.maximum_ring_growth, 2u);
+
+    const auto feasibility =
+        ResolvePreThresholdProfilePolicy("feasibility128");
+    EXPECT_EQ(feasibility.transcript_stat_bits, 128u);
+    EXPECT_EQ(feasibility.maximum_ring_growth, 4u);
+
+    EXPECT_THROW(
+        (void)ResolvePreThresholdProfilePolicy("unknown"),
+        std::invalid_argument);
+}
+
+TEST(PreThresholdCalibration, RejectsProfilePolicyMismatch) {
+    struct Fixture {
+        const char* name;
+        std::function<void(PiccardParams&, PreThresholdCalibrationRequest&,
+                           PreThresholdCalibrationRow&)> mutate;
+    };
+    const Fixture fixtures[] = {
+        {"unknown_profile", [](PiccardParams&,
+                               PreThresholdCalibrationRequest& request,
+                               PreThresholdCalibrationRow& row) {
+             request.profile_id = "unknown";
+             row.key.profile_id = "unknown";
+         }},
+        {"transcript", [](PiccardParams& profile,
+                           PreThresholdCalibrationRequest&,
+                           PreThresholdCalibrationRow& row) {
+             profile.transcript_stat_bits = 64;
+             row.transcript_stat_bits = 64;
+             row.query_stat_bits = 84;
+             row.coefficient_stat_bits = 97;
+             row.flood_noise_bits = 165;
+         }},
+        {"max_queries", [](PiccardParams& profile,
+                            PreThresholdCalibrationRequest&,
+                            PreThresholdCalibrationRow& row) {
+             profile.max_queries = 1;
+             row.max_queries = 1;
+             row.query_stat_bits = 40;
+             row.coefficient_stat_bits = 53;
+             row.flood_noise_bits = 121;
+         }},
+        {"margin", [](PiccardParams& profile,
+                       PreThresholdCalibrationRequest&,
+                       PreThresholdCalibrationRow& row) {
+             profile.flood_margin_bits = 9;
+             row.flood_margin_bits = 9;
+             row.flood_noise_bits = 142;
+         }},
+    };
+
+    for (const auto& fixture : fixtures) {
+        SCOPED_TRACE(fixture.name);
+        PiccardParams profile = DerivedDefaultOneHotProfile();
+        PreThresholdCalibrationRequest request = PrimaryOneHotRequest();
+        PreThresholdCalibrationRow row = PrimaryOneHotRow();
+        fixture.mutate(profile, request, row);
+        EXPECT_THROW(
+            (void)SelectPreThresholdCalibration(profile, request, {row}),
+            std::invalid_argument);
+    }
+}
+
+TEST(PreThresholdCalibration, NeverBorrowsAcrossSecurityLevels) {
+    PreThresholdCalibrationRow std192 = PrimaryOneHotRow();
+    std192.key.security = SecurityLevel::STD192;
+
+    EXPECT_THROW(
+        (void)SelectPreThresholdCalibration(
+            DerivedDefaultOneHotProfile(),
+            PrimaryOneHotRequest(),
+            {std192}),
+        std::invalid_argument);
+
+    PiccardParams profile192;
+    profile192.security = SecurityLevel::STD192;
+    CalibrationAccess::Derive(profile192);
+    PreThresholdCalibrationRequest request192 = PrimaryOneHotRequest();
+    request192.security = SecurityLevel::STD192;
+    request192.requested_ring_dim = profile192.ring_dim;
+    PreThresholdCalibrationRow std128 = PrimaryOneHotRow();
+    EXPECT_THROW(
+        (void)SelectPreThresholdCalibration(
+            profile192, request192, {std128}),
+        std::invalid_argument);
+}
+
+TEST(PreThresholdCalibration, RecomputesEveryDerivedCapacityField) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PreThresholdCalibrationRow&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"transcript_stat_bits", [](PreThresholdCalibrationRow& row) {
+             ++row.transcript_stat_bits;
+         }},
+        {"max_queries", [](PreThresholdCalibrationRow& row) {
+             ++row.max_queries;
+         }},
+        {"query_stat_bits", [](PreThresholdCalibrationRow& row) {
+             ++row.query_stat_bits;
+         }},
+        {"coefficient_stat_bits", [](PreThresholdCalibrationRow& row) {
+             ++row.coefficient_stat_bits;
+         }},
+        {"flood_margin_bits", [](PreThresholdCalibrationRow& row) {
+             ++row.flood_margin_bits;
+         }},
+        {"flood_noise_bits", [](PreThresholdCalibrationRow& row) {
+             ++row.flood_noise_bits;
+         }},
+    };
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        PreThresholdCalibrationRow row = PrimaryOneHotRow();
+        mutation.apply(row);
+        EXPECT_THROW(
+            (void)SelectPreThresholdCalibration(
+                DerivedDefaultOneHotProfile(),
+                PrimaryOneHotRequest(),
+                {row}),
+            std::invalid_argument);
+    }
+}
+
+TEST(PreThresholdCalibration, DoublingRingAddsExactlyOneCoefficientBit) {
+    const PiccardParams natural = SelectPreThresholdCalibration(
+        DerivedDefaultOneHotProfile(),
+        PrimaryOneHotRequest(),
+        {PrimaryOneHotRow(8192)});
+    const PiccardParams grown = SelectPreThresholdCalibration(
+        DerivedDefaultOneHotProfile(),
+        PrimaryOneHotRequest(),
+        {PrimaryOneHotRow(16384)});
+
+    EXPECT_EQ(
+        grown.CoefficientStatBits(),
+        natural.CoefficientStatBits() + 1u);
+}
+
+TEST(PreThresholdCalibration, RejectsInvalidGrowthAndOverflow) {
+    std::vector<PreThresholdCalibrationRow> invalid_rows;
+    PreThresholdCalibrationRow non_integral = PrimaryOneHotRow();
+    non_integral.ring_dim_calibrated = 12288;
+    invalid_rows.push_back(non_integral);
+    PreThresholdCalibrationRow shrink = PrimaryOneHotRow();
+    shrink.ring_dim_calibrated = 4096;
+    invalid_rows.push_back(shrink);
+    PreThresholdCalibrationRow forbidden = PrimaryOneHotRow();
+    forbidden.ring_dim_calibrated = 32768;
+    invalid_rows.push_back(forbidden);
+    PreThresholdCalibrationRow overflow = PrimaryOneHotRow();
+    overflow.eval_noise_bits = std::numeric_limits<uint32_t>::max();
+    overflow.flood_noise_bits = std::numeric_limits<uint32_t>::max();
+    invalid_rows.push_back(overflow);
+
+    for (const auto& row : invalid_rows) {
+        EXPECT_THROW(
+            (void)SelectPreThresholdCalibration(
+                DerivedDefaultOneHotProfile(),
+                PrimaryOneHotRequest(),
+                {row}),
+            std::invalid_argument);
+    }
+}
+
+TEST(PreThresholdCalibration, ChoosesMeasuredCostIndependentOfInputOrder) {
+    PreThresholdCalibrationRow expensive_n = PrimaryOneHotRow(16384);
+    expensive_n.log_q = 170.0;
+    expensive_n.log_delta = 153.9999779867;
+    expensive_n.ct_bytes = 100;
+
+    PreThresholdCalibrationRow expensive_q = PrimaryOneHotRow();
+    expensive_q.log_q = 210.0;
+    expensive_q.log_delta = 193.9999779867;
+    expensive_q.ct_bytes = 3000;
+    expensive_q.provisioned_depth = 2;
+    expensive_q.scaling_mod_size = 35;
+
+    PreThresholdCalibrationRow winner = PrimaryOneHotRow();
+    winner.log_q = 200.0;
+    winner.ct_bytes = 4000;
+    winner.provisioned_depth = 4;
+    winner.scaling_mod_size = 45;
+
+    const auto select = [&](std::vector<PreThresholdCalibrationRow> rows) {
+        return SelectPreThresholdCalibration(
+            DerivedDefaultOneHotProfile(),
+            PrimaryOneHotRequest(),
+            rows);
+    };
+    const PiccardParams forward =
+        select({expensive_n, expensive_q, winner});
+    const PiccardParams reverse =
+        select({winner, expensive_q, expensive_n});
+
+    EXPECT_DOUBLE_EQ(
+        forward.SelectedPreThresholdCalibration().log_q,
+        200.0);
+    EXPECT_DOUBLE_EQ(
+        reverse.SelectedPreThresholdCalibration().log_q,
+        200.0);
+    EXPECT_EQ(forward.mult_depth, 4u);
+    EXPECT_EQ(reverse.mult_depth, 4u);
+}
+
+TEST(PreThresholdCalibration, UsesCiphertextDepthAndScalingTieBreakers) {
+    PreThresholdCalibrationRow high_ct = PrimaryOneHotRow();
+    high_ct.ct_bytes = 5000;
+
+    PreThresholdCalibrationRow high_depth = PrimaryOneHotRow();
+    high_depth.ct_bytes = 4000;
+    high_depth.provisioned_depth = 4;
+    high_depth.scaling_mod_size = 35;
+
+    PreThresholdCalibrationRow high_sms = PrimaryOneHotRow();
+    high_sms.ct_bytes = 4000;
+    high_sms.provisioned_depth = 3;
+    high_sms.scaling_mod_size = 45;
+
+    PreThresholdCalibrationRow winner = PrimaryOneHotRow();
+    winner.ct_bytes = 4000;
+    winner.provisioned_depth = 3;
+    winner.scaling_mod_size = 40;
+
+    const PiccardParams selected = SelectPreThresholdCalibration(
+        DerivedDefaultOneHotProfile(),
+        PrimaryOneHotRequest(),
+        {high_ct, high_depth, high_sms, winner});
+    const auto& row = selected.SelectedPreThresholdCalibration();
+    EXPECT_EQ(row.ct_bytes, 4000u);
+    EXPECT_EQ(row.provisioned_depth, 3u);
+    EXPECT_EQ(row.scaling_mod_size, 40u);
+}
+
+TEST(PreThresholdCalibration, RejectsConflictingEqualCostRowsInAnyOrder) {
+    PreThresholdCalibrationRow first = PrimaryOneHotRow();
+    PreThresholdCalibrationRow second = PrimaryOneHotRow();
+    ++second.eval_noise_bits;
+    ++second.flood_noise_bits;
+
+    const auto select =
+        [&](const std::vector<PreThresholdCalibrationRow>& rows) {
+            return SelectPreThresholdCalibration(
+                DerivedDefaultOneHotProfile(),
+                PrimaryOneHotRequest(),
+                rows);
+        };
+    for (const auto& rows :
+         {std::vector<PreThresholdCalibrationRow>{first, second},
+          std::vector<PreThresholdCalibrationRow>{second, first}}) {
+        const std::string message =
+            InvalidArgumentMessage([&] { (void)select(rows); });
+        EXPECT_NE(
+            message.find("conflicting equal-cost"),
+            std::string::npos);
+    }
+
+    EXPECT_NO_THROW((void)select({first, first}));
+}
+
+TEST(PreThresholdCalibration, RejectsImpossibleMeasuredLogRelationship) {
+    PreThresholdCalibrationRow impossible = PrimaryOneHotRow();
+    impossible.log_q = 100.0;
+    impossible.log_delta = 200.0;
+
+    EXPECT_THROW(
+        (void)SelectPreThresholdCalibration(
+            DerivedDefaultOneHotProfile(),
+            PrimaryOneHotRequest(),
+            {impossible}),
+        std::invalid_argument);
+}
+
+TEST(PreThresholdCalibration, CheaperIncompleteOrMismatchedRowCannotWin) {
+    PreThresholdCalibrationRow valid = PrimaryOneHotRow();
+    valid.log_q = 200.0;
+    valid.ct_bytes = 4000;
+
+    PreThresholdCalibrationRow incomplete = PrimaryOneHotRow();
+    incomplete.log_q = 1.0;
+    incomplete.log_delta = 1000.0;
+    incomplete.ct_bytes = 0;
+
+    PreThresholdCalibrationRow mismatched = PrimaryOneHotRow();
+    mismatched.key.profile_id = "sensitivity64";
+    mismatched.log_q = 1.0;
+    mismatched.log_delta = 1000.0;
+    mismatched.ct_bytes = 1;
+
+    const PiccardParams selected = SelectPreThresholdCalibration(
+        DerivedDefaultOneHotProfile(),
+        PrimaryOneHotRequest(),
+        {incomplete, mismatched, valid});
+    EXPECT_DOUBLE_EQ(
+        selected.SelectedPreThresholdCalibration().log_q,
+        200.0);
+}
+
+TEST(ExplicitRingCandidates, PreservesExplicitMonotoneDoublingLists) {
+    const ExplicitRingCandidateSet primary = BuildExplicitRingCandidateSet(
+        ExplicitRingCandidateRequest{
+            "primary40",
+            SecurityLevel::STD128,
+            8192,
+            {8192, 16384},
+        },
+        40,
+        UINT64_C(1) << 20,
+        8);
+    const ExplicitRingCandidateSet feasibility =
+        BuildExplicitRingCandidateSet(
+            ExplicitRingCandidateRequest{
+                "feasibility128",
+                SecurityLevel::STD192,
+                8192,
+                {8192, 16384, 32768},
+            },
+            128,
+            UINT64_C(1) << 20,
+            8);
+
+    EXPECT_EQ(primary.candidates, (std::vector<uint32_t>{8192, 16384}));
+    EXPECT_EQ(
+        feasibility.candidates,
+        (std::vector<uint32_t>{8192, 16384, 32768}));
+}
+
+TEST(ExplicitRingCandidates, RejectsEveryInvalidSequenceShape) {
+    const std::vector<std::vector<uint32_t>> invalid = {
+        {4096, 8192},
+        {8192, 12288},
+        {8192, 32768},
+        {8192, 8192},
+        {8192, 16384, 32768},
+        {524288, 1048576, 2097152},
+    };
+    for (const auto& candidates : invalid) {
+        SCOPED_TRACE(::testing::PrintToString(candidates));
+        EXPECT_THROW(
+            (void)BuildExplicitRingCandidateSet(
+                ExplicitRingCandidateRequest{
+                    "primary40",
+                    SecurityLevel::STD128,
+                    candidates.front() == 4096 ? 8192u : candidates.front(),
+                    candidates,
+                },
+                40,
+                UINT64_C(1) << 20,
+                8),
+            std::invalid_argument);
+    }
+}
+
+TEST(ExplicitRingCandidates, FeasibilityAlonePermitsFourfoldGrowth) {
+    EXPECT_NO_THROW(
+        (void)BuildExplicitRingCandidateSet(
+            ExplicitRingCandidateRequest{
+                "feasibility128",
+                SecurityLevel::STD128,
+                8192,
+                {8192, 16384, 32768},
+            },
+            128,
+            UINT64_C(1) << 20,
+            8));
+    EXPECT_THROW(
+        (void)BuildExplicitRingCandidateSet(
+            ExplicitRingCandidateRequest{
+                "sensitivity64",
+                SecurityLevel::STD128,
+                8192,
+                {8192, 16384, 32768},
+            },
+            64,
+            UINT64_C(1) << 20,
+            8),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)BuildExplicitRingCandidateSet(
+            ExplicitRingCandidateRequest{
+                "primary40",
+                SecurityLevel::STD128,
+                8192,
+                {8192, 16384, 32768},
+            },
+            128,
+            UINT64_C(1) << 20,
+            8),
+        std::invalid_argument);
+}
+
+TEST(ExplicitRingCandidates, RejectsUnknownOrMismatchedProfilePolicy) {
+    const auto build = [](
+                           const std::string& profile_id,
+                           uint32_t transcript_stat_bits,
+                           uint64_t max_queries,
+                           uint32_t margin) {
+        return BuildExplicitRingCandidateSet(
+            ExplicitRingCandidateRequest{
+                profile_id,
+                SecurityLevel::STD128,
+                8192,
+                {8192},
+            },
+            transcript_stat_bits,
+            max_queries,
+            margin);
+    };
+
+    EXPECT_THROW(
+        (void)build("unknown", 40, UINT64_C(1) << 20, 8),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)build("primary40", 64, UINT64_C(1) << 20, 8),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)build("primary40", 40, (UINT64_C(1) << 20) - 1, 8),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)build("primary40", 40, UINT64_C(1) << 20, 9),
+        std::invalid_argument);
+}
+
+TEST(ExplicitRingCandidates, RetainsSecurityIdentityWithoutBorrowing) {
+    const auto std128 = BuildExplicitRingCandidateSet(
+        ExplicitRingCandidateRequest{
+            "primary40",
+            SecurityLevel::STD128,
+            8192,
+            {8192, 16384},
+        },
+        40,
+        UINT64_C(1) << 20,
+        8);
+    const auto std192 = BuildExplicitRingCandidateSet(
+        ExplicitRingCandidateRequest{
+            "primary40",
+            SecurityLevel::STD192,
+            16384,
+            {16384, 32768},
+        },
+        40,
+        UINT64_C(1) << 20,
+        8);
+
+    EXPECT_EQ(std128.security, SecurityLevel::STD128);
+    EXPECT_EQ(std128.natural_ring_dim, 8192u);
+    EXPECT_EQ(std192.security, SecurityLevel::STD192);
+    EXPECT_EQ(std192.natural_ring_dim, 16384u);
+    EXPECT_NE(std128.candidates, std192.candidates);
 }
 
 TEST(PiccardParams, RuntimeAdoptionRequiresPriorSelection) {

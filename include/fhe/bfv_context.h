@@ -4,6 +4,7 @@
 #include "openfhe.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace piccard {
@@ -79,6 +80,16 @@ public:
      * @brief Returns eval + coefficient-stat + margin + two guard bits.
      */
     uint32_t RequiredFloodBudgetBits() const;
+
+    /**
+     * @brief Names requested, natural, calibrated, and realized dimensions.
+     */
+    std::string CalibrationRingDiagnostics() const;
+
+    /**
+     * @brief Narrow test seam proving contract failures precede key generation.
+     */
+    bool HasGeneratedKeysForTesting() const { return key_pair_.good(); }
 
     /** @brief Returns the fixed sanitizer construction label. */
     static constexpr const char* SanitizerModel() {

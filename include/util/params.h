@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace piccard {
 
@@ -21,11 +23,18 @@ enum class Circuit {
 };
 
 struct CalibrationCandidate;
+struct PreThresholdCalibrationRequest;
+struct PreThresholdCalibrationRow;
 struct PiccardParams;
 
 PiccardParams SelectSanitizerCandidate(
     PiccardParams profile,
     const CalibrationCandidate& candidate);
+
+PiccardParams SelectPreThresholdCalibration(
+    PiccardParams profile,
+    const PreThresholdCalibrationRequest& request,
+    const std::vector<PreThresholdCalibrationRow>& candidates);
 
 struct PiccardParams {
     // User-configurable
@@ -100,6 +109,18 @@ struct PiccardParams {
     uint32_t CoefficientStatBits() const { return coefficient_stat_bits_; }
 
     /**
+     * @brief Returns the exact selected revision-profile measurement.
+     *
+     * @throws std::logic_error on legacy or derive-only parameter sets.
+     */
+    const PreThresholdCalibrationRow& SelectedPreThresholdCalibration() const;
+
+    /** @brief Whether selection retained a revision-profile measured row. */
+    bool UsesPreThresholdCalibration() const {
+        return static_cast<bool>(selected_pre_threshold_calibration_);
+    }
+
+    /**
      * @brief Read-only bridge for pre-Phase-3/4 consumers.
      *
      * Non-threshold paths return CoefficientStatBits(). The threshold
@@ -168,6 +189,8 @@ private:
         uint32_t flood_noise_bits;
         double selected_log2_q_over_t;
         Circuit selected_circuit;
+        std::shared_ptr<const PreThresholdCalibrationRow>
+            selected_pre_threshold_calibration;
         bool runtime_adopted;
 
         bool operator==(const ValidationSnapshot& other) const;
@@ -200,6 +223,8 @@ private:
     uint32_t flood_noise_bits_ = 0;
     double selected_log2_q_over_t_ = 0.0;
     Circuit selected_circuit_ = Circuit::OneHot;
+    std::shared_ptr<const PreThresholdCalibrationRow>
+        selected_pre_threshold_calibration_;
     bool runtime_adopted_ = false;
     bool validation_snapshot_valid_ = false;
     ValidationSnapshot validation_snapshot_{};
@@ -208,6 +233,10 @@ private:
     friend PiccardParams SelectSanitizerCandidate(
         PiccardParams profile,
         const CalibrationCandidate& candidate);
+    friend PiccardParams SelectPreThresholdCalibration(
+        PiccardParams profile,
+        const PreThresholdCalibrationRequest& request,
+        const std::vector<PreThresholdCalibrationRow>& candidates);
 
     // Look up the calibration frontier for (circuit, ring_dim, natural_depth)
     // and adopt the cheapest measured parameters that leave room for the

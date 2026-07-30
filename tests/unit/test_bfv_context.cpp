@@ -5,6 +5,7 @@
 #include "core/threshold_poly.h"
 #include "ciphertext-ser.h"
 #include "cryptocontext-ser.h"
+#include "version.h"
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace piccard;
 
@@ -30,6 +32,77 @@ protected:
     PiccardParams params;
     std::unique_ptr<BFVContext> ctx;
 };
+
+namespace {
+
+struct MeasuredSelection {
+    PiccardParams params;
+    PreThresholdCalibrationRow row;
+};
+
+MeasuredSelection BuildMeasuredSelection(uint32_t calibrated_ring_dim) {
+    PiccardParams profile;
+    CalibrationAccess::Derive(profile);
+
+    PiccardParams measurement = profile;
+    measurement.ring_dim = calibrated_ring_dim;
+    measurement.mult_depth = 2;
+    measurement.scaling_mod_size = 40;
+    BFVContext discovery(measurement);
+    discovery.Initialize();
+
+    const auto& cc = discovery.GetCryptoContext();
+    const auto crypto_params = cc->GetCryptoParameters();
+    const auto elem_params = crypto_params->GetElementParams();
+    const double log_q =
+        std::log2(elem_params->GetModulus().ConvertToDouble());
+    const double log_delta =
+        log_q -
+        std::log2(static_cast<double>(
+            crypto_params->GetPlaintextModulus()));
+    const uint32_t actual_ring_dim = cc->GetRingDimension();
+    if (actual_ring_dim != calibrated_ring_dim) {
+        throw std::runtime_error(
+            "test fixture OpenFHE did not realize requested synthetic N");
+    }
+
+    const PreThresholdCalibrationRequest request{
+        "primary40",
+        Circuit::OneHot,
+        "onehot-v1",
+        SecurityLevel::STD128,
+        profile.ring_dim,
+        profile.natural_mult_depth,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        GetOPENFHEVersion(),
+    };
+    const uint32_t coefficient_stat_bits =
+        calibrated_ring_dim == 8192 ? 73u : 74u;
+    PreThresholdCalibrationRow row{
+        request,
+        8192,
+        calibrated_ring_dim,
+        measurement.mult_depth,
+        measurement.scaling_mod_size,
+        static_cast<uint32_t>(elem_params->GetParams().size()),
+        crypto_params->GetPlaintextModulus(),
+        log_q,
+        log_delta,
+        1,
+        4096,
+        40,
+        UINT64_C(1) << 20,
+        60,
+        coefficient_stat_bits,
+        8,
+        1u + coefficient_stat_bits + 8u,
+    };
+    PiccardParams selected =
+        SelectPreThresholdCalibration(profile, request, {row});
+    return {std::move(selected), std::move(row)};
+}
+
+}  // namespace
 
 TEST_F(BFVContextTest, EncryptDecryptRoundTrip) {
     std::vector<int64_t> values(params.ring_dim, 0);
@@ -499,6 +572,130 @@ TEST_F(BFVContextTest, UnsizedContextInitializesButFloodRejects) {
     std::vector<int64_t> values(ctx.GetSlotCount(), 0);
     auto ct = ctx.Encrypt(values);
     EXPECT_THROW(ctx.Flood(ct), std::logic_error);
+}
+
+TEST(BFVContextPreThreshold, ReproducesNormalAndGrownMeasuredContracts) {
+    for (uint32_t calibrated_ring_dim : {8192u, 16384u}) {
+        SCOPED_TRACE(calibrated_ring_dim);
+        MeasuredSelection measured =
+            BuildMeasuredSelection(calibrated_ring_dim);
+        BFVContext context(measured.params);
+        ASSERT_NO_THROW(context.Initialize());
+
+        const auto& live = context.GetCryptoContext();
+        const auto crypto_params = live->GetCryptoParameters();
+        const auto elem_params = crypto_params->GetElementParams();
+        const double live_log_q =
+            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double live_log_delta =
+            live_log_q -
+            std::log2(static_cast<double>(
+                crypto_params->GetPlaintextModulus()));
+
+        EXPECT_EQ(context.GetSlotCount(), calibrated_ring_dim);
+        EXPECT_EQ(
+            context.GetParams().RequestedRingDim(),
+            measured.row.key.requested_ring_dim);
+        EXPECT_EQ(
+            context.GetParams().ring_dim_natural,
+            measured.row.natural_ring_dim);
+        EXPECT_EQ(
+            context.GetParams().SelectedCalibratedRingDim(),
+            measured.row.ring_dim_calibrated);
+        const auto bfv_crypto_params = std::dynamic_pointer_cast<
+            lbcrypto::CryptoParametersBFVRNS>(crypto_params);
+        ASSERT_TRUE(bfv_crypto_params);
+        EXPECT_EQ(
+            bfv_crypto_params->GetMultiplicativeDepth(),
+            measured.row.provisioned_depth);
+        EXPECT_EQ(
+            context.GetParams().scaling_mod_size,
+            measured.row.scaling_mod_size);
+        EXPECT_EQ(
+            crypto_params->GetPlaintextModulus(),
+            measured.row.plaintext_mod);
+        EXPECT_EQ(
+            elem_params->GetParams().size(),
+            measured.row.num_limbs);
+        EXPECT_NEAR(live_log_q, measured.row.log_q, 1e-9);
+        EXPECT_NEAR(live_log_delta, measured.row.log_delta, 1e-9);
+        EXPECT_EQ(
+            context.RequiredFloodBudgetBits(),
+            measured.row.flood_noise_bits + 2u);
+        EXPECT_TRUE(context.HasGeneratedKeysForTesting());
+
+        const std::string diagnostics =
+            context.CalibrationRingDiagnostics();
+        EXPECT_NE(diagnostics.find("requested N=8192"), std::string::npos);
+        EXPECT_NE(diagnostics.find("natural N=8192"), std::string::npos);
+        EXPECT_NE(
+            diagnostics.find(
+                "calibrated N=" +
+                std::to_string(calibrated_ring_dim)),
+            std::string::npos);
+        EXPECT_NE(
+            diagnostics.find(
+                "realized N=" +
+                std::to_string(calibrated_ring_dim)),
+            std::string::npos);
+    }
+}
+
+TEST(BFVContextPreThreshold, RejectsStaleOpenFHEVersionBeforeContextOrKeys) {
+    MeasuredSelection measured = BuildMeasuredSelection(8192);
+    measured.row.key.openfhe_version = "stale-openfhe";
+    PreThresholdCalibrationRequest stale_request = measured.row.key;
+
+    PiccardParams profile;
+    CalibrationAccess::Derive(profile);
+    PiccardParams selected = SelectPreThresholdCalibration(
+        profile, stale_request, {measured.row});
+    BFVContext context(selected);
+
+    EXPECT_THROW(context.Initialize(), std::invalid_argument);
+    EXPECT_FALSE(context.GetCryptoContext());
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextPreThreshold, RejectsMeasuredFieldMismatchBeforeKeyGeneration) {
+    struct Mutation {
+        const char* name;
+        std::function<void(PreThresholdCalibrationRow&)> apply;
+    };
+    const Mutation mutations[] = {
+        {"num_limbs", [](PreThresholdCalibrationRow& row) {
+             ++row.num_limbs;
+         }},
+        {"log_q_and_log_delta", [](PreThresholdCalibrationRow& row) {
+             row.log_q += 1.0;
+             row.log_delta += 1.0;
+         }},
+    };
+
+    for (const auto& mutation : mutations) {
+        SCOPED_TRACE(mutation.name);
+        MeasuredSelection measured = BuildMeasuredSelection(8192);
+        mutation.apply(measured.row);
+        PiccardParams profile;
+        CalibrationAccess::Derive(profile);
+        PiccardParams selected = SelectPreThresholdCalibration(
+            profile, measured.row.key, {measured.row});
+        BFVContext context(selected);
+
+        EXPECT_THROW(context.Initialize(), std::runtime_error);
+        EXPECT_TRUE(context.GetCryptoContext());
+        EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+    }
+}
+
+TEST(BFVContextPreThreshold, RejectsSelectedParameterMutationBeforeContext) {
+    MeasuredSelection measured = BuildMeasuredSelection(16384);
+    ++measured.params.mult_depth;
+    BFVContext context(measured.params);
+
+    EXPECT_THROW(context.Initialize(), std::logic_error);
+    EXPECT_FALSE(context.GetCryptoContext());
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
 }
 
 TEST_F(BFVContextTest, SanitizerClaimsUseFixedPocLabels) {

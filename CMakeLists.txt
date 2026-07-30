@@ -118,6 +118,7 @@ if(OpenFHE_FOUND)
         piccard_noise_calibration_schema
         PUBLIC
             OpenSSL::Crypto
+            piccard_core
             piccard_security_profile
     )
 endif()
@@ -689,6 +690,69 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                 --reps=1
                 --seed=20260729
         )
+        add_test(
+            NAME NoisePreThresholdRejectsNonNaturalFirstRing
+            COMMAND
+                bench_noise
+                --pre_threshold
+                --smoke
+                --profile_manifest=profiles.json
+                --profile=primary40
+                --key_id=primary40:onehot:STD128
+                --circuit=onehot
+                --security=STD128
+                --scaling_mod_grid=40
+                --max_depth_delta=0
+                --ring_candidates=16384
+                --timeout_seconds=30
+                --transcript_stat_bits=40
+                --max_queries=1048576
+                --margin=8
+                --reps=1
+                --seed=20260729
+        )
+        add_test(
+            NAME NoisePreThresholdGrownSmoke
+            COMMAND
+                bench_noise
+                --pre_threshold
+                --smoke
+                --profile_manifest=profiles.json
+                --profile=primary40
+                --key_id=primary40:onehot:STD128
+                --circuit=onehot
+                --security=STD128
+                --scaling_mod_grid=40
+                --max_depth_delta=0
+                --ring_candidates=8192,16384
+                --timeout_seconds=30
+                --transcript_stat_bits=40
+                --max_queries=1048576
+                --margin=8
+                --reps=1
+                --seed=20260729
+        )
+        add_test(
+            NAME NoisePreThresholdRejectsProfilePolicyMismatch
+            COMMAND
+                bench_noise
+                --pre_threshold
+                --smoke
+                --profile_manifest=profiles.json
+                --profile=primary40
+                --key_id=primary40:onehot:STD128
+                --circuit=onehot
+                --security=STD128
+                --scaling_mod_grid=40
+                --max_depth_delta=0
+                --ring_candidates=8192
+                --timeout_seconds=30
+                --transcript_stat_bits=64
+                --max_queries=1048576
+                --margin=8
+                --reps=1
+                --seed=20260729
+        )
         set_tests_properties(
             NoisePreThresholdRejectsThreshold
             PROPERTIES
@@ -701,6 +765,26 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                 FAIL_REGULAR_EXPRESSION "FAILED:"
                 PASS_REGULAR_EXPRESSION "dec-OK"
                 TIMEOUT 30
+        )
+        set_tests_properties(
+            NoisePreThresholdRejectsNonNaturalFirstRing
+            PROPERTIES
+                WILL_FAIL TRUE
+                TIMEOUT 30
+        )
+        set_tests_properties(
+            NoisePreThresholdGrownSmoke
+            PROPERTIES
+                FAIL_REGULAR_EXPRESSION "FAILED:"
+                PASS_REGULAR_EXPRESSION
+                    "requested N=8192.*natural N=8192.*calibrated N=16384.*realized N=16384"
+                TIMEOUT 30
+        )
+        set_tests_properties(
+            NoisePreThresholdRejectsProfilePolicyMismatch
+            PROPERTIES
+                WILL_FAIL TRUE
+                TIMEOUT 5
         )
     endif()
 

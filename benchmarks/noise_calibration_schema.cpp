@@ -1,5 +1,6 @@
 #include "noise_calibration_schema.h"
 
+#include "util/params_calibration.h"
 #include "util/security_profile.h"
 
 #include "version.h"
@@ -482,6 +483,11 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
     Require(
         options.max_queries >= 1 && options.max_queries <= kMaxQueries,
         "--max_queries must be in the inclusive range 1..2^63");
+    ValidatePreThresholdProfilePolicy(
+        options.profile,
+        options.transcript_stat_bits,
+        options.max_queries,
+        options.margin);
     Require(options.reps > 0, "--reps must be positive");
     Require(
         options.smoke || options.reps >= 5,

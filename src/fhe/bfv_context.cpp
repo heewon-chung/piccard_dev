@@ -1,11 +1,16 @@
 #include "fhe/bfv_context.h"
 
 #include "math/distributiongenerator.h"
+#include "scheme/bfvrns/bfvrns-cryptoparameters.h"
+#include "util/params_calibration.h"
+#include "version.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace piccard {
@@ -82,6 +87,15 @@ lbcrypto::DCRTPoly SampleFloodingNoise(
 BFVContext::BFVContext(const PiccardParams& params)
     : params_(params), runtime_ring_dim_(params.ring_dim) {}
 
+std::string BFVContext::CalibrationRingDiagnostics() const {
+    std::ostringstream out;
+    out << "requested N=" << params_.RequestedRingDim()
+        << ", natural N=" << params_.ring_dim_natural
+        << ", calibrated N=" << params_.SelectedCalibratedRingDim()
+        << ", realized N=" << runtime_ring_dim_;
+    return out.str();
+}
+
 uint32_t BFVContext::RequiredFloodBudgetBits() const {
     // FloodNoiseBits() first revalidates the complete Phase 2 fingerprint.
     const uint32_t selected_flood_bits = params_.FloodNoiseBits();
@@ -99,6 +113,19 @@ uint32_t BFVContext::RequiredFloodBudgetBits() const {
 }
 
 void BFVContext::Initialize() {
+    const PreThresholdCalibrationRow* measured_row = nullptr;
+    if (params_.UsesPreThresholdCalibration()) {
+        measured_row = &params_.SelectedPreThresholdCalibration();
+        const std::string linked_version = GetOPENFHEVersion();
+        if (measured_row->key.openfhe_version != linked_version) {
+            throw std::invalid_argument(
+                "selected calibration OpenFHE version '" +
+                measured_row->key.openfhe_version +
+                "' does not match linked OpenFHE version '" +
+                linked_version + "' before context construction");
+        }
+    }
+
     lbcrypto::CCParams<lbcrypto::CryptoContextBFVRNS> bfv_params;
 
     bfv_params.SetPlaintextModulus(params_.plaintext_mod);
@@ -156,8 +183,40 @@ void BFVContext::Initialize() {
     runtime_ring_dim_ = cc_->GetRingDimension();
 
     // This is the first point where the measured context actually exists.
-    // Adoption verifies requested, selected, and actual N before any keys or
+    // Verify every measured field and adopt the exact N before any keys or
     // size-dependent rotation plans are created.
+    if (measured_row != nullptr) {
+        const auto crypto_params = std::dynamic_pointer_cast<
+            lbcrypto::CryptoParametersBFVRNS>(
+                cc_->GetCryptoParameters());
+        if (!crypto_params) {
+            throw std::runtime_error(
+                "live context is not BFVRNS for selected calibration");
+        }
+        const auto elem_params = crypto_params->GetElementParams();
+        const double live_log_q =
+            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double live_log_delta =
+            live_log_q -
+            std::log2(static_cast<double>(
+                crypto_params->GetPlaintextModulus()));
+        constexpr double kLogTolerance = 1e-9;
+        if (runtime_ring_dim_ != measured_row->ring_dim_calibrated ||
+            crypto_params->GetMultiplicativeDepth() !=
+                measured_row->provisioned_depth ||
+            params_.scaling_mod_size != measured_row->scaling_mod_size ||
+            crypto_params->GetPlaintextModulus() !=
+                measured_row->plaintext_mod ||
+            elem_params->GetParams().size() != measured_row->num_limbs ||
+            std::abs(live_log_q - measured_row->log_q) > kLogTolerance ||
+            std::abs(live_log_delta - measured_row->log_delta) >
+                kLogTolerance) {
+            throw std::runtime_error(
+                "live OpenFHE context disagrees with selected measured row (" +
+                CalibrationRingDiagnostics() + ")");
+        }
+    }
+
     if (params_.FloodingSized()) {
         params_.AdoptVerifiedRuntimeRingDim(runtime_ring_dim_);
     }
@@ -170,6 +229,13 @@ void BFVContext::Initialize() {
             log_q - std::log2(static_cast<double>(params_.plaintext_mod));
         const double required =
             static_cast<double>(RequiredFloodBudgetBits());
+        if (measured_row != nullptr &&
+            (params_.FloodNoiseBits() != measured_row->flood_noise_bits ||
+             RequiredFloodBudgetBits() !=
+                 measured_row->flood_noise_bits + 2u)) {
+            throw std::runtime_error(
+                "runtime sanitizer budget disagrees with selected measured row");
+        }
         if (required > log_delta) {
             throw std::runtime_error(
                 "noise flooding does not fit: needs " +

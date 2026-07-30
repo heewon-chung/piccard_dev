@@ -38,6 +38,7 @@
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 #include "protocol/threshold_piccard.h"
+#include "fhe/bfv_context.h"
 #include "util/params.h"
 #include "util/params_calibration.h"
 
@@ -242,7 +243,9 @@ struct CalibResult {
     // requirement, or every threshold cell is rejected for a cost flooding did
     // not cause.
     uint32_t ring_dim_baseline = 0;
+    uint32_t ring_dim_calibrated = 0;
     bool     ring_dim_grew = false;
+    bool     pre_threshold_evidence = false;
     uint32_t mult_depth = 0;
     // The depth Validate()/ValidateSqrt() derives on its own, before any sweep
     // override. Phase 1 knows this value before a context exists, so it is the
@@ -529,6 +532,8 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t k, uint32_t m,
                                  uint32_t depth_delta, uint32_t sms,
                                  bool pre_threshold_evidence,
+                                 uint32_t natural_ring_dim = 0,
+                                 uint32_t calibrated_ring_dim = 0,
                                  uint32_t* natural_depth_out = nullptr) {
     PiccardParams params;
     params.k = k;
@@ -553,12 +558,15 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
 
     // Work 2 made protocol KeyGen adopt only a sanitizer-selected runtime
     // dimension. Evidence still needs the production raw circuit path, so arm
-    // that adoption guard with the natural candidate while keeping the
-    // selection deliberately minimal. EvaluateRaw never applies its flooding
-    // value; the measured result is reduced later with the requested evidence
-    // profile. Phase 2 replaces this natural-only candidate with explicit ring
-    // search.
+    // that adoption guard with the already validated explicit candidate.
+    // EvaluateRaw never applies its placeholder flooding value; the measured
+    // result is reduced later with the requested evidence profile.
     if (pre_threshold_evidence) {
+        if (natural_ring_dim == 0 || calibrated_ring_dim == 0) {
+            throw std::invalid_argument(
+                "pre-threshold measurement requires explicit natural and "
+                "calibrated ring dimensions");
+        }
         params.transcript_stat_bits = 40;
         params.max_queries = 1;
         params.flood_margin_bits = 0;
@@ -568,8 +576,8 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                 circuit,
                 sec,
                 params.ring_dim,
-                params.ring_dim,
-                params.ring_dim,
+                natural_ring_dim,
+                calibrated_ring_dim,
                 params.natural_mult_depth,
                 params.mult_depth,
                 params.scaling_mod_size,
@@ -589,7 +597,8 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
                                        const std::vector<Pattern>& pats,
                                        uint64_t root_seed, uint32_t reps,
                                        uint32_t baseline_ring_dim,
-                                       bool pre_threshold_evidence) {
+                                       bool pre_threshold_evidence,
+                                       uint32_t calibrated_ring_dim = 0) {
     try {
         uint32_t natural_depth = 0;
         PiccardParams params =
@@ -601,6 +610,8 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
                 depth_delta,
                 sms,
                 pre_threshold_evidence,
+                baseline_ring_dim,
+                calibrated_ring_dim,
                 &natural_depth);
         std::vector<CalibResult> rows;
         switch (circuit) {
@@ -612,7 +623,10 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
             r.natural_mult_depth = natural_depth;
             r.ring_dim_baseline =
                 baseline_ring_dim ? baseline_ring_dim : r.ring_dim_requested;
+            r.ring_dim_calibrated =
+                calibrated_ring_dim ? calibrated_ring_dim : r.ring_dim;
             r.ring_dim_grew = (r.ring_dim > r.ring_dim_baseline);
+            r.pre_threshold_evidence = pre_threshold_evidence;
         }
         return rows;
     } catch (const std::exception& e) {
@@ -625,12 +639,33 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
         r.k = k;
         r.m = m;
         r.scaling_mod_size = sms;
+        r.ring_dim_baseline = baseline_ring_dim;
+        r.ring_dim_calibrated = calibrated_ring_dim;
+        r.pre_threshold_evidence = pre_threshold_evidence;
         r.pattern = "-";
         r.ok = false;
         r.error = e.what();
         return {r};
     }
     return {};
+}
+
+static uint32_t DiscoverNaturalRingDimension(
+    Circuit circuit,
+    SecurityLevel security,
+    uint32_t k,
+    uint32_t m) {
+    PiccardParams params = BuildParams(
+        circuit,
+        security,
+        k,
+        m,
+        0,
+        0,
+        false);
+    BFVContext context(params);
+    context.Initialize();
+    return context.GetSlotCount();
 }
 
 // ============================================================================
@@ -680,6 +715,16 @@ static void PrintRow(const CalibResult& r) {
               << " | " << std::left << std::setw(10) << r.pattern << std::right
               << " B_eval=" << std::setprecision(2) << std::setw(7) << r.eval_noise_bits
               << " headroom=" << std::setw(7) << r.headroom_bits
+              << (r.pre_threshold_evidence
+                      ? "  requested N=" +
+                            std::to_string(r.ring_dim_requested) +
+                            " natural N=" +
+                            std::to_string(r.ring_dim_baseline) +
+                            " calibrated N=" +
+                            std::to_string(r.ring_dim_calibrated) +
+                            " realized N=" +
+                            std::to_string(r.ring_dim)
+                      : "")
               << "  " << (r.decrypt_ok ? "dec-OK" : "DEC-FAIL")
               << (r.decision_ok ? "" : " DECISION-FAIL")
               << (r.saturated ? "  SATURATED" : "")
@@ -995,6 +1040,7 @@ int main(int argc, char** argv) {
         target_lambda = evidence.transcript_stat_bits;
         margin = evidence.margin;
         seed = evidence.seed;
+        sms = evidence.scaling_mod_grid.front();
     } else {
         for (int i = 1; i < argc; i++) {
             std::string arg(argv[i]);
@@ -1078,6 +1124,45 @@ int main(int argc, char** argv) {
     if (!sweep) {
         std::cout << "\n=== single point ===\n";
         for (Circuit c : circuits) {
+            if (evidence.pre_threshold) {
+                try {
+                    const uint32_t natural_ring_dim =
+                        DiscoverNaturalRingDimension(c, security, k, m);
+                    const ExplicitRingCandidateSet ring_set =
+                        BuildExplicitRingCandidateSet(
+                            ExplicitRingCandidateRequest{
+                                evidence.profile,
+                                security,
+                                natural_ring_dim,
+                                evidence.ring_candidates,
+                            },
+                            evidence.transcript_stat_bits,
+                            evidence.max_queries,
+                            evidence.margin);
+                    for (uint32_t candidate : ring_set.candidates) {
+                        record(RunOne(
+                            c,
+                            security,
+                            k,
+                            m,
+                            0,
+                            sms,
+                            patterns,
+                            seed,
+                            reps,
+                            natural_ring_dim,
+                            true,
+                            candidate));
+                    }
+                } catch (const std::exception& error) {
+                    std::cerr
+                        << "Invalid explicit ring candidate set: "
+                        << error.what() << "\n";
+                    return 1;
+                }
+                continue;
+            }
+
             // Measure the circuit's own configuration first even here, so a
             // single point is judged against the same baseline the sweep uses.
             // Without it the threshold variant looks like it grew the ring when

@@ -137,6 +137,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                flood_noise_bits,
                selected_log2_q_over_t,
                selected_circuit,
+               selected_pre_threshold_calibration,
                runtime_adopted) ==
            std::tie(
                other.k,
@@ -163,6 +164,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                other.flood_noise_bits,
                other.selected_log2_q_over_t,
                other.selected_circuit,
+               other.selected_pre_threshold_calibration,
                other.runtime_adopted);
 }
 
@@ -193,6 +195,7 @@ PiccardParams::CurrentValidationSnapshot() const {
         flood_noise_bits_,
         selected_log2_q_over_t_,
         selected_circuit_,
+        selected_pre_threshold_calibration_,
         runtime_adopted_,
     };
 }
@@ -278,6 +281,16 @@ uint32_t PiccardParams::FloodNoiseBits() const {
         VerifyValidationSnapshot();
     }
     return flood_noise_bits_;
+}
+
+const PreThresholdCalibrationRow&
+PiccardParams::SelectedPreThresholdCalibration() const {
+    if (!selected_pre_threshold_calibration_) {
+        throw std::logic_error(
+            "no pre-threshold calibration contract was selected");
+    }
+    VerifyValidationSnapshot();
+    return *selected_pre_threshold_calibration_;
 }
 
 void PiccardParams::AdoptVerifiedRuntimeRingDim(uint32_t runtime_n) {
@@ -436,6 +449,7 @@ void PiccardParams::ClearFloodingSelection() {
     flood_noise_bits_ = 0;
     selected_log2_q_over_t_ = 0.0;
     selected_circuit_ = Circuit::OneHot;
+    selected_pre_threshold_calibration_.reset();
     runtime_adopted_ = false;
     validation_snapshot_valid_ = false;
     validation_snapshot_ = ValidationSnapshot{};

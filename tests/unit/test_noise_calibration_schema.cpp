@@ -233,8 +233,8 @@ TEST(NoiseEvidenceParser, AcceptsSqrtStd192AndSplitValueSyntax) {
         "--ring_candidates", "16384",
         "--timeout_seconds", "60",
         "--transcript_stat_bits", "64",
-        "--max_queries", "9223372036854775808",
-        "--margin", "0",
+        "--max_queries", "1048576",
+        "--margin", "8",
         "--reps", "5",
         "--seed", "0",
     });
@@ -242,22 +242,38 @@ TEST(NoiseEvidenceParser, AcceptsSqrtStd192AndSplitValueSyntax) {
     EXPECT_EQ(options.circuit, "sqrt");
     EXPECT_EQ(options.security, "STD192");
     EXPECT_EQ(options.transcript_stat_bits, 64u);
-    EXPECT_EQ(options.max_queries, UINT64_C(1) << 63);
-    EXPECT_EQ(options.margin, 0u);
+    EXPECT_EQ(options.max_queries, UINT64_C(1) << 20);
+    EXPECT_EQ(options.margin, 8u);
     EXPECT_EQ(options.seed, 0u);
 }
 
-TEST(NoiseEvidenceParser, AcceptsEveryTranscriptTargetAndQueryBoundary) {
-    for (uint32_t stat_bits : {40u, 64u, 128u}) {
+TEST(NoiseEvidenceParser, AcceptsOnlyCanonicalProfilePolicies) {
+    for (const auto& [profile_id, stat_bits] :
+         std::vector<std::pair<std::string, uint32_t>>{
+             {"primary40", 40},
+             {"sensitivity64", 64},
+             {"feasibility128", 128},
+         }) {
         auto args = RequiredEvidenceArgs();
+        args[2] = "--profile=" + profile_id;
+        args[3] = "--key_id=" + profile_id + ":onehot:STD128";
         args[10] = "--transcript_stat_bits=" + std::to_string(stat_bits);
         EXPECT_NO_THROW(nc::ParseEvidenceOptions(args));
     }
+}
 
-    for (const char* max_queries : {"1", "9223372036854775808"}) {
+TEST(NoiseEvidenceParser, RejectsUnknownOrMismatchedProfilePolicy) {
+    const std::vector<std::pair<size_t, std::string>> mismatches = {
+        {2, "--profile=unknown40"},
+        {10, "--transcript_stat_bits=64"},
+        {11, "--max_queries=1048575"},
+        {12, "--margin=9"},
+    };
+    for (const auto& [index, replacement] : mismatches) {
         auto args = RequiredEvidenceArgs();
-        args[11] = std::string("--max_queries=") + max_queries;
-        EXPECT_NO_THROW(nc::ParseEvidenceOptions(args));
+        args[index] = replacement;
+        EXPECT_THROW(nc::ParseEvidenceOptions(args), std::invalid_argument)
+            << replacement;
     }
 }
 
