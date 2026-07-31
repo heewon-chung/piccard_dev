@@ -102,6 +102,22 @@ MeasuredSelection BuildMeasuredSelection(uint32_t calibrated_ring_dim) {
     return {std::move(selected), std::move(row)};
 }
 
+struct ContextOnlyFailure {
+    bool is_invalid_argument = false;
+    std::string message;
+};
+
+ContextOnlyFailure CaptureContextOnlyFailure(BFVContext* context) {
+    try {
+        context->InitializeContextOnly();
+    } catch (const std::invalid_argument& error) {
+        return {true, error.what()};
+    } catch (const std::exception& error) {
+        return {false, error.what()};
+    }
+    return {};
+}
+
 }  // namespace
 
 TEST_F(BFVContextTest, EncryptDecryptRoundTrip) {
@@ -653,6 +669,151 @@ TEST(BFVContextPreThreshold, ContextOnlyInitializationGeneratesNoKeys) {
     EXPECT_TRUE(context.GetCryptoContext());
     EXPECT_EQ(context.GetSlotCount(), 8192u);
     EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextPreThreshold, RejectsPlaintextModulusNotGreaterThanKBeforeOpenFHE) {
+    PiccardParams invalid;
+    invalid.k = 16;
+    invalid.m = 8;
+    invalid.security = SecurityLevel::TOY;
+    CalibrationAccess::Derive(invalid);
+    ASSERT_EQ(invalid.ring_dim, 1024u);
+    invalid.k = 65537;
+    invalid.plaintext_mod = 65537;
+    ASSERT_EQ(invalid.plaintext_mod, invalid.k);
+    ASSERT_TRUE(IsPrime(invalid.plaintext_mod));
+    ASSERT_EQ(
+        (invalid.plaintext_mod - 1) %
+            (UINT64_C(2) * invalid.ring_dim),
+        0u);
+
+    BFVContext context(invalid);
+    const ContextOnlyFailure failure =
+        CaptureContextOnlyFailure(&context);
+
+    EXPECT_TRUE(failure.is_invalid_argument);
+    EXPECT_NE(
+        failure.message.find(
+            "planned packed plaintext parameters are incompatible before "
+            "OpenFHE"),
+        std::string::npos);
+    EXPECT_NE(failure.message.find("p=65537"), std::string::npos);
+    EXPECT_NE(failure.message.find("k=65537"), std::string::npos);
+    EXPECT_FALSE(context.GetCryptoContext());
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextPreThreshold, RejectsCompositeCongruentPlaintextModulusBeforeOpenFHE) {
+    PiccardParams invalid;
+    invalid.k = 16;
+    invalid.m = 8;
+    invalid.security = SecurityLevel::TOY;
+    CalibrationAccess::Derive(invalid);
+    ASSERT_EQ(invalid.ring_dim, 1024u);
+    invalid.plaintext_mod = 2049;
+    ASSERT_GT(invalid.plaintext_mod, invalid.k);
+    ASSERT_FALSE(IsPrime(invalid.plaintext_mod));
+    ASSERT_EQ(
+        (invalid.plaintext_mod - 1) %
+            (UINT64_C(2) * invalid.ring_dim),
+        0u);
+
+    BFVContext context(invalid);
+    const ContextOnlyFailure failure =
+        CaptureContextOnlyFailure(&context);
+
+    EXPECT_TRUE(failure.is_invalid_argument);
+    EXPECT_NE(
+        failure.message.find(
+            "planned packed plaintext parameters are incompatible before "
+            "OpenFHE"),
+        std::string::npos);
+    EXPECT_NE(failure.message.find("p=2049"), std::string::npos);
+    EXPECT_FALSE(context.GetCryptoContext());
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextPreThreshold, RejectsPlannedRingIncompatiblePlaintextModulusBeforeOpenFHE) {
+    PiccardParams incompatible;
+    incompatible.k = 32;
+    incompatible.m = 64;
+    incompatible.security = SecurityLevel::TOY;
+    CalibrationAccess::Derive(incompatible);
+    ASSERT_EQ(incompatible.ring_dim, 2048u);
+    ASSERT_EQ(incompatible.plaintext_mod, 12289u);
+    ASSERT_NE(
+        (incompatible.plaintext_mod - 1) %
+            (UINT64_C(2) * 4096),
+        0u);
+
+    incompatible.ring_dim = 4096;
+    BFVContext context(incompatible);
+    const ContextOnlyFailure failure =
+        CaptureContextOnlyFailure(&context);
+
+    EXPECT_TRUE(failure.is_invalid_argument);
+    EXPECT_NE(
+        failure.message.find(
+            "planned packed plaintext parameters are incompatible before "
+            "OpenFHE"),
+        std::string::npos);
+    EXPECT_NE(failure.message.find("p=12289"), std::string::npos);
+    EXPECT_NE(failure.message.find("N=4096"), std::string::npos);
+    EXPECT_FALSE(context.GetCryptoContext());
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextPreThreshold,
+     RejectsRealizedStandardSecurityRingIncompatibilityBeforeKeysOrAdoption) {
+    PiccardParams profile;
+    profile.k = 128;
+    profile.m = 64;
+    profile.security = SecurityLevel::STD128;
+    CalibrationAccess::Derive(profile);
+    ASSERT_EQ(profile.ring_dim, 8192u);
+    ASSERT_EQ(profile.plaintext_mod, 65537u);
+    profile.transcript_stat_bits = 40;
+    profile.max_queries = 1;
+    profile.flood_margin_bits = 0;
+
+    PiccardParams selected = SelectSanitizerCandidate(
+        profile,
+        CalibrationCandidate{
+            Circuit::OneHot,
+            SecurityLevel::STD128,
+            8192,
+            8192,
+            32768,
+            1,
+            23,
+            60,
+            0,
+            1.0e9,
+        });
+    ASSERT_EQ(selected.SelectedCalibratedRingDim(), 32768u);
+    ASSERT_EQ(selected.plaintext_mod, 65537u);
+    ASSERT_EQ(selected.mult_depth, 23u);
+    ASSERT_EQ(selected.scaling_mod_size, 60u);
+    ASSERT_EQ(
+        (selected.plaintext_mod - 1) %
+            (UINT64_C(2) * selected.SelectedCalibratedRingDim()),
+        0u);
+
+    BFVContext context(selected);
+    const ContextOnlyFailure failure =
+        CaptureContextOnlyFailure(&context);
+
+    EXPECT_TRUE(failure.is_invalid_argument);
+    EXPECT_EQ(
+        failure.message,
+        "realized packed plaintext parameters are incompatible before "
+        "OpenFHE: p=65537, k=128, N=65536, 2N=131072; require prime "
+        "p > k and (p - 1) % (2N) == 0");
+    ASSERT_TRUE(context.GetCryptoContext());
+    EXPECT_EQ(context.GetSlotCount(), 65536u);
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+    EXPECT_EQ(context.GetParams().ring_dim, 8192u);
+    EXPECT_EQ(context.GetParams().SelectedCalibratedRingDim(), 32768u);
 }
 
 TEST(BFVContextPreThreshold, RejectsStaleOpenFHEVersionBeforeContextOrKeys) {

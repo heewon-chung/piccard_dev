@@ -82,6 +82,34 @@ lbcrypto::DCRTPoly SampleFloodingNoise(
     return noise;
 }
 
+void ValidatePackedPlaintextParameters(
+    const PiccardParams& params,
+    uint32_t ring_dim,
+    const char* stage) {
+    if (ring_dim == 0) {
+        throw std::invalid_argument(
+            std::string(stage) +
+            " packed plaintext ring dimension must be positive before "
+            "OpenFHE");
+    }
+    const uint64_t two_n =
+        UINT64_C(2) * static_cast<uint64_t>(ring_dim);
+    const bool compatible =
+        params.plaintext_mod > params.k &&
+        IsPrime(params.plaintext_mod) &&
+        (params.plaintext_mod - 1) % two_n == 0;
+    if (!compatible) {
+        throw std::invalid_argument(
+            std::string(stage) +
+            " packed plaintext parameters are incompatible before OpenFHE: "
+            "p=" + std::to_string(params.plaintext_mod) +
+            ", k=" + std::to_string(params.k) +
+            ", N=" + std::to_string(ring_dim) +
+            ", 2N=" + std::to_string(two_n) +
+            "; require prime p > k and (p - 1) % (2N) == 0");
+    }
+}
+
 } // namespace
 
 BFVContext::BFVContext(const PiccardParams& params)
@@ -116,6 +144,14 @@ void BFVContext::InitializeContextOnly() {
     if (cc_) {
         throw std::logic_error("BFV context was already initialized");
     }
+    const uint32_t configured_ring_dim =
+        params_.FloodingSized()
+            ? params_.SelectedCalibratedRingDim()
+            : params_.ring_dim;
+    uint32_t needed_ring_dim = NextPowerOf2(params_.feature_dim);
+    needed_ring_dim = std::max(needed_ring_dim, configured_ring_dim);
+    ValidatePackedPlaintextParameters(params_, needed_ring_dim, "planned");
+
     const PreThresholdCalibrationRow* measured_row = nullptr;
     if (params_.UsesPreThresholdCalibration()) {
         measured_row = &params_.SelectedPreThresholdCalibration();
@@ -140,16 +176,6 @@ void BFVContext::InitializeContextOnly() {
     if (params_.scaling_mod_size != 0) {
         bfv_params.SetScalingModSize(params_.scaling_mod_size);
     }
-
-    // A sized sanitizer may have selected a measured context larger than the
-    // immutable requested N. Unsized baseline copies keep their independent
-    // runtime request and never enter the sanitizer-adoption path.
-    const uint32_t configured_ring_dim =
-        params_.FloodingSized()
-            ? params_.SelectedCalibratedRingDim()
-            : params_.ring_dim;
-    uint32_t needed_ring_dim = NextPowerOf2(params_.feature_dim);
-    needed_ring_dim = std::max(needed_ring_dim, configured_ring_dim);
 
     switch (params_.security) {
         case SecurityLevel::TOY:
@@ -184,6 +210,7 @@ void BFVContext::InitializeContextOnly() {
     }
 
     runtime_ring_dim_ = cc_->GetRingDimension();
+    ValidatePackedPlaintextParameters(params_, runtime_ring_dim_, "realized");
 
     // This is the first point where the measured context actually exists.
     // Verify every measured field and adopt the exact N before any keys or

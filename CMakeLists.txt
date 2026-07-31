@@ -733,6 +733,19 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                     "strict cleanup probe passed: iterations=3"
                 TIMEOUT 60
         )
+        add_test(
+            NAME NoiseCandidatePlaintextCompatibility
+            COMMAND bench_noise --candidate_plaintext_probe
+        )
+        set_tests_properties(
+            NoiseCandidatePlaintextCompatibility
+            PROPERTIES
+                FAIL_REGULAR_EXPRESSION
+                    "candidate plaintext probe failed"
+                PASS_REGULAR_EXPRESSION
+                    "candidate plaintext probe passed: natural_N=2048 natural_p=12289 calibrated_N=4096 candidate_p=40961 consumers=2 helper_boundary=577->641 low_max_reject=OK packed_encrypt=OK"
+                TIMEOUT 60
+        )
         add_test(NAME NoiseDetailIdentityMapping
                  COMMAND bench_noise --detail_identity_probe)
         set_tests_properties(

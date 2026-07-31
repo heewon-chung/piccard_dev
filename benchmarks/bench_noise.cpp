@@ -66,6 +66,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <random>
 #include <sstream>
@@ -531,13 +532,43 @@ static const char* CircuitName(Circuit c) {
 /// plain struct, so the harness can pin (mult_depth, scaling_mod_size) after
 /// the derived fields are computed -- that is what lets a grid sweep run
 /// through the same code path the protocol uses.
+static uint64_t FindCandidatePlaintextModulus(
+    uint32_t candidate_max_k,
+    uint32_t calibrated_ring_dim) {
+    if (candidate_max_k == 0) {
+        throw std::invalid_argument(
+            "candidate plaintext minimum must be positive");
+    }
+    if (calibrated_ring_dim == 0) {
+        throw std::invalid_argument(
+            "candidate plaintext ring dimension must be positive");
+    }
+    const uint64_t two_n_wide =
+        UINT64_C(2) * static_cast<uint64_t>(calibrated_ring_dim);
+    if (two_n_wide > std::numeric_limits<uint32_t>::max()) {
+        throw std::overflow_error(
+            "candidate plaintext cyclotomic order exceeds uint32");
+    }
+    const uint32_t two_n = static_cast<uint32_t>(two_n_wide);
+    const uint64_t plaintext_mod =
+        FindPlaintextModulus(candidate_max_k, two_n);
+    if (plaintext_mod <= candidate_max_k ||
+        !IsPrime(plaintext_mod) ||
+        (plaintext_mod - 1) % two_n != 0) {
+        throw std::logic_error(
+            "derived candidate plaintext modulus violates packed BFV contract");
+    }
+    return plaintext_mod;
+}
+
 static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t k, uint32_t m,
                                  uint32_t depth_delta, uint32_t sms,
                                  bool pre_threshold_evidence,
                                  uint32_t natural_ring_dim = 0,
                                  uint32_t calibrated_ring_dim = 0,
-                                 uint32_t* natural_depth_out = nullptr) {
+                                 uint32_t* natural_depth_out = nullptr,
+                                 uint32_t candidate_max_k = 0) {
     PiccardParams params;
     params.k = k;
     params.m = m;
@@ -570,6 +601,14 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                 "pre-threshold measurement requires explicit natural and "
                 "calibrated ring dimensions");
         }
+        const uint32_t plaintext_minimum =
+            candidate_max_k == 0 ? k : candidate_max_k;
+        if (plaintext_minimum < k) {
+            throw std::invalid_argument(
+                "candidate maximum consumer k is below current consumer k");
+        }
+        params.plaintext_mod = FindCandidatePlaintextModulus(
+            plaintext_minimum, calibrated_ring_dim);
         params.transcript_stat_bits = 40;
         params.max_queries = 1;
         params.flood_margin_bits = 0;
@@ -601,7 +640,8 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
                                        uint64_t root_seed, uint32_t reps,
                                        uint32_t baseline_ring_dim,
                                        bool pre_threshold_evidence,
-                                       uint32_t calibrated_ring_dim = 0) {
+                                       uint32_t calibrated_ring_dim = 0,
+                                       uint32_t candidate_max_k = 0) {
     try {
         uint32_t natural_depth = 0;
         PiccardParams params =
@@ -615,7 +655,8 @@ static std::vector<CalibResult> RunOne(Circuit circuit, SecurityLevel sec,
                 pre_threshold_evidence,
                 baseline_ring_dim,
                 calibrated_ring_dim,
-                &natural_depth);
+                &natural_depth,
+                candidate_max_k);
         std::vector<CalibResult> rows;
         switch (circuit) {
             case Circuit::OneHot:    rows = RunOneHot(params, pats, root_seed, reps); break;
@@ -1269,6 +1310,14 @@ static int RunStrictEvidence(
     const SecurityLevel security =
         ParseEvidenceSecurity(options.security);
     const auto& representative = options.consumer_points.front();
+    uint32_t candidate_max_k = 0;
+    for (const auto& consumer : options.consumer_points) {
+        candidate_max_k = std::max(candidate_max_k, consumer.k);
+    }
+    if (candidate_max_k == 0) {
+        throw std::invalid_argument(
+            "pre-threshold candidate requires a positive consumer k");
+    }
     const uint32_t natural_ring_dim =
         DiscoverNaturalRingDimensionContextOnly(
             circuit,
@@ -1343,7 +1392,8 @@ static int RunStrictEvidence(
                                         1,
                                         natural_ring_dim,
                                         true,
-                                        calibrated_ring_dim);
+                                        calibrated_ring_dim,
+                                        candidate_max_k);
                                 });
                             details.push_back(ToDetailRow(
                                 options,
@@ -1767,6 +1817,125 @@ static int RunStrictCleanupProbe() {
     return 0;
 }
 
+static int RunCandidatePlaintextProbe() {
+    constexpr uint32_t natural_ring_dim = 2048;
+    constexpr uint32_t calibrated_ring_dim = 4096;
+    constexpr uint32_t candidate_max_k = 32;
+    constexpr uint64_t expected_natural_p = 12289;
+    constexpr uint64_t expected_candidate_p = 40961;
+    const std::vector<std::pair<uint32_t, uint32_t>> consumers{
+        {16, 128},
+        {32, 64},
+    };
+
+    std::vector<PiccardParams> grown;
+    for (const auto& [consumer_k, consumer_m] : consumers) {
+        PiccardParams natural = BuildParams(
+            Circuit::OneHot,
+            SecurityLevel::TOY,
+            consumer_k,
+            consumer_m,
+            0,
+            40,
+            true,
+            natural_ring_dim,
+            natural_ring_dim,
+            nullptr,
+            candidate_max_k);
+        RequireProbe(
+            natural.plaintext_mod == expected_natural_p,
+            "natural candidate plaintext modulus moved");
+
+        PiccardParams candidate = BuildParams(
+            Circuit::OneHot,
+            SecurityLevel::TOY,
+            consumer_k,
+            consumer_m,
+            0,
+            40,
+            true,
+            natural_ring_dim,
+            calibrated_ring_dim,
+            nullptr,
+            candidate_max_k);
+        RequireProbe(
+            candidate.plaintext_mod == expected_candidate_p,
+            "grown candidate retained natural-ring plaintext modulus");
+        grown.push_back(std::move(candidate));
+    }
+
+    RequireProbe(
+        grown.size() == 2 &&
+            grown.front().plaintext_mod == grown.back().plaintext_mod,
+        "candidate plaintext modulus differs across consumers");
+    RequireProbe(
+        grown.front().plaintext_mod ==
+            FindPlaintextModulus(
+                candidate_max_k, 2 * calibrated_ring_dim),
+        "candidate plaintext modulus differs from expected formula");
+    RequireProbe(
+        grown.front().plaintext_mod > candidate_max_k,
+        "candidate plaintext modulus does not exceed maximum consumer k");
+    RequireProbe(
+        IsPrime(grown.front().plaintext_mod),
+        "candidate plaintext modulus is not prime");
+    RequireProbe(
+        (grown.front().plaintext_mod - 1) %
+                (UINT64_C(2) * calibrated_ring_dim) ==
+            0,
+        "candidate plaintext modulus is not compatible with calibrated ring");
+
+    const uint64_t below_boundary =
+        FindCandidatePlaintextModulus(576, 32);
+    const uint64_t at_boundary =
+        FindCandidatePlaintextModulus(577, 32);
+    RequireProbe(
+        below_boundary == 577 && at_boundary == 641 &&
+            below_boundary != at_boundary,
+        "candidate plaintext helper ignored its minimum argument");
+
+    bool rejected_low_max = false;
+    try {
+        (void)BuildParams(
+            Circuit::OneHot,
+            SecurityLevel::TOY,
+            32,
+            64,
+            0,
+            40,
+            true,
+            natural_ring_dim,
+            calibrated_ring_dim,
+            nullptr,
+            31);
+    } catch (const std::invalid_argument& error) {
+        rejected_low_max =
+            std::string(error.what()) ==
+            "candidate maximum consumer k is below current consumer k";
+    }
+    RequireProbe(
+        rejected_low_max,
+        "candidate builder accepted maximum k below current consumer k");
+
+    BFVContext context(grown.back());
+    context.Initialize();
+    const auto ciphertext = context.Encrypt({1});
+    const auto plaintext = context.Decrypt(ciphertext);
+    RequireProbe(
+        context.GetSlotCount() == calibrated_ring_dim,
+        "probe did not realize calibrated ring");
+    RequireProbe(
+        !plaintext.empty() && plaintext.front() == 1,
+        "packed encrypt/decrypt round trip failed");
+
+    std::cout
+        << "candidate plaintext probe passed: natural_N=2048 "
+        << "natural_p=12289 calibrated_N=4096 candidate_p=40961 "
+        << "consumers=2 helper_boundary=577->641 low_max_reject=OK "
+        << "packed_encrypt=OK\n";
+    return 0;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1828,6 +1997,16 @@ int main(int argc, char** argv) {
             return RunDetailIdentityProbe();
         } catch (const std::exception& error) {
             std::cerr << "detail identity probe failed: "
+                      << error.what() << '\n';
+            return 1;
+        }
+    }
+    if (raw_args.size() == 1 &&
+        raw_args.front() == "--candidate_plaintext_probe") {
+        try {
+            return RunCandidatePlaintextProbe();
+        } catch (const std::exception& error) {
+            std::cerr << "candidate plaintext probe failed: "
                       << error.what() << '\n';
             return 1;
         }
