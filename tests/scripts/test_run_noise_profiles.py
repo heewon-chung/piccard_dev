@@ -21,6 +21,8 @@ FAKE_BENCH = r"""#!/usr/bin/env python3
 import csv, hashlib, json, math, os, pathlib, signal, sys, time
 
 args = sys.argv[1:]
+with open(os.environ["FAKE_INVOCATION_LOG"], "a") as invocation_log:
+    invocation_log.write(json.dumps(args, separators=(",", ":")) + "\n")
 value = lambda name, default="": next(
     (a.split("=", 1)[1] for a in args if a.startswith(name + "=")), default)
 mode = os.environ.get("FAKE_MODE", "success")
@@ -88,10 +90,23 @@ if mode == "replace_binary":
     replacement.write_bytes(benchmark_path.read_bytes() + b"\n# replaced\n")
     replacement.chmod(0o755)
     replacement.replace(benchmark_path)
-if mode == "crash":
-    raise RuntimeError("fake crash")
+if mode in ("crash", "publisher_cleanup_path_swap",
+            "raw_cleanup_path_swap"):
+    os.write(1, b"FAKE_BENCH_STDOUT crash\n")
+    os.write(2, b"FAKE_BENCH_STDERR crash\n")
+    raise SystemExit(23)
 if mode == "signal":
+    os.write(1, b"FAKE_BENCH_STDOUT signal\n")
+    os.write(2, b"FAKE_BENCH_STDERR signal\n")
     os.kill(os.getpid(), signal.SIGSEGV)
+if mode == "diagnostic_flood":
+    sys.stdout.buffer.write(
+        b"OUT-HEAD\n" + b"O" * 1_200_000 + b"\nOUT-TAIL\n")
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(
+        b"ERR-HEAD\n" + b"E" * 1_200_000 + b"\nERR-TAIL\n")
+    sys.stderr.buffer.flush()
+    raise SystemExit(29)
 if mode == "oom":
     raise SystemExit(137)
 if mode == "missing_csv":
@@ -331,8 +346,20 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                   *" --print_profile_manifest "*|*" --print_source_commit "*|*" --preflight_context "*) ;;
                   *)
                     trap 'echo TERM >>"$FAKE_SIGNAL_LOG"' TERM
+                    printf '%s\\n' 'FAKE_BENCH_STDOUT timeout'
+                    printf '%s\\n' 'FAKE_BENCH_STDERR timeout' >&2
                     : >"$PICCARD_TEST_READY_MARKER"
                     while :; do sleep 1; done
+                    ;;
+                esac
+                ;;
+              measurement_no_readiness)
+                case " $* " in
+                  *" --print_profile_manifest "*|*" --print_source_commit "*|*" --preflight_context "*) ;;
+                  *)
+                    printf '%s\\n' 'FAKE_BENCH_STDOUT no readiness'
+                    printf '%s\\n' 'FAKE_BENCH_STDERR no readiness' >&2
+                    exit 17
                     ;;
                 esac
                 ;;
@@ -348,6 +375,8 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         self.env["FAKE_SIGNAL_LOG"] = str(self.signal_log)
         self.env["FAKE_BENCH_IMPL"] = str(self.fake_impl)
         self.env["FAKE_BENCH_PATH"] = str(self.fake)
+        self.invocation_log = self.root / "invocations.jsonl"
+        self.env["FAKE_INVOCATION_LOG"] = str(self.invocation_log)
         self.ready_dir = self.root / "ready"
         self.ready_dir.mkdir()
         self.env["PICCARD_TEST_READY_DIR"] = str(self.ready_dir)
@@ -364,6 +393,11 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             "PICCARD_TEST_TIMEOUT_MS": "50",
             "PICCARD_TEST_TERM_GRACE_MS": "20",
         }
+        self.diagnostic_flood_timing_env = {
+            "PICCARD_TEST_SUPERVISOR": "1",
+            "PICCARD_TEST_TIMEOUT_MS": "2000",
+            "PICCARD_TEST_TERM_GRACE_MS": "100",
+        }
 
     def tearDown(self):
         self.temp.cleanup()
@@ -372,9 +406,28 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         env = self.env.copy()
         env["FAKE_MODE"] = mode
         if mode in (
-            "preflight_hang", "preflight_startup_delay", "measurement_hang"
+            "preflight_hang", "preflight_startup_delay", "measurement_hang",
+            "measurement_no_readiness",
         ):
             env.update(self.test_timing_env)
+        if mode == "diagnostic_flood":
+            env.update(self.diagnostic_flood_timing_env)
+        guarded_faults = {
+            "capture_setup_failure": {
+                "PICCARD_TEST_FAIL_SECOND_CAPTURE": "1",
+            },
+            "pre_binding_failure": {
+                "PICCARD_TEST_PRE_BINDING_FAILURE": "1",
+            },
+            "publisher_cleanup_path_swap": {
+                "PICCARD_TEST_PUBLISH_PAYLOAD_FAILURE": "1",
+                "PICCARD_TEST_SWAP_PUBLISHER_CLEANUP": "1",
+            },
+            "raw_cleanup_path_swap": {
+                "PICCARD_TEST_SWAP_RAW_CLEANUP": "1",
+            },
+        }
+        env.update(guarded_faults.get(mode, {}))
         if dry_run:
             env["DRY_RUN"] = "1"
         return subprocess.run(
@@ -384,6 +437,17 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             text=True,
             capture_output=True,
             timeout=60 if mode == "finalization" else 10,
+        )
+
+    def measurement_invocation_count(self):
+        if not self.invocation_log.exists():
+            return 0
+        return sum(
+            any(argument.startswith("--aggregate_csv=") for argument in args)
+            for args in (
+                json.loads(line)
+                for line in self.invocation_log.read_text().splitlines()
+            )
         )
 
     def build_finalizable_root(self):
@@ -552,7 +616,22 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             data = json.loads((shard / "shard_manifest.json").read_text())
             self.assertEqual(data["candidate_count"], 1)
             self.assertFalse(data["table_eligible"])
+            self.assertEqual(data["schema"], "piccard-shard-manifest")
+            self.assertEqual(data["version"], 1)
+            self.assertFalse((shard / "benchmark.stdout.log").exists())
+            self.assertFalse((shard / "benchmark.stderr.log").exists())
             candidates = json.loads((shard / "candidates.json").read_text())
+            expected_payload = {"aggregate.csv", "candidates.json"} | {
+                "details/" + receipt["candidate_id"] + ".csv"
+                for receipt in candidates["candidates"]
+            }
+            actual_payload = {
+                path.relative_to(shard).as_posix()
+                for path in shard.rglob("*")
+                if path.is_file() and path.name != "shard_manifest.json"
+            }
+            self.assertEqual(set(data["files"]), expected_payload)
+            self.assertEqual(actual_payload, expected_payload)
             for field in (
                 "profile_id", "circuit", "shape_id", "security",
                 "requested_ring_dim", "natural_depth", "consumer_points",
@@ -687,10 +766,31 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         failure = next(result_root.rglob("failure.json"))
         data = json.loads(failure.read_text())
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["phase"], "measurement")
+        self.assertEqual(data["capture_state"], "COMPLETE")
         self.assertEqual(data["status_code"], "TIMEOUT")
         self.assertTrue(data["term_sent"])
         self.assertTrue(data["kill_sent"])
         self.assertLess(data["elapsed_ms"], 500)
+        manifest = json.loads(
+            (failure.parent / "shard_manifest.json").read_text())
+        expected_logs = {
+            "stdout": b"FAKE_BENCH_STDOUT timeout\n",
+            "stderr": b"FAKE_BENCH_STDERR timeout\n",
+        }
+        for stream, expected in expected_logs.items():
+            log_path = failure.parent / f"benchmark.{stream}.log"
+            content = log_path.read_bytes()
+            self.assertIn(expected, content)
+            metadata = data["diagnostic_logs"][stream]
+            digest = hashlib.sha256(content).hexdigest()
+            self.assertEqual(metadata["path"], log_path.name)
+            self.assertEqual(metadata["sha256"], digest)
+            self.assertEqual(metadata["original_bytes"], len(content))
+            self.assertEqual(metadata["stored_bytes"], len(content))
+            self.assertFalse(metadata["truncated"])
+            self.assertEqual(manifest["files"][log_path.name], digest)
         aggregate = next(result_root.rglob("aggregate.csv"))
         with aggregate.open(newline="") as source:
             rows = list(csv.reader(source))
@@ -711,10 +811,254 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         self.assertEqual(rows[1][37], "TIMEOUT")
         self.assertEqual(rows[1][0], "sensitivity64")
         self.assertEqual(rows[1][36], self.env["FAKE_EMBEDDED_SOURCE"])
+        self.assertNotIn("FAKE_BENCH_STD", rows[1][38])
+        self.assertNotIn("FAKE_BENCH_STD", result.stderr)
         profile = json.loads(
             (result_root / "profiles" / "sensitivity64" /
              "profile_manifest.json").read_text())
         self.assertEqual(profile["profile_verdict"], "FAIL_INCOMPLETE")
+
+    def test_measurement_process_error_persists_exact_child_logs_without_canonical_leakage(self):
+        cases = {
+            "crash": (
+                b"FAKE_BENCH_STDOUT crash\n",
+                b"FAKE_BENCH_STDERR crash\n",
+                23,
+            ),
+            "signal": (
+                b"FAKE_BENCH_STDOUT signal\n",
+                b"FAKE_BENCH_STDERR signal\n",
+                -signal.SIGSEGV,
+            ),
+        }
+        for mode, (expected_stdout, expected_stderr, returncode) in cases.items():
+            with self.subTest(mode=mode):
+                result_root = self.root / ("captured-" + mode)
+                result = self.run_runner(
+                    *self.smoke_args(result_root), mode=mode)
+                self.assertEqual(result.returncode, 2)
+                shard = next(
+                    (result_root / "profiles" / "sensitivity64").glob(
+                        "key-*"))
+                stdout_path = shard / "benchmark.stdout.log"
+                stderr_path = shard / "benchmark.stderr.log"
+                self.assertEqual(stdout_path.read_bytes(), expected_stdout)
+                self.assertEqual(stderr_path.read_bytes(), expected_stderr)
+                failure = json.loads((shard / "failure.json").read_text())
+                self.assertEqual(failure["version"], 2)
+                self.assertEqual(failure["phase"], "measurement")
+                self.assertEqual(failure["capture_state"], "COMPLETE")
+                self.assertEqual(failure["status_code"], "PROCESS_ERROR")
+                self.assertEqual(
+                    failure["detail"], f"measurement exit {returncode}")
+                self.assertEqual(failure["exit_code"], returncode)
+                self.assertFalse(failure["term_sent"])
+                self.assertFalse(failure["kill_sent"])
+                self.assertEqual(
+                    set(failure["diagnostic_logs"]), {"stdout", "stderr"})
+                manifest = json.loads(
+                    (shard / "shard_manifest.json").read_text())
+                for stream, path in (
+                    ("stdout", stdout_path), ("stderr", stderr_path)
+                ):
+                    metadata = failure["diagnostic_logs"][stream]
+                    content = path.read_bytes()
+                    digest = hashlib.sha256(content).hexdigest()
+                    self.assertEqual(metadata["path"], path.name)
+                    self.assertEqual(metadata["sha256"], digest)
+                    self.assertEqual(
+                        metadata["original_bytes"], len(content))
+                    self.assertEqual(metadata["stored_bytes"], len(content))
+                    self.assertFalse(metadata["truncated"])
+                    self.assertEqual(manifest["files"][path.name], digest)
+                with (shard / "aggregate.csv").open(
+                    newline=""
+                ) as source:
+                    row = next(csv.DictReader(source))
+                self.assertEqual(row["status_code"], "PROCESS_ERROR")
+                self.assertEqual(
+                    row["error_message"], f"measurement exit {returncode}")
+                self.assertNotIn("FAKE_BENCH_STD", row["error_message"])
+                self.assertNotIn("FAKE_BENCH_STD", result.stderr)
+
+    def test_measurement_supervision_failures_are_atomic_and_catchable(self):
+        no_readiness_root = self.root / "no-readiness"
+        no_readiness = self.run_runner(
+            *self.smoke_args(no_readiness_root),
+            mode="measurement_no_readiness",
+        )
+        self.assertEqual(no_readiness.returncode, 2)
+        no_readiness_shard = next(
+            (no_readiness_root / "profiles" / "sensitivity64").glob("key-*"))
+        self.assertEqual(
+            {path.name for path in no_readiness_shard.iterdir()},
+            {
+                "aggregate.csv", "benchmark.stderr.log",
+                "benchmark.stdout.log", "failure.json",
+                "shard_manifest.json",
+            },
+        )
+        failure = json.loads(
+            (no_readiness_shard / "failure.json").read_text())
+        self.assertEqual(failure["phase"], "measurement")
+        self.assertEqual(failure["capture_state"], "COMPLETE")
+        self.assertTrue(
+            failure["detail"].startswith("benchmark binding failed:"))
+        expected = {
+            "stdout": b"FAKE_BENCH_STDOUT no readiness\n",
+            "stderr": b"FAKE_BENCH_STDERR no readiness\n",
+        }
+        manifest = json.loads(
+            (no_readiness_shard / "shard_manifest.json").read_text())
+        for stream, content in expected.items():
+            log = no_readiness_shard / f"benchmark.{stream}.log"
+            self.assertEqual(log.read_bytes(), content)
+            digest = hashlib.sha256(content).hexdigest()
+            self.assertEqual(
+                failure["diagnostic_logs"][stream]["sha256"], digest)
+            self.assertEqual(manifest["files"][log.name], digest)
+            self.assertNotIn(content.decode().strip(), failure["detail"])
+        self.assertNotIn("FAKE_BENCH_STD", no_readiness.stderr)
+        no_readiness_profile = no_readiness_shard.parent
+        self.assertFalse(any(
+            path.name.startswith(".") and ".tmp-" in path.name
+            for path in no_readiness_profile.iterdir()
+        ))
+
+        for mode in ("capture_setup_failure", "pre_binding_failure"):
+            with self.subTest(mode=mode):
+                before = self.measurement_invocation_count()
+                result_root = self.root / mode
+                result = self.run_runner(
+                    *self.smoke_args(result_root), mode=mode)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self.measurement_invocation_count(), before)
+                shard = next(
+                    (result_root / "profiles" / "sensitivity64").glob(
+                        "key-*"))
+                self.assertEqual(
+                    {path.name for path in shard.iterdir()},
+                    {"aggregate.csv", "failure.json", "shard_manifest.json"},
+                )
+                failure = json.loads((shard / "failure.json").read_text())
+                self.assertEqual(failure["phase"], "measurement")
+                self.assertEqual(failure["capture_state"], "NOT_STARTED")
+                self.assertEqual(failure["diagnostic_logs"], {})
+                self.assertEqual(failure["status_code"], "PROCESS_ERROR")
+                self.assertFalse(any(
+                    shard.glob("benchmark.*.log")))
+                self.assertFalse(any(
+                    path.name.startswith(".") and ".tmp-" in path.name
+                    for path in shard.parent.iterdir()
+                ))
+
+        swapped_root = self.root / "publisher-cleanup-swap"
+        swapped = self.run_runner(
+            *self.smoke_args(swapped_root),
+            mode="publisher_cleanup_path_swap",
+        )
+        self.assertNotEqual(swapped.returncode, 0)
+        self.assertIn("unowned", swapped.stderr.lower())
+        swapped_profile = (
+            swapped_root / "profiles" / "sensitivity64")
+        self.assertFalse(any(swapped_profile.glob("key-*")))
+        run = json.loads((swapped_root / "run_manifest.json").read_text())
+        raw_temporaries = list(swapped_profile.glob(
+            ".*.piccard-shard-v1.tmp-" + run["run_nonce"]))
+        publisher_temporaries = list(swapped_profile.glob(
+            ".*.piccard-failure-v2.tmp-" + run["run_nonce"] + "-*"))
+        self.assertEqual(len(raw_temporaries), 1)
+        self.assertEqual(len(publisher_temporaries), 1)
+        raw_temporary = raw_temporaries[0]
+        publisher_temporary = publisher_temporaries[0]
+        self.assertEqual(
+            json.loads(
+                (raw_temporary / ".piccard-shard-owner.json").read_text()
+            )["schema"],
+            "piccard-shard-owner",
+        )
+        self.assertEqual(
+            json.loads(
+                (publisher_temporary /
+                 ".piccard-failure-publisher-owner.json").read_text()
+            )["schema"],
+            "piccard-failure-publisher-owner",
+        )
+        self.assertEqual(
+            (raw_temporary / "benchmark.stdout.log").read_bytes(),
+            b"FAKE_BENCH_STDOUT crash\n",
+        )
+        self.assertEqual(
+            (raw_temporary / "benchmark.stderr.log").read_bytes(),
+            b"FAKE_BENCH_STDERR crash\n",
+        )
+
+        raw_swap_root = self.root / "raw-cleanup-swap"
+        raw_swap = self.run_runner(
+            *self.smoke_args(raw_swap_root), mode="raw_cleanup_path_swap")
+        self.assertNotEqual(raw_swap.returncode, 0)
+        self.assertIn("unowned", raw_swap.stderr.lower())
+        raw_swap_profile = (
+            raw_swap_root / "profiles" / "sensitivity64")
+        published = list(raw_swap_profile.glob("key-*"))
+        self.assertEqual(len(published), 1)
+        published_bytes = {
+            path.relative_to(published[0]).as_posix(): path.read_bytes()
+            for path in published[0].rglob("*") if path.is_file()
+        }
+        raw_swap_run = json.loads(
+            (raw_swap_root / "run_manifest.json").read_text())
+        raw_swap_temporaries = list(raw_swap_profile.glob(
+            ".*.piccard-shard-v1.tmp-" + raw_swap_run["run_nonce"]))
+        self.assertEqual(len(raw_swap_temporaries), 1)
+        self.assertTrue(
+            (raw_swap_temporaries[0] /
+             ".piccard-shard-owner.json").is_file())
+        self.assertEqual(
+            {
+                path.relative_to(published[0]).as_posix(): path.read_bytes()
+                for path in published[0].rglob("*") if path.is_file()
+            },
+            published_bytes,
+        )
+
+    def test_measurement_diagnostic_logs_are_deterministically_bounded(self):
+        result_root = self.root / "diagnostic-flood"
+        result = self.run_runner(
+            *self.smoke_args(result_root), mode="diagnostic_flood")
+        self.assertEqual(result.returncode, 2)
+        shard = next(
+            (result_root / "profiles" / "sensitivity64").glob("key-*"))
+        failure = json.loads((shard / "failure.json").read_text())
+        self.assertEqual(failure["detail"], "measurement exit 29")
+        self.assertEqual(failure["exit_code"], 29)
+        marker = (
+            b"\n[PICCARD_DIAGNOSTIC_TRUNCATED "
+            b"original_bytes=1200019]\n")
+        payload_budget = 1_048_576 - len(marker)
+        head_bytes = payload_budget // 2
+        tail_bytes = payload_budget - head_bytes
+        raw_streams = {
+            "stdout": (
+                b"OUT-HEAD\n" + b"O" * 1_200_000 + b"\nOUT-TAIL\n"),
+            "stderr": (
+                b"ERR-HEAD\n" + b"E" * 1_200_000 + b"\nERR-TAIL\n"),
+        }
+        for stream, raw in raw_streams.items():
+            path = shard / f"benchmark.{stream}.log"
+            stored = path.read_bytes()
+            metadata = failure["diagnostic_logs"][stream]
+            self.assertEqual(metadata["original_bytes"], 1_200_019)
+            self.assertEqual(metadata["stored_bytes"], 1_048_576)
+            self.assertTrue(metadata["truncated"])
+            self.assertEqual(len(stored), 1_048_576)
+            self.assertEqual(
+                metadata["sha256"], hashlib.sha256(stored).hexdigest())
+            expected = raw[:head_bytes] + marker + raw[-tail_bytes:]
+            self.assertEqual(stored, expected)
+            self.assertEqual(
+                stored[head_bytes:head_bytes + len(marker)], marker)
+            self.assertEqual(stored.count(marker), 1)
 
     def test_timeout_and_process_error_shards_resume_to_completion(self):
         for mode in ("measurement_hang", "crash"):
@@ -723,6 +1067,24 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                 failed = self.run_runner(
                     *self.smoke_args(result_root), mode=mode)
                 self.assertEqual(failed.returncode, 2)
+                profile_dir = (
+                    result_root / "profiles" / "sensitivity64")
+                incomplete = next(profile_dir.glob("key-*"))
+                failure = json.loads(
+                    (incomplete / "failure.json").read_text())
+                self.assertEqual(failure["version"], 2)
+                self.assertEqual(failure["phase"], "measurement")
+                self.assertEqual(failure["capture_state"], "COMPLETE")
+                self.assertEqual(
+                    set(failure["diagnostic_logs"]),
+                    {"stdout", "stderr"},
+                )
+                receipt = json.loads(
+                    (profile_dir / "profile_manifest.json").read_text())
+                self.assertIn(
+                    incomplete.name,
+                    receipt["shard_manifest_sha256"],
+                )
                 resumed = self.run_runner(
                     "--profile=sensitivity64", "--smoke", "--resume",
                     f"--results-root={result_root}",
@@ -733,6 +1095,110 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                      "profile_manifest.json").read_text())
                 self.assertEqual(profile["profile_verdict"], "PASS")
                 self.assertEqual(len(profile["key_verdicts"]), 4)
+                for shard in profile_dir.glob("key-*"):
+                    self.assertFalse(
+                        (shard / "benchmark.stdout.log").exists())
+                    self.assertFalse(
+                        (shard / "benchmark.stderr.log").exists())
+
+    def test_resume_rejects_tampered_incomplete_diagnostic_log_before_recompute(self):
+        cases = {
+            "log_only": "incomplete shard payload hash mismatch",
+            "manifest_only_repin": "immutable parent shard digest mismatch",
+            "missing_receipt_parent_digest":
+                "missing incomplete parent shard digest",
+            "no_receipt_malformed_v2":
+                "diagnostic stored_bytes type mismatch",
+        }
+        for mutation, expected_error in cases.items():
+            with self.subTest(mutation=mutation):
+                result_root = self.root / ("resume-tamper-" + mutation)
+                first = self.run_runner(
+                    *self.smoke_args(result_root), mode="crash")
+                self.assertEqual(first.returncode, 2, first.stderr)
+                profile_dir = (
+                    result_root / "profiles" / "sensitivity64")
+                shard = next(profile_dir.glob("key-*"))
+                stderr_path = shard / "benchmark.stderr.log"
+                shard_manifest_path = shard / "shard_manifest.json"
+                failure_path = shard / "failure.json"
+                if mutation in ("log_only", "manifest_only_repin"):
+                    content = bytearray(stderr_path.read_bytes())
+                    content[0] ^= 1
+                    stderr_path.write_bytes(content)
+                    if mutation == "manifest_only_repin":
+                        shard_manifest = json.loads(
+                            shard_manifest_path.read_text())
+                        shard_manifest["files"][
+                            stderr_path.name] = hashlib.sha256(
+                                stderr_path.read_bytes()).hexdigest()
+                        shard_manifest_path.write_text(
+                            json.dumps(
+                                shard_manifest,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ) + "\n")
+                elif mutation == "missing_receipt_parent_digest":
+                    profile_path = profile_dir / "profile_manifest.json"
+                    profile = json.loads(profile_path.read_text())
+                    profile["shard_manifest_sha256"].pop(shard.name)
+                    profile_path.write_text(
+                        json.dumps(
+                            profile, sort_keys=True, separators=(",", ":"))
+                        + "\n")
+                    seal_path = profile_dir / "completion_seal.json"
+                    seal = json.loads(seal_path.read_text())
+                    seal["shard_manifest_sha256"].pop(shard.name)
+                    seal["profile_manifest_sha256"] = hashlib.sha256(
+                        profile_path.read_bytes()).hexdigest()
+                    seal_path.chmod(0o644)
+                    seal_path.write_text(
+                        json.dumps(
+                            seal, sort_keys=True, separators=(",", ":"))
+                        + "\n")
+                    seal_path.chmod(0o444)
+                else:
+                    (profile_dir / "profile_manifest.json").unlink()
+                    (profile_dir / "completion_seal.json").unlink()
+                    failure = json.loads(failure_path.read_text())
+                    failure["diagnostic_logs"]["stderr"][
+                        "stored_bytes"] = True
+                    failure_path.write_text(
+                        json.dumps(
+                            failure, sort_keys=True, separators=(",", ":"))
+                        + "\n")
+                    shard_manifest = json.loads(
+                        shard_manifest_path.read_text())
+                    shard_manifest["files"][
+                        failure_path.name] = hashlib.sha256(
+                            failure_path.read_bytes()).hexdigest()
+                    shard_manifest_path.write_text(
+                        json.dumps(
+                            shard_manifest,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ) + "\n")
+                before = {
+                    path.relative_to(shard).as_posix(): path.read_bytes()
+                    for path in shard.rglob("*") if path.is_file()
+                }
+                invocation_count = self.measurement_invocation_count()
+                resumed = self.run_runner(
+                    "--profile=sensitivity64",
+                    "--smoke",
+                    "--resume",
+                    f"--results-root={result_root}",
+                )
+                self.assertEqual(resumed.returncode, 2)
+                self.assertIn(expected_error, resumed.stderr)
+                self.assertEqual(
+                    self.measurement_invocation_count(), invocation_count)
+                self.assertTrue(shard.is_dir())
+                after = {
+                    path.relative_to(shard).as_posix(): path.read_bytes()
+                    for path in shard.rglob("*") if path.is_file()
+                }
+                self.assertEqual(after, before)
 
     def test_resume_recovers_when_interrupted_before_profile_receipt(self):
         result_root = self.root / "missing-receipt"
@@ -789,6 +1255,55 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(len(rows[1]), 40)
                 self.assertEqual(rows[1][37], "PROCESS_ERROR")
+                if mode in ("missing_csv", "truncated_csv"):
+                    shard = failure.parent
+                    manifest = json.loads(
+                        (shard / "shard_manifest.json").read_text())
+                    self.assertEqual(
+                        data["schema"], "piccard-runner-failure")
+                    self.assertEqual(data["version"], 2)
+                    self.assertEqual(data["phase"], "measurement")
+                    self.assertEqual(data["capture_state"], "COMPLETE")
+                    self.assertEqual(
+                        set(data["diagnostic_logs"]),
+                        {"stdout", "stderr"},
+                    )
+                    self.assertEqual(
+                        manifest["schema"], "piccard-shard-manifest")
+                    self.assertEqual(manifest["version"], 1)
+                    self.assertEqual(
+                        set(manifest["files"]),
+                        {
+                            "aggregate.csv", "failure.json",
+                            "benchmark.stdout.log", "benchmark.stderr.log",
+                        },
+                    )
+                    self.assertEqual(
+                        {path.name for path in shard.iterdir()},
+                        {
+                            "aggregate.csv", "failure.json",
+                            "benchmark.stdout.log", "benchmark.stderr.log",
+                            "shard_manifest.json",
+                        },
+                    )
+                    for stream in ("stdout", "stderr"):
+                        log = shard / f"benchmark.{stream}.log"
+                        self.assertEqual(log.read_bytes(), b"")
+                        digest = hashlib.sha256(b"").hexdigest()
+                        self.assertEqual(
+                            data["diagnostic_logs"][stream]["sha256"],
+                            digest,
+                        )
+                        self.assertEqual(
+                            manifest["files"][log.name], digest)
+                    with aggregate.open(newline="") as source:
+                        row = next(csv.DictReader(source))
+                    self.assertEqual(
+                        row["error_message"], data["detail"])
+                    self.assertEqual(manifest["candidate_count"], 0)
+                    self.assertEqual(
+                        manifest["key_verdict"], "INCOMPLETE")
+                    self.assertFalse(data["table_eligible"])
 
     def test_binary_replacement_is_detected_and_shards_bind_run_identity(self):
         original_benchmark = self.fake.read_bytes()

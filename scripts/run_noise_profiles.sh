@@ -46,6 +46,11 @@ DETAIL_HEADER = (
 SCALING_GRID = [40, 45, 50, 52, 54, 58, 60]
 ABSOLUTE_N_CAP = 1048576
 ROOT_SEED = 20260729
+DIAGNOSTIC_LOG_NAMES = {
+    "stdout": "benchmark.stdout.log",
+    "stderr": "benchmark.stderr.log",
+}
+MAX_DIAGNOSTIC_LOG_BYTES = 1_048_576
 
 
 def fail(message, code=1):
@@ -59,6 +64,14 @@ def sha256_bytes(data):
 
 def sha256_file(path):
     return sha256_bytes(path.read_bytes())
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def verify_benchmark_binary(path, expected_sha256):
@@ -213,8 +226,43 @@ def resolve_timing(bench):
     return timeout_ms, grace_ms, True
 
 
+class SupervisionError(RuntimeError):
+    def __init__(self, message, process_result, capture_state):
+        super().__init__(message)
+        self.process_result = process_result
+        self.capture_state = capture_state
+
+
+def empty_process_result():
+    return {
+        "returncode": None,
+        "stdout": None,
+        "stderr": None,
+        "timed_out": False,
+        "term_sent": False,
+        "kill_sent": False,
+        "elapsed_ms": 0,
+    }
+
+
+def remove_created_capture(path, identity):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (info.st_dev, info.st_ino) != identity
+    ):
+        raise ValueError("diagnostic capture ownership changed")
+    path.unlink()
+
+
 def supervise(
-    command, timeout_ms, grace_ms, environment, test_readiness=False
+    command, timeout_ms, grace_ms, environment, test_readiness=False,
+    capture_paths=None,
 ):
     child_environment = environment
     readiness_marker = None
@@ -228,49 +276,170 @@ def supervise(
         child_environment = environment.copy()
         child_environment["PICCARD_TEST_READY_MARKER"] = str(
             readiness_marker)
+    capture_files = {}
+    capture_identities = {}
+    if capture_paths is not None:
+        if set(capture_paths) != set(DIAGNOSTIC_LOG_NAMES):
+            raise SupervisionError(
+                "diagnostic capture path set mismatch",
+                empty_process_result(),
+                "NOT_STARTED",
+            )
+        try:
+            for stream in ("stdout", "stderr"):
+                if (
+                    stream == "stderr"
+                    and guarded_fake
+                    and os.environ.get(
+                        "PICCARD_TEST_FAIL_SECOND_CAPTURE") == "1"
+                ):
+                    raise OSError("guarded second diagnostic sink failure")
+                descriptor = os.open(
+                    capture_paths[stream],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                info = os.fstat(descriptor)
+                capture_identities[stream] = (info.st_dev, info.st_ino)
+                capture_files[stream] = os.fdopen(descriptor, "wb")
+        except Exception as error:
+            for output in capture_files.values():
+                output.close()
+            for stream, identity in capture_identities.items():
+                remove_created_capture(capture_paths[stream], identity)
+            raise SupervisionError(
+                "diagnostic capture setup failed: " + str(error),
+                empty_process_result(),
+                "NOT_STARTED",
+            ) from error
     started = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=child_environment,
-        start_new_session=True,
-    )
-    if readiness_marker is not None:
-        readiness_deadline = time.monotonic() + 10.0
-        while (
-            not readiness_marker.exists()
-            and process.poll() is None
-            and time.monotonic() < readiness_deadline
-        ):
-            time.sleep(0.002)
-        if not readiness_marker.exists():
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            fail(
-                "guarded fake benchmark did not publish readiness "
-                f"(returncode={process.returncode}, stderr={stderr.strip()})")
-        readiness_marker.unlink(missing_ok=True)
-        started = time.monotonic()
-    deadline = started + timeout_ms / 1000.0
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=(
+                capture_files["stdout"]
+                if capture_paths is not None else subprocess.PIPE
+            ),
+            stderr=(
+                capture_files["stderr"]
+                if capture_paths is not None else subprocess.PIPE
+            ),
+            text=capture_paths is None,
+            env=child_environment,
+            start_new_session=True,
+        )
+    except Exception as error:
+        for output in capture_files.values():
+            output.close()
+        for stream, identity in capture_identities.items():
+            remove_created_capture(capture_paths[stream], identity)
+        raise SupervisionError(
+            "benchmark launch failed: " + str(error),
+            empty_process_result(),
+            "NOT_STARTED",
+        ) from error
+
     timed_out = False
     term_sent = False
     kill_sent = False
-    while process.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.002)
-    if process.poll() is None:
-        timed_out = True
-        term_sent = True
-        os.killpg(process.pid, signal.SIGTERM)
-        grace_deadline = time.monotonic() + grace_ms / 1000.0
-        while process.poll() is None and time.monotonic() < grace_deadline:
+    stdout = None
+    stderr = None
+    supervision_error = None
+    capture_error = None
+    try:
+        if readiness_marker is not None:
+            readiness_deadline = time.monotonic() + 10.0
+            while (
+                not readiness_marker.exists()
+                and process.poll() is None
+                and time.monotonic() < readiness_deadline
+            ):
+                time.sleep(0.002)
+            if not readiness_marker.exists():
+                if process.poll() is None:
+                    kill_sent = True
+                    os.killpg(process.pid, signal.SIGKILL)
+                if capture_paths is None:
+                    stdout, stderr = process.communicate()
+                else:
+                    process.wait()
+                raise RuntimeError(
+                    "guarded fake benchmark did not publish readiness "
+                    f"(returncode={process.returncode})")
+            readiness_marker.unlink(missing_ok=True)
+            started = time.monotonic()
+        deadline = started + timeout_ms / 1000.0
+        while process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.002)
+        if process.poll() is None:
+            timed_out = True
+            term_sent = True
+            os.killpg(process.pid, signal.SIGTERM)
+            grace_deadline = time.monotonic() + grace_ms / 1000.0
+            while (
+                process.poll() is None
+                and time.monotonic() < grace_deadline
+            ):
+                time.sleep(0.002)
+            if process.poll() is None:
+                kill_sent = True
+                os.killpg(process.pid, signal.SIGKILL)
+        if capture_paths is None:
+            stdout, stderr = process.communicate()
+        else:
+            process.wait()
+    except Exception as error:
         if process.poll() is None:
             kill_sent = True
             os.killpg(process.pid, signal.SIGKILL)
-    stdout, stderr = process.communicate()
+        if capture_paths is None:
+            process.communicate()
+        else:
+            process.wait()
+        receipt = {
+            "returncode": process.returncode,
+            "stdout": None,
+            "stderr": None,
+            "timed_out": timed_out,
+            "term_sent": term_sent,
+            "kill_sent": kill_sent,
+            "elapsed_ms":
+                round((time.monotonic() - started) * 1000, 3),
+        }
+        supervision_error = SupervisionError(
+            str(error), receipt, "COMPLETE")
+        supervision_error.__cause__ = error
+    finally:
+        readiness_marker.unlink(
+            missing_ok=True) if readiness_marker is not None else None
+        for output in capture_files.values():
+            if not output.closed:
+                try:
+                    output.flush()
+                    os.fsync(output.fileno())
+                except Exception as error:
+                    if capture_error is None:
+                        capture_error = error
+                finally:
+                    output.close()
+    if supervision_error is not None:
+        raise supervision_error
+    if capture_error is not None:
+        receipt = {
+            "returncode": process.returncode,
+            "stdout": None,
+            "stderr": None,
+            "timed_out": timed_out,
+            "term_sent": term_sent,
+            "kill_sent": kill_sent,
+            "elapsed_ms":
+                round((time.monotonic() - started) * 1000, 3),
+        }
+        raise SupervisionError(
+            "diagnostic capture durability failed: " + str(capture_error),
+            receipt,
+            "COMPLETE",
+        ) from capture_error
     return {
         "returncode": process.returncode,
         "stdout": stdout,
@@ -822,18 +991,177 @@ def validate_measurement(
     return rows, manifest
 
 
+def persist_bounded_diagnostic(source, destination):
+    """Return path/hash/original_bytes/stored_bytes/truncated metadata."""
+    source_info = source.lstat()
+    if source.is_symlink() or not stat.S_ISREG(source_info.st_mode):
+        raise ValueError("diagnostic source is not a direct regular file")
+    source_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        source_flags |= os.O_NOFOLLOW
+    source_descriptor = os.open(source, source_flags)
+    destination_descriptor = None
+    try:
+        opened_info = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(opened_info.st_mode)
+            or (opened_info.st_dev, opened_info.st_ino)
+            != (source_info.st_dev, source_info.st_ino)
+        ):
+            raise ValueError("diagnostic source identity changed")
+        original_size = opened_info.st_size
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+
+        def write_bytes(data):
+            view = memoryview(data)
+            while view:
+                written = os.write(destination_descriptor, view)
+                view = view[written:]
+
+        def copy_bytes(byte_count):
+            remaining = byte_count
+            while remaining:
+                block = os.read(source_descriptor, min(65536, remaining))
+                if not block:
+                    raise ValueError("diagnostic source shortened while copying")
+                write_bytes(block)
+                remaining -= len(block)
+
+        truncated = original_size > MAX_DIAGNOSTIC_LOG_BYTES
+        if not truncated:
+            copy_bytes(original_size)
+        else:
+            marker = (
+                "\n[PICCARD_DIAGNOSTIC_TRUNCATED "
+                f"original_bytes={original_size}]\n"
+            ).encode("ascii")
+            payload_budget = MAX_DIAGNOSTIC_LOG_BYTES - len(marker)
+            head_bytes = payload_budget // 2
+            tail_bytes = payload_budget - head_bytes
+            copy_bytes(head_bytes)
+            write_bytes(marker)
+            os.lseek(source_descriptor, original_size - tail_bytes, os.SEEK_SET)
+            copy_bytes(tail_bytes)
+        os.fsync(destination_descriptor)
+    finally:
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+        os.close(source_descriptor)
+    stored_size = destination.stat().st_size
+    return {
+        "path": destination.name,
+        "sha256": sha256_file(destination),
+        "original_bytes": original_size,
+        "stored_bytes": stored_size,
+        "truncated": truncated,
+    }
+
+
+def validate_owned_failure_publish_temporary(
+    path, profile_dir, partition
+):
+    expected_prefix = (
+        "." + partition["key_id"]
+        + ".piccard-failure-v2.tmp-" + runtime_run_nonce + "-"
+    )
+    if (
+        path.parent != profile_dir
+        or not path.name.startswith(expected_prefix)
+        or path.name == expected_prefix
+    ):
+        raise ValueError("unowned failure publisher temporary basename")
+    info = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("unowned failure publisher temporary")
+    marker = path / ".piccard-failure-publisher-owner.json"
+    marker_info = marker.lstat()
+    if (
+        marker.is_symlink()
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_nlink != 1
+    ):
+        raise ValueError("unowned failure publisher temporary marker")
+    expected = {
+        "key_id": partition["key_id"],
+        "profile_id": partition["profile_id"],
+        "run_nonce": runtime_run_nonce,
+        "temporary_realpath": str(path.resolve(strict=True)),
+        "schema": "piccard-failure-publisher-owner",
+        "version": 1,
+    }
+    rendered = (
+        json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if marker.read_bytes() != rendered:
+        raise ValueError("unowned failure publisher temporary marker")
+
+
+def remove_owned_failure_publish_temporary(path, profile_dir, partition):
+    validate_owned_failure_publish_temporary(path, profile_dir, partition)
+    shutil.rmtree(path)
+
+
 def write_failure_atomic(
     profile_dir, partition, status, detail, process_result, smoke,
-    natural_ring_dim=""
+    natural_ring_dim="", *, phase, capture_state,
+    diagnostic_source_dir=None,
 ):
+    legal_state = (
+        (phase == "preflight"
+         and capture_state == "NOT_APPLICABLE"
+         and diagnostic_source_dir is None)
+        or
+        (phase == "measurement"
+         and capture_state == "NOT_STARTED"
+         and diagnostic_source_dir is None)
+        or
+        (phase == "measurement"
+         and capture_state == "COMPLETE"
+         and diagnostic_source_dir is not None)
+    )
+    if not legal_state:
+        raise ValueError("invalid failure diagnostic capture state")
     target = profile_dir / partition["key_id"]
     if target.exists():
         raise ValueError("refusing to overwrite an existing failed shard")
     temporary = Path(tempfile.mkdtemp(
-        prefix="." + partition["key_id"] + ".tmp-", dir=profile_dir))
+        prefix=(
+            "." + partition["key_id"]
+            + ".piccard-failure-v2.tmp-" + runtime_run_nonce + "-"
+        ),
+        dir=profile_dir,
+    ))
+    marker = temporary / ".piccard-failure-publisher-owner.json"
+    marker_value = {
+        "key_id": partition["key_id"],
+        "profile_id": partition["profile_id"],
+        "run_nonce": runtime_run_nonce,
+        "temporary_realpath": str(temporary.resolve(strict=True)),
+        "schema": "piccard-failure-publisher-owner",
+        "version": 1,
+    }
+    marker_descriptor = os.open(
+        marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(marker_descriptor, "wb", closefd=False) as output:
+            output.write(
+                (json.dumps(
+                    marker_value, sort_keys=True, separators=(",", ":"))
+                 + "\n").encode())
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(marker_descriptor)
+    fsync_directory(temporary)
+    publisher_owned = True
+    diagnostic_logs = {}
     failure = {
         "schema": "piccard-runner-failure",
-        "version": 1,
+        "version": 2,
         "key_id": partition["key_id"],
         "status_code": status,
         "detail": detail,
@@ -843,59 +1171,104 @@ def write_failure_atomic(
         "elapsed_ms": process_result.get("elapsed_ms", 0),
         "smoke_only": smoke,
         "table_eligible": False,
+        "phase": phase,
+        "capture_state": capture_state,
+        "diagnostic_logs": diagnostic_logs,
     }
-    atomic_json(temporary / "failure.json", failure)
-    fields = {name: "" for name in AGGREGATE_HEADER.split(",")}
-    fields.update({
-        "profile": partition["profile_id"],
-        "circuit": partition["circuit"],
-        "shape_id": partition["shape_id"],
-        "security": partition["security"],
-        "consumer_count": str(len(partition["consumer_points"])),
-        "consumer_set_sha256": partition["consumer_set_sha256"],
-        "pattern_count": "3",
-        "repetitions_per_pattern":
-            str(1 if smoke else policy["repetitions"]),
-        "seed": str(ROOT_SEED),
-        "requested_ring_dim": str(partition["requested_ring_dim"]),
-        "natural_ring_dim":
-            str(natural_ring_dim) if natural_ring_dim else "",
-        "natural_depth": str(partition["natural_depth"]),
-        "max_queries": str(policy["max_queries"]),
-        "flood_margin_bits": str(policy["flood_margin_bits"]),
-        "openfhe_version": matrix["openfhe_version"],
-        "source_commit": runtime_source_commit,
-        "status_code": status,
-        "error_message": detail,
-    })
-    with (temporary / "aggregate.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as output:
-        writer = csv.DictWriter(
-            output, fieldnames=AGGREGATE_HEADER.split(","),
-            lineterminator="\n")
-        writer.writeheader()
-        writer.writerow(fields)
-    atomic_json(temporary / "shard_manifest.json", {
-        "schema": "piccard-shard-manifest",
-        "version": 1,
-        "key_id": partition["key_id"],
-        "profile_id": partition["profile_id"],
-        "status": "INCOMPLETE",
-        "key_verdict": "INCOMPLETE",
-        "candidate_count": 0,
-        "smoke_only": smoke,
-        "table_eligible": False,
-        "source_commit": runtime_source_commit,
-        "openfhe_version": matrix["openfhe_version"],
-        "run_nonce": runtime_run_nonce,
-        "benchmark_sha256": runtime_benchmark_sha256,
-        "files": {
+    try:
+        if (
+            guarded_fake
+            and os.environ.get("PICCARD_TEST_PUBLISH_PAYLOAD_FAILURE") == "1"
+        ):
+            raise OSError("guarded failure publisher payload failure")
+        if capture_state == "COMPLETE":
+            for stream, name in DIAGNOSTIC_LOG_NAMES.items():
+                diagnostic_logs[stream] = persist_bounded_diagnostic(
+                    diagnostic_source_dir / name,
+                    temporary / name,
+                )
+        atomic_json(temporary / "failure.json", failure)
+        fields = {name: "" for name in AGGREGATE_HEADER.split(",")}
+        fields.update({
+            "profile": partition["profile_id"],
+            "circuit": partition["circuit"],
+            "shape_id": partition["shape_id"],
+            "security": partition["security"],
+            "consumer_count": str(len(partition["consumer_points"])),
+            "consumer_set_sha256": partition["consumer_set_sha256"],
+            "pattern_count": "3",
+            "repetitions_per_pattern":
+                str(1 if smoke else policy["repetitions"]),
+            "seed": str(ROOT_SEED),
+            "requested_ring_dim": str(partition["requested_ring_dim"]),
+            "natural_ring_dim":
+                str(natural_ring_dim) if natural_ring_dim else "",
+            "natural_depth": str(partition["natural_depth"]),
+            "max_queries": str(policy["max_queries"]),
+            "flood_margin_bits": str(policy["flood_margin_bits"]),
+            "openfhe_version": matrix["openfhe_version"],
+            "source_commit": runtime_source_commit,
+            "status_code": status,
+            "error_message": detail,
+        })
+        with (temporary / "aggregate.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as output:
+            writer = csv.DictWriter(
+                output, fieldnames=AGGREGATE_HEADER.split(","),
+                lineterminator="\n")
+            writer.writeheader()
+            writer.writerow(fields)
+            output.flush()
+            os.fsync(output.fileno())
+        files = {
             "aggregate.csv": sha256_file(temporary / "aggregate.csv"),
             "failure.json": sha256_file(temporary / "failure.json"),
-        },
-    })
-    os.replace(temporary, target)
+        }
+        files.update({
+            metadata["path"]: metadata["sha256"]
+            for metadata in diagnostic_logs.values()
+        })
+        atomic_json(temporary / "shard_manifest.json", {
+            "schema": "piccard-shard-manifest",
+            "version": 1,
+            "key_id": partition["key_id"],
+            "profile_id": partition["profile_id"],
+            "status": "INCOMPLETE",
+            "key_verdict": "INCOMPLETE",
+            "candidate_count": 0,
+            "smoke_only": smoke,
+            "table_eligible": False,
+            "source_commit": runtime_source_commit,
+            "openfhe_version": matrix["openfhe_version"],
+            "run_nonce": runtime_run_nonce,
+            "benchmark_sha256": runtime_benchmark_sha256,
+            "files": files,
+        })
+        fsync_directory(temporary)
+        validate_owned_failure_publish_temporary(
+            temporary, profile_dir, partition)
+        marker.unlink()
+        publisher_owned = False
+        fsync_directory(temporary)
+        os.replace(temporary, target)
+        fsync_directory(profile_dir)
+    except Exception as error:
+        if publisher_owned:
+            cleanup_path = temporary
+            if (
+                guarded_fake
+                and os.environ.get(
+                    "PICCARD_TEST_SWAP_PUBLISHER_CLEANUP") == "1"
+                and diagnostic_source_dir is not None
+            ):
+                cleanup_path = diagnostic_source_dir
+            try:
+                remove_owned_failure_publish_temporary(
+                    cleanup_path, profile_dir, partition)
+            except Exception as cleanup_error:
+                raise cleanup_error from error
+        raise
     print(
         f"{status} {partition['key_id']} {detail} "
         f"term_sent={str(failure['term_sent']).lower()} "
@@ -909,14 +1282,32 @@ INCOMPLETE_SHARD_FIELDS = {
     "candidate_count", "smoke_only", "table_eligible", "source_commit",
     "openfhe_version", "run_nonce", "benchmark_sha256", "files",
 }
+FAILURE_FIELDS = {
+    "schema", "version", "key_id", "status_code", "detail", "exit_code",
+    "term_sent", "kill_sent", "elapsed_ms", "smoke_only",
+    "table_eligible", "phase", "capture_state", "diagnostic_logs",
+}
+DIAGNOSTIC_LOG_FIELDS = {
+    "path", "sha256", "original_bytes", "stored_bytes", "truncated",
+}
 
 
-def validate_incomplete_shard(shard, partition):
+def validate_incomplete_shard(shard, partition, parent_digest):
     info = shard.lstat()
     if shard.is_symlink() or not stat.S_ISDIR(info.st_mode):
         raise ValueError("incomplete shard is not a direct real directory")
+    manifest_path = shard / "shard_manifest.json"
+    if parent_digest is not None:
+        if (
+            not isinstance(parent_digest, str)
+            or len(parent_digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in parent_digest)
+        ):
+            raise ValueError("invalid incomplete parent shard digest")
+        if sha256_file(manifest_path) != parent_digest:
+            raise ValueError("immutable parent shard digest mismatch")
     manifest = load_json_exact(
-        shard / "shard_manifest.json",
+        manifest_path,
         INCOMPLETE_SHARD_FIELDS,
         "incomplete shard manifest",
     )
@@ -934,17 +1325,190 @@ def validate_incomplete_shard(shard, partition):
         or manifest["smoke_only"] != options["smoke"]
         or manifest["table_eligible"] is not False
         or any(manifest[field] != expected[field] for field in identity_fields)
-        or set(manifest["files"]) != {"aggregate.csv", "failure.json"}
     ):
         raise ValueError("incomplete shard identity/schema mismatch")
-    for relative, digest in manifest["files"].items():
-        path = shard / relative
-        if not path.is_file() or path.is_symlink() or sha256_file(path) != digest:
-            raise ValueError("incomplete shard payload hash mismatch")
-    if {path.name for path in shard.iterdir()} != {
-        "aggregate.csv", "failure.json", "shard_manifest.json"
+    failure = load_json_exact(
+        shard / "failure.json", FAILURE_FIELDS, "failure receipt")
+    if (
+        failure["schema"] != "piccard-runner-failure"
+        or failure["version"] != 2
+        or failure["key_id"] != partition["key_id"]
+        or failure["status_code"] not in {"PROCESS_ERROR", "TIMEOUT"}
+        or not isinstance(failure["detail"], str)
+        or not failure["detail"]
+        or failure["smoke_only"] != options["smoke"]
+        or failure["table_eligible"] is not False
+    ):
+        raise ValueError("failure receipt identity/schema mismatch")
+    exit_code = failure["exit_code"]
+    if exit_code is not None and (
+        isinstance(exit_code, bool) or not isinstance(exit_code, int)
+    ):
+        raise ValueError("failure exit_code type mismatch")
+    if (
+        not isinstance(failure["term_sent"], bool)
+        or not isinstance(failure["kill_sent"], bool)
+    ):
+        raise ValueError("failure signal receipt type mismatch")
+    elapsed_ms = failure["elapsed_ms"]
+    if (
+        isinstance(elapsed_ms, bool)
+        or not isinstance(elapsed_ms, (int, float))
+        or not math.isfinite(elapsed_ms)
+        or elapsed_ms < 0
+    ):
+        raise ValueError("failure elapsed_ms type mismatch")
+    state = (failure["phase"], failure["capture_state"])
+    if state not in {
+        ("preflight", "NOT_APPLICABLE"),
+        ("measurement", "NOT_STARTED"),
+        ("measurement", "COMPLETE"),
     }:
+        raise ValueError("failure phase/capture_state mismatch")
+    if state == ("measurement", "NOT_STARTED") and (
+        exit_code is not None
+        or failure["term_sent"]
+        or failure["kill_sent"]
+    ):
+        raise ValueError("NOT_STARTED process receipt mismatch")
+
+    diagnostic_logs = failure["diagnostic_logs"]
+    truncation_checks = {}
+    if state == ("measurement", "COMPLETE"):
+        if (
+            not isinstance(diagnostic_logs, dict)
+            or set(diagnostic_logs) != set(DIAGNOSTIC_LOG_NAMES)
+        ):
+            raise ValueError("diagnostic log topology mismatch")
+        expected_payloads = {
+            "aggregate.csv", "failure.json",
+            *DIAGNOSTIC_LOG_NAMES.values(),
+        }
+        for stream, expected_path in DIAGNOSTIC_LOG_NAMES.items():
+            metadata = diagnostic_logs[stream]
+            if (
+                not isinstance(metadata, dict)
+                or set(metadata) != DIAGNOSTIC_LOG_FIELDS
+            ):
+                raise ValueError("diagnostic metadata schema mismatch")
+            if metadata["path"] != expected_path:
+                raise ValueError("diagnostic path mismatch")
+            digest = metadata["sha256"]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in digest)
+            ):
+                raise ValueError("diagnostic sha256 type mismatch")
+            original_bytes = metadata["original_bytes"]
+            stored_bytes = metadata["stored_bytes"]
+            if (
+                isinstance(original_bytes, bool)
+                or not isinstance(original_bytes, int)
+                or original_bytes < 0
+            ):
+                raise ValueError("diagnostic original_bytes type mismatch")
+            if (
+                isinstance(stored_bytes, bool)
+                or not isinstance(stored_bytes, int)
+                or stored_bytes < 0
+            ):
+                raise ValueError("diagnostic stored_bytes type mismatch")
+            if not isinstance(metadata["truncated"], bool):
+                raise ValueError("diagnostic truncated type mismatch")
+            if stored_bytes > MAX_DIAGNOSTIC_LOG_BYTES:
+                raise ValueError("diagnostic stored_bytes exceeds cap")
+            if metadata["truncated"]:
+                if (
+                    original_bytes <= MAX_DIAGNOSTIC_LOG_BYTES
+                    or stored_bytes != MAX_DIAGNOSTIC_LOG_BYTES
+                ):
+                    raise ValueError("diagnostic truncation size mismatch")
+                marker = (
+                    "\n[PICCARD_DIAGNOSTIC_TRUNCATED "
+                    f"original_bytes={original_bytes}]\n"
+                ).encode("ascii")
+                payload_budget = MAX_DIAGNOSTIC_LOG_BYTES - len(marker)
+                marker_offset = payload_budget // 2
+                truncation_checks[expected_path] = (marker_offset, marker)
+            elif original_bytes != stored_bytes:
+                raise ValueError("diagnostic untruncated size mismatch")
+    else:
+        if diagnostic_logs != {}:
+            raise ValueError("diagnostic logs forbidden for capture state")
+        expected_payloads = {"aggregate.csv", "failure.json"}
+
+    files = manifest["files"]
+    if not isinstance(files, dict) or set(files) != expected_payloads:
         raise ValueError("incomplete shard payload topology mismatch")
+    for relative, digest in files.items():
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise ValueError("incomplete shard payload digest type mismatch")
+        path = shard / relative
+        path_info = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(path_info.st_mode):
+            raise ValueError("incomplete shard payload is non-regular")
+        actual_digest = sha256_file(path)
+        if actual_digest != digest:
+            raise ValueError("incomplete shard payload hash mismatch")
+        for metadata in diagnostic_logs.values():
+            if metadata["path"] == relative and (
+                metadata["sha256"] != digest
+                or metadata["stored_bytes"] != path_info.st_size
+            ):
+                raise ValueError("diagnostic payload binding mismatch")
+        if relative in truncation_checks:
+            marker_offset, marker = truncation_checks[relative]
+            content = path.read_bytes()
+            if (
+                content[
+                    marker_offset:marker_offset + len(marker)
+                ] != marker
+                or content.count(marker) != 1
+            ):
+                raise ValueError("diagnostic truncation marker mismatch")
+    actual_topology = {
+        path.relative_to(shard).as_posix()
+        for path in shard.rglob("*")
+    }
+    if actual_topology != expected_payloads | {"shard_manifest.json"}:
+        raise ValueError("incomplete shard payload topology mismatch")
+
+    aggregate_path = shard / "aggregate.csv"
+    with aggregate_path.open(newline="") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames != AGGREGATE_HEADER.split(","):
+            raise ValueError("incomplete aggregate header mismatch")
+        rows = list(reader)
+    if len(rows) != 1:
+        raise ValueError("incomplete aggregate row count mismatch")
+    row = rows[0]
+    aggregate_expected = {
+        "profile": partition["profile_id"],
+        "circuit": partition["circuit"],
+        "shape_id": partition["shape_id"],
+        "security": partition["security"],
+        "consumer_count": str(len(partition["consumer_points"])),
+        "consumer_set_sha256": partition["consumer_set_sha256"],
+        "pattern_count": "3",
+        "repetitions_per_pattern":
+            str(1 if options["smoke"] else policy["repetitions"]),
+        "seed": str(ROOT_SEED),
+        "requested_ring_dim": str(partition["requested_ring_dim"]),
+        "natural_depth": str(partition["natural_depth"]),
+        "max_queries": str(policy["max_queries"]),
+        "flood_margin_bits": str(policy["flood_margin_bits"]),
+        "openfhe_version": matrix["openfhe_version"],
+        "source_commit": runtime_source_commit,
+        "status_code": failure["status_code"],
+        "error_message": failure["detail"],
+    }
+    if any(row[field] != value for field, value in aggregate_expected.items()):
+        raise ValueError("incomplete aggregate identity/status mismatch")
 
 
 def validate_owned_shard_temporary(path, profile_dir, partition):
@@ -978,6 +1542,37 @@ def validate_owned_shard_temporary(path, profile_dir, partition):
     ).encode()
     if data != rendered:
         raise ValueError("unowned shard temporary marker")
+
+
+def remove_owned_shard_temporary(path, profile_dir, partition):
+    validate_owned_shard_temporary(path, profile_dir, partition)
+    shutil.rmtree(path)
+
+
+def publish_measurement_failure(
+    profile_dir, partition, status, detail, process_result, smoke,
+    natural_ring_dim, capture_state, diagnostic_source_dir,
+    raw_temporary,
+):
+    write_failure_atomic(
+        profile_dir,
+        partition,
+        status,
+        detail,
+        process_result,
+        smoke,
+        natural_ring_dim,
+        phase="measurement",
+        capture_state=capture_state,
+        diagnostic_source_dir=diagnostic_source_dir,
+    )
+    cleanup_path = raw_temporary
+    if (
+        guarded_fake
+        and os.environ.get("PICCARD_TEST_SWAP_RAW_CLEANUP") == "1"
+    ):
+        cleanup_path = profile_dir / partition["key_id"]
+    remove_owned_shard_temporary(cleanup_path, profile_dir, partition)
 
 
 RUN_MANIFEST_FIELDS = {
@@ -1814,13 +2409,21 @@ for partition in partitions:
                 owned_temporary, profile_dir, partition)
         except Exception as error:
             fail("owned shard temporary validation failed: " + str(error), 2)
-        shutil.rmtree(owned_temporary)
+        remove_owned_shard_temporary(
+            owned_temporary, profile_dir, partition)
     if options["resume"] and target.exists():
         try:
             stored = json.loads(
                 (target / "shard_manifest.json").read_text())
             if stored.get("status") == "INCOMPLETE":
-                validate_incomplete_shard(target, partition)
+                parent_digest = None
+                if prior_profile_manifest is not None:
+                    if partition["key_id"] not in parent_digests:
+                        raise ValueError(
+                            "missing incomplete parent shard digest")
+                    parent_digest = parent_digests[partition["key_id"]]
+                validate_incomplete_shard(
+                    target, partition, parent_digest)
                 shutil.rmtree(target)
             else:
                 parent_digest = parent_digests.get(
@@ -1888,6 +2491,8 @@ for partition in partitions:
                 str(error),
                 preflight,
                 options["smoke"],
+                phase="preflight",
+                capture_state="NOT_APPLICABLE",
             )
         else:
             print(
@@ -1945,7 +2550,20 @@ for partition in partitions:
         "version": 1,
     })
     (temporary_path / "details").mkdir()
+    measurement_capture_paths = {
+        stream: temporary_path / name
+        for stream, name in DIAGNOSTIC_LOG_NAMES.items()
+    }
+    measurement = empty_process_result()
+    measurement_capture_state = "NOT_STARTED"
+    measurement_diagnostic_source = None
+    measurement_error = None
     try:
+        if (
+            guarded_fake
+            and os.environ.get("PICCARD_TEST_PRE_BINDING_FAILURE") == "1"
+        ):
+            raise OSError("guarded pre-binding failure")
         verify_benchmark_binary(bench, runtime_benchmark_sha256)
         measurement = supervise(
             measurement_command,
@@ -1955,21 +2573,34 @@ for partition in partitions:
             grace_ms,
             environment,
             test_readiness=test_timing,
+            capture_paths=measurement_capture_paths,
         )
+        measurement_capture_state = "COMPLETE"
+        measurement_diagnostic_source = temporary_path
         verify_benchmark_binary(bench, runtime_benchmark_sha256)
+    except SupervisionError as error:
+        measurement = error.process_result
+        measurement_capture_state = error.capture_state
+        measurement_diagnostic_source = (
+            temporary_path
+            if measurement_capture_state == "COMPLETE" else None
+        )
+        measurement_error = error
     except Exception as error:
-        shutil.rmtree(temporary_path)
-        write_failure_atomic(
+        measurement_error = error
+    if measurement_error is not None:
+        publish_measurement_failure(
             profile_dir, partition, "PROCESS_ERROR",
-            "benchmark binding failed: " + str(error),
-            {
-                "returncode": None, "timed_out": False,
-                "term_sent": False, "kill_sent": False, "elapsed_ms": 0,
-            },
-            options["smoke"], natural_ring_dim)
+            "benchmark binding failed: " + str(measurement_error),
+            measurement,
+            options["smoke"],
+            natural_ring_dim,
+            measurement_capture_state,
+            measurement_diagnostic_source,
+            temporary_path,
+        )
         any_incomplete = True
         break
-    (temporary_path / ".piccard-shard-owner.json").unlink()
     if measurement["timed_out"] or measurement["returncode"] != 0:
         status = "TIMEOUT" if measurement["timed_out"] else "PROCESS_ERROR"
         detail = (
@@ -1977,8 +2608,7 @@ for partition in partitions:
             if measurement["timed_out"]
             else "measurement exit " + str(measurement["returncode"])
         )
-        shutil.rmtree(temporary_path)
-        write_failure_atomic(
+        publish_measurement_failure(
             profile_dir,
             partition,
             status,
@@ -1986,6 +2616,9 @@ for partition in partitions:
             measurement,
             options["smoke"],
             natural_ring_dim,
+            measurement_capture_state,
+            measurement_diagnostic_source,
+            temporary_path,
         )
         any_incomplete = True
         break
@@ -2007,11 +2640,12 @@ for partition in partitions:
         candidate_value["benchmark_sha256"] = runtime_benchmark_sha256
         atomic_json(temporary_path / "candidates.json", candidate_value)
     except Exception as error:
-        shutil.rmtree(temporary_path)
-        write_failure_atomic(
+        publish_measurement_failure(
             profile_dir, partition, "PROCESS_ERROR",
             "candidate command normalization failed: " + str(error),
-            measurement, options["smoke"], natural_ring_dim)
+            measurement, options["smoke"], natural_ring_dim,
+            measurement_capture_state, measurement_diagnostic_source,
+            temporary_path)
         any_incomplete = True
         break
     try:
@@ -2027,8 +2661,7 @@ for partition in partitions:
             target,
         )
     except Exception as error:
-        shutil.rmtree(temporary_path)
-        write_failure_atomic(
+        publish_measurement_failure(
             profile_dir,
             partition,
             "PROCESS_ERROR",
@@ -2036,10 +2669,16 @@ for partition in partitions:
             measurement,
             options["smoke"],
             natural_ring_dim,
+            measurement_capture_state,
+            measurement_diagnostic_source,
+            temporary_path,
         )
         any_incomplete = True
         break
 
+    for capture_path in measurement_capture_paths.values():
+        capture_path.unlink()
+    (temporary_path / ".piccard-shard-owner.json").unlink()
     files = {}
     for path in sorted(
         candidate
