@@ -280,8 +280,7 @@ static DynamicResult RunMultiTrialDynamic(
 static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
                        DynamicCSVWriter& csv) {
     std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
-    // BottomStructure requires set_size >> k to populate all hash buckets
-    size_t effective_size = std::max(config.set_size, size_t{10000});
+    size_t effective_size = config.set_size;
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
 
@@ -292,7 +291,7 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
-            ApplySanitizerConfig(config, params);
+            ApplyBenchmarkProfile(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -321,7 +320,7 @@ static void BenchVaryK(const BenchmarkConfig& config, uint32_t depth,
 static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
                        DynamicCSVWriter& csv) {
     std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
-    size_t effective_size = std::max(config.set_size, size_t{10000});
+    size_t effective_size = config.set_size;
     auto [sa, sb] = MakeSetsWithOverlap(effective_size, 0.5);
     double j_true = ExactJaccard(sa, sb);
 
@@ -332,7 +331,7 @@ static void BenchVaryM(const BenchmarkConfig& config, uint32_t depth,
             params.m = m;
             params.bottom_depth = depth;
             params.security = config.security_level;
-            ApplySanitizerConfig(config, params);
+            ApplyBenchmarkProfile(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -367,7 +366,7 @@ static void BenchVarySetSize(const BenchmarkConfig& config, uint32_t depth,
     params.m = config.m;
     params.bottom_depth = depth;
     params.security = config.security_level;
-    ApplySanitizerConfig(config, params);
+    ApplyBenchmarkProfile(config, params);
     params.Validate();
 
     DynamicPiccard engine(params);
@@ -409,7 +408,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
-            ApplySanitizerConfig(config, params);
+            ApplyBenchmarkProfile(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -494,7 +493,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
             params.m = m;
             params.bottom_depth = depth;
             params.security = config.security_level;
-            ApplySanitizerConfig(config, params);
+            ApplyBenchmarkProfile(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -579,7 +578,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
             params.m = config.m;
             params.bottom_depth = depth;
             params.security = config.security_level;
-            ApplySanitizerConfig(config, params);
+            ApplyBenchmarkProfile(config, params);
             params.Validate();
 
             DynamicPiccard engine(params);
@@ -643,6 +642,50 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
     }
 }
 
+static double IntersectionFractionForJaccard(double target_jaccard) {
+    return target_jaccard == 0.0
+        ? 0.0
+        : (2.0 * target_jaccard) / (1.0 + target_jaccard);
+}
+
+static void RunProfileGrid(const BenchmarkConfig& config,
+                           uint32_t depth,
+                           DynamicCSVWriter& csv) {
+    const BenchmarkMode mode = ParseBenchmarkMode(config.mode);
+    const BenchmarkGridPoint supplied{
+        "evidence", config.k, config.m, config.set_size, 0,
+        config.target_jaccard};
+    const auto points = ResolveBenchmarkGrid(
+        config.profile, BenchmarkProducer::Dynamic, mode,
+        config.evidence_point, supplied);
+
+    for (const auto& point : points) {
+        PiccardParams params;
+        params.k = point.k;
+        params.m = point.m;
+        params.bottom_depth = depth;
+        params.security = config.security_level;
+        params.hash_seed = config.seed;
+        ApplyBenchmarkProfile(config, params);
+        params.Validate();
+
+        DynamicPiccard engine(params);
+        engine.KeyGen();
+        const double intersection_fraction =
+            IntersectionFractionForJaccard(point.target_jaccard);
+        auto [set_a, set_b] = MakeSetsWithOverlap(
+            point.set_size, intersection_fraction);
+        const double j_true = ExactJaccard(set_a, set_b);
+        auto row = RunMultiTrialDynamic(
+            engine, set_a, set_b, j_true, depth,
+            point.axis + "_timing", config.trials);
+        row.accuracy_trials = 0;
+        ApplyBenchmarkProfile(
+            config, row, BenchmarkMeasurementKind::FheTiming);
+        csv.WriteRow(row);
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -671,12 +714,18 @@ int main(int argc, char** argv) {
             depth = static_cast<uint32_t>(std::stoul(arg.substr(8)));
         }
     }
+    RejectUnknownBenchmarkOptions(argc, argv, {"--depth="});
 
     config.Print();
     std::cerr << "  Depth:     " << depth << "\n";
 
     DynamicCSVWriter csv;
     csv.WriteHeader();
+
+    if (config.profile.run_class != BenchmarkRunClass::Legacy) {
+        RunProfileGrid(config, depth, csv);
+        return 0;
+    }
 
     if (config.mode == "timing") {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";

@@ -351,7 +351,7 @@ inline ComparisonResult FinalizeSJ16Extrapolated(
     r.total_ms = ex.predicted_ms;
     r.trials = 0;  // unmeasured sentinel; leaves total_ms_sd etc. at -1 default
 
-    r.measurement_kind = "extrapolated";
+    r.measurement_status = "extrapolated";
     std::ostringstream a, b, res;
     a << std::fixed << std::setprecision(6) << ex.alpha;
     b << std::fixed << std::setprecision(6) << ex.beta;

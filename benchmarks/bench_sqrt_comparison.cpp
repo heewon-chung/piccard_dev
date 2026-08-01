@@ -101,7 +101,8 @@ void PrintHeader(int num_trials) {
     std::cout << SerializeSqrtComparisonHeader();
 }
 
-void PrintRow(const std::string& name, uint32_t k, uint32_t m,
+void PrintRow(const BenchmarkConfig& config,
+              const std::string& name, uint32_t k, uint32_t m,
               const std::vector<BenchResult>& results) {
     std::vector<double> enc, enr, eva, dec, tot, abs_errs, rel_errs;
     for (auto& r : results) {
@@ -126,7 +127,9 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
 
     SqrtComparisonResult row;
     row.encoding = name;
-    row.security = "TOY";
+    row.security = config.security_level == SecurityLevel::TOY ? "TOY" :
+        config.security_level == SecurityLevel::STD128 ? "STD128" :
+        config.security_level == SecurityLevel::STD192 ? "STD192" : "STD256";
     row.k = k;
     row.m = m;
     row.ring_dim = results[0].ring_dim;
@@ -144,6 +147,8 @@ void PrintRow(const std::string& name, uint32_t k, uint32_t m,
     row.jaccard_rel_error_sd = s_rel.stddev;
     row.sanitizer = results[0].sanitizer;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    ApplyBenchmarkProfile(
+        config, row, BenchmarkMeasurementKind::Diagnostic);
     std::cout << SerializeSqrtComparisonRow(row);
 }
 
@@ -152,6 +157,10 @@ int main(int argc, char** argv) {
 
     const SqrtComparisonConfig config =
         ResolveSqrtComparisonConfig(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv);
+    (void)ResolveBenchmarkGrid(
+        config.sanitizer.profile, BenchmarkProducer::SqrtComparison,
+        BenchmarkMode::Timing, false, {});
     const uint64_t seed = config.seed;
     const int num_trials = config.trials;
 
@@ -189,7 +198,7 @@ int main(int argc, char** argv) {
                 p.k = cfg.k;
                 p.m = cfg.m;
                 p.security = config.sanitizer.security_level;
-                ApplySanitizerConfig(config.sanitizer, p);
+                ApplyBenchmarkProfile(config.sanitizer, p);
                 p.flood_margin_bits = config.flood_margin_bits;
                 p.Validate();
 
@@ -204,7 +213,7 @@ int main(int argc, char** argv) {
                 p.k = cfg.k;
                 p.m = cfg.m;
                 p.security = config.sanitizer.security_level;
-                ApplySanitizerConfig(config.sanitizer, p);
+                ApplyBenchmarkProfile(config.sanitizer, p);
                 p.flood_margin_bits = config.flood_margin_bits;
                 p.ValidateSqrt();
 
@@ -214,8 +223,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        PrintRow("OneHot", cfg.k, cfg.m, onehot_results);
-        PrintRow("Sqrt", cfg.k, cfg.m, sqrt_results);
+        PrintRow(config.sanitizer, "OneHot", cfg.k, cfg.m, onehot_results);
+        PrintRow(config.sanitizer, "Sqrt", cfg.k, cfg.m, sqrt_results);
     }
 
     return 0;

@@ -112,18 +112,23 @@ static uint32_t CurrentOmpThreads() {
 
 class ComparisonCSVWriter {
 public:
-    ComparisonCSVWriter() : out_(&std::cout) {}
+    explicit ComparisonCSVWriter(const BenchmarkConfig& config)
+        : out_(&std::cout), config_(&config) {}
 
     void WriteHeader() {
         *out_ << SerializeComparisonHeader();
     }
 
     void WriteRow(const ComparisonResult& r) {
-        *out_ << SerializeComparisonRow(r, CurrentOmpThreads());
+        ComparisonResult profiled = r;
+        ApplyBenchmarkProfile(*config_, profiled,
+                              BenchmarkMeasurementKind::FheTiming);
+        *out_ << SerializeComparisonRow(profiled, CurrentOmpThreads());
     }
 
 private:
     std::ostream* out_;
+    const BenchmarkConfig* config_;
 };
 
 // ============================================================================
@@ -722,7 +727,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
         pp.k = k;
         pp.m = config.m;
         pp.security = config.security_level;
-        ApplySanitizerConfig(config, pp);
+        ApplyBenchmarkProfile(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -738,7 +743,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
             sp.k = k;
             sp.m = config.m;
             sp.security = config.security_level;
-            ApplySanitizerConfig(config, sp);
+            ApplyBenchmarkProfile(config, sp);
             sp.ValidateSqrt();
 
             SqrtPiccard sqrt_eng(sp);
@@ -803,7 +808,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
         pp.k = config.k;
         pp.m = m;
         pp.security = config.security_level;
-        ApplySanitizerConfig(config, pp);
+        ApplyBenchmarkProfile(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -819,7 +824,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
             sp.k = config.k;
             sp.m = m;
             sp.security = config.security_level;
-            ApplySanitizerConfig(config, sp);
+            ApplyBenchmarkProfile(config, sp);
             sp.ValidateSqrt();
 
             SqrtPiccard sqrt_eng(sp);
@@ -862,7 +867,11 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                               ComparisonCSVWriter& csv) {
     // Universe sizes chosen to span: within Piccard ring_dim, at boundary,
     // and well beyond (forcing larger BFV parameters for baseline).
-    std::vector<uint32_t> u_values = QuickSweep<uint32_t>({16384, 65536, 262144, 1048576}, cfg.base.security_level);
+    std::vector<uint32_t> u_values =
+        cfg.base.profile.run_class == BenchmarkRunClass::Legacy
+        ? QuickSweep<uint32_t>({16384, 65536, 262144, 1048576},
+                               cfg.base.security_level)
+        : std::vector<uint32_t>{16384, 65536};
     const auto& config = cfg.base;
 
 #ifdef HAVE_SJ16
@@ -915,7 +924,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
         pp.k = config.k;
         pp.m = config.m;
         pp.security = config.security_level;
-        ApplySanitizerConfig(config, pp);
+        ApplyBenchmarkProfile(config, pp);
         pp.Validate();
 
         Piccard piccard(pp);
@@ -930,7 +939,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             sp.k = config.k;
             sp.m = config.m;
             sp.security = config.security_level;
-            ApplySanitizerConfig(config, sp);
+            ApplyBenchmarkProfile(config, sp);
             sp.ValidateSqrt();
             sqrt_eng = std::make_unique<SqrtPiccard>(sp);
             sqrt_eng->KeyGen();
@@ -1349,7 +1358,7 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
     pp.k = config.k;
     pp.m = config.m;
     pp.security = config.security_level;
-    ApplySanitizerConfig(config, pp);
+    ApplyBenchmarkProfile(config, pp);
     pp.Validate();
 
     Piccard piccard(pp);
@@ -1363,7 +1372,7 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
         sp.k = config.k;
         sp.m = config.m;
         sp.security = config.security_level;
-        ApplySanitizerConfig(config, sp);
+        ApplyBenchmarkProfile(config, sp);
         sp.ValidateSqrt();
         sqrt_eng = std::make_unique<SqrtPiccard>(sp);
         sqrt_eng->KeyGen();
@@ -1498,10 +1507,24 @@ int main(int argc, char** argv) {
     }
 
     auto config = ComparisonConfig::ParseArgs(argc, argv);
+    RejectUnknownBenchmarkOptions(
+        argc, argv,
+        {"--universe=", "--sj16", "--sj16_key_bits=",
+         "--sj16_max_universe=", "--sj16_precompute"});
     config.Print();
 
-    ComparisonCSVWriter csv;
+    ComparisonCSVWriter csv(config.base);
     csv.WriteHeader();
+
+    if (config.base.profile.run_class != BenchmarkRunClass::Legacy) {
+        if (config.base.profile.id != "std128-t40-primary") {
+            throw std::invalid_argument(
+                "bench_comparison named evidence supports only "
+                "std128-t40-primary reviewer comparison");
+        }
+        BenchVaryUniverse(config, csv);
+        return 0;
+    }
 
     if (config.base.mode == "timing") {
         std::cerr << "\n=== Vary k (median of "

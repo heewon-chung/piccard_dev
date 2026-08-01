@@ -276,7 +276,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -388,7 +388,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -494,7 +494,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
-    ApplySanitizerConfig(config, params);
+    ApplyBenchmarkProfile(config, params);
     params.Validate();
 
     Piccard engine(params);
@@ -603,7 +603,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -674,7 +674,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.Validate();
 
         Piccard engine(params);
@@ -742,7 +742,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
-    ApplySanitizerConfig(config, params);
+    ApplyBenchmarkProfile(config, params);
     params.Validate();
 
     Piccard engine(params);
@@ -866,7 +866,7 @@ static void BenchCombinedVaryingK(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = k;
         params.m = config.m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.hash_seed = config.seed;
         params.Validate();
 
@@ -923,7 +923,7 @@ static void BenchCombinedVaryingM(const BenchmarkConfig& config, CSVWriter& csv)
         params.k = config.k;
         params.m = m;
         params.security = config.security_level;
-        ApplySanitizerConfig(config, params);
+        ApplyBenchmarkProfile(config, params);
         params.hash_seed = config.seed;
         params.Validate();
 
@@ -977,7 +977,7 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
     params.k = config.k;
     params.m = config.m;
     params.security = config.security_level;
-    ApplySanitizerConfig(config, params);
+    ApplyBenchmarkProfile(config, params);
     params.hash_seed = config.seed;
     params.Validate();
 
@@ -1025,6 +1025,113 @@ static void BenchCombinedVaryingSetSize(const BenchmarkConfig& config, CSVWriter
     }
 }
 
+static double IntersectionFractionForJaccard(double target_jaccard) {
+    return target_jaccard == 0.0
+        ? 0.0
+        : (2.0 * target_jaccard) / (1.0 + target_jaccard);
+}
+
+static BenchmarkResult RunProfileAccuracyPoint(
+    Piccard& engine,
+    const BenchmarkConfig& config,
+    const BenchmarkGridPoint& point,
+    const std::string& label) {
+    std::vector<std::pair<double, double>> estimates;
+    estimates.reserve(config.accuracy_trials);
+    const double intersection_fraction =
+        IntersectionFractionForJaccard(point.target_jaccard);
+    const uint64_t fixed_hash_seed = engine.GetParams().hash_seed;
+    for (size_t trial = 0; trial < config.accuracy_trials; ++trial) {
+        std::mt19937_64 rng(
+            TrialSeed(config.seed, trial, point.target_jaccard));
+        engine.SetHashSeed(
+            config.hash_randomness == HashRandomness::Resampled
+                ? HashTrialSeed(config.seed, trial, point.target_jaccard)
+                : fixed_hash_seed);
+        auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+            point.set_size, intersection_fraction, rng);
+        const double j_true = ExactJaccard(set_a, set_b);
+        const auto result = engine.Run(set_a, set_b);
+        estimates.emplace_back(result.jaccard_estimate, j_true);
+    }
+
+    const auto stats = ComputeAccuracyStats(estimates);
+    BenchmarkResult row;
+    row.label = label + "_accuracy";
+    row.param_k = point.k;
+    row.param_m = point.m;
+    row.param_set_size = point.set_size;
+    row.param_ring_dim = engine.GetParams().ring_dim;
+    row.encoding = "onehot";
+    row.param_mult_depth = engine.GetParams().mult_depth;
+    row.param_num_cts = 1;
+    row.trials = stats.num_trials;
+    row.accuracy_trials = stats.num_trials;
+    row.accuracy_median = stats.median;
+    row.accuracy_p25 = stats.p25;
+    row.accuracy_p75 = stats.p75;
+    row.accuracy_p95 = stats.p95;
+    row.accuracy_max = stats.max_error;
+    row.jaccard_expected = point.target_jaccard;
+    row.hash_randomness = HashRandomnessName(config.hash_randomness);
+    row.hash_seed = config.hash_randomness == HashRandomness::Fixed
+        ? fixed_hash_seed : 0;
+    row.hash_root_seed = config.seed;
+    row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.scaling_mod_size = engine.GetParams().scaling_mod_size;
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    ApplyBenchmarkProfile(
+        config, row, BenchmarkMeasurementKind::FheAccuracy);
+    return row;
+}
+
+static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv) {
+    const BenchmarkGridPoint supplied{
+        "evidence", config.k, config.m, config.set_size, 0,
+        config.target_jaccard};
+    const BenchmarkMode mode = ParseBenchmarkMode(config.mode);
+    const auto points = ResolveBenchmarkGrid(
+        config.profile, BenchmarkProducer::Piccard, mode,
+        config.evidence_point, supplied);
+
+    for (const auto& point : points) {
+        PiccardParams params;
+        params.k = point.k;
+        params.m = point.m;
+        params.security = config.security_level;
+        params.hash_seed = config.seed;
+        ApplyBenchmarkProfile(config, params);
+        params.Validate();
+
+        Piccard engine(params);
+        engine.KeyGen();
+        const std::string label = point.axis + "_k" +
+            std::to_string(point.k) + "_m" + std::to_string(point.m) +
+            "_n" + std::to_string(point.set_size);
+
+        for (const auto kind : MeasurementKindsForMode(mode)) {
+            if (kind == BenchmarkMeasurementKind::FheTiming) {
+                const double intersection_fraction =
+                    IntersectionFractionForJaccard(point.target_jaccard);
+                auto [set_a, set_b] = MakeSetsWithOverlap(
+                    point.set_size, intersection_fraction);
+                const double j_true = ExactJaccard(set_a, set_b);
+                auto row = RunMultiTrial(
+                    engine, set_a, set_b, j_true, label + "_timing",
+                    config.trials);
+                row.encoding = "onehot";
+                row.accuracy_trials = 0;
+                ApplyBenchmarkProfile(
+                    config, row, BenchmarkMeasurementKind::FheTiming);
+                csv.WriteRow(row);
+            } else {
+                csv.WriteRow(RunProfileAccuracyPoint(
+                    engine, config, point, label));
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1036,10 +1143,16 @@ int main(int argc, char** argv) {
     }
 
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv);
     config.Print();
 
     CSVWriter csv;
     csv.WriteHeader();
+
+    if (config.profile.run_class != BenchmarkRunClass::Legacy) {
+        RunProfileGrid(config, csv);
+        return 0;
+    }
 
     std::vector<BenchmarkResult> all_results;
 

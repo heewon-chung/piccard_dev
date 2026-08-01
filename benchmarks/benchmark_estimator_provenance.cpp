@@ -103,6 +103,18 @@ void WriteStandardSanitizerFields(std::ostringstream& out,
         << SanitizerAssuranceName(*metadata.model);
 }
 
+void WriteBenchmarkProfileFields(std::ostringstream& out,
+                                 const BenchmarkProfileMetadata& profile) {
+    if (profile.profile_id.empty()) {
+        throw std::logic_error("benchmark row is missing profile_id");
+    }
+    out << "," << profile.profile_id
+        << "," << BenchmarkRunClassName(profile.run_class)
+        << "," << profile.target_security_bits
+        << "," << (profile.comparison_eligible ? "true" : "false")
+        << "," << BenchmarkMeasurementKindName(profile.measurement_kind);
+}
+
 const char* SecurityClassOf(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") {
         return "CPA/no-leakage";
@@ -133,6 +145,18 @@ const char* EstimatorModelName(EstimatorModel model) {
             return "not-applicable";
     }
     throw std::logic_error("unknown estimator model");
+}
+
+BenchmarkProfileMetadata MakeBenchmarkProfileMetadata(
+    const BenchmarkProfile& profile,
+    BenchmarkMeasurementKind measurement_kind) {
+    BenchmarkProfileMetadata metadata;
+    metadata.profile_id = profile.id;
+    metadata.run_class = profile.run_class;
+    metadata.target_security_bits = profile.target_security_bits;
+    metadata.comparison_eligible = profile.comparison_eligible;
+    metadata.measurement_kind = measurement_kind;
+    return metadata;
 }
 
 SanitizerMetadata MakeSanitizerMetadata(const PiccardParams& params) {
@@ -184,7 +208,8 @@ std::string SerializeBenchmarkHeader() {
         "transcript_stat_bits,max_queries,query_stat_bits,"
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
-        "sanitizer_assurance,estimator_model\n";
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
 }
 
 std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
@@ -251,7 +276,9 @@ std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
         << r.phase_flood_ms_sd << ","
         << r.phase_flood_ms_median << ",";
     WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
-    out << "," << estimator_model << "\n";
+    out << "," << estimator_model;
+    WriteBenchmarkProfileFields(out, r.profile);
+    out << "\n";
     return out.str();
 }
 
@@ -280,7 +307,8 @@ std::string SerializeDynamicHeader() {
         "transcript_stat_bits,max_queries,query_stat_bits,"
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
-        "sanitizer_assurance,estimator_model\n";
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
 }
 
 std::string SerializeDynamicRow(const DynamicResult& r) {
@@ -322,7 +350,9 @@ std::string SerializeDynamicRow(const DynamicResult& r) {
         << r.phase_flood_ms_sd << ","
         << r.phase_flood_ms_median << ",";
     WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
-    out << "," << estimator_model << "\n";
+    out << "," << estimator_model;
+    WriteBenchmarkProfileFields(out, r.profile);
+    out << "\n";
     return out.str();
 }
 
@@ -348,9 +378,10 @@ std::string SerializeComparisonHeader() {
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
         "sanitizer_assurance,"
-        "measurement_kind,extrapolation_alpha,extrapolation_beta,"
+        "measurement_status,extrapolation_alpha,extrapolation_beta,"
         "extrapolation_residual,extrapolation_source,"
-        "omp_threads,estimator_model\n";
+        "omp_threads,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
 }
 
 std::string SerializeComparisonRow(const ComparisonResult& r,
@@ -405,13 +436,15 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << r.phase_flood_ms_median << ",";
     WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
     out << ","
-        << r.measurement_kind << ","
+        << r.measurement_status << ","
         << r.extrapolation_alpha << ","
         << r.extrapolation_beta << ","
         << r.extrapolation_residual << ","
         << r.extrapolation_source << ","
         << omp_threads << ","
-        << estimator_model << "\n";
+        << estimator_model;
+    WriteBenchmarkProfileFields(out, r.profile);
+    out << "\n";
     return out.str();
 }
 
@@ -425,7 +458,9 @@ std::string SerializeCrossoverHeader() {
         "max_queries,query_stat_bits,flood_margin_bits,"
         "onehot_coefficient_stat_bits,onehot_eval_noise_bits,"
         "onehot_flood_noise_bits,sqrt_coefficient_stat_bits,"
-        "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model\n";
+        "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model,"
+        "profile_id,run_class,target_security_bits,comparison_eligible,"
+        "measurement_kind\n";
 }
 
 std::string SerializeCrossoverRow(const CrossoverResult& r) {
@@ -476,7 +511,9 @@ std::string SerializeCrossoverRow(const CrossoverResult& r) {
     out << ",";
     WriteOptional(out, r.sqrt_flood_noise_bits);
     out << ","
-        << estimator_model << "\n";
+        << estimator_model;
+    WriteBenchmarkProfileFields(out, r.profile);
+    out << "\n";
     return out.str();
 }
 
@@ -486,7 +523,8 @@ std::string SerializeSqrtComparisonHeader() {
         "|err|,rel_err,security,transcript_stat_bits,max_queries,"
         "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
         "eval_noise_bits,flood_noise_bits,sanitizer_model,"
-        "sanitizer_assurance,estimator_model\n";
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
 }
 
 std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
@@ -532,7 +570,9 @@ std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
     out << ","
         << SanitizerModelName(*r.sanitizer.model) << ","
         << SanitizerAssuranceName(*r.sanitizer.model) << ","
-        << estimator_model << "\n";
+        << estimator_model;
+    WriteBenchmarkProfileFields(out, r.profile);
+    out << "\n";
     return out.str();
 }
 

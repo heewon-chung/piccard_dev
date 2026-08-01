@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "benchmark_profile.h"
 #include "benchmark_estimator_provenance.h"
 #include "util/params.h"
 #include "openfhe.h"
@@ -262,6 +263,9 @@ struct BenchmarkConfig {
     HashRandomness hash_randomness;  // accuracy CRS mode; timing is always fixed
     uint32_t transcript_stat_bits; // Released-transcript statistical target
     uint64_t max_queries;          // Maximum sanitizer transcripts released
+    BenchmarkProfile profile;      // Named immutable evidence profile
+    bool evidence_point;           // Run exactly the supplied parameter point
+    double target_jaccard;         // Evidence-mode Jaccard target
 
     BenchmarkConfig()
         : k(128),
@@ -275,7 +279,10 @@ struct BenchmarkConfig {
           accuracy_trials(100),
           hash_randomness(HashRandomness::Resampled),
           transcript_stat_bits(40),
-          max_queries(UINT64_C(1) << 20) {}
+          max_queries(UINT64_C(1) << 20),
+          profile(LegacyBenchmarkProfile()),
+          evidence_point(false),
+          target_jaccard(0.5) {}
 
     // Parse known flags, ignoring unrecognized ones (so callers can
     // layer additional flags on top without triggering errors).
@@ -288,6 +295,11 @@ struct BenchmarkConfig {
         BenchmarkConfig config;
         bool saw_transcript_stat_bits = false;
         bool saw_max_queries = false;
+        bool saw_security = false;
+        bool saw_profile = false;
+        bool saw_overlap = false;
+        bool saw_evidence_point = false;
+        bool saw_target_jaccard = false;
 
         auto parse_uint64 = [](const std::string& value,
                                const char* flag) -> uint64_t {
@@ -324,6 +336,10 @@ struct BenchmarkConfig {
                     throw std::invalid_argument("Invalid mode: " + config.mode);
                 }
             } else if (arg.find("--security=") == 0) {
+                if (saw_security) {
+                    throw std::invalid_argument("Duplicate --security");
+                }
+                saw_security = true;
                 std::string sec = arg.substr(11);
                 if (sec == "TOY") {
                     config.security_level = SecurityLevel::TOY;
@@ -339,6 +355,7 @@ struct BenchmarkConfig {
             } else if (arg.find("--seed=") == 0) {
                 config.seed = std::stoull(arg.substr(7));
             } else if (arg.find("--overlap=") == 0) {
+                saw_overlap = true;
                 config.overlap = std::stod(arg.substr(10));
             } else if (arg.find("--accuracy_trials=") == 0) {
                 config.accuracy_trials = std::stoull(arg.substr(18));
@@ -385,10 +402,73 @@ struct BenchmarkConfig {
                         " (expected 1..9223372036854775808)");
                 }
                 config.max_queries = parsed;
+            } else if (arg.find("--profile=") == 0) {
+                if (saw_profile) {
+                    throw std::invalid_argument("Duplicate --profile");
+                }
+                saw_profile = true;
+                config.profile = ResolveBenchmarkProfile(arg.substr(10));
+            } else if (arg == "--evidence_point") {
+                if (saw_evidence_point) {
+                    throw std::invalid_argument("Duplicate --evidence_point");
+                }
+                saw_evidence_point = true;
+                config.evidence_point = true;
+            } else if (arg.find("--target-jaccard=") == 0) {
+                if (saw_target_jaccard) {
+                    throw std::invalid_argument("Duplicate --target-jaccard");
+                }
+                saw_target_jaccard = true;
+                const std::string value = arg.substr(17);
+                size_t consumed = 0;
+                config.target_jaccard = std::stod(value, &consumed);
+                if (consumed != value.size()) {
+                    throw std::invalid_argument(
+                        "Invalid --target-jaccard: " + value);
+                }
+                if (!std::isfinite(config.target_jaccard) ||
+                    config.target_jaccard < 0.0 ||
+                    config.target_jaccard > 1.0) {
+                    throw std::invalid_argument(
+                        "Invalid --target-jaccard (expected 0..1)");
+                }
             } else if (arg == "--help" || arg == "-h") {
                 // Handled by caller
             }
             // Silently ignore unrecognized flags (e.g. --universe=)
+        }
+
+        if (saw_profile) {
+            if (saw_security &&
+                config.security_level != config.profile.security) {
+                throw std::invalid_argument(
+                    "--security conflicts with --profile=" +
+                    config.profile.id);
+            }
+            if (saw_transcript_stat_bits &&
+                config.transcript_stat_bits !=
+                    config.profile.transcript_stat_bits) {
+                throw std::invalid_argument(
+                    "--transcript_stat_bits conflicts with --profile=" +
+                    config.profile.id);
+            }
+            if (saw_max_queries &&
+                config.max_queries != config.profile.max_queries) {
+                throw std::invalid_argument(
+                    "--max_queries conflicts with --profile=" +
+                    config.profile.id);
+            }
+            config.security_level = config.profile.security;
+            config.transcript_stat_bits = config.profile.transcript_stat_bits;
+            config.max_queries = config.profile.max_queries;
+        }
+        if (config.evidence_point && !saw_profile) {
+            throw std::invalid_argument(
+                "--evidence_point requires a named --profile");
+        }
+        if (config.evidence_point && saw_overlap) {
+            throw std::invalid_argument(
+                "evidence mode rejects legacy --overlap; use --target-jaccard");
         }
 
         // If no seed specified, generate one from random_device
@@ -434,13 +514,71 @@ struct BenchmarkConfig {
                   << "  Hash rand: " << HashRandomnessName(hash_randomness) << "\n"
                   << "  Transcript stat bits: " << transcript_stat_bits << "\n"
                   << "  Max queries: " << max_queries << "\n";
+        std::cerr << "  Profile:    " << profile.id << " ("
+                  << BenchmarkRunClassName(profile.run_class) << ")\n"
+                  << "  Evidence point: " << (evidence_point ? "yes" : "no")
+                  << "\n"
+                  << "  Target Jaccard: " << target_jaccard << "\n";
     }
 };
 
-inline void ApplySanitizerConfig(const BenchmarkConfig& config,
-                                 PiccardParams& params) {
+inline void ApplyBenchmarkProfile(const BenchmarkConfig& config,
+                                  PiccardParams& params) {
     params.transcript_stat_bits = config.transcript_stat_bits;
     params.max_queries = config.max_queries;
+}
+
+template <typename Result>
+inline void ApplyBenchmarkProfile(
+    const BenchmarkConfig& config,
+    Result& result,
+    BenchmarkMeasurementKind measurement_kind) {
+    result.profile =
+        MakeBenchmarkProfileMetadata(config.profile, measurement_kind);
+}
+
+inline bool IsBaseBenchmarkOption(const std::string& arg) {
+    if (arg == "--help" || arg == "-h" || arg == "--evidence_point") {
+        return true;
+    }
+    const char* prefixes[] = {
+        "--k=", "--m=", "--set_size=", "--trials=", "--mode=",
+        "--security=", "--seed=", "--overlap=", "--accuracy_trials=",
+        "--hash_randomness=", "--transcript_stat_bits=", "--max_queries=",
+        "--profile=", "--target-jaccard=",
+    };
+    for (const char* prefix : prefixes) {
+        if (arg.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
+
+/** @brief Fail after the executable has declared all of its extension flags. */
+inline void RejectUnknownBenchmarkOptions(
+    int argc,
+    char** argv,
+    const std::vector<std::string>& extension_prefixes = {}) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (IsBaseBenchmarkOption(arg)) continue;
+        bool extension = false;
+        for (const auto& prefix : extension_prefixes) {
+            if (arg == prefix || arg.rfind(prefix, 0) == 0) {
+                extension = true;
+                break;
+            }
+        }
+        if (!extension) {
+            throw std::invalid_argument("Unknown option: " + arg);
+        }
+    }
+}
+
+// Kept for source compatibility outside the evidence runners. New non-threshold
+// evidence sites call ApplyBenchmarkProfile explicitly.
+inline void ApplySanitizerConfig(const BenchmarkConfig& config,
+                                 PiccardParams& params) {
+    ApplyBenchmarkProfile(config, params);
 }
 
 struct SqrtComparisonConfig {
@@ -466,7 +604,9 @@ inline SqrtComparisonConfig ResolveSqrtComparisonConfig(
 
     BenchmarkConfig sanitizer =
         BenchmarkConfig::ParseArgs(argc, argv, std::move(random_seed));
-    sanitizer.security_level = SecurityLevel::TOY;
+    if (sanitizer.profile.run_class == BenchmarkRunClass::Legacy) {
+        sanitizer.security_level = SecurityLevel::TOY;
+    }
 
     SqrtComparisonConfig resolved;
     resolved.seed = sanitizer.seed;

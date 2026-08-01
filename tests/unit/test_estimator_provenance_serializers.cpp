@@ -95,7 +95,8 @@ TEST(EstimatorProvenanceSerializers, PiccardGoldenSchema) {
         "transcript_stat_bits,max_queries,query_stat_bits,"
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
-        "sanitizer_assurance,estimator_model\n";
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
     const std::string expected_row =
         "piccard,128,64,1000,8192,"
         "0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0,0,"
@@ -106,7 +107,7 @@ TEST(EstimatorProvenanceSerializers, PiccardGoldenSchema) {
         "0.000,-1.000,0.000,40,1048576,60,73,8,60,141,0,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
 
     ExpectGoldenCsv(SerializeBenchmarkHeader(), SerializeBenchmarkRow(row),
                     expected_header, expected_row);
@@ -136,7 +137,7 @@ TEST(EstimatorProvenanceSerializers, OneHotAndSqrtGoldenRows) {
         "0.000,-1.000,0.000,40,1048576,60,73,8,60,141,0,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
     const std::string expected_sqrt =
         "sqrt,0,0,0,0,"
         "0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0,0,"
@@ -147,7 +148,7 @@ TEST(EstimatorProvenanceSerializers, OneHotAndSqrtGoldenRows) {
         "0.000,-1.000,0.000,40,1048576,60,73,8,60,141,0,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
 
     EXPECT_EQ(SerializeBenchmarkRow(onehot), expected_onehot);
     EXPECT_EQ(SerializeBenchmarkRow(sqrt), expected_sqrt);
@@ -179,7 +180,8 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "phase_flood_ms_median,transcript_stat_bits,max_queries,"
         "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
         "eval_noise_bits,flood_noise_bits,scaling_mod_size,"
-        "sanitizer_model,sanitizer_assurance,estimator_model\n";
+        "sanitizer_model,sanitizer_assurance,estimator_model,profile_id,"
+        "run_class,target_security_bits,comparison_eligible,measurement_kind\n";
     const std::string expected_row =
         "dynamic,128,64,0,0,0,"
         "0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0,0,"
@@ -189,7 +191,7 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "0.000,-1.000,0.000,40,1048576,60,73,8,60,141,0,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
 
     ExpectGoldenCsv(SerializeDynamicHeader(), SerializeDynamicRow(row),
                     expected_header, expected_row);
@@ -210,9 +212,10 @@ TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
         "max_queries,query_stat_bits,coefficient_stat_bits,"
         "flood_margin_bits,eval_noise_bits,flood_noise_bits,"
         "scaling_mod_size,sanitizer_model,sanitizer_assurance,"
-        "measurement_kind,extrapolation_alpha,"
+        "measurement_status,extrapolation_alpha,"
         "extrapolation_beta,extrapolation_residual,extrapolation_source,"
-        "omp_threads,estimator_model\n";
+        "omp_threads,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
 
     struct Case {
         const char* method;
@@ -262,7 +265,8 @@ TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
                    "phase-smudging-enc0-poc-v1,"
                    "empirical-phase-statistical+ciphertext-computational,"
                  : ",,,,,,,,not-applicable,not-applicable,") +
-            "measured,,,,,4," + c.expected_estimator + "\n";
+            "measured,,,,,4," + c.expected_estimator +
+            ",legacy,legacy,0,false,diagnostic\n";
 
         ExpectGoldenCsv(SerializeComparisonHeader(),
                         SerializeComparisonRow(row, 4),
@@ -294,13 +298,15 @@ TEST(EstimatorProvenanceSerializers, CrossoverBothArmsGoldenSchema) {
         "max_queries,query_stat_bits,flood_margin_bits,"
         "onehot_coefficient_stat_bits,onehot_eval_noise_bits,"
         "onehot_flood_noise_bits,sqrt_coefficient_stat_bits,"
-        "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model\n";
+        "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model,"
+        "profile_id,run_class,target_security_bits,comparison_eligible,"
+        "measurement_kind\n";
     const std::string expected_row =
         "128,64,0,0,0,0,12.500,8.250,1,1.5152,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
         "40,1048576,60,8,73,60,141,72,95,175,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
 
     ExpectGoldenCsv(SerializeCrossoverHeader(), SerializeCrossoverRow(row),
                     expected_header, expected_row);
@@ -327,21 +333,22 @@ TEST(EstimatorProvenanceSerializers, SqrtComparisonBothArmsGoldenRows) {
         "|err|,rel_err,security,transcript_stat_bits,max_queries,"
         "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
         "eval_noise_bits,flood_noise_bits,sanitizer_model,"
-        "sanitizer_assurance,estimator_model\n";
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind\n";
     const std::string expected_onehot =
         "OneHot,128,64,8192,1,0.00,0.00,0.00,0.00,0.00"
         "\xC2\xB1" "0.00,0.0000" "\xC2\xB1" "0.0000,N/A,"
         "TOY,40,1048576,60,73,8,60,141,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
     const std::string expected_sqrt =
         "Sqrt,128,64,8192,3,0.00,0.00,0.00,0.00,0.00"
         "\xC2\xB1" "0.00,0.0000" "\xC2\xB1" "0.0000,N/A,"
         "TOY,40,1048576,60,73,8,60,141,"
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
-        "sha256-random-ranking-poc-v1\n";
+        "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic\n";
 
     EXPECT_EQ(SerializeSqrtComparisonHeader(), expected_header);
     EXPECT_EQ(SerializeSqrtComparisonRow(onehot), expected_onehot);
@@ -482,4 +489,97 @@ TEST(EstimatorProvenanceSerializers,
     EXPECT_EQ(cells[ColumnIndex(header, "max_queries")], "1048576");
     EXPECT_EQ(cells[ColumnIndex(header, "flood_margin_bits")], "8");
     EXPECT_EQ(CsvColumns(header), CsvColumns(serialized));
+}
+
+TEST(EstimatorProvenanceSerializers,
+     TypedBenchmarkProfileMetadataIsPresentOnEveryRowSchema) {
+    const auto primary = MakeBenchmarkProfileMetadata(
+        ResolveBenchmarkProfile("std128-t40-primary"),
+        BenchmarkMeasurementKind::FheTiming);
+
+    BenchmarkResult benchmark;
+    benchmark.label = "piccard";
+    benchmark.profile = primary;
+    benchmark.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    benchmark.sanitizer = ApplicableMetadata();
+
+    DynamicResult dynamic;
+    dynamic.label = "dynamic";
+    dynamic.profile = primary;
+    dynamic.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    dynamic.sanitizer = ApplicableMetadata();
+
+    ComparisonResult comparison;
+    comparison.scenario = "review";
+    comparison.method = "piccard";
+    comparison.profile = primary;
+    comparison.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    comparison.sanitizer = ApplicableMetadata();
+
+    CrossoverResult crossover;
+    crossover.profile = MakeBenchmarkProfileMetadata(
+        ResolveBenchmarkProfile("toy-smoke"),
+        BenchmarkMeasurementKind::Diagnostic);
+    crossover.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    crossover.sanitizer = ApplicableMetadata();
+    crossover.onehot_coefficient_stat_bits = 73;
+    crossover.onehot_eval_noise_bits = 60;
+    crossover.onehot_flood_noise_bits = 141;
+    crossover.sqrt_coefficient_stat_bits = 73;
+    crossover.sqrt_eval_noise_bits = 60;
+    crossover.sqrt_flood_noise_bits = 141;
+
+    SqrtComparisonResult sqrt;
+    sqrt.encoding = "OneHot";
+    sqrt.profile = crossover.profile;
+    sqrt.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    sqrt.sanitizer = ApplicableMetadata();
+
+    struct Csv {
+        std::string header;
+        std::string row;
+        const char* expected_profile;
+        const char* expected_class;
+        const char* expected_kind;
+    };
+    const std::vector<Csv> csvs = {
+        {SerializeBenchmarkHeader(), SerializeBenchmarkRow(benchmark),
+         "std128-t40-primary", "primary", "fhe-timing"},
+        {SerializeDynamicHeader(), SerializeDynamicRow(dynamic),
+         "std128-t40-primary", "primary", "fhe-timing"},
+        {SerializeComparisonHeader(), SerializeComparisonRow(comparison, 4),
+         "std128-t40-primary", "primary", "fhe-timing"},
+        {SerializeCrossoverHeader(), SerializeCrossoverRow(crossover),
+         "toy-smoke", "smoke", "diagnostic"},
+        {SerializeSqrtComparisonHeader(), SerializeSqrtComparisonRow(sqrt),
+         "toy-smoke", "smoke", "diagnostic"},
+    };
+
+    for (const auto& csv : csvs) {
+        const auto cells = CsvCells(csv.row);
+        EXPECT_EQ(cells[ColumnIndex(csv.header, "profile_id")],
+                  csv.expected_profile);
+        EXPECT_EQ(cells[ColumnIndex(csv.header, "run_class")],
+                  csv.expected_class);
+        EXPECT_EQ(cells[ColumnIndex(csv.header, "measurement_kind")],
+                  csv.expected_kind);
+        EXPECT_EQ(cells[ColumnIndex(csv.header, "target_security_bits")],
+                  csv.expected_profile == std::string("toy-smoke") ? "0" : "128");
+        EXPECT_EQ(cells[ColumnIndex(csv.header, "comparison_eligible")],
+                  csv.expected_profile == std::string("toy-smoke") ? "false" : "true");
+    }
+}
+
+TEST(EstimatorProvenanceSerializers, LegacyRowsAreLabelledLegacy) {
+    BenchmarkResult row;
+    row.label = "legacy";
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = ApplicableMetadata();
+
+    const std::string header = SerializeBenchmarkHeader();
+    const auto cells = CsvCells(SerializeBenchmarkRow(row));
+    EXPECT_EQ(cells[ColumnIndex(header, "profile_id")], "legacy");
+    EXPECT_EQ(cells[ColumnIndex(header, "run_class")], "legacy");
+    EXPECT_EQ(cells[ColumnIndex(header, "comparison_eligible")], "false");
+    EXPECT_EQ(cells[ColumnIndex(header, "measurement_kind")], "diagnostic");
 }

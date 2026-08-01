@@ -23,18 +23,23 @@ using namespace piccard::benchmark;
 
 class CrossoverCSVWriter {
 public:
-    CrossoverCSVWriter() : out_(&std::cout) {}
+    explicit CrossoverCSVWriter(const BenchmarkConfig& config)
+        : out_(&std::cout), config_(&config) {}
 
     void WriteHeader() {
         *out_ << SerializeCrossoverHeader();
     }
 
     void WriteRow(const CrossoverResult& r) {
-        *out_ << SerializeCrossoverRow(r);
+        CrossoverResult profiled = r;
+        ApplyBenchmarkProfile(*config_, profiled,
+                              BenchmarkMeasurementKind::Diagnostic);
+        *out_ << SerializeCrossoverRow(profiled);
     }
 
 private:
     std::ostream* out_;
+    const BenchmarkConfig* config_;
 };
 
 // ============================================================================
@@ -131,10 +136,10 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
             PiccardParams sp;
             try {
                 pp.k = k; pp.m = m; pp.security = config.security_level;
-                ApplySanitizerConfig(config, pp);
+                ApplyBenchmarkProfile(config, pp);
                 pp.Validate();
                 sp.k = k; sp.m = m; sp.security = config.security_level;
-                ApplySanitizerConfig(config, sp);
+                ApplyBenchmarkProfile(config, sp);
                 sp.ValidateSqrt();
             } catch (const std::exception& e) {
                 std::cerr << "WARNING: skipping k=" << k << " m=" << m
@@ -223,9 +228,13 @@ int main(int argc, char** argv) {
     }
 
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv);
+    (void)ResolveBenchmarkGrid(
+        config.profile, BenchmarkProducer::Crossover, BenchmarkMode::Timing,
+        false, {});
     config.Print();
 
-    CrossoverCSVWriter csv;
+    CrossoverCSVWriter csv(config);
     csv.WriteHeader();
 
     std::cerr << "\n=== Crossover sweep (median of "

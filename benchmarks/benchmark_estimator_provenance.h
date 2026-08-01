@@ -1,5 +1,7 @@
 #pragma once
 
+#include "benchmark_profile.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -10,6 +12,21 @@ namespace piccard {
 struct PiccardParams;
 
 namespace benchmark {
+
+/** @brief Typed suite provenance carried by every non-threshold row. */
+struct BenchmarkProfileMetadata {
+    std::string profile_id = "legacy";
+    BenchmarkRunClass run_class = BenchmarkRunClass::Legacy;
+    uint32_t target_security_bits = 0;
+    bool comparison_eligible = false;
+    BenchmarkMeasurementKind measurement_kind =
+        BenchmarkMeasurementKind::Diagnostic;
+};
+
+/** @brief Bind a resolved immutable profile and a concrete row kind. */
+BenchmarkProfileMetadata MakeBenchmarkProfileMetadata(
+    const BenchmarkProfile& profile,
+    BenchmarkMeasurementKind measurement_kind);
 
 /**
  * @brief Estimator implementation represented by a benchmark row.
@@ -47,6 +64,7 @@ SanitizerMetadata NotApplicableSanitizerMetadata();
  * @brief Result row shared by Piccard and onehot/sqrt benchmarks.
  */
 struct BenchmarkResult {
+    BenchmarkProfileMetadata profile;
     std::string label;
 
     uint32_t param_k = 0;
@@ -124,6 +142,7 @@ struct BenchmarkResult {
  * @brief Result row for the dynamic benchmark.
  */
 struct DynamicResult {
+    BenchmarkProfileMetadata profile;
     std::string label;
     uint32_t k = 0;
     uint32_t m = 0;
@@ -191,6 +210,7 @@ struct DynamicResult {
  * @brief Result row for the protocol comparison benchmark.
  */
 struct ComparisonResult {
+    BenchmarkProfileMetadata profile;
     std::string scenario;
     std::string method;
 
@@ -240,7 +260,7 @@ struct ComparisonResult {
     double phase_flood_ms_median = 0.0;
     uint32_t scaling_mod_size = 0;
 
-    std::string measurement_kind = "measured";
+    std::string measurement_status = "measured";
     std::string extrapolation_alpha;
     std::string extrapolation_beta;
     std::string extrapolation_residual;
@@ -254,6 +274,7 @@ struct ComparisonResult {
  * @brief Result row for the onehot/sqrt crossover benchmark.
  */
 struct CrossoverResult {
+    BenchmarkProfileMetadata profile;
     uint32_t k = 0;
     uint32_t m = 0;
     uint32_t onehot_feature_dim = 0;
@@ -278,6 +299,7 @@ struct CrossoverResult {
  * @brief Aggregated output row for the legacy sqrt comparison benchmark.
  */
 struct SqrtComparisonResult {
+    BenchmarkProfileMetadata profile;
     std::string encoding;
     std::string security;
     uint32_t k = 0;

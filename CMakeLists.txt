@@ -127,6 +127,7 @@ endif()
 # Shared deterministic serializers for all non-threshold benchmark schemas.
 add_library(
     piccard_benchmark_serializers
+    benchmarks/benchmark_profile.cpp
     benchmarks/benchmark_estimator_provenance.cpp
 )
 target_include_directories(
@@ -517,6 +518,22 @@ if(BUILD_TESTS)
                 NAME EstimatorProvenanceSerializers
                 COMMAND test_estimator_provenance_serializers
             )
+
+            add_executable(
+                test_benchmark_profile
+                tests/unit/test_benchmark_profile.cpp
+            )
+            target_link_libraries(
+                test_benchmark_profile
+                piccard_fhe
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_benchmark_profile
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME BenchmarkProfile COMMAND test_benchmark_profile)
 
             add_executable(
                 test_noise_calibration_schema
