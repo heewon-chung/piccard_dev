@@ -381,7 +381,9 @@ std::string SerializeComparisonHeader() {
         "measurement_status,extrapolation_alpha,extrapolation_beta,"
         "extrapolation_residual,extrapolation_source,"
         "omp_threads,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind\n";
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "target_jaccard,realized_intersection,realized_union,"
+        "realized_jaccard\n";
 }
 
 std::string SerializeComparisonRow(const ComparisonResult& r,
@@ -444,6 +446,11 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << omp_threads << ","
         << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
+    out << "," << std::fixed << std::setprecision(6)
+        << r.target_jaccard << ","
+        << r.realized_intersection << ","
+        << r.realized_union << ","
+        << r.realized_jaccard;
     out << "\n";
     return out.str();
 }

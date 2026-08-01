@@ -86,6 +86,54 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction,
     return {a, b};
 }
 
+struct ReviewerWorkload {
+    std::vector<uint64_t> set_a;
+    std::vector<uint64_t> set_b;
+    double target_jaccard = 0.0;
+    size_t intersection = 0;
+    size_t union_size = 0;
+    double realized_jaccard = 0.0;
+};
+
+/** Build equal-size sets whose exact rational Jaccard is nearest the target. */
+static ReviewerWorkload MakeReviewerWorkload(size_t set_size,
+                                             double target_jaccard,
+                                             uint64_t universe_size) {
+    const long double target = static_cast<long double>(target_jaccard);
+    const long double ideal_intersection =
+        (2.0L * static_cast<long double>(set_size) * target) /
+        (1.0L + target);
+    const size_t intersection = static_cast<size_t>(
+        std::llround(ideal_intersection));
+    const size_t union_size = 2 * set_size - intersection;
+    if (union_size > universe_size) {
+        throw std::invalid_argument(
+            "reviewer comparison universe is too small for target Jaccard");
+    }
+
+    ReviewerWorkload workload;
+    workload.target_jaccard = target_jaccard;
+    workload.intersection = intersection;
+    workload.union_size = union_size;
+    workload.realized_jaccard = union_size == 0
+        ? 1.0
+        : static_cast<double>(intersection) /
+              static_cast<double>(union_size);
+    workload.set_a.reserve(set_size);
+    workload.set_b.reserve(set_size);
+    for (uint64_t value = 0; value < intersection; ++value) {
+        workload.set_a.push_back(value);
+        workload.set_b.push_back(value);
+    }
+    for (uint64_t value = intersection; value < set_size; ++value) {
+        workload.set_a.push_back(value);
+    }
+    for (uint64_t offset = 0; offset < set_size - intersection; ++offset) {
+        workload.set_b.push_back(set_size + offset);
+    }
+    return workload;
+}
+
 // SJ16 adapter (Phase 4) — owns the SJ16 per-trial timing + aggregation. Kept
 // out of this shared file; included here because it maps onto ComparisonResult
 // above. Compiled out entirely when GMP/piccard_baselines is absent.
@@ -112,24 +160,46 @@ static uint32_t CurrentOmpThreads() {
 
 class ComparisonCSVWriter {
 public:
-    explicit ComparisonCSVWriter(const BenchmarkConfig& config)
-        : out_(&std::cout), config_(&config) {}
+    ComparisonCSVWriter() : out_(&std::cout) {}
 
     void WriteHeader() {
         *out_ << SerializeComparisonHeader();
     }
 
     void WriteRow(const ComparisonResult& r) {
-        ComparisonResult profiled = r;
-        ApplyBenchmarkProfile(*config_, profiled,
-                              BenchmarkMeasurementKind::FheTiming);
-        *out_ << SerializeComparisonRow(profiled, CurrentOmpThreads());
+        *out_ << SerializeComparisonRow(r, CurrentOmpThreads());
     }
 
 private:
     std::ostream* out_;
-    const BenchmarkConfig* config_;
 };
+
+static void ClearAccuracyFields(ComparisonResult& row) {
+    row.jaccard_computed = 0.0;
+    row.jaccard_expected = 0.0;
+    row.jaccard_error = 0.0;
+    row.jaccard_rel_error = 0.0;
+    row.rel_error_eligible_n = 0;
+    row.accuracy_trials = 0;
+}
+
+static void BindReviewerRow(
+    const BenchmarkConfig& config,
+    const ReviewerWorkload& workload,
+    BenchmarkMeasurementKind measurement_kind,
+    ComparisonResult& row) {
+    row.target_jaccard = workload.target_jaccard;
+    row.realized_intersection = workload.intersection;
+    row.realized_union = workload.union_size;
+    row.realized_jaccard = workload.realized_jaccard;
+
+    // FHE-IND is a diagnostic comparator, not a Piccard-family evidence row.
+    // Leave its default legacy profile metadata intact instead of applying the
+    // primary Piccard profile to the common comparison writer.
+    if (row.method != "baseline") {
+        ApplyBenchmarkProfile(config, row, measurement_kind);
+    }
+}
 
 // ============================================================================
 // Timed protocol: Piccard
@@ -657,6 +727,7 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
 struct ComparisonConfig {
     BenchmarkConfig base;
     uint32_t universe_size = 65536;  // Default: 2^16
+    bool emit_evidence_fixture = false;
 
     // SJ16 baseline (Phase 4), opt-in. Runs only in BenchVaryUniverse.
     bool sj16 = false;                   // --sj16
@@ -683,6 +754,8 @@ struct ComparisonConfig {
                     static_cast<uint32_t>(std::stoul(arg.substr(20)));
             } else if (arg == "--sj16_precompute") {
                 config.sj16_precompute = true;
+            } else if (arg == "--emit_evidence_fixture") {
+                config.emit_evidence_fixture = true;
             }
         }
         return config;
@@ -693,6 +766,255 @@ struct ComparisonConfig {
         std::cerr << "  Universe: " << universe_size << "\n";
     }
 };
+
+static ComparisonResult MakeReviewerFixtureRow(
+    const BenchmarkConfig& config,
+    const ReviewerWorkload& workload,
+    uint32_t universe_size,
+    const char* method,
+    BenchmarkMeasurementKind measurement_kind) {
+    ComparisonResult row;
+    row.scenario = "vary_universe_" + std::to_string(universe_size);
+    row.method = method;
+    row.universe_size = universe_size;
+    row.set_size = workload.set_a.size();
+    const bool is_baseline = std::string(method) == "baseline";
+    row.k = is_baseline ? 0 : config.k;
+    row.m = is_baseline ? 0 : config.m;
+    row.estimator_model = is_baseline
+        ? EstimatorModel::NotApplicable
+        : EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = NotApplicableSanitizerMetadata();
+
+    if (measurement_kind == BenchmarkMeasurementKind::FheTiming) {
+        row.trials = config.trials;
+    } else {
+        row.accuracy_trials = config.accuracy_trials;
+        row.jaccard_computed = workload.realized_jaccard;
+        row.jaccard_expected = workload.realized_jaccard;
+    }
+    BindReviewerRow(config, workload, measurement_kind, row);
+    return row;
+}
+
+static void SetReviewerAccuracyFields(
+    ComparisonResult& row,
+    const ReviewerWorkload& workload,
+    size_t accuracy_trials,
+    double estimate_sum,
+    double error_sum) {
+    const double trials = static_cast<double>(accuracy_trials);
+    row.accuracy_trials = accuracy_trials;
+    row.jaccard_computed = estimate_sum / trials;
+    row.jaccard_expected = workload.realized_jaccard;
+    row.jaccard_error = error_sum / trials;
+    row.jaccard_rel_error = workload.realized_jaccard > 0.0
+        ? row.jaccard_error / workload.realized_jaccard
+        : -1.0;
+    row.rel_error_eligible_n = workload.realized_jaccard > 0.0
+        ? accuracy_trials
+        : 0;
+}
+
+template <typename Engine>
+static ComparisonResult RunReviewerHashedAccuracy(
+    Engine& engine,
+    const BenchmarkConfig& config,
+    const ReviewerWorkload& workload,
+    uint32_t universe_size,
+    const std::string& scenario,
+    const char* method,
+    uint32_t mult_depth) {
+    ComparisonResult row;
+    row.scenario = scenario;
+    row.method = method;
+    row.universe_size = universe_size;
+    row.set_size = workload.set_a.size();
+    row.k = engine.GetParams().k;
+    row.m = engine.GetParams().m;
+    row.ring_dim = engine.GetParams().ring_dim;
+    row.num_cts = 1;
+    row.mult_depth = mult_depth;
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.scaling_mod_size = engine.GetParams().scaling_mod_size;
+    row.hash_randomness = HashRandomnessName(config.hash_randomness);
+    row.hash_seed = engine.GetParams().hash_seed;
+    row.hash_root_seed = config.hash_randomness == HashRandomness::Resampled
+        ? config.seed
+        : engine.GetParams().hash_seed;
+
+    double estimate_sum = 0.0;
+    double error_sum = 0.0;
+    for (size_t trial = 0; trial < config.accuracy_trials; ++trial) {
+        const uint64_t hash_seed =
+            config.hash_randomness == HashRandomness::Resampled
+            ? benchmark::HashTrialSeed(
+                  config.seed, trial, workload.target_jaccard)
+            : row.hash_seed;
+        engine.SetHashSeed(hash_seed);
+        const auto result = engine.Run(workload.set_a, workload.set_b);
+        estimate_sum += result.jaccard_estimate;
+        error_sum += std::abs(
+            result.jaccard_estimate - workload.realized_jaccard);
+    }
+    SetReviewerAccuracyFields(
+        row, workload, config.accuracy_trials, estimate_sum, error_sum);
+    return row;
+}
+
+static ComparisonResult RunReviewerBaselineAccuracy(
+    const BaselineEngine& engine,
+    const BenchmarkConfig& config,
+    const ReviewerWorkload& workload,
+    const std::string& scenario) {
+    ComparisonResult row;
+    row.scenario = scenario;
+    row.method = "baseline";
+    row.universe_size = engine.GetParams().universe_size;
+    row.set_size = workload.set_a.size();
+    row.ring_dim = engine.GetParams().ring_dim;
+    row.num_cts = engine.GetParams().num_ciphertexts;
+    row.estimator_model = EstimatorModel::NotApplicable;
+    row.sanitizer = NotApplicableSanitizerMetadata();
+
+    double estimate_sum = 0.0;
+    double error_sum = 0.0;
+    for (size_t trial = 0; trial < config.accuracy_trials; ++trial) {
+        (void)trial;
+        const double estimate = engine.ComputeJaccard(
+            workload.set_a, workload.set_b);
+        estimate_sum += estimate;
+        error_sum += std::abs(estimate - workload.realized_jaccard);
+    }
+
+    SetReviewerAccuracyFields(
+        row, workload, config.accuracy_trials, estimate_sum, error_sum);
+    return row;
+}
+
+static void WriteReviewerRowsForPoint(
+    const ComparisonConfig& cfg,
+    const BenchmarkGridPoint& point,
+    ComparisonCSVWriter& csv) {
+    BenchmarkConfig config = cfg.base;
+    config.k = point.k;
+    config.m = point.m;
+    config.set_size = point.set_size;
+
+    const ReviewerWorkload workload = MakeReviewerWorkload(
+        config.set_size, point.target_jaccard, point.universe_size);
+    const auto measurement_kinds = MeasurementKindsForMode(
+        ParseBenchmarkMode(config.mode));
+
+    if (cfg.emit_evidence_fixture) {
+        for (BenchmarkMeasurementKind kind : measurement_kinds) {
+            for (const char* method : {"piccard", "piccard_sqrt", "baseline"}) {
+                csv.WriteRow(MakeReviewerFixtureRow(
+                    config, workload, point.universe_size, method, kind));
+            }
+        }
+        return;
+    }
+
+    PiccardParams params;
+    params.k = config.k;
+    params.m = config.m;
+    params.security = config.security_level;
+    ApplyBenchmarkProfile(config, params);
+    params.Validate();
+    Piccard piccard(params);
+    piccard.KeyGen();
+
+    PiccardParams sqrt_params = params;
+    sqrt_params.ValidateSqrt();
+    SqrtPiccard sqrt_piccard(sqrt_params);
+    sqrt_piccard.KeyGen();
+
+    BaselineParams baseline_params;
+    baseline_params.universe_size = point.universe_size;
+    baseline_params.security = config.security_level;
+    baseline_params.Validate();
+    BaselineEngine baseline(baseline_params);
+    baseline.Initialize();
+
+    const std::string scenario =
+        "vary_universe_" + std::to_string(point.universe_size);
+    for (BenchmarkMeasurementKind kind : measurement_kinds) {
+        if (kind == BenchmarkMeasurementKind::FheTiming) {
+            auto piccard_row = RunMultiTrialPiccard(
+                piccard, workload.set_a, workload.set_b,
+                workload.realized_jaccard, scenario, point.universe_size,
+                config.trials);
+            ClearAccuracyFields(piccard_row);
+            BindReviewerRow(config, workload, kind, piccard_row);
+            csv.WriteRow(piccard_row);
+
+            auto sqrt_row = RunMultiTrialSqrtPiccard(
+                sqrt_piccard, workload.set_a, workload.set_b,
+                workload.realized_jaccard, scenario, point.universe_size,
+                config.trials);
+            ClearAccuracyFields(sqrt_row);
+            BindReviewerRow(config, workload, kind, sqrt_row);
+            csv.WriteRow(sqrt_row);
+
+            auto baseline_row = RunMultiTrialBaseline(
+                baseline, workload.set_a, workload.set_b,
+                workload.realized_jaccard, scenario, config.trials);
+            ClearAccuracyFields(baseline_row);
+            BindReviewerRow(config, workload, kind, baseline_row);
+            csv.WriteRow(baseline_row);
+        } else {
+            auto piccard_row = RunReviewerHashedAccuracy(
+                piccard, config, workload, point.universe_size, scenario,
+                "piccard", 1);
+            BindReviewerRow(config, workload, kind, piccard_row);
+            csv.WriteRow(piccard_row);
+
+            auto sqrt_row = RunReviewerHashedAccuracy(
+                sqrt_piccard, config, workload, point.universe_size, scenario,
+                "piccard_sqrt", 3);
+            BindReviewerRow(config, workload, kind, sqrt_row);
+            csv.WriteRow(sqrt_row);
+
+            auto baseline_row = RunReviewerBaselineAccuracy(
+                baseline, config, workload, scenario);
+            BindReviewerRow(config, workload, kind, baseline_row);
+            csv.WriteRow(baseline_row);
+        }
+    }
+}
+
+static void BenchReviewerComparison(const ComparisonConfig& cfg,
+                                    ComparisonCSVWriter& csv) {
+    const auto mode = ParseBenchmarkMode(cfg.base.mode);
+    if ((mode == BenchmarkMode::Timing || mode == BenchmarkMode::Combined) &&
+        cfg.base.trials == 0) {
+        throw std::invalid_argument("reviewer timing trials must be positive");
+    }
+    if ((mode == BenchmarkMode::Accuracy || mode == BenchmarkMode::Combined) &&
+        cfg.base.accuracy_trials == 0) {
+        throw std::invalid_argument("reviewer accuracy trials must be positive");
+    }
+
+    BenchmarkGridPoint supplied;
+    supplied.axis = "U";
+    supplied.k = cfg.base.k;
+    supplied.m = cfg.base.m;
+    supplied.set_size = cfg.base.set_size;
+    supplied.universe_size = cfg.universe_size;
+    supplied.target_jaccard = cfg.base.target_jaccard;
+    auto points = ResolveBenchmarkGrid(
+        cfg.base.profile, BenchmarkProducer::Comparison, mode,
+        cfg.base.evidence_point, supplied);
+    for (auto& point : points) {
+        // The CLI Jaccard target is the workload contract. The native resolver
+        // supplies the two fixed reviewer universes and never substitutes the
+        // legacy intersection/set-size overlap interpretation.
+        point.target_jaccard = cfg.base.target_jaccard;
+        WriteReviewerRowsForPoint(cfg, point, csv);
+    }
+}
 
 // ============================================================================
 // Scenario 1: Vary k (Piccard ring_dim changes; baseline constant)
@@ -1510,19 +1832,26 @@ int main(int argc, char** argv) {
     RejectUnknownBenchmarkOptions(
         argc, argv,
         {"--universe=", "--sj16", "--sj16_key_bits=",
-         "--sj16_max_universe=", "--sj16_precompute"});
+         "--sj16_max_universe=", "--sj16_precompute",
+         "--emit_evidence_fixture"});
     config.Print();
 
-    ComparisonCSVWriter csv(config.base);
+    ComparisonCSVWriter csv;
     csv.WriteHeader();
 
     if (config.base.profile.run_class != BenchmarkRunClass::Legacy) {
-        if (config.base.profile.id != "std128-t40-primary") {
+        const bool reviewer_primary =
+            config.base.profile.id == "std128-t40-primary";
+        const bool focused_toy =
+            config.base.profile.id == "toy-smoke" &&
+            config.base.evidence_point;
+        if (!reviewer_primary && !focused_toy) {
             throw std::invalid_argument(
                 "bench_comparison named evidence supports only "
-                "std128-t40-primary reviewer comparison");
+                "std128-t40-primary reviewer comparison or a toy-smoke "
+                "evidence point");
         }
-        BenchVaryUniverse(config, csv);
+        BenchReviewerComparison(config, csv);
         return 0;
     }
 

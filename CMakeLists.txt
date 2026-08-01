@@ -679,6 +679,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         target_link_libraries(bench_comparison piccard_baselines)
     endif()
     target_include_directories(bench_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    if(BUILD_TESTS)
+        add_test(
+            NAME BenchmarkProfileExecutables
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_benchmark_profile_executables.py
+                    $<TARGET_FILE:bench_comparison>
+        )
+    endif()
     # SJ16 baseline (Phase 4): link the AHE engine and define HAVE_SJ16 only when
     # the GMP-backed baselines exist (implies GMP + Paillier + OpenFHE).
     if(HAVE_PICCARD_BASELINES)

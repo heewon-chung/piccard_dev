@@ -215,7 +215,9 @@ TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
         "measurement_status,extrapolation_alpha,"
         "extrapolation_beta,extrapolation_residual,extrapolation_source,"
         "omp_threads,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind\n";
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "target_jaccard,realized_intersection,realized_union,"
+        "realized_jaccard\n";
 
     struct Case {
         const char* method;
@@ -266,7 +268,7 @@ TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
                    "empirical-phase-statistical+ciphertext-computational,"
                  : ",,,,,,,,not-applicable,not-applicable,") +
             "measured,,,,,4," + c.expected_estimator +
-            ",legacy,legacy,0,false,diagnostic\n";
+            ",legacy,legacy,0,false,diagnostic,0.000000,0,0,0.000000\n";
 
         ExpectGoldenCsv(SerializeComparisonHeader(),
                         SerializeComparisonRow(row, 4),

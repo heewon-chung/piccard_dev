@@ -237,6 +237,12 @@ struct ComparisonResult {
     double jaccard_error = 0.0;
     double jaccard_rel_error = 0.0;
 
+    // Requested workload and the exact rational workload actually realized.
+    double target_jaccard = 0.0;
+    size_t realized_intersection = 0;
+    size_t realized_union = 0;
+    double realized_jaccard = 0.0;
+
     size_t trials = 0;
     double total_ms_sd = -1.0;
     double total_ms_median = 0.0;
