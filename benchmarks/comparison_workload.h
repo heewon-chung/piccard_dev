@@ -27,9 +27,24 @@ enum class TrialKind : uint8_t { Warmup = 0, Timing = 1, Accuracy = 2 };
 /** @brief Family-qualified row kind required by reviewer comparison suites. */
 std::string ReviewMeasurementKind(const std::string& method, TrialKind kind);
 
-/** @brief Timing exposes its fixed CRS; accuracy's resampled CRS is row-N/A. */
-std::optional<uint64_t> ReviewHashSeedCell(TrialKind kind,
-                                           uint64_t record_hash_seed);
+/** @brief Method-conditioned applicability for one emitted CSV aggregate row. */
+struct ReviewMethodRowPolicy {
+    std::optional<uint64_t> k;
+    std::optional<uint64_t> m;
+    std::optional<uint64_t> hash_seed;
+    std::string hash_randomness;
+};
+
+/** @brief Resolve applicability and CRS cells for one method/arm row. */
+ReviewMethodRowPolicy ResolveReviewMethodRowPolicy(
+    const std::string& method,
+    TrialKind kind,
+    uint64_t requested_k,
+    uint64_t requested_m,
+    uint64_t timing_hash_seed);
+
+/** @brief Serialize a numeric field, using an empty cell for numeric N/A. */
+std::string ReviewNumericCell(double value);
 
 /** @brief One immutable canonical trial supplied by reference to every adapter. */
 struct ComparisonTrial {

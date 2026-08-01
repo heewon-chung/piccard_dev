@@ -392,6 +392,10 @@ if(BUILD_TESTS)
             test_comparison_workload
             PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
         )
+        target_compile_definitions(
+            test_comparison_workload
+            PRIVATE PICCARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        )
         add_test(NAME ComparisonWorkload COMMAND test_comparison_workload)
 
         add_executable(

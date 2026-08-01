@@ -7,9 +7,11 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <tuple>
@@ -517,11 +519,45 @@ std::string ReviewMeasurementKind(const std::string& method, TrialKind kind) {
         ? AccuracyKind(method) : TimingKind(method);
 }
 
-std::optional<uint64_t> ReviewHashSeedCell(TrialKind kind,
-                                           uint64_t record_hash_seed) {
-    if (kind == TrialKind::Timing) return record_hash_seed;
-    if (kind == TrialKind::Accuracy) return std::nullopt;
-    throw std::invalid_argument("warmup records do not emit aggregate rows");
+ReviewMethodRowPolicy ResolveReviewMethodRowPolicy(
+    const std::string& method,
+    TrialKind kind,
+    uint64_t requested_k,
+    uint64_t requested_m,
+    uint64_t timing_hash_seed) {
+    if (kind == TrialKind::Warmup) {
+        throw std::invalid_argument("warmup records do not emit aggregate rows");
+    }
+    // Piccard consumes both configured dimensions. BCG12 MinHash consumes k
+    // and the shared full-range CRS, but not one-hot m. Exact BCG12 and SJ16
+    // have neither parameter nor a workload hash CRS in their aggregate rows.
+    const bool piccard = method == "piccard" || method == "piccard_sqrt";
+    const bool minhash = method == "bcg12_mh_ff" || method == "bcg12_mh_ec";
+    const bool hash_crs = piccard || minhash;
+    if (!piccard && !minhash && method != "bcg12_exact_ff" &&
+        method != "bcg12_exact_ec" && method != "sj16" &&
+        method != "sj16_precomputed") {
+        throw std::invalid_argument("unknown review row method: " + method);
+    }
+    ReviewMethodRowPolicy policy;
+    if (piccard || minhash) policy.k = requested_k;
+    if (piccard) policy.m = requested_m;
+    if (hash_crs && kind == TrialKind::Timing) {
+        policy.hash_seed = timing_hash_seed;
+        policy.hash_randomness = "fixed";
+    } else if (hash_crs) {
+        policy.hash_randomness = "resampled";
+    } else {
+        policy.hash_randomness = "not-applicable";
+    }
+    return policy;
+}
+
+std::string ReviewNumericCell(double value) {
+    if (value < 0.0) return "";
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(6) << value;
+    return out.str();
 }
 
 ExactRational ParseExactDecimal(const std::string& text) {

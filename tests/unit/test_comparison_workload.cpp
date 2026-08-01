@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -152,17 +154,94 @@ TEST(ComparisonWorkload, ExactCardinalityJaccardAndCrsRules) {
     EXPECT_EQ(std::adjacent_find(trial_seeds.begin(), trial_seeds.end()),
               trial_seeds.end());
 
-    EXPECT_EQ(ReviewHashSeedCell(TrialKind::Timing, timing_hash_seed),
-              std::optional<uint64_t>(timing_hash_seed));
-    EXPECT_EQ(ReviewHashSeedCell(TrialKind::Accuracy,
-                                 workload.Records()[2].hash_seed),
-              std::nullopt);
     EXPECT_EQ(ReviewMeasurementKind("piccard", TrialKind::Accuracy),
               "fhe-accuracy");
     EXPECT_EQ(ReviewMeasurementKind("bcg12_mh_ec", TrialKind::Timing),
               "psi-timing");
     EXPECT_EQ(ReviewMeasurementKind("sj16", TrialKind::Accuracy),
               "ahe-accuracy");
+
+    const auto piccard_policy = ResolveReviewMethodRowPolicy(
+        "piccard", TrialKind::Timing, 16, 16, timing_hash_seed);
+    EXPECT_EQ(piccard_policy.k, std::optional<uint64_t>(16));
+    EXPECT_EQ(piccard_policy.m, std::optional<uint64_t>(16));
+    EXPECT_EQ(piccard_policy.hash_seed,
+              std::optional<uint64_t>(timing_hash_seed));
+    EXPECT_EQ(piccard_policy.hash_randomness, "fixed");
+
+    const auto minhash_policy = ResolveReviewMethodRowPolicy(
+        "bcg12_mh_ec", TrialKind::Timing, 16, 16, timing_hash_seed);
+    EXPECT_EQ(minhash_policy.k, std::optional<uint64_t>(16));
+    EXPECT_EQ(minhash_policy.m, std::nullopt);
+    EXPECT_EQ(minhash_policy.hash_seed,
+              std::optional<uint64_t>(timing_hash_seed));
+
+    const auto exact_policy = ResolveReviewMethodRowPolicy(
+        "bcg12_exact_ec", TrialKind::Timing, 16, 16, timing_hash_seed);
+    EXPECT_EQ(exact_policy.k, std::nullopt);
+    EXPECT_EQ(exact_policy.m, std::nullopt);
+    EXPECT_EQ(exact_policy.hash_seed, std::nullopt);
+    EXPECT_EQ(exact_policy.hash_randomness, "not-applicable");
+
+    const auto accuracy_policy = ResolveReviewMethodRowPolicy(
+        "piccard", TrialKind::Accuracy, 16, 16, timing_hash_seed);
+    EXPECT_EQ(accuracy_policy.hash_seed, std::nullopt);
+    EXPECT_EQ(accuracy_policy.hash_randomness, "resampled");
+    EXPECT_EQ(ReviewNumericCell(-1.0), "");
+    EXPECT_EQ(ReviewNumericCell(0.0), "0.000000");
+}
+
+TEST(ComparisonWorkload, ToyCsvGoldenBindsPersistedMethodApplicability) {
+#ifdef PICCARD_SOURCE_DIR
+    std::ifstream input(std::string(PICCARD_SOURCE_DIR) +
+                        "/tests/fixtures/review_toy_results.golden.csv");
+    ASSERT_TRUE(input.good());
+    std::string line;
+    ASSERT_TRUE(std::getline(input, line));
+    EXPECT_EQ(line,
+              "method,measurement_kind,evidence_arm,k,m,hash_randomness,"
+              "hash_seed,total_ms_sd,workload_manifest_sha256");
+    const std::string expected_digest =
+        "e5a1f07c6912592197c1d17b40f9487ce002b8067927aabd456bc4712a3b3a56";
+    const std::vector<std::pair<std::string, std::string>> expected_rows = {
+        {"piccard", "fhe-timing"},
+        {"piccard", "fhe-accuracy"},
+        {"piccard_sqrt", "fhe-timing"},
+        {"piccard_sqrt", "fhe-accuracy"},
+        {"bcg12_mh_ec", "psi-timing"},
+        {"bcg12_mh_ec", "psi-accuracy"},
+        {"bcg12_exact_ec", "psi-timing"},
+        {"bcg12_exact_ec", "psi-accuracy"},
+        {"sj16", "ahe-timing"},
+        {"sj16", "ahe-accuracy"},
+    };
+    size_t rows = 0;
+    while (std::getline(input, line)) {
+        std::stringstream fields(line);
+        std::vector<std::string> cells;
+        std::string cell;
+        while (std::getline(fields, cell, ',')) cells.push_back(cell);
+        ASSERT_EQ(cells.size(), 9u);
+        ASSERT_LT(rows, expected_rows.size());
+        EXPECT_EQ(cells[0], expected_rows[rows].first);
+        EXPECT_EQ(cells[1], expected_rows[rows].second);
+        const TrialKind kind = cells[2] == "timing"
+            ? TrialKind::Timing : TrialKind::Accuracy;
+        const auto policy = ResolveReviewMethodRowPolicy(
+            cells[0], kind, 16, 16, UINT64_C(15329580584519071531));
+        EXPECT_EQ(cells[3], policy.k ? std::to_string(*policy.k) : "");
+        EXPECT_EQ(cells[4], policy.m ? std::to_string(*policy.m) : "");
+        EXPECT_EQ(cells[5], policy.hash_randomness);
+        EXPECT_EQ(cells[6], policy.hash_seed
+                               ? std::to_string(*policy.hash_seed) : "");
+        EXPECT_EQ(cells[7], "");
+        EXPECT_EQ(cells[8], expected_digest);
+        ++rows;
+    }
+    EXPECT_EQ(rows, 10u);
+#else
+    GTEST_SKIP() << "PICCARD_SOURCE_DIR is not defined";
+#endif
 }
 
 TEST(ComparisonWorkload, SeedSensitivityAndExactHalfRoundsDown) {

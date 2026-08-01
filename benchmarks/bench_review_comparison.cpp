@@ -57,8 +57,9 @@ using piccard::benchmark::PrecomputationModeName;
 using piccard::benchmark::PrimitiveName;
 using piccard::benchmark::ProtocolModelName;
 using piccard::benchmark::ResolveBaselineCapability;
-using piccard::benchmark::ReviewHashSeedCell;
 using piccard::benchmark::ReviewMeasurementKind;
+using piccard::benchmark::ReviewNumericCell;
+using piccard::benchmark::ResolveReviewMethodRowPolicy;
 using piccard::benchmark::SecurityBasisName;
 using piccard::benchmark::TrialKind;
 using piccard::benchmark::ValidateAggregateMembership;
@@ -530,10 +531,9 @@ std::string SerializeAggregate(const Options& options,
     const bool eligible = !suite_diagnostic && cap.comparison_eligible;
     const std::string arm = aggregate.kind == TrialKind::Timing
         ? "timing" : "accuracy";
-    const std::string hash_randomness = aggregate.kind == TrialKind::Timing
-        ? "fixed" : "resampled";
-    const std::optional<uint64_t> hash_seed = ReviewHashSeedCell(
-        aggregate.kind, workload.Records()[1].hash_seed);
+    const auto row_policy = ResolveReviewMethodRowPolicy(
+        aggregate.adapter->Name(), aggregate.kind, options.k, options.m,
+        workload.Records()[1].hash_seed);
 
     std::ostringstream out;
     out << options.suite << ",review-" << options.universe << ","
@@ -560,7 +560,8 @@ std::string SerializeAggregate(const Options& options,
 #else
         << 1 << ",false"
 #endif
-        << "," << options.k << "," << options.m << "," << options.set_size
+        << "," << OptionalU64(row_policy.k) << ","
+        << OptionalU64(row_policy.m) << "," << options.set_size
         << "," << options.universe << ",jaccard,"
         << workload.Spec().target_jaccard.numerator << ","
         << workload.Spec().target_jaccard.denominator << ","
@@ -569,8 +570,8 @@ std::string SerializeAggregate(const Options& options,
         << realized.exact_intersection << "," << realized.exact_union << ","
         << RationalDouble(realized.exact_jaccard) << ","
         << options.trials << "," << options.accuracy_trials << ","
-        << aggregate.observations.size() << "," << hash_randomness << ","
-        << OptionalU64(hash_seed) << ","
+        << aggregate.observations.size() << "," << row_policy.hash_randomness << ","
+        << OptionalU64(row_policy.hash_seed) << ","
         << (exact ? "not-applicable" : "sha256-random-ranking-poc-v1") << ","
         << (params ? "phase-smudging-enc0-poc-v1" : "not-applicable") << ","
         << (params ? "empirical-phase-statistical+ciphertext-computational"
@@ -588,7 +589,7 @@ std::string SerializeAggregate(const Options& options,
         << OptionalU64(provenance.plaintext_modulus) << ","
         << OptionalU32(provenance.num_limbs) << "," << provenance.openfhe_version
         << "," << std::fixed << std::setprecision(6) << stats.mean << ","
-        << stats.sd << "," << stats.median << "," << estimate << ","
+        << ReviewNumericCell(stats.sd) << "," << stats.median << "," << estimate << ","
         << expected << "," << error << ",measured\n";
     return out.str();
 }
