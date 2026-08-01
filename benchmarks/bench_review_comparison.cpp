@@ -166,12 +166,14 @@ Options ParseOptions(int argc, char** argv) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout
                 << "Usage: bench_review_comparison --suite=SUITE --profile=ID "
-                   "--security=LEVEL --k=N --m=N --set-size=N --universe=N "
+                   "--security=LEVEL (optional with --profile) --k=N --m=N "
+                   "--set-size=N --universe=N "
                    "--target-jaccard=DECIMAL --trials=N --accuracy-trials=N "
                    "--seed=N --methods=CSV --sj16-key-bits=N "
                    "--manifest-out=PATH.bin --execution-trace-out=PATH.bin "
                    "(--strict-security|--diagnostic-security|"
-                   "--allow-unmatched-security)\n";
+                   "--allow-unmatched-security)\n"
+                   "Profile supplies security when --security is omitted.\n";
             std::exit(0);
         } else if (key == "--overlap") {
             throw std::invalid_argument(
@@ -248,7 +250,6 @@ double RationalDouble(const ExactRational& value) {
 struct Observation {
     QueryCost cost;
     double expected = 0.0;
-    std::string trial_digest;
 };
 
 class Adapter {
@@ -258,8 +259,7 @@ public:
     virtual ~Adapter() = default;
     const std::string& Name() const { return name_; }
     const BaselineCapability& Capability() const { return capability_; }
-    virtual Observation Run(const ComparisonTrial& trial,
-                            const std::string& trial_digest) = 0;
+    virtual Observation Run(const ComparisonTrial& trial) = 0;
     virtual BenchmarkProvenance Provenance() const = 0;
     virtual const PiccardParams* Params() const { return nullptr; }
 
@@ -285,8 +285,7 @@ public:
         engine_->KeyGen();
     }
 
-    Observation Run(const ComparisonTrial& trial,
-                    const std::string& trial_digest) override {
+    Observation Run(const ComparisonTrial& trial) override {
         engine_->SetHashSeed(trial.hash_seed);
         const auto start = Clock::now();
         const auto result = engine_->Run(trial.set_a, trial.set_b);
@@ -296,7 +295,6 @@ public:
             std::chrono::duration<double, std::milli>(stop - start).count();
         out.cost.jaccard_estimate = result.jaccard_estimate;
         out.expected = RationalDouble(trial.exact_jaccard);
-        out.trial_digest = trial_digest;
         return out;
     }
 
@@ -327,8 +325,7 @@ public:
         engine_->KeyGen();
     }
 
-    Observation Run(const ComparisonTrial& trial,
-                    const std::string& trial_digest) override {
+    Observation Run(const ComparisonTrial& trial) override {
         engine_->SetHashSeed(trial.hash_seed);
         const auto start = Clock::now();
         const auto result = engine_->Run(trial.set_a, trial.set_b);
@@ -338,7 +335,6 @@ public:
             std::chrono::duration<double, std::milli>(stop - start).count();
         out.cost.jaccard_estimate = result.jaccard_estimate;
         out.expected = RationalDouble(trial.exact_jaccard);
-        out.trial_digest = trial_digest;
         return out;
     }
 
@@ -369,13 +365,11 @@ public:
         engine_->Setup();
     }
 
-    Observation Run(const ComparisonTrial& trial,
-                    const std::string& trial_digest) override {
+    Observation Run(const ComparisonTrial& trial) override {
         engine_->SetHashSeed(trial.hash_seed);
         Observation out;
         out.cost = engine_->RunQuery(trial.set_a, trial.set_b);
         out.expected = RationalDouble(trial.exact_jaccard);
-        out.trial_digest = trial_digest;
         return out;
     }
 
@@ -399,15 +393,13 @@ public:
         engine_->SetUniverse(universe);
     }
 
-    Observation Run(const ComparisonTrial& trial,
-                    const std::string& trial_digest) override {
+    Observation Run(const ComparisonTrial& trial) override {
         if (precomputed_) {
             engine_->PrepareRandomizerPool(static_cast<size_t>(universe_) + 1);
         }
         Observation out;
         out.cost = engine_->RunQuery(trial.set_a, trial.set_b);
         out.expected = RationalDouble(trial.exact_jaccard);
-        out.trial_digest = trial_digest;
         return out;
     }
 
@@ -690,13 +682,9 @@ int Run(int argc, char** argv) {
     try {
         for (const auto& trial : workload.Records()) {
             trace.BeginRecord(trial);
-            const std::string trial_digest = workload.TrialSha256Hex(trial);
             for (const auto& method : workload.ExecutionOrder(trial)) {
                 trace.AppendDispatch(method);  // must precede adapter invocation
-                Observation observation = by_name.at(method)->Run(trial, trial_digest);
-                if (observation.trial_digest != trial_digest) {
-                    throw std::runtime_error("adapter observed a different immutable trial");
-                }
+                Observation observation = by_name.at(method)->Run(trial);
                 if (trial.kind != TrialKind::Warmup) {
                     aggregates.at({method, trial.kind}).observations.push_back(
                         std::move(observation));

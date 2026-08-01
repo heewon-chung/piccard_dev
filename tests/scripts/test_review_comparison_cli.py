@@ -72,6 +72,12 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertEqual(aliased.stdout, "")
             self.assertIn("must differ", aliased.stderr)
 
+    def test_help_documents_profile_derived_security(self):
+        result = self.run_cli([str(self.binary), "--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--security=LEVEL (optional with --profile)", result.stdout)
+        self.assertIn("Profile supplies security when --security is omitted.", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

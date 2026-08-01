@@ -3,11 +3,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
+#include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,6 +97,14 @@ std::vector<AggregateIdentity> ValidToyRows(
         rows.push_back(std::move(accuracy));
     }
     return rows;
+}
+
+std::vector<std::string> CsvCells(const std::string& line) {
+    std::stringstream fields(line);
+    std::vector<std::string> cells;
+    std::string cell;
+    while (std::getline(fields, cell, ',')) cells.push_back(cell);
+    return cells;
 }
 
 }  // namespace
@@ -191,51 +201,79 @@ TEST(ComparisonWorkload, ExactCardinalityJaccardAndCrsRules) {
     EXPECT_EQ(ReviewNumericCell(0.0), "0.000000");
 }
 
-TEST(ComparisonWorkload, ToyCsvGoldenBindsPersistedMethodApplicability) {
+TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
 #ifdef PICCARD_SOURCE_DIR
     std::ifstream input(std::string(PICCARD_SOURCE_DIR) +
-                        "/tests/fixtures/review_toy_results.golden.csv");
+                        "/.omo/evidence/work4-phase4-toy-results.csv");
     ASSERT_TRUE(input.good());
     std::string line;
     ASSERT_TRUE(std::getline(input, line));
-    EXPECT_EQ(line,
-              "method,measurement_kind,evidence_arm,k,m,hash_randomness,"
-              "hash_seed,total_ms_sd,workload_manifest_sha256");
+    const auto header = CsvCells(line);
+    ASSERT_EQ(header.size(), 66u);
+    std::map<std::string, size_t> column;
+    for (size_t i = 0; i < header.size(); ++i) column.emplace(header[i], i);
+    for (const char* name : {"method", "measurement_kind", "evidence_arm",
+                             "comparison_eligible", "workload_id",
+                             "workload_manifest_sha256", "execution_trace_sha256",
+                             "k", "m", "hash_randomness", "hash_seed",
+                             "total_ms_sd", "measurement_status"}) {
+        ASSERT_TRUE(column.find(name) != column.end()) << name;
+    }
     const std::string expected_digest =
         "e5a1f07c6912592197c1d17b40f9487ce002b8067927aabd456bc4712a3b3a56";
-    const std::vector<std::pair<std::string, std::string>> expected_rows = {
-        {"piccard", "fhe-timing"},
-        {"piccard", "fhe-accuracy"},
-        {"piccard_sqrt", "fhe-timing"},
-        {"piccard_sqrt", "fhe-accuracy"},
-        {"bcg12_mh_ec", "psi-timing"},
-        {"bcg12_mh_ec", "psi-accuracy"},
-        {"bcg12_exact_ec", "psi-timing"},
-        {"bcg12_exact_ec", "psi-accuracy"},
-        {"sj16", "ahe-timing"},
-        {"sj16", "ahe-accuracy"},
+    const std::string expected_trace =
+        "b637d8275e106f1a517e1b063b2ec694cfdef618d782af654319ea9e6ac0aa7e";
+    const struct {
+        const char* method;
+        const char* kind;
+        const char* arm;
+        const char* k;
+        const char* m;
+        const char* randomness;
+        const char* hash_seed;
+    } expected_rows[] = {
+        {"piccard", "fhe-timing", "timing", "16", "16", "fixed",
+         "15329580584519071531"},
+        {"piccard", "fhe-accuracy", "accuracy", "16", "16", "resampled", ""},
+        {"piccard_sqrt", "fhe-timing", "timing", "16", "16", "fixed",
+         "15329580584519071531"},
+        {"piccard_sqrt", "fhe-accuracy", "accuracy", "16", "16", "resampled", ""},
+        {"bcg12_mh_ec", "psi-timing", "timing", "16", "", "fixed",
+         "15329580584519071531"},
+        {"bcg12_mh_ec", "psi-accuracy", "accuracy", "16", "", "resampled", ""},
+        {"bcg12_exact_ec", "psi-timing", "timing", "", "", "not-applicable", ""},
+        {"bcg12_exact_ec", "psi-accuracy", "accuracy", "", "", "not-applicable", ""},
+        {"sj16", "ahe-timing", "timing", "", "", "not-applicable", ""},
+        {"sj16", "ahe-accuracy", "accuracy", "", "", "not-applicable", ""},
     };
     size_t rows = 0;
     while (std::getline(input, line)) {
-        std::stringstream fields(line);
-        std::vector<std::string> cells;
-        std::string cell;
-        while (std::getline(fields, cell, ',')) cells.push_back(cell);
-        ASSERT_EQ(cells.size(), 9u);
-        ASSERT_LT(rows, expected_rows.size());
-        EXPECT_EQ(cells[0], expected_rows[rows].first);
-        EXPECT_EQ(cells[1], expected_rows[rows].second);
-        const TrialKind kind = cells[2] == "timing"
-            ? TrialKind::Timing : TrialKind::Accuracy;
-        const auto policy = ResolveReviewMethodRowPolicy(
-            cells[0], kind, 16, 16, UINT64_C(15329580584519071531));
-        EXPECT_EQ(cells[3], policy.k ? std::to_string(*policy.k) : "");
-        EXPECT_EQ(cells[4], policy.m ? std::to_string(*policy.m) : "");
-        EXPECT_EQ(cells[5], policy.hash_randomness);
-        EXPECT_EQ(cells[6], policy.hash_seed
-                               ? std::to_string(*policy.hash_seed) : "");
-        EXPECT_EQ(cells[7], "");
-        EXPECT_EQ(cells[8], expected_digest);
+        const auto cells = CsvCells(line);
+        ASSERT_EQ(cells.size(), header.size());
+        ASSERT_LT(rows, std::size(expected_rows));
+        const auto& expected = expected_rows[rows];
+        EXPECT_EQ(cells[column.at("method")], expected.method);
+        EXPECT_EQ(cells[column.at("measurement_kind")], expected.kind);
+        EXPECT_EQ(cells[column.at("evidence_arm")], expected.arm);
+        EXPECT_EQ(cells[column.at("k")], expected.k);
+        EXPECT_EQ(cells[column.at("m")], expected.m);
+        EXPECT_EQ(cells[column.at("hash_randomness")], expected.randomness);
+        EXPECT_EQ(cells[column.at("hash_seed")], expected.hash_seed);
+        EXPECT_EQ(cells[column.at("comparison_eligible")], "false");
+        EXPECT_EQ(cells[column.at("workload_id")],
+                  "review-64-e5a1f07c69125921");
+        EXPECT_EQ(cells[column.at("workload_manifest_sha256")], expected_digest);
+        EXPECT_EQ(cells[column.at("execution_trace_sha256")], expected_trace);
+        EXPECT_EQ(cells[column.at("measurement_status")], "measured");
+        const std::string& sd = cells[column.at("total_ms_sd")];
+        if (std::string(expected.arm) == "timing") {
+            EXPECT_TRUE(sd.empty());
+        } else {
+            ASSERT_FALSE(sd.empty());
+            const double parsed_sd = std::stod(sd);
+            EXPECT_TRUE(std::isfinite(parsed_sd));
+            EXPECT_GE(parsed_sd, 0.0);
+        }
         ++rows;
     }
     EXPECT_EQ(rows, 10u);

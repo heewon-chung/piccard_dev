@@ -689,11 +689,6 @@ std::vector<std::string> ComparisonWorkload::ExecutionOrder(
     return order;
 }
 
-std::string ComparisonWorkload::TrialSha256Hex(
-    const ComparisonTrial& record) const {
-    return Sha256Hex(SerializeTrial(record));
-}
-
 void ComparisonWorkload::WriteNew(const std::filesystem::path& path) const {
     AtomicWriteNew(path, bytes_);
 }

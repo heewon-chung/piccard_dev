@@ -92,8 +92,6 @@ public:
     /** @brief Derive the trial-seed rotation of the manifest method list. */
     std::vector<std::string> ExecutionOrder(
         const ComparisonTrial& record) const;
-    /** @brief Hash the canonical record encoding observed by every adapter. */
-    std::string TrialSha256Hex(const ComparisonTrial& record) const;
 
     /** @brief Atomically publish to a new .bin path; existing paths fail. */
     void WriteNew(const std::filesystem::path& path) const;
