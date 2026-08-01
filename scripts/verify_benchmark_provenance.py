@@ -71,6 +71,10 @@ SANITIZER_NUMERIC = (
     "flood_noise_bits", "scaling_mod_size",
 )
 FHE_NUMERIC = ("actual_ring_dim", "log_q_bits", "plaintext_modulus", "num_limbs")
+MEASURED_REQUIRED_NUMERIC = (
+    "total_ms", "total_ms_median", "jaccard_computed",
+    "jaccard_expected", "jaccard_error",
+)
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 UINT = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 
@@ -146,6 +150,17 @@ def _validate_numeric_cells(row: dict[str, str], row_number: int) -> None:
     for column in BOOLEAN_COLUMNS & row.keys():
         require(row[column] in {"true", "false"},
                 f"row {row_number}: {column} must be true or false")
+
+
+def validate_measured_metrics(row: dict[str, str], row_number: int) -> None:
+    """Require the evidence-bearing numeric cells on every measured row."""
+    if row.get("measurement_status") != "measured":
+        return
+    for column in MEASURED_REQUIRED_NUMERIC:
+        value = row.get(column, "")
+        require(value != "",
+                f"row {row_number}: measured {column} is required")
+        _finite(value, column, row_number)
 
 
 def _validate_profile(row: dict[str, str], row_number: int):
@@ -333,6 +348,7 @@ def validate_rows(rows: list[dict[str, str]]) -> None:
         _validate_numeric_cells(row, row_number)
         require(row["measurement_status"] in {"measured", "extrapolated", "infeasible", "skipped", "error"},
                 f"row {row_number}: invalid measurement_status")
+        validate_measured_metrics(row, row_number)
         target, transcript, profile_eligible = _validate_profile(row, row_number)
         _validate_method(row, row_number, target, profile_eligible)
         if row["method"] in {"piccard", "piccard_sqrt"}:

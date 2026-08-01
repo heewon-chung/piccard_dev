@@ -79,3 +79,47 @@ Recorded results:
   `measurement_status=measured|extrapolated`; legacy semantics are accepted
   only with `--legacy-sj16-schema`, emit `DEPRECATED`, and cannot be mixed with
   new semantics.
+
+## Review-fix follow-up
+
+The Phase 5 code review at `.omo/evidence/work4-phase5-code-review.md` found
+that populated numeric cells were finite-checked but blank measured-result
+cells were treated as optional. The fix adds one shared status-aware contract:
+every `measurement_status=measured` row must contain finite `total_ms`,
+`total_ms_median`, `jaccard_computed`, `jaccard_expected`, and
+`jaccard_error`. `total_ms_sd` remains intentionally optional; the persisted
+one-trial TOY producer fixture explicitly exercises its empty representation.
+
+CLI-level regression tests mutate every required metric to both blank and
+`NaN` and require nonzero exits with column-specific diagnostics from both
+verifiers. The RED run executed 21 tests and failed 11 subcases: the five
+blank cells passed the provenance gate, four blank cells passed the review
+gate, and the review gate's blank/`NaN` `jaccard_expected` diagnostics did not
+name the column.
+
+Positive comparison coverage now also builds independent, non-benchmark
+canonical binary fixtures in `tests/scripts/review_verifier_fixtures.py`:
+
+- a complete `primary-review` workload with 81 canonical records, complete
+  cyclic trace, and 14 exact method-arm CSV rows; and
+- an `sj16-precompute-sensitivity` workload with 4 canonical records,
+  complete cyclic trace, and the required included/precomputed 2-row group.
+
+Both use empty sets and universe 1 to keep regeneration deterministic and
+fast. They invoke the real CLI verifier and do not import production encoding
+helpers. The persisted Phase 4 TOY fixture remains as the producer-bound
+positive control. No benchmark was executed for this follow-up.
+
+Follow-up focused command:
+
+```text
+python3 -m unittest -v tests.scripts.test_verify_review_comparison tests.scripts.test_verify_benchmark_provenance tests.scripts.test_verify_sj16_extrapolation
+```
+
+Initial GREEN result: exit 0, `Ran 21 tests in 3.507s`, `OK`.
+
+Fresh final pre-commit result after the explicit empty-`total_ms_sd` fixture
+assertion: exit 0, `Ran 21 tests in 3.504s`, `OK`. Python compilation and
+`git diff --check` both exited 0. The persisted producer artifact checks were
+rerun and returned the same 10-row provenance PASS and 10-row `toy-smoke`
+review-comparison PASS JSON recorded above.

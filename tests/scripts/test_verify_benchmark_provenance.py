@@ -47,6 +47,18 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"verdict": "PASS"', result.stdout)
 
+    def test_measured_rows_require_each_core_metric_to_be_finite(self):
+        required_metrics = (
+            "total_ms", "total_ms_median", "jaccard_computed",
+            "jaccard_expected", "jaccard_error",
+        )
+        for column in required_metrics:
+            for value in ("", "NaN"):
+                with self.subTest(column=column, value=value):
+                    rows = [dict(row) for row in self.rows]
+                    rows[0][column] = value
+                    self.assert_rejects(rows, column)
+
     def test_complete_std128_capability_fixture_passes(self):
         rows = [dict(row) for row in self.rows]
         for row in rows:

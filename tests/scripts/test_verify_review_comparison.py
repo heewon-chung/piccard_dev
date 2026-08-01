@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.scripts.review_verifier_fixtures import write_review_fixture
+
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = ROOT / "scripts" / "verify_review_comparison.py"
@@ -57,10 +59,60 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
         self.assertIn(cause, result.stderr)
 
     def test_persisted_toy_artifact_passes_without_rerunning_benchmark(self):
+        _, rows = self.read_rows()
+        self.assertTrue(any(
+            row["measurement_status"] == "measured" and
+            row["trials"] == "1" and row["total_ms_sd"] == ""
+            for row in rows
+        ))
         result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"verdict": "PASS"', result.stdout)
         self.assertIn('"rows": 10', result.stdout)
+
+    def test_primary_review_14_row_non_benchmark_fixture_passes(self):
+        fields, _ = self.read_rows()
+        rows = write_review_fixture(
+            "primary-review", fields, self.csv_path,
+            self.workload_path, self.trace_path,
+        )
+        self.assertEqual(len(rows), 14)
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"suite": "primary-review"', result.stdout)
+        self.assertIn('"rows": 14', result.stdout)
+
+    def test_sj16_precompute_2_row_non_benchmark_fixture_passes(self):
+        fields, _ = self.read_rows()
+        rows = write_review_fixture(
+            "sj16-precompute-sensitivity", fields, self.csv_path,
+            self.workload_path, self.trace_path,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row["precomputation_mode"] for row in rows},
+            {"randomizer-generation-included", "randomizers-precomputed"},
+        )
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"suite": "sj16-precompute-sensitivity"', result.stdout)
+        self.assertIn('"rows": 2', result.stdout)
+
+    def test_measured_rows_require_each_core_metric_to_be_finite(self):
+        fields, rows = self.read_rows()
+        required_metrics = (
+            "total_ms", "total_ms_median", "jaccard_computed",
+            "jaccard_expected", "jaccard_error",
+        )
+        for column in required_metrics:
+            for value in ("", "NaN"):
+                with self.subTest(column=column, value=value):
+                    mutated = [dict(row) for row in rows]
+                    mutated[0][column] = value
+                    self.write_rows(fields, mutated)
+                    result = self.run_verifier()
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(column, result.stderr)
 
     def test_method_elsewhere_does_not_satisfy_required_workload_membership(self):
         self.assert_rejects_mutation("workload_id", "review-elsewhere-deadbeef", "workload_id", 8)

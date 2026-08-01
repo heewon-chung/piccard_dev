@@ -15,6 +15,7 @@ from pathlib import Path
 
 from verify_benchmark_provenance import (
     REQUIRED_COLUMNS, VerificationError, load_csv, require, validate_rows,
+    validate_measured_metrics,
 )
 
 
@@ -287,6 +288,7 @@ def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: st
             "omp_threads must match across the comparison group")
     for row_number, row in enumerate(rows, 2):
         method, arm = row["method"], row["evidence_arm"]
+        validate_measured_metrics(row, row_number)
         checks = {
             "suite": workload.suite,
             "scenario": f"review-{workload.universe}",
