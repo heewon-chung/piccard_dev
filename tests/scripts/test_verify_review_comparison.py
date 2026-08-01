@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Behavior tests for the manifest-bound reviewer comparison gate."""
+
+import csv
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+VERIFIER = ROOT / "scripts" / "verify_review_comparison.py"
+EVIDENCE = ROOT / ".omo" / "evidence"
+
+
+class ReviewComparisonVerifierTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.csv_path = self.root / "results.csv"
+        self.workload_path = self.root / "workload.bin"
+        self.trace_path = self.root / "trace.bin"
+        shutil.copyfile(EVIDENCE / "work4-phase4-toy-results.csv", self.csv_path)
+        shutil.copyfile(EVIDENCE / "work4-phase4-toy-workload.bin", self.workload_path)
+        shutil.copyfile(EVIDENCE / "work4-phase4-toy-trace.bin", self.trace_path)
+
+    def run_verifier(self):
+        return subprocess.run(
+            [
+                "python3", str(VERIFIER),
+                f"--csv={self.csv_path}",
+                f"--workload={self.workload_path}",
+                f"--execution-trace={self.trace_path}",
+            ],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+
+    def read_rows(self):
+        with self.csv_path.open(newline="") as stream:
+            reader = csv.DictReader(stream)
+            return list(reader.fieldnames or ()), list(reader)
+
+    def write_rows(self, fields, rows):
+        with self.csv_path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def assert_rejects_mutation(self, column, value, cause, row_index=0):
+        fields, rows = self.read_rows()
+        rows[row_index][column] = value
+        self.write_rows(fields, rows)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(cause, result.stderr)
+
+    def test_persisted_toy_artifact_passes_without_rerunning_benchmark(self):
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"verdict": "PASS"', result.stdout)
+        self.assertIn('"rows": 10', result.stdout)
+
+    def test_method_elsewhere_does_not_satisfy_required_workload_membership(self):
+        self.assert_rejects_mutation("workload_id", "review-elsewhere-deadbeef", "workload_id", 8)
+
+    def test_group_conditions_are_exactly_manifest_bound(self):
+        cases = (
+            ("workload_manifest_sha256", "0" * 64, "workload_manifest_sha256"),
+            ("profile_id", "std128-t40-primary", "profile_id"),
+            ("root_seed", "8", "root_seed"),
+            ("omp_threads", "3", "omp_threads"),
+            ("target_jaccard", "0.25", "target_jaccard"),
+            ("timing_trials", "2", "timing_trials"),
+            ("measurement_status", "extrapolated", "measurement_status"),
+            ("security_match", "false", "security_match"),
+        )
+        for column, value, cause in cases:
+            with self.subTest(column=column):
+                fields, rows = self.read_rows()
+                original = [dict(row) for row in rows]
+                rows[0][column] = value
+                self.write_rows(fields, rows)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+                self.write_rows(fields, original)
+
+    def test_duplicate_unexpected_and_missing_method_kind_pairs_fail(self):
+        fields, rows = self.read_rows()
+        mutations = []
+        duplicate = [dict(row) for row in rows]
+        duplicate.append(dict(rows[0]))
+        mutations.append((duplicate, "duplicate method-kind"))
+        unexpected = [dict(row) for row in rows]
+        unexpected[0]["method"] = "unexpected"
+        mutations.append((unexpected, "unexpected method-kind"))
+        missing = [dict(row) for row in rows[:-1]]
+        mutations.append((missing, "missing method-kind"))
+        for mutated, cause in mutations:
+            with self.subTest(cause=cause):
+                self.write_rows(fields, mutated)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+
+    def test_row_parameters_membership_and_trial_counts_are_exact(self):
+        cases = (
+            (0, "k", "17", "k"),
+            (0, "m", "17", "m"),
+            (0, "set_size", "11", "set_size"),
+            (0, "universe_size", "65", "universe_size"),
+            (0, "measurement_kind", "fhe-accuracy", "measurement_kind"),
+            (0, "trials", "2", "aggregate trial count"),
+            (6, "jaccard_error", "0.1", "exact method"),
+        )
+        fields, rows = self.read_rows()
+        for index, column, value, cause in cases:
+            with self.subTest(column=column):
+                mutated = [dict(row) for row in rows]
+                mutated[index][column] = value
+                self.write_rows(fields, mutated)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+
+    def test_workload_and_execution_trace_bytes_are_reparsed(self):
+        for path, cause in ((self.workload_path, "workload"), (self.trace_path, "execution trace")):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                tampered = bytearray(original)
+                tampered[-1] ^= 1
+                path.write_bytes(tampered)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+                path.write_bytes(original)
+
+
+if __name__ == "__main__":
+    unittest.main()

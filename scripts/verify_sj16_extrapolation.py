@@ -1,56 +1,130 @@
-"""Plan 13-2 V-5 (3) gate: SJ16 extrapolated CSV rows exist and follow the
-field conventions bench_comparison.cpp's FinalizeSJ16Extrapolated (via
-benchmarks/sj16_adapter.h) commits to.
+#!/usr/bin/env python3
+"""Verify measured/extrapolated SJ16 timing rows under the typed schema."""
 
-Transcribed from Branch_Prompts/13_measurement-symmetry.md V-5 (3) with one
-deviation from the literal pseudocode, verified empirically before writing
-this file (build + run, not guessed):
+from __future__ import annotations
 
-    total_ms_sd sentinel check uses `float(...) == -1.0` instead of the
-    plan's literal `r["total_ms_sd"] == "-1"`. bench_comparison.cpp's CSV
-    writer renders EVERY *_sd column with `std::fixed <<
-    std::setprecision(3)` (WriteRow, benchmarks/bench_comparison.cpp) — the
-    -1.0 sentinel therefore always serializes as the string "-1.000", never
-    bare "-1", for measured rows too. A literal "-1" string comparison would
-    fail against a correct implementation on every real run; this is the
-    same class of formatting-assumption bug the plan's own V-7 review
-    history caught twice before (rounds 1-2 of this same document). All
-    other assertions are transcribed as written.
+import argparse
+import csv
+import json
+import math
+import sys
+from pathlib import Path
 
-Precondition (V-5 (1), enforced by the caller, not this script): a PASS
-calibration artifact for the smoke run's --sj16_key_bits must already exist
-at results/sj16_calibration_<host>.txt, and the smoke CSV (V-5 (2)) must be
-generated AFTER that artifact exists. Without that ordering this script's
-`assert extr` fires for the right reason (13-2 not exercised) but the wrong
-cause (missing precondition, not missing implementation).
-"""
 
-import csv, pathlib, sys
+class VerificationError(ValueError):
+    pass
 
-smoke = pathlib.Path(sys.argv[1])
-rows = list(csv.DictReader(open(smoke / "comparison_timing.csv")))
 
-kinds = {r["measurement_kind"] for r in rows}
-assert kinds <= {"measured", "extrapolated"}, kinds
-assert all(r["measurement_kind"] for r in rows), "some row has an empty measurement_kind"
+REQUIRED = {
+    "method", "measurement_kind", "trials", "total_ms", "total_ms_sd",
+    "phase_encode_ms", "extrapolation_alpha", "extrapolation_source",
+}
 
-meas = [r for r in rows if r["method"] == "sj16" and r["measurement_kind"] == "measured"]
-extr = [r for r in rows if r["method"] == "sj16" and r["measurement_kind"] == "extrapolated"]
 
-# The (1) PASS fit is a precondition, so the extrapolated row is **required**.
-# Without this assert, 13-2 could be unimplemented and this script would
-# still pass.
-assert extr, "PASS 적합이 있는데도 외삽 행이 0개 — 13-2 미구현이거나 방출 경로가 죽었다"
-assert meas, "실측 sj16 행이 0개 — u<=max 지점이 측정되지 않았다"
+def require(condition, message):
+    if not condition:
+        raise VerificationError(message)
 
-for r in extr:
-    assert r["trials"] == "0", ("extrapolated trials must be 0", r["trials"])
-    assert float(r["total_ms"]) > 0, "extrapolated row has no predicted time"
-    # See module docstring: -1.000 is the real serialized sentinel, not "-1".
-    assert float(r["total_ms_sd"]) == -1.0, ("sd sentinel expected", r["total_ms_sd"])
-    assert float(r["phase_encode_ms"]) == 0, "phase breakdown must not be invented"
-    assert r["extrapolation_alpha"] and r["extrapolation_source"], "provenance missing"
-for r in meas:
-    assert not r["extrapolation_alpha"], "measured row carries extrapolation fields"
 
-print(f"OK: sj16 measured={len(meas)} extrapolated={len(extr)}")
+def finite(row, column, number):
+    try:
+        value = float(row[column])
+    except ValueError as error:
+        raise VerificationError(f"row {number}: {column} must be finite") from error
+    require(math.isfinite(value), f"row {number}: {column} must be finite")
+    return value
+
+
+def load(path: Path):
+    try:
+        with path.open(newline="", encoding="utf-8") as stream:
+            records = list(csv.reader(stream, strict=True))
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise VerificationError(f"cannot parse CSV: {error}") from error
+    require(records, "CSV is empty")
+    header = records[0]
+    require(len(set(header)) == len(header), "duplicate CSV columns")
+    missing = REQUIRED - set(header)
+    require(not missing, f"missing required columns: {', '.join(sorted(missing))}")
+    rows = []
+    for number, values in enumerate(records[1:], 2):
+        require(len(values) == len(header), f"CSV column count mismatch on line {number}")
+        rows.append(dict(zip(header, values)))
+    return header, rows
+
+
+def migrate(rows, header, legacy):
+    sj16 = [dict(row) for row in rows if row["method"] == "sj16"]
+    require(sj16, "no SJ16 rows")
+    legacy_rows = [row for row in sj16 if row["measurement_kind"] in {"measured", "extrapolated"}]
+    new_rows = [row for row in sj16 if row["measurement_kind"] == "ahe-timing"]
+    require(not (legacy_rows and new_rows), "mixed legacy/new SJ16 semantics are forbidden")
+    if legacy_rows:
+        require(legacy, "legacy SJ16 schema requires --legacy-sj16-schema")
+        require(len(legacy_rows) == len(sj16), "mixed legacy/new SJ16 semantics are forbidden")
+        for row in sj16:
+            row["measurement_status"] = row["measurement_kind"]
+            row["measurement_kind"] = "ahe-timing"
+        print("DEPRECATED: --legacy-sj16-schema migration mode", file=sys.stderr)
+    else:
+        require("measurement_status" in header, "new SJ16 schema requires measurement_status")
+        require(not legacy, "--legacy-sj16-schema accepts only legacy rows, not new semantics")
+    return sj16
+
+
+def verify(rows):
+    measured = []
+    extrapolated = []
+    for number, row in enumerate(rows, 2):
+        require(row["measurement_kind"] == "ahe-timing",
+                f"row {number}: measurement_kind must be ahe-timing")
+        status = row.get("measurement_status", "")
+        require(status in {"measured", "extrapolated"},
+                f"row {number}: measurement_status must be measured or extrapolated")
+        total = finite(row, "total_ms", number)
+        require(total > 0, f"row {number}: total_ms must be positive")
+        if status == "extrapolated":
+            require(row["trials"] == "0", f"row {number}: extrapolated trials must be 0")
+            require(finite(row, "total_ms_sd", number) == -1.0,
+                    f"row {number}: extrapolated total_ms_sd sentinel must be -1")
+            require(finite(row, "phase_encode_ms", number) == 0.0,
+                    f"row {number}: extrapolated phase breakdown must be zero")
+            require(bool(row["extrapolation_alpha"] and row["extrapolation_source"]),
+                    f"row {number}: extrapolation provenance missing")
+            finite(row, "extrapolation_alpha", number)
+            extrapolated.append(row)
+        else:
+            require(row["trials"].isdigit() and int(row["trials"]) > 0,
+                    f"row {number}: measured trials must be positive")
+            require(row["extrapolation_alpha"] == "" and row["extrapolation_source"] == "",
+                    f"row {number}: measured row carries extrapolation fields")
+            if row["total_ms_sd"]:
+                finite(row, "total_ms_sd", number)
+            finite(row, "phase_encode_ms", number)
+            measured.append(row)
+    require(measured, "no measured SJ16 timing rows")
+    require(extrapolated, "no extrapolated SJ16 timing rows")
+    return len(measured), len(extrapolated)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path,
+                        help="comparison_timing.csv or its containing directory")
+    parser.add_argument("--legacy-sj16-schema", action="store_true")
+    args = parser.parse_args(argv)
+    path = args.path / "comparison_timing.csv" if args.path.is_dir() else args.path
+    try:
+        header, rows = load(path)
+        sj16 = migrate(rows, header, args.legacy_sj16_schema)
+        measured, extrapolated = verify(sj16)
+    except VerificationError as error:
+        print(f"verify_sj16_extrapolation: FAIL: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps({"verifier": "sj16-extrapolation", "verdict": "PASS",
+                      "measured": measured, "extrapolated": extrapolated}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
