@@ -119,15 +119,18 @@ generation, and resume without retaining temporary artifacts. A real
 cryptographic toy smoke was deliberately deferred to keep this Phase 6 run
 bounded; no real-smoke artifact exists.
 
-## Unrelated aggregate-build failure
+## Aggregate-build wiring failure
 
 `cmake --build build -j4` built the Phase 6 targets but the aggregate `all`
-target exited nonzero while linking the pre-existing `bench_threshold` target.
+target exited nonzero while linking `bench_threshold`.
 The undefined symbols were `BenchmarkRunClassName`,
-`LegacyBenchmarkProfile`, and `ResolveBenchmarkProfile`. Phase 6 does not
-modify that target or its linkage, `ThresholdProfileCompat` passes, and the
-task explicitly forbids threshold edits, so this unrelated failure was not
-changed or hidden.
+`LegacyBenchmarkProfile`, and `ResolveBenchmarkProfile`. Although Phase 6 did
+not modify the threshold source or CLI, Work 4's shared `benchmark_utils.h`
+path introduced those serializer/profile references without adding
+`piccard_benchmark_serializers` to `bench_threshold`'s link dependencies.
+`ThresholdProfileCompat` still passed, so this was an aggregate build-wiring
+regression rather than a threshold behavior failure. It is corrected by the
+post-Fable Work 4 aggregate-build fix recorded separately.
 
 ## REQUEST_CHANGES follow-up
 

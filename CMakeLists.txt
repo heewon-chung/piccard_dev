@@ -855,7 +855,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     target_include_directories(bench_dynamic PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_threshold benchmarks/bench_threshold.cpp)
-    target_link_libraries(bench_threshold piccard_fhe)
+    target_link_libraries(
+        bench_threshold
+        piccard_fhe
+        piccard_benchmark_serializers
+    )
     target_include_directories(bench_threshold PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
 
     add_executable(bench_sqrt_comparison benchmarks/bench_sqrt_comparison.cpp)
