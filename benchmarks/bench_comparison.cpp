@@ -727,7 +727,6 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
 struct ComparisonConfig {
     BenchmarkConfig base;
     uint32_t universe_size = 65536;  // Default: 2^16
-    bool emit_evidence_fixture = false;
 
     // SJ16 baseline (Phase 4), opt-in. Runs only in BenchVaryUniverse.
     bool sj16 = false;                   // --sj16
@@ -754,8 +753,6 @@ struct ComparisonConfig {
                     static_cast<uint32_t>(std::stoul(arg.substr(20)));
             } else if (arg == "--sj16_precompute") {
                 config.sj16_precompute = true;
-            } else if (arg == "--emit_evidence_fixture") {
-                config.emit_evidence_fixture = true;
             }
         }
         return config;
@@ -766,36 +763,6 @@ struct ComparisonConfig {
         std::cerr << "  Universe: " << universe_size << "\n";
     }
 };
-
-static ComparisonResult MakeReviewerFixtureRow(
-    const BenchmarkConfig& config,
-    const ReviewerWorkload& workload,
-    uint32_t universe_size,
-    const char* method,
-    BenchmarkMeasurementKind measurement_kind) {
-    ComparisonResult row;
-    row.scenario = "vary_universe_" + std::to_string(universe_size);
-    row.method = method;
-    row.universe_size = universe_size;
-    row.set_size = workload.set_a.size();
-    const bool is_baseline = std::string(method) == "baseline";
-    row.k = is_baseline ? 0 : config.k;
-    row.m = is_baseline ? 0 : config.m;
-    row.estimator_model = is_baseline
-        ? EstimatorModel::NotApplicable
-        : EstimatorModel::Sha256RandomRankingPocV1;
-    row.sanitizer = NotApplicableSanitizerMetadata();
-
-    if (measurement_kind == BenchmarkMeasurementKind::FheTiming) {
-        row.trials = config.trials;
-    } else {
-        row.accuracy_trials = config.accuracy_trials;
-        row.jaccard_computed = workload.realized_jaccard;
-        row.jaccard_expected = workload.realized_jaccard;
-    }
-    BindReviewerRow(config, workload, measurement_kind, row);
-    return row;
-}
 
 static void SetReviewerAccuracyFields(
     ComparisonResult& row,
@@ -906,16 +873,6 @@ static void WriteReviewerRowsForPoint(
         config.set_size, point.target_jaccard, point.universe_size);
     const auto measurement_kinds = MeasurementKindsForMode(
         ParseBenchmarkMode(config.mode));
-
-    if (cfg.emit_evidence_fixture) {
-        for (BenchmarkMeasurementKind kind : measurement_kinds) {
-            for (const char* method : {"piccard", "piccard_sqrt", "baseline"}) {
-                csv.WriteRow(MakeReviewerFixtureRow(
-                    config, workload, point.universe_size, method, kind));
-            }
-        }
-        return;
-    }
 
     PiccardParams params;
     params.k = config.k;
@@ -1832,8 +1789,7 @@ int main(int argc, char** argv) {
     RejectUnknownBenchmarkOptions(
         argc, argv,
         {"--universe=", "--sj16", "--sj16_key_bits=",
-         "--sj16_max_universe=", "--sj16_precompute",
-         "--emit_evidence_fixture"});
+         "--sj16_max_universe=", "--sj16_precompute"});
     config.Print();
 
     ComparisonCSVWriter csv;
