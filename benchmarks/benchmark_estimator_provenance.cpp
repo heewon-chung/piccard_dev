@@ -10,6 +10,9 @@ namespace piccard {
 namespace benchmark {
 namespace {
 
+template <typename T>
+void WriteOptional(std::ostringstream& out, const std::optional<T>& value);
+
 const char* RequireEstimatorModel(
     const std::optional<EstimatorModel>& estimator_model) {
     if (!estimator_model.has_value()) {
@@ -72,6 +75,55 @@ bool RequireSanitizerMetadata(const SanitizerMetadata& metadata) {
             "not-applicable sanitizer metadata has numeric fields");
     }
     return applicable;
+}
+
+template <typename T>
+bool EqualOptional(const std::optional<T>& left,
+                   const std::optional<T>& right) {
+    return left == right;
+}
+
+void RequireMatchingSanitizer(
+    const SanitizerMetadata& metadata,
+    const std::optional<uint32_t>& scaling_mod_size,
+    const BenchmarkProvenance& provenance) {
+    const bool applicable = RequireSanitizerMetadata(metadata);
+    ValidateBenchmarkProvenance(provenance);
+    if (applicable != provenance.sanitizer_applicable ||
+        !EqualOptional(metadata.transcript_stat_bits,
+                       provenance.transcript_stat_bits) ||
+        !EqualOptional(metadata.max_queries, provenance.max_queries) ||
+        !EqualOptional(metadata.query_stat_bits, provenance.query_stat_bits) ||
+        !EqualOptional(metadata.coefficient_stat_bits,
+                       provenance.coefficient_stat_bits) ||
+        !EqualOptional(metadata.flood_margin_bits,
+                       provenance.flood_margin_bits) ||
+        !EqualOptional(metadata.eval_noise_bits, provenance.eval_noise_bits) ||
+        !EqualOptional(metadata.flood_noise_bits,
+                       provenance.flood_noise_bits) ||
+        (applicable && scaling_mod_size.has_value() &&
+         provenance.scaling_mod_size != scaling_mod_size)) {
+        throw std::logic_error(
+            "benchmark row sanitizer disagrees with live provenance");
+    }
+}
+
+void WriteBenchmarkProvenanceFields(
+    std::ostringstream& out,
+    const BenchmarkProvenance& provenance) {
+    const bool fhe_applicable = ValidateBenchmarkProvenance(provenance);
+    out << ",";
+    WriteOptional(out, provenance.actual_ring_dim);
+    out << ",";
+    if (provenance.log_q_bits.has_value()) {
+        out << std::setprecision(12) << *provenance.log_q_bits;
+    }
+    out << ",";
+    WriteOptional(out, provenance.plaintext_modulus);
+    out << ",";
+    WriteOptional(out, provenance.num_limbs);
+    out << "," << provenance.openfhe_version;
+    (void)fhe_applicable;
 }
 
 template <typename T>
@@ -209,11 +261,16 @@ std::string SerializeBenchmarkHeader() {
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
         "sanitizer_assurance,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind\n";
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+        "openfhe_version\n";
 }
 
-std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
+std::string SerializeBenchmarkRow(
+    const BenchmarkResult& r,
+    const BenchmarkProvenance& provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
+    RequireMatchingSanitizer(r.sanitizer, r.scaling_mod_size, provenance);
     std::ostringstream out;
     out << r.label << ","
         << r.param_k << ","
@@ -278,6 +335,7 @@ std::string SerializeBenchmarkRow(const BenchmarkResult& r) {
     WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
     out << "," << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
+    WriteBenchmarkProvenanceFields(out, provenance);
     out << "\n";
     return out.str();
 }
@@ -308,11 +366,16 @@ std::string SerializeDynamicHeader() {
         "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
         "flood_noise_bits,scaling_mod_size,sanitizer_model,"
         "sanitizer_assurance,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind\n";
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+        "openfhe_version\n";
 }
 
-std::string SerializeDynamicRow(const DynamicResult& r) {
+std::string SerializeDynamicRow(
+    const DynamicResult& r,
+    const BenchmarkProvenance& provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
+    RequireMatchingSanitizer(r.sanitizer, r.scaling_mod_size, provenance);
     std::ostringstream out;
     out << r.label << ","
         << r.k << "," << r.m << "," << r.set_size << "," << r.ring_dim
@@ -352,6 +415,7 @@ std::string SerializeDynamicRow(const DynamicResult& r) {
     WriteStandardSanitizerFields(out, r.sanitizer, r.scaling_mod_size);
     out << "," << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
+    WriteBenchmarkProvenanceFields(out, provenance);
     out << "\n";
     return out.str();
 }
@@ -383,12 +447,15 @@ std::string SerializeComparisonHeader() {
         "omp_threads,estimator_model,profile_id,run_class,"
         "target_security_bits,comparison_eligible,measurement_kind,"
         "target_jaccard,realized_intersection,realized_union,"
-        "realized_jaccard\n";
+        "realized_jaccard,actual_ring_dim,log_q_bits,plaintext_modulus,"
+        "num_limbs,openfhe_version\n";
 }
 
 std::string SerializeComparisonRow(const ComparisonResult& r,
-                                   uint32_t omp_threads) {
+                                   uint32_t omp_threads,
+                                   const BenchmarkProvenance& provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
+    RequireMatchingSanitizer(r.sanitizer, r.scaling_mod_size, provenance);
     std::ostringstream out;
     out << r.scenario << ","
         << r.method << ","
@@ -451,6 +518,7 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << r.realized_intersection << ","
         << r.realized_union << ","
         << r.realized_jaccard;
+    WriteBenchmarkProvenanceFields(out, provenance);
     out << "\n";
     return out.str();
 }
@@ -467,12 +535,20 @@ std::string SerializeCrossoverHeader() {
         "onehot_flood_noise_bits,sqrt_coefficient_stat_bits,"
         "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model,"
         "profile_id,run_class,target_security_bits,comparison_eligible,"
-        "measurement_kind\n";
+        "measurement_kind,openfhe_version,onehot_actual_ring_dim,"
+        "onehot_log_q_bits,onehot_plaintext_modulus,onehot_num_limbs,"
+        "sqrt_actual_ring_dim,sqrt_log_q_bits,sqrt_plaintext_modulus,"
+        "sqrt_num_limbs\n";
 }
 
-std::string SerializeCrossoverRow(const CrossoverResult& r) {
+std::string SerializeCrossoverRow(
+    const CrossoverResult& r,
+    const BenchmarkProvenance& onehot_provenance,
+    const BenchmarkProvenance& sqrt_provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
     const bool applicable = RequireSanitizerMetadata(r.sanitizer);
+    ValidateBenchmarkProvenance(onehot_provenance);
+    ValidateBenchmarkProvenance(sqrt_provenance);
     if (!applicable ||
         !r.onehot_coefficient_stat_bits.has_value() ||
         !r.onehot_eval_noise_bits.has_value() ||
@@ -482,6 +558,36 @@ std::string SerializeCrossoverRow(const CrossoverResult& r) {
         !r.sqrt_flood_noise_bits.has_value()) {
         throw std::logic_error(
             "crossover row is missing applicable arm sanitizer metadata");
+    }
+    const bool common_matches =
+        onehot_provenance.sanitizer_applicable &&
+        sqrt_provenance.sanitizer_applicable &&
+        r.sanitizer.transcript_stat_bits ==
+            onehot_provenance.transcript_stat_bits &&
+        r.sanitizer.transcript_stat_bits ==
+            sqrt_provenance.transcript_stat_bits &&
+        r.sanitizer.max_queries == onehot_provenance.max_queries &&
+        r.sanitizer.max_queries == sqrt_provenance.max_queries &&
+        r.sanitizer.query_stat_bits == onehot_provenance.query_stat_bits &&
+        r.sanitizer.query_stat_bits == sqrt_provenance.query_stat_bits &&
+        r.sanitizer.flood_margin_bits ==
+            onehot_provenance.flood_margin_bits &&
+        r.sanitizer.flood_margin_bits ==
+            sqrt_provenance.flood_margin_bits;
+    const bool arms_match =
+        r.onehot_coefficient_stat_bits ==
+            onehot_provenance.coefficient_stat_bits &&
+        r.onehot_eval_noise_bits == onehot_provenance.eval_noise_bits &&
+        r.onehot_flood_noise_bits == onehot_provenance.flood_noise_bits &&
+        r.sqrt_coefficient_stat_bits ==
+            sqrt_provenance.coefficient_stat_bits &&
+        r.sqrt_eval_noise_bits == sqrt_provenance.eval_noise_bits &&
+        r.sqrt_flood_noise_bits == sqrt_provenance.flood_noise_bits;
+    if (!common_matches || !arms_match ||
+        onehot_provenance.openfhe_version !=
+            sqrt_provenance.openfhe_version) {
+        throw std::logic_error(
+            "crossover sanitizer or build provenance is inconsistent");
     }
     std::ostringstream out;
     out << r.k << ","
@@ -520,6 +626,22 @@ std::string SerializeCrossoverRow(const CrossoverResult& r) {
     out << ","
         << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
+    out << "," << onehot_provenance.openfhe_version << ",";
+    WriteOptional(out, onehot_provenance.actual_ring_dim);
+    out << ",";
+    WriteOptional(out, onehot_provenance.log_q_bits);
+    out << ",";
+    WriteOptional(out, onehot_provenance.plaintext_modulus);
+    out << ",";
+    WriteOptional(out, onehot_provenance.num_limbs);
+    out << ",";
+    WriteOptional(out, sqrt_provenance.actual_ring_dim);
+    out << ",";
+    WriteOptional(out, sqrt_provenance.log_q_bits);
+    out << ",";
+    WriteOptional(out, sqrt_provenance.plaintext_modulus);
+    out << ",";
+    WriteOptional(out, sqrt_provenance.num_limbs);
     out << "\n";
     return out.str();
 }
@@ -531,11 +653,16 @@ std::string SerializeSqrtComparisonHeader() {
         "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
         "eval_noise_bits,flood_noise_bits,sanitizer_model,"
         "sanitizer_assurance,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind\n";
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+        "openfhe_version\n";
 }
 
-std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
+std::string SerializeSqrtComparisonRow(
+    const SqrtComparisonResult& r,
+    const BenchmarkProvenance& provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
+    RequireMatchingSanitizer(r.sanitizer, std::nullopt, provenance);
     std::ostringstream out;
     out << r.encoding << ","
         << r.k << ","
@@ -579,6 +706,7 @@ std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& r) {
         << SanitizerAssuranceName(*r.sanitizer.model) << ","
         << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
+    WriteBenchmarkProvenanceFields(out, provenance);
     out << "\n";
     return out.str();
 }

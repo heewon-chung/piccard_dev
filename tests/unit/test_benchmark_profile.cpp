@@ -1,9 +1,12 @@
 #include "benchmark_profile.h"
+#include "benchmark_provenance.h"
 #include "benchmark_utils.h"
+#include "fhe/bfv_context.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,6 +29,27 @@ std::vector<std::string> Keys(const std::vector<BenchmarkGridPoint>& points) {
     keys.reserve(points.size());
     for (const auto& point : points) keys.push_back(point.Key());
     return keys;
+}
+
+std::vector<std::string> CsvCells(const std::string& line) {
+    std::vector<std::string> cells;
+    size_t start = 0;
+    for (size_t comma = line.find(','); comma != std::string::npos;
+         comma = line.find(',', start)) {
+        cells.push_back(line.substr(start, comma - start));
+        start = comma + 1;
+    }
+    std::string last = line.substr(start);
+    if (!last.empty() && last.back() == '\n') last.pop_back();
+    cells.push_back(last);
+    return cells;
+}
+
+size_t ColumnIndex(const std::string& header, const std::string& name) {
+    const auto cells = CsvCells(header);
+    const auto it = std::find(cells.begin(), cells.end(), name);
+    EXPECT_NE(it, cells.end()) << "missing CSV column " << name;
+    return static_cast<size_t>(std::distance(cells.begin(), it));
 }
 
 }  // namespace
@@ -249,4 +273,143 @@ TEST(BenchmarkProfile, UnknownOptionsAreFatalAfterExtensionsAreDeclared) {
         "bench", "--profile=toy-smoke", "--depth=5"};
     EXPECT_NO_THROW(RejectUnknownBenchmarkOptions(
         3, const_cast<char**>(extension), {"--depth="}));
+}
+
+TEST(BenchmarkProvenance, LivePiccardFheValuesArePositiveAndSerialized) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+    BFVContext context(params);
+    context.InitializeContextOnly();
+
+    const BenchmarkProvenance provenance =
+        MakePiccardBenchmarkProvenance(context);
+    ASSERT_TRUE(provenance.actual_ring_dim.has_value());
+    ASSERT_TRUE(provenance.log_q_bits.has_value());
+    ASSERT_TRUE(provenance.plaintext_modulus.has_value());
+    ASSERT_TRUE(provenance.num_limbs.has_value());
+    EXPECT_GT(*provenance.actual_ring_dim, 0u);
+    EXPECT_GT(*provenance.log_q_bits, 0.0);
+    EXPECT_GT(*provenance.plaintext_modulus, 0u);
+    EXPECT_GT(*provenance.num_limbs, 0u);
+    EXPECT_NE(provenance.openfhe_version, "unknown");
+
+    BenchmarkResult row;
+    row.label = "piccard";
+    row.param_ring_dim = context.GetSlotCount();
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = MakeSanitizerMetadata(context.GetParams());
+    row.scaling_mod_size = context.GetParams().scaling_mod_size;
+    const std::string header = SerializeBenchmarkHeader();
+    const auto cells = CsvCells(SerializeBenchmarkRow(row, provenance));
+    EXPECT_EQ(cells[ColumnIndex(header, "actual_ring_dim")],
+              std::to_string(context.GetSlotCount()));
+    EXPECT_FALSE(cells[ColumnIndex(header, "log_q_bits")].empty());
+    EXPECT_FALSE(cells[ColumnIndex(header, "plaintext_modulus")].empty());
+    EXPECT_FALSE(cells[ColumnIndex(header, "num_limbs")].empty());
+    EXPECT_EQ(cells[ColumnIndex(header, "openfhe_version")],
+              provenance.openfhe_version);
+}
+
+TEST(BenchmarkProvenance, FheIndKeepsActualBfvAndSanitizerNotApplicable) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+    BFVContext context(params);
+    context.InitializeContextOnly();
+
+    ComparisonResult row;
+    row.method = "baseline";
+    row.estimator_model = EstimatorModel::NotApplicable;
+    row.sanitizer = NotApplicableSanitizerMetadata();
+    const BenchmarkProvenance provenance =
+        MakeFheIndBenchmarkProvenance(context);
+    const std::string header = SerializeComparisonHeader();
+    const auto cells = CsvCells(SerializeComparisonRow(row, 1, provenance));
+
+    EXPECT_EQ(cells[ColumnIndex(header, "sanitizer_model")],
+              "not-applicable");
+    EXPECT_TRUE(cells[ColumnIndex(header, "query_stat_bits")].empty());
+    EXPECT_TRUE(cells[ColumnIndex(header, "coefficient_stat_bits")].empty());
+    EXPECT_GT(std::stoul(cells[ColumnIndex(header, "actual_ring_dim")]), 0u);
+    EXPECT_GT(std::stod(cells[ColumnIndex(header, "log_q_bits")]), 0.0);
+    EXPECT_GT(std::stoull(cells[ColumnIndex(header, "plaintext_modulus")]), 0u);
+    EXPECT_GT(std::stoul(cells[ColumnIndex(header, "num_limbs")]), 0u);
+}
+
+TEST(BenchmarkProvenance, AheUsesExactNotApplicableFheRepresentation) {
+    ComparisonResult row;
+    row.method = "sj16";
+    row.estimator_model = EstimatorModel::NotApplicable;
+    row.sanitizer = NotApplicableSanitizerMetadata();
+    const BenchmarkProvenance provenance = MakeAheBenchmarkProvenance();
+    const std::string header = SerializeComparisonHeader();
+    const auto cells = CsvCells(SerializeComparisonRow(row, 1, provenance));
+
+    for (const char* column : {"actual_ring_dim", "log_q_bits",
+                               "plaintext_modulus", "num_limbs"}) {
+        EXPECT_TRUE(cells[ColumnIndex(header, column)].empty()) << column;
+    }
+    EXPECT_EQ(cells[ColumnIndex(header, "openfhe_version")],
+              "not-applicable");
+}
+
+TEST(BenchmarkProvenance, UnknownOpenFheVersionIsRejected) {
+    BenchmarkResult row;
+    row.label = "piccard";
+    row.param_ring_dim = 1024;
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer.model = SanitizerModel::PhaseSmudgingEnc0PocV1;
+    row.sanitizer.transcript_stat_bits = 40;
+    row.sanitizer.max_queries = UINT64_C(1048576);
+    row.sanitizer.query_stat_bits = 60;
+    row.sanitizer.coefficient_stat_bits = 73;
+    row.sanitizer.flood_margin_bits = 8;
+    row.sanitizer.eval_noise_bits = 60;
+    row.sanitizer.flood_noise_bits = 141;
+    BenchmarkProvenance provenance;
+    provenance.sanitizer_applicable = true;
+    provenance.transcript_stat_bits = row.sanitizer.transcript_stat_bits;
+    provenance.max_queries = row.sanitizer.max_queries;
+    provenance.query_stat_bits = row.sanitizer.query_stat_bits;
+    provenance.coefficient_stat_bits = row.sanitizer.coefficient_stat_bits;
+    provenance.flood_margin_bits = row.sanitizer.flood_margin_bits;
+    provenance.eval_noise_bits = row.sanitizer.eval_noise_bits;
+    provenance.flood_noise_bits = row.sanitizer.flood_noise_bits;
+    provenance.scaling_mod_size = 40;
+    provenance.actual_ring_dim = 1024;
+    provenance.log_q_bits = 120.0;
+    provenance.plaintext_modulus = 12289;
+    provenance.num_limbs = 3;
+    provenance.openfhe_version = "unknown";
+
+    EXPECT_THROW(SerializeBenchmarkRow(row, provenance), std::logic_error);
+}
+
+TEST(BenchmarkProvenance, RejectsSanitizerQueryOrCoefficientDrift) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+    BFVContext context(params);
+    context.InitializeContextOnly();
+    const BenchmarkProvenance provenance =
+        MakePiccardBenchmarkProvenance(context);
+
+    BenchmarkResult row;
+    row.label = "piccard";
+    row.param_ring_dim = context.GetSlotCount();
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = MakeSanitizerMetadata(context.GetParams());
+    row.scaling_mod_size = context.GetParams().scaling_mod_size;
+    ++*row.sanitizer.query_stat_bits;
+    EXPECT_THROW(SerializeBenchmarkRow(row, provenance), std::logic_error);
+    row.sanitizer = MakeSanitizerMetadata(context.GetParams());
+    ++*row.sanitizer.coefficient_stat_bits;
+    EXPECT_THROW(SerializeBenchmarkRow(row, provenance), std::logic_error);
 }

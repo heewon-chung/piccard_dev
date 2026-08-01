@@ -36,6 +36,7 @@ struct BenchResult {
     double jaccard_est;
     double jaccard_true;
     SanitizerMetadata sanitizer;
+    BenchmarkProvenance provenance;
 };
 
 template <typename Engine>
@@ -46,6 +47,7 @@ BenchResult RunBench(Engine& engine, const std::vector<uint64_t>& set_x,
     r.mult_depth = engine.GetParams().mult_depth;
     r.jaccard_true = j_true;
     r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    r.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
 
     // Encode
     auto t0 = Clock::now();
@@ -146,10 +148,11 @@ void PrintRow(const BenchmarkConfig& config,
     row.jaccard_rel_error = s_rel.mean;
     row.jaccard_rel_error_sd = s_rel.stddev;
     row.sanitizer = results[0].sanitizer;
+    row.provenance = results[0].provenance;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     ApplyBenchmarkProfile(
         config, row, BenchmarkMeasurementKind::Diagnostic);
-    std::cout << SerializeSqrtComparisonRow(row);
+    std::cout << SerializeSqrtComparisonRow(row, row.provenance);
 }
 
 int main(int argc, char** argv) {

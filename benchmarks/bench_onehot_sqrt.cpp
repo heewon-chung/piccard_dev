@@ -266,6 +266,7 @@ static BenchmarkResult RunMultiTrial(
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
     result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     result.scaling_mod_size = engine.GetParams().scaling_mod_size;
     return result;
 }
@@ -495,6 +496,7 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
                               ? pp.hash_seed : 0;
         oh_br.hash_root_seed = config.seed;
         oh_br.sanitizer = MakeSanitizerMetadata(onehot.GetParams());
+        oh_br.provenance = MakePiccardBenchmarkProvenance(onehot.GetBFVContext());
         oh_br.scaling_mod_size = onehot.GetParams().scaling_mod_size;
         csv.WriteRow(oh_br);
 
@@ -522,6 +524,7 @@ static void BenchAccuracy(const BenchmarkConfig& config, CSVWriter& csv) {
                               ? sp.hash_seed : 0;
         sq_br.hash_root_seed = config.seed;
         sq_br.sanitizer = MakeSanitizerMetadata(sqrt_eng.GetParams());
+        sq_br.provenance = MakePiccardBenchmarkProvenance(sqrt_eng.GetBFVContext());
         sq_br.scaling_mod_size = sqrt_eng.GetParams().scaling_mod_size;
         csv.WriteRow(sq_br);
 
@@ -586,6 +589,7 @@ static BenchmarkResult RunProfileAccuracyEncoding(
         ? fixed_hash_seed : 0;
     row.hash_root_seed = config.seed;
     row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     row.scaling_mod_size = engine.GetParams().scaling_mod_size;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     ApplyBenchmarkProfile(

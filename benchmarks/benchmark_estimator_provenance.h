@@ -1,6 +1,7 @@
 #pragma once
 
 #include "benchmark_profile.h"
+#include "benchmark_provenance.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -136,6 +137,7 @@ struct BenchmarkResult {
     // Deliberately unset by default. Serializers reject missing provenance.
     std::optional<EstimatorModel> estimator_model;
     SanitizerMetadata sanitizer;
+    BenchmarkProvenance provenance;
 };
 
 /**
@@ -204,6 +206,7 @@ struct DynamicResult {
 
     std::optional<EstimatorModel> estimator_model;
     SanitizerMetadata sanitizer;
+    BenchmarkProvenance provenance;
 };
 
 /**
@@ -274,6 +277,7 @@ struct ComparisonResult {
 
     std::optional<EstimatorModel> estimator_model;
     SanitizerMetadata sanitizer;
+    BenchmarkProvenance provenance;
 };
 
 /**
@@ -299,6 +303,8 @@ struct CrossoverResult {
     std::optional<uint32_t> sqrt_eval_noise_bits;
     std::optional<uint32_t> sqrt_flood_noise_bits;
     std::optional<EstimatorModel> estimator_model;
+    BenchmarkProvenance onehot_provenance;
+    BenchmarkProvenance sqrt_provenance;
 };
 
 /**
@@ -325,23 +331,32 @@ struct SqrtComparisonResult {
     double jaccard_rel_error_sd = 0.0;
     SanitizerMetadata sanitizer;
     std::optional<EstimatorModel> estimator_model;
+    BenchmarkProvenance provenance;
 };
 
 std::string SerializeBenchmarkHeader();
-std::string SerializeBenchmarkRow(const BenchmarkResult& row);
+std::string SerializeBenchmarkRow(const BenchmarkResult& row,
+                                  const BenchmarkProvenance& provenance);
 
 std::string SerializeDynamicHeader();
-std::string SerializeDynamicRow(const DynamicResult& row);
+std::string SerializeDynamicRow(const DynamicResult& row,
+                                const BenchmarkProvenance& provenance);
 
 std::string SerializeComparisonHeader();
 std::string SerializeComparisonRow(const ComparisonResult& row,
-                                   uint32_t omp_threads);
+                                   uint32_t omp_threads,
+                                   const BenchmarkProvenance& provenance);
 
 std::string SerializeCrossoverHeader();
-std::string SerializeCrossoverRow(const CrossoverResult& row);
+std::string SerializeCrossoverRow(
+    const CrossoverResult& row,
+    const BenchmarkProvenance& onehot_provenance,
+    const BenchmarkProvenance& sqrt_provenance);
 
 std::string SerializeSqrtComparisonHeader();
-std::string SerializeSqrtComparisonRow(const SqrtComparisonResult& row);
+std::string SerializeSqrtComparisonRow(
+    const SqrtComparisonResult& row,
+    const BenchmarkProvenance& provenance);
 
 }  // namespace benchmark
 }  // namespace piccard

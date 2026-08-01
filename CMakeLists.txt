@@ -44,10 +44,23 @@ endif()
 # Find OpenFHE (required for FHE operations)
 find_package(OpenFHE QUIET)
 if(OpenFHE_FOUND)
+    if(NOT BASE_OPENFHE_VERSION)
+        message(FATAL_ERROR "OpenFHE package did not expose BASE_OPENFHE_VERSION")
+    endif()
+    set(PICCARD_CONFIGURED_OPENFHE_VERSION "${BASE_OPENFHE_VERSION}")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/cmake/build_info.h.in"
+        "${CMAKE_BINARY_DIR}/generated/build_info.h"
+        @ONLY
+    )
     message(STATUS "Found OpenFHE: ${BASE_OPENFHE_VERSION}")
     message(STATUS "OpenFHE include: ${OpenFHE_INCLUDE}")
     message(STATUS "OpenFHE libraries: ${OpenFHE_LIBRARIES}")
-    add_compile_definitions(HAVE_OPENFHE)
+    add_compile_definitions(
+        HAVE_OPENFHE
+        OPENFHE_VERSION=${BASE_OPENFHE_VERSION}
+    )
 else()
     message(STATUS "OpenFHE not found - FHE features disabled")
 endif()
@@ -78,6 +91,7 @@ message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_BINARY_DIR}/generated)
 if(OpenFHE_FOUND)
     include_directories(
         ${OpenFHE_INCLUDE}
@@ -130,6 +144,12 @@ add_library(
     benchmarks/benchmark_profile.cpp
     benchmarks/benchmark_estimator_provenance.cpp
 )
+if(OpenFHE_FOUND)
+    target_sources(
+        piccard_benchmark_serializers
+        PRIVATE benchmarks/benchmark_provenance.cpp
+    )
+endif()
 target_include_directories(
     piccard_benchmark_serializers
     PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
@@ -254,6 +274,7 @@ if(OpenFHE_FOUND)
             ${OpenFHE_INCLUDE}/binfhe
     )
     set(HAVE_PICCARD_FHE TRUE)
+    target_link_libraries(piccard_benchmark_serializers PUBLIC piccard_fhe)
 else()
     set(HAVE_PICCARD_FHE FALSE)
 endif()

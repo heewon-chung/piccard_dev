@@ -1,5 +1,6 @@
 #include "fhe/bfv_context.h"
 
+#include "build_info.h"
 #include "math/distributiongenerator.h"
 #include "scheme/bfvrns/bfvrns-cryptoparameters.h"
 #include "util/params_calibration.h"
@@ -16,6 +17,16 @@
 namespace piccard {
 
 namespace {
+
+double TowerSumLogQBits(
+    const std::shared_ptr<lbcrypto::ILDCRTParams<lbcrypto::BigInteger>>&
+        element_params) {
+    double log_q_bits = 0.0;
+    for (const auto& tower : element_params->GetParams()) {
+        log_q_bits += std::log2(tower->GetModulus().ConvertToDouble());
+    }
+    return log_q_bits;
+}
 
 /// A polynomial whose every coefficient is an independent uniform integer on
 /// [-2^bits, 2^bits - 1], returned in EVALUATION format so it can be added to
@@ -140,6 +151,30 @@ uint32_t BFVContext::RequiredFloodBudgetBits() const {
     return static_cast<uint32_t>(required);
 }
 
+BFVRuntimeMetadata BFVContext::GetRuntimeMetadata() const {
+    if (!cc_) {
+        throw std::logic_error(
+            "BFV runtime metadata requires an initialized context");
+    }
+    const auto crypto_params = cc_->GetCryptoParameters();
+    const auto element_params = crypto_params->GetElementParams();
+    BFVRuntimeMetadata metadata;
+    metadata.actual_ring_dim = cc_->GetRingDimension();
+    metadata.log_q_bits = TowerSumLogQBits(element_params);
+    metadata.plaintext_modulus = crypto_params->GetPlaintextModulus();
+    metadata.num_limbs =
+        static_cast<uint32_t>(element_params->GetParams().size());
+    metadata.openfhe_version = PICCARD_BUILD_OPENFHE_VERSION;
+    const std::string linked_version = GetOPENFHEVersion();
+    if (metadata.openfhe_version.empty() ||
+        metadata.openfhe_version == "unknown" ||
+        metadata.openfhe_version != linked_version) {
+        throw std::runtime_error(
+            "configured OpenFHE version does not match linked OpenFHE");
+    }
+    return metadata;
+}
+
 void BFVContext::InitializeContextOnly() {
     if (cc_) {
         throw std::logic_error("BFV context was already initialized");
@@ -224,8 +259,7 @@ void BFVContext::InitializeContextOnly() {
                 "live context is not BFVRNS for selected calibration");
         }
         const auto elem_params = crypto_params->GetElementParams();
-        const double live_log_q =
-            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double live_log_q = TowerSumLogQBits(elem_params);
         const double live_log_delta =
             live_log_q -
             std::log2(static_cast<double>(
@@ -253,8 +287,7 @@ void BFVContext::InitializeContextOnly() {
 
     if (params_.FloodingSized()) {
         auto elem_params = cc_->GetCryptoParameters()->GetElementParams();
-        const double log_q =
-            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double log_q = TowerSumLogQBits(elem_params);
         const double log_delta =
             log_q - std::log2(static_cast<double>(params_.plaintext_mod));
         const double required =

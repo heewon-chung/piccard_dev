@@ -167,7 +167,8 @@ public:
     }
 
     void WriteRow(const ComparisonResult& r) {
-        *out_ << SerializeComparisonRow(r, CurrentOmpThreads());
+        *out_ << SerializeComparisonRow(
+            r, CurrentOmpThreads(), r.provenance);
     }
 
 private:
@@ -217,6 +218,7 @@ static ComparisonResult RunPiccardTimed(
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    cr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
     cr.method = "piccard";
     cr.universe_size = universe_size;
@@ -298,6 +300,7 @@ static ComparisonResult RunBaselineTimed(
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::NotApplicable;
     cr.sanitizer = NotApplicableSanitizerMetadata();
+    cr.provenance = MakeFheIndBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
     cr.method = "baseline";
     cr.universe_size = engine.GetParams().universe_size;
@@ -412,6 +415,7 @@ static ComparisonResult RunMultiTrialPiccard(
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
     r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    r.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     r.scaling_mod_size = engine.GetParams().scaling_mod_size;
     // Provenance (task 9-1a): this sweep never reseeds — every trial reuses
     // the engine's construction-time CRS — so hash_seed and hash_root_seed
@@ -464,6 +468,7 @@ static ComparisonResult RunMultiTrialBaseline(
     ComparisonResult r;
     r.estimator_model = EstimatorModel::NotApplicable;
     r.sanitizer = NotApplicableSanitizerMetadata();
+    r.provenance = MakeFheIndBenchmarkProvenance(engine.GetBFVContext());
     r.scenario = scenario; r.method = "baseline";
     r.universe_size = engine.GetParams().universe_size;
     r.set_size = set_x.size(); r.k = 0; r.m = 0;
@@ -518,6 +523,7 @@ static ComparisonResult RunBCG12MultiTrial(
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::NotApplicable;
     cr.sanitizer = NotApplicableSanitizerMetadata();
+    cr.provenance = MakeAheBenchmarkProvenance();
     cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
     cr.set_size=x.size(); cr.k=k; cr.m=0; cr.ring_dim=0; cr.num_cts=0; cr.mult_depth=0;
     cr.trials=trials;
@@ -566,6 +572,7 @@ static ComparisonResult RunSqrtPiccardTimed(
     ComparisonResult cr;
     cr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    cr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
     cr.method = "piccard_sqrt";
     cr.universe_size = universe_size;
@@ -709,6 +716,7 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
     r.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
     r.rel_error_eligible_n = rel_eligible;
     r.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    r.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     r.scaling_mod_size = engine.GetParams().scaling_mod_size;
     // Provenance (task 9-1a): this sweep never reseeds, same rationale as
     // RunMultiTrialPiccard above.
@@ -804,6 +812,7 @@ static ComparisonResult RunReviewerHashedAccuracy(
     row.mult_depth = mult_depth;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     row.scaling_mod_size = engine.GetParams().scaling_mod_size;
     row.hash_randomness = HashRandomnessName(config.hash_randomness);
     row.hash_seed = engine.GetParams().hash_seed;
@@ -844,6 +853,7 @@ static ComparisonResult RunReviewerBaselineAccuracy(
     row.num_cts = engine.GetParams().num_ciphertexts;
     row.estimator_model = EstimatorModel::NotApplicable;
     row.sanitizer = NotApplicableSanitizerMetadata();
+    row.provenance = MakeFheIndBenchmarkProvenance(engine.GetBFVContext());
 
     double estimate_sum = 0.0;
     double error_sum = 0.0;
@@ -1192,6 +1202,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                                                     config.set_size);
                 er.estimator_model = EstimatorModel::NotApplicable;
                 er.sanitizer = NotApplicableSanitizerMetadata();
+                er.provenance = MakeAheBenchmarkProvenance();
                 csv.WriteRow(er);
             }
         }
@@ -1449,6 +1460,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             pr.jaccard_rel_error = (p_rel > 0) ? (pr.jaccard_error / pr.jaccard_expected) : -1.0;
             pr.rel_error_eligible_n = p_rel;
             pr.sanitizer = MakeSanitizerMetadata(piccard.GetParams());
+            pr.provenance =
+                MakePiccardBenchmarkProvenance(piccard.GetBFVContext());
             pr.scaling_mod_size = piccard.GetParams().scaling_mod_size;
             pr.hash_randomness = HashRandomnessName(config.hash_randomness);
             pr.hash_seed = timing_crs;
@@ -1502,6 +1515,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             }
             sr.sanitizer =
                 MakeSanitizerMetadata(sqrt_eng->GetParams());
+            sr.provenance = MakePiccardBenchmarkProvenance(
+                sqrt_eng->GetBFVContext());
             sr.scaling_mod_size = sqrt_eng->GetParams().scaling_mod_size;
             sr.hash_randomness = HashRandomnessName(config.hash_randomness);
             sr.hash_seed = timing_crs;
@@ -1529,6 +1544,8 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             ComparisonResult br;
             br.estimator_model = EstimatorModel::NotApplicable;
             br.sanitizer = NotApplicableSanitizerMetadata();
+            br.provenance =
+                MakeFheIndBenchmarkProvenance(baseline.GetBFVContext());
             br.scenario = scenario; br.method = "baseline";
             br.universe_size = u; br.set_size = config.set_size;
             br.k = 0; br.m = 0;
@@ -1574,6 +1591,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             ComparisonResult r;
             r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
             r.sanitizer = NotApplicableSanitizerMetadata();
+            r.provenance = MakeAheBenchmarkProvenance();
             r.scenario=scenario; r.method=method; r.universe_size=u;
             r.set_size=config.set_size; r.k=config.k; r.m=0; r.ring_dim=0; r.num_cts=0; r.mult_depth=0;
             r.trials=config.trials;
@@ -1610,6 +1628,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             auto sr = FinalizeSJ16(sj16_trials, u, scenario, config.set_size);
             sr.estimator_model = EstimatorModel::NotApplicable;
             sr.sanitizer = NotApplicableSanitizerMetadata();
+            sr.provenance = MakeAheBenchmarkProvenance();
             csv.WriteRow(sr);
 
             std::cerr << "  U=" << u

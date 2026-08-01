@@ -9,6 +9,15 @@
 
 namespace piccard {
 
+/** @brief Parameters read from the realized OpenFHE BFV context. */
+struct BFVRuntimeMetadata {
+    uint32_t actual_ring_dim = 0;
+    double log_q_bits = 0.0;
+    uint64_t plaintext_modulus = 0;
+    uint32_t num_limbs = 0;
+    std::string openfhe_version;
+};
+
 class BFVContext {
 public:
     explicit BFVContext(const PiccardParams& params);
@@ -79,6 +88,9 @@ public:
 
     /** @brief Returns the actual ring dimension of the realized context. */
     uint32_t GetSlotCount() const { return runtime_ring_dim_; }
+
+    /** @brief Returns live modulus-chain, plaintext, ring, and build metadata. */
+    BFVRuntimeMetadata GetRuntimeMetadata() const;
 
     /** @brief Returns the context's verified private parameter copy. */
     const PiccardParams& GetParams() const { return params_; }

@@ -356,7 +356,8 @@ TEST(BenchmarkUtils, EstimatorModelNamesAreStable) {
 TEST(BenchmarkUtils, BenchmarkSerializerRejectsMissingEstimatorModel) {
     BenchmarkResult row;
     row.label = "missing-provenance";
-    EXPECT_THROW(SerializeBenchmarkRow(row), std::logic_error);
+    EXPECT_THROW(
+        SerializeBenchmarkRow(row, row.provenance), std::logic_error);
 }
 
 TEST(BaselineParams, AdoptsPowerOfTwoRuntimeAndPreservesRequestedDimension) {

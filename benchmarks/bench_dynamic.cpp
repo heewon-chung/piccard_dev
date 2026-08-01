@@ -67,7 +67,7 @@ public:
     }
 
     void WriteRow(const DynamicResult& r) {
-        *out_ << SerializeDynamicRow(r);
+        *out_ << SerializeDynamicRow(r, r.provenance);
     }
 };
 
@@ -268,6 +268,7 @@ static DynamicResult RunMultiTrialDynamic(
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
     result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     return result;
@@ -463,6 +464,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, uint32_t depth,
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
                     dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                    dr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
@@ -548,6 +550,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, uint32_t depth,
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
                     dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                    dr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }
@@ -629,6 +632,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
                     dr.hash_seed = trial_hash_seed;
                     dr.hash_root_seed = config.seed;
                     dr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                    dr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                     dr.scaling_mod_size = engine.GetParams().scaling_mod_size;
                     csv.WriteRow(dr);
                 }

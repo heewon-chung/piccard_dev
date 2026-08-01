@@ -246,6 +246,7 @@ static BenchmarkResult RunMultiTrial(
     // Noise-flooding parameter fields are constants; copy explicitly from
     // engine.GetParams() so this aggregation path does not leave them at 0.
     result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     double n = static_cast<double>(num_trials);
@@ -352,6 +353,7 @@ static void BenchVaryingK(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
         result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+        result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): this sweep is --mode=timing and never
@@ -464,6 +466,7 @@ static void BenchVaryingM(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
         result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+        result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
@@ -571,6 +574,7 @@ static void BenchVaryingSetSize(const BenchmarkConfig& config, CSVWriter& csv) {
         result.jaccard_rel_error = (rel_eligible > 0) ? (sum_rel_err / static_cast<double>(rel_eligible)) : -1.0;
         result.rel_error_eligible_n = rel_eligible;
         result.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+        result.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
         result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
         // Provenance (task 9-2): see BenchVaryingK for the "fixed"/CRS
@@ -651,6 +655,7 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
                 br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                br.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -720,6 +725,7 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config, CSVWriter& csv) {
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
                 br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                br.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -787,6 +793,7 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, CSVWriter& c
                 br.hash_seed = trial_hash_seed;
                 br.hash_root_seed = config.seed;
                 br.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+                br.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
                 br.scaling_mod_size = engine.GetParams().scaling_mod_size;
                 csv.WriteRow(br);
             }
@@ -1078,6 +1085,7 @@ static BenchmarkResult RunProfileAccuracyPoint(
         ? fixed_hash_seed : 0;
     row.hash_root_seed = config.seed;
     row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     row.scaling_mod_size = engine.GetParams().scaling_mod_size;
     row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     ApplyBenchmarkProfile(

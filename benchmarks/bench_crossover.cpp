@@ -34,7 +34,9 @@ public:
         CrossoverResult profiled = r;
         ApplyBenchmarkProfile(*config_, profiled,
                               BenchmarkMeasurementKind::Diagnostic);
-        *out_ << SerializeCrossoverRow(profiled);
+        *out_ << SerializeCrossoverRow(
+            profiled, profiled.onehot_provenance,
+            profiled.sqrt_provenance);
     }
 
 private:
@@ -157,6 +159,10 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
             sqrt_eng.KeyGen();
             cr.sqrt_ring_dim = sqrt_eng.GetParams().ring_dim;
             cr.sanitizer = MakeSanitizerMetadata(onehot.GetParams());
+            cr.onehot_provenance =
+                MakePiccardBenchmarkProvenance(onehot.GetBFVContext());
+            cr.sqrt_provenance =
+                MakePiccardBenchmarkProvenance(sqrt_eng.GetBFVContext());
             cr.onehot_coefficient_stat_bits =
                 onehot.GetParams().CoefficientStatBits();
             cr.onehot_eval_noise_bits = onehot.GetParams().eval_noise_bits;

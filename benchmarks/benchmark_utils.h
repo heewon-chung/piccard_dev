@@ -242,7 +242,7 @@ public:
     }
 
     void WriteRow(const BenchmarkResult& result) {
-        *out_ << SerializeBenchmarkRow(result);
+        *out_ << SerializeBenchmarkRow(result, result.provenance);
     }
 };
 

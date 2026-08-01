@@ -35,6 +35,17 @@ protected:
 
 namespace {
 
+double TowerSumLogQBits(
+    const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& context) {
+    double log_q_bits = 0.0;
+    const auto towers =
+        context->GetCryptoParameters()->GetElementParams()->GetParams();
+    for (const auto& tower : towers) {
+        log_q_bits += std::log2(tower->GetModulus().ConvertToDouble());
+    }
+    return log_q_bits;
+}
+
 struct MeasuredSelection {
     PiccardParams params;
     PreThresholdCalibrationRow row;
@@ -54,8 +65,7 @@ MeasuredSelection BuildMeasuredSelection(uint32_t calibrated_ring_dim) {
     const auto& cc = discovery.GetCryptoContext();
     const auto crypto_params = cc->GetCryptoParameters();
     const auto elem_params = crypto_params->GetElementParams();
-    const double log_q =
-        std::log2(elem_params->GetModulus().ConvertToDouble());
+    const double log_q = TowerSumLogQBits(cc);
     const double log_delta =
         log_q -
         std::log2(static_cast<double>(
@@ -187,6 +197,49 @@ TEST_F(BFVContextTest, Addition) {
 
     EXPECT_EQ(result[0], 10);
     EXPECT_EQ(result[1], 7);
+}
+
+TEST(BFVContextRuntimeMetadata, ToyRuntimeMetadataMatchesLiveContext) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    BFVContext context(params);
+    context.InitializeContextOnly();
+
+    const auto metadata = context.GetRuntimeMetadata();
+    const auto& live = context.GetCryptoContext();
+    const auto crypto_params = live->GetCryptoParameters();
+    EXPECT_EQ(metadata.actual_ring_dim, live->GetRingDimension());
+    EXPECT_NEAR(metadata.log_q_bits, TowerSumLogQBits(live), 1e-9);
+    EXPECT_EQ(metadata.plaintext_modulus,
+              crypto_params->GetPlaintextModulus());
+    EXPECT_EQ(metadata.num_limbs,
+              crypto_params->GetElementParams()->GetParams().size());
+    EXPECT_EQ(metadata.openfhe_version, GetOPENFHEVersion());
+    EXPECT_NE(metadata.openfhe_version, "unknown");
+}
+
+TEST(BFVContextRuntimeMetadata, CalibratedStd128MetadataMatchesLiveContext) {
+    PiccardParams params;
+    params.k = 128;
+    params.m = 64;
+    params.security = SecurityLevel::STD128;
+    params.Validate();
+
+    BFVContext context(params);
+    context.InitializeContextOnly();
+
+    const auto metadata = context.GetRuntimeMetadata();
+    const auto& live = context.GetCryptoContext();
+    EXPECT_EQ(metadata.actual_ring_dim, live->GetRingDimension());
+    EXPECT_NEAR(metadata.log_q_bits, TowerSumLogQBits(live), 1e-9);
+    EXPECT_GT(metadata.actual_ring_dim, 0u);
+    EXPECT_GT(metadata.log_q_bits, 0.0);
+    EXPECT_GT(metadata.plaintext_modulus, 0u);
+    EXPECT_GT(metadata.num_limbs, 0u);
 }
 
 TEST_F(BFVContextTest, Rotation) {
@@ -601,8 +654,7 @@ TEST(BFVContextPreThreshold, ReproducesNormalAndGrownMeasuredContracts) {
         const auto& live = context.GetCryptoContext();
         const auto crypto_params = live->GetCryptoParameters();
         const auto elem_params = crypto_params->GetElementParams();
-        const double live_log_q =
-            std::log2(elem_params->GetModulus().ConvertToDouble());
+        const double live_log_q = TowerSumLogQBits(live);
         const double live_log_delta =
             live_log_q -
             std::log2(static_cast<double>(
