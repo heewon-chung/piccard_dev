@@ -324,6 +324,9 @@ TEST(BenchmarkProvenance, FheIndKeepsActualBfvAndSanitizerNotApplicable) {
 
     ComparisonResult row;
     row.method = "baseline";
+    row.capability = ResolveBaselineCapability(
+        BaselineMethod::FheInd, 0, BaselineEvidenceKind::Timing);
+    row.ring_dim = context.GetSlotCount();
     row.estimator_model = EstimatorModel::NotApplicable;
     row.sanitizer = NotApplicableSanitizerMetadata();
     const BenchmarkProvenance provenance =
@@ -344,6 +347,9 @@ TEST(BenchmarkProvenance, FheIndKeepsActualBfvAndSanitizerNotApplicable) {
 TEST(BenchmarkProvenance, AheUsesExactNotApplicableFheRepresentation) {
     ComparisonResult row;
     row.method = "sj16";
+    row.capability = ResolveBaselineCapability(
+        BaselineMethod::Sj16Paillier3072, 128,
+        BaselineEvidenceKind::Timing);
     row.estimator_model = EstimatorModel::NotApplicable;
     row.sanitizer = NotApplicableSanitizerMetadata();
     const BenchmarkProvenance provenance = MakeAheBenchmarkProvenance();

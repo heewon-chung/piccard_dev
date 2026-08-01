@@ -84,10 +84,11 @@ inline piccard::baselines::SJ16Trial RunSJ16OnTrial(
 // the per-phase mean, with matching _sd and _median. Accuracy is the mean
 // absolute error mean|jaccard_estimate - j_true| (SJ16 is exact, so ~0).
 //
-// SJ16 has no BFV ring: ring_dim / mult_depth / k / m are 0. num_cts carries the
-// genuine on-wire ciphertext count |U|+1. Communication comes straight from the
-// engine's per-direction serialized-byte accounting (comm_bytes = P1->P2 upload
-// + P2->P1 response; ct_size_bytes = P1->P2 upload only).
+// SJ16 has no BFV ring: ring_dim / k / m remain empty numeric N/A cells and
+// mult_depth is zero. num_cts carries the genuine on-wire ciphertext count
+// |U|+1. Communication comes straight from the engine's per-direction
+// serialized-byte accounting (comm_bytes = P1->P2 upload + P2->P1 response;
+// ct_size_bytes = P1->P2 upload only).
 inline ComparisonResult FinalizeSJ16(
     const std::vector<piccard::baselines::SJ16Trial>& trials,
     uint32_t u,
@@ -95,12 +96,8 @@ inline ComparisonResult FinalizeSJ16(
     size_t set_size = 0) {
     ComparisonResult r;
     r.scenario = scenario;
-    r.method = "sj16";
     r.universe_size = u;
     r.set_size = set_size;
-    r.k = 0;
-    r.m = 0;
-    r.ring_dim = 0;                 // no ring: additive-HE protocol
     r.num_cts = u + 1;             // |U| indicator cts + 1 response ct on the wire
     r.mult_depth = 0;
 
@@ -339,12 +336,8 @@ inline ComparisonResult FinalizeSJ16Extrapolated(
     size_t set_size = 0) {
     ComparisonResult r;
     r.scenario = scenario;
-    r.method = "sj16";
     r.universe_size = u;
     r.set_size = set_size;
-    r.k = 0;
-    r.m = 0;
-    r.ring_dim = 0;
     r.num_cts = u + 1;
     r.mult_depth = 0;
 

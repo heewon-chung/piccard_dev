@@ -262,90 +262,67 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
 }
 
 TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
-    const std::string expected_header =
-        "scenario,method,security_class,universe_size,set_size,k,m,ring_dim,"
-        "num_cts,mult_depth,phase_encode_ms,phase_encrypt_ms,phase_compute_ms,"
-        "phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,comm_bytes,"
-        "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
-        "trials,total_ms_sd,total_ms_median,phase_encode_ms_sd,"
-        "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
-        "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
-        "phase_decrypt_ms_median,rel_error_eligible_n,model,hash_randomness,"
-        "hash_seed,hash_root_seed,accuracy_trials,phase_flood_ms,"
-        "phase_flood_ms_sd,phase_flood_ms_median,transcript_stat_bits,"
-        "max_queries,query_stat_bits,coefficient_stat_bits,"
-        "flood_margin_bits,eval_noise_bits,flood_noise_bits,"
-        "scaling_mod_size,sanitizer_model,sanitizer_assurance,"
-        "measurement_status,extrapolation_alpha,"
-        "extrapolation_beta,extrapolation_residual,extrapolation_source,"
-        "omp_threads,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind,"
-        "target_jaccard,realized_intersection,realized_union,"
-        "realized_jaccard,actual_ring_dim,log_q_bits,plaintext_modulus,"
-        "num_limbs,openfhe_version\n";
-
     struct Case {
-        const char* method;
+        BaselineMethod method;
         EstimatorModel model;
-        const char* security_class;
-        const char* protocol_model;
-        const char* expected_estimator;
+        const char* expected_kind;
     };
     const Case cases[] = {
-        {"piccard", EstimatorModel::Sha256RandomRankingPocV1,
-         "CPA/no-leakage", "3-party-outsourced", kEstimator},
-        {"piccard_sqrt", EstimatorModel::Sha256RandomRankingPocV1,
-         "CPA/no-leakage", "3-party-outsourced", kEstimator},
-        {"baseline", EstimatorModel::NotApplicable,
-         "KPA/leakage", "3-party-outsourced", kNotApplicable},
-        {"bcg12_mh_ff", EstimatorModel::Sha256RandomRankingPocV1,
-         "AHE/no-leakage", "2-party", kEstimator},
-        {"bcg12_exact_ec", EstimatorModel::NotApplicable,
-         "AHE/no-leakage", "2-party", kNotApplicable},
-        {"sj16", EstimatorModel::NotApplicable,
-         "AHE/no-leakage", "2-party", kNotApplicable},
+        {BaselineMethod::Piccard, EstimatorModel::Sha256RandomRankingPocV1,
+         "fhe-timing"},
+        {BaselineMethod::PiccardSqrt,
+         EstimatorModel::Sha256RandomRankingPocV1, "fhe-timing"},
+        {BaselineMethod::FheInd, EstimatorModel::NotApplicable,
+         "diagnostic"},
+        {BaselineMethod::Bcg12MinHashFf,
+         EstimatorModel::Sha256RandomRankingPocV1, "psi-timing"},
+        {BaselineMethod::Bcg12ExactEc, EstimatorModel::NotApplicable,
+         "psi-timing"},
+        {BaselineMethod::Sj16Paillier3072, EstimatorModel::NotApplicable,
+         "ahe-timing"},
     };
 
     for (const auto& c : cases) {
         ComparisonResult row;
         row.scenario = "golden";
-        row.method = c.method;
+        row.method = BaselineMethodName(c.method);
+        row.capability = ResolveBaselineCapability(
+            c.method, 128, BaselineEvidenceKind::Timing);
         row.estimator_model = c.model;
         const bool sanitizer_applies =
-            std::string(c.method) == "piccard" ||
-            std::string(c.method) == "piccard_sqrt";
+            c.method == BaselineMethod::Piccard ||
+            c.method == BaselineMethod::PiccardSqrt;
         row.sanitizer = sanitizer_applies
             ? ApplicableMetadata()
             : NotApplicableSanitizerMetadata();
         row.provenance = sanitizer_applies
             ? ApplicableProvenance()
-            : (std::string(c.method) == "baseline"
+            : (c.method == BaselineMethod::FheInd
                    ? FheIndProvenance()
                    : MakeAheBenchmarkProvenance());
+        if (c.method == BaselineMethod::Piccard ||
+            c.method == BaselineMethod::PiccardSqrt) {
+            row.k = 128;
+            row.m = 64;
+            row.ring_dim = 8192;
+        } else if (c.method == BaselineMethod::FheInd) {
+            row.ring_dim = 8192;
+        } else if (c.method == BaselineMethod::Bcg12MinHashFf) {
+            row.k = 128;
+            row.hash_randomness = "fixed";
+        }
 
-        const std::string expected_row =
-            std::string("golden,") + c.method + "," + c.security_class +
-            ",0,0,0,0,0,0,0,"
-            "0.000,0.000,0.000,0.000,0.000,0,0,0,"
-            "0.000000,0.000000,0.000000,0.000000,0,"
-            "-1.000,0.000,-1.000,0.000,-1.000,0.000,-1.000,0.000,"
-            "-1.000,0.000,0," +
-            c.protocol_model +
-            ",,0,0,0,0.000,-1.000,0.000," +
-            (sanitizer_applies
-                 ? "40,1048576,60,73,8,60,141,0,"
-                   "phase-smudging-enc0-poc-v1,"
-                   "empirical-phase-statistical+ciphertext-computational,"
-                 : ",,,,,,,,not-applicable,not-applicable,") +
-            "measured,,,,,4," + c.expected_estimator +
-            ",legacy,legacy,0,false,diagnostic,0.000000,0,0,0.000000" +
-            (sanitizer_applies || std::string(c.method) == "baseline"
-                 ? StandardProvenanceSuffix()
-                 : ",,,,,not-applicable\n");
-
-        ExpectGoldenCsv(SerializeComparisonHeader(),
-                        SerializeComparisonRow(row, 4, row.provenance),
-                        expected_header, expected_row);
+        const std::string header = SerializeComparisonHeader();
+        const std::string serialized =
+            SerializeComparisonRow(row, 4, row.provenance);
+        const auto cells = CsvCells(serialized);
+        EXPECT_EQ(cells[ColumnIndex(header, "measurement_kind")],
+                  c.expected_kind);
+        EXPECT_EQ(cells[ColumnIndex(header, "protocol_model")],
+                  ProtocolModelName(row.capability->protocol_model));
+        EXPECT_EQ(cells[ColumnIndex(header, "comparison_scope")],
+                  ComparisonScopeName(row.capability->comparison_scope));
+        EXPECT_EQ(CsvColumns(header), CsvColumns(serialized));
     }
 }
 
@@ -494,11 +471,11 @@ TEST(EstimatorProvenanceSerializers,
 
 TEST(EstimatorProvenanceSerializers,
      ComparisonSanitizerIndependentRowsUseEmptyNumericCells) {
-    const char* methods[] = {
-        "baseline",
-        "bcg12_mh_ff",
-        "bcg12_exact_ec",
-        "sj16",
+    const BaselineMethod methods[] = {
+        BaselineMethod::FheInd,
+        BaselineMethod::Bcg12MinHashFf,
+        BaselineMethod::Bcg12ExactEc,
+        BaselineMethod::Sj16Paillier3072,
     };
     const std::string header = SerializeComparisonHeader();
     const std::vector<std::string> numeric_columns = {
@@ -512,15 +489,22 @@ TEST(EstimatorProvenanceSerializers,
         "scaling_mod_size",
     };
 
-    for (const char* method : methods) {
+    for (BaselineMethod method : methods) {
         ComparisonResult row;
         row.scenario = "not-applicable-golden";
-        row.method = method;
+        row.method = BaselineMethodName(method);
+        row.capability = ResolveBaselineCapability(
+            method, 128, BaselineEvidenceKind::Timing);
         row.estimator_model = EstimatorModel::NotApplicable;
         row.sanitizer = NotApplicableSanitizerMetadata();
-        row.provenance = std::string(method) == "baseline"
+        row.provenance = method == BaselineMethod::FheInd
             ? FheIndProvenance()
             : MakeAheBenchmarkProvenance();
+        if (method == BaselineMethod::FheInd) row.ring_dim = 8192;
+        if (method == BaselineMethod::Bcg12MinHashFf) {
+            row.k = 128;
+            row.hash_randomness = "fixed";
+        }
 
         const std::string serialized =
             SerializeComparisonRow(row, 4, row.provenance);
@@ -531,7 +515,8 @@ TEST(EstimatorProvenanceSerializers,
                   "not-applicable");
         for (const auto& column : numeric_columns) {
             EXPECT_EQ(cells[ColumnIndex(header, column)], "")
-                << "method=" << method << " column=" << column;
+                << "method=" << BaselineMethodName(method)
+                << " column=" << column;
         }
         EXPECT_EQ(CsvColumns(header), CsvColumns(serialized));
     }
@@ -620,7 +605,12 @@ TEST(EstimatorProvenanceSerializers,
     ComparisonResult comparison;
     comparison.scenario = "review";
     comparison.method = "piccard";
+    comparison.capability = ResolveBaselineCapability(
+        BaselineMethod::Piccard, 128, BaselineEvidenceKind::Timing);
     comparison.profile = primary;
+    comparison.k = 128;
+    comparison.m = 64;
+    comparison.ring_dim = 8192;
     comparison.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
     comparison.sanitizer = ApplicableMetadata();
     comparison.provenance = ApplicableProvenance();

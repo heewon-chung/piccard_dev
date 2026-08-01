@@ -24,6 +24,11 @@ enum class BenchmarkRunClass {
 enum class BenchmarkMeasurementKind {
     FheTiming,
     FheAccuracy,
+    PlaintextEstimator,
+    PsiTiming,
+    PsiAccuracy,
+    AheTiming,
+    AheAccuracy,
     Diagnostic,
 };
 

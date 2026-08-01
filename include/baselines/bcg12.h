@@ -22,7 +22,6 @@ public:
     explicit BCG12(const Bcg12Params& p);
     ~BCG12() override;
     const char*   Name() const override;              // per-variant, see below
-    SecurityClass Security() const override;          // AHE_NoLeakage
     void          Setup() override;                   // build group + MinHasher (excl. from query cost)
     QueryCost     RunQuery(const std::vector<uint64_t>& set_x,
                            const std::vector<uint64_t>& set_y) override;

@@ -5,10 +5,9 @@
  * @brief FHE-IND comparator: binary vector encoding + BFV inner product
  *
  * Implements pairwise Jaccard computation using full-dimension binary vectors
- * encrypted with BFV, in the style of LeP20's one-hot BFV construction. This
- * is not a faithful reimplementation of ZLG+24/EPSet; this is a
- * universe-sized BFV indicator-vector protocol, implemented in C++ using the
- * same OpenFHE library as Piccard for a fair same-machine comparison.
+ * encrypted with BFV. This is a local, universe-sized BFV indicator comparator
+ * implemented in C++ using the same OpenFHE library as Piccard. It is reported
+ * only as a diagnostic primitive, not as a reviewed deployment protocol.
  *
  * Key difference from Piccard: encodes sets as binary vectors of dimension
  * U_set (universe size), whereas Piccard compresses to dimension k*m via

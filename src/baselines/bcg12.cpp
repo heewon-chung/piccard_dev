@@ -40,8 +40,6 @@ const char* BCG12::Name() const {
     return params_.backend == Bcg12Backend::FF ? "bcg12_exact_ff" : "bcg12_exact_ec";
 }
 
-SecurityClass BCG12::Security() const { return SecurityClass::AHE_NoLeakage; }
-
 void BCG12::Setup() {
     group_ = (params_.backend == Bcg12Backend::FF) ? MakeFiniteFieldGroup() : MakeEcGroup();
     if (params_.mode == Bcg12Mode::MinHash) {

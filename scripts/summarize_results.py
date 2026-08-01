@@ -193,7 +193,9 @@ def filter_rows(data, key, prefix):
 # ("baseline" CSV key, see FHE_IND_DISCLOSURE below) side by side. These
 # additional methods (when present in the CSV) are emitted as their own
 # supplementary rows so they are no longer silently dropped — notably `sj16`.
-COMPARISON_EXTRA_METHODS = ("piccard_sqrt", "bcg12", "sj16")
+COMPARISON_EXTRA_METHODS = (
+    "piccard_sqrt", "bcg12", "sj16", "sj16_precomputed"
+)
 
 # Row labels carrying each method's security class, and for SJ16 the
 # lower-bound caveat the design doc requires the emitted table to carry.
@@ -202,9 +204,17 @@ COMPARISON_EXTRA_METHODS = ("piccard_sqrt", "bcg12", "sj16")
 # boundary-aware branch below, which reads security_class off their own CSV
 # row instead of a hardcoded string.
 _METHOD_LABELS = {
-    "piccard_sqrt": "piccard_sqrt [CPA/no-leakage]",
-    "bcg12": "bcg12 [AHE/no-leakage]",
-    "sj16": "sj16 [AHE/no-leakage; shares only, secure division excluded]",
+    "piccard_sqrt":
+        "piccard_sqrt [end-to-end-estimator; bfv-sqrt-minhash]",
+    "sj16": (
+        "sj16 [component-lower-bound; intersection-shares-lower-bound; "
+        "secure division excluded]"
+    ),
+    "sj16_precomputed": (
+        "sj16_precomputed [component-lower-bound; "
+        "intersection-shares-lower-bound; secure division excluded; "
+        "randomizers-precomputed]"
+    ),
 }
 
 # Exact disclosure sentence appended to the ASCII title AND the LaTeX caption of
@@ -224,9 +234,230 @@ SJ16_LOWER_BOUND_NOTE = (
 # universe-sized BFV indicator-vector protocol with KPA/leakage security, and
 # must not be read as reproducing [11]'s numbers.
 FHE_IND_DISCLOSURE = (
-    "FHE-IND [KPA/leakage; universe-sized BFV indicator vector; "
-    "not a faithful [11] reimplementation]"
+    "FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only]"
 )
+
+
+_REQUIRED_TAXONOMY = {
+    "cryptographic_profile", "nominal_security_bits", "security_match",
+    "comparison_eligible", "comparison_scope", "primitive",
+    "protocol_model", "output_semantics", "assurance_scope",
+    "security_basis", "cost_scope", "precomputation_mode",
+    "secure_division_included", "measurement_kind", "measurement_status",
+    "target_security_bits", "k", "m", "ring_dim", "sanitizer_model",
+    "openfhe_version", "actual_ring_dim", "log_q_bits",
+    "plaintext_modulus", "num_limbs", "hash_randomness", "hash_seed",
+}
+
+
+def _expect_taxonomy(row, expected):
+    method = row.get("method", "")
+    for field, want in expected.items():
+        got = row.get(field, "")
+        if got != want:
+            raise ValueError(
+                f"{method}: {field}={got!r}, expected {want!r}")
+
+
+def _require_positive_numeric(row, fields):
+    for field in fields:
+        value = row.get(field, "")
+        try:
+            valid = float(value) > 0
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(
+                f"{row.get('method', '')}: {field} must be positive numeric")
+
+
+def validate_comparison_taxonomy(rows):
+    """Fail closed on any comparison row outside the Phase-3 truth table."""
+    if not rows:
+        return
+    missing = _REQUIRED_TAXONOMY - set(rows[0])
+    if missing:
+        raise ValueError(f"comparison CSV missing taxonomy columns: {sorted(missing)}")
+
+    boundaries = defaultdict(set)
+    row_keys = set()
+    for row in rows:
+        method = row.get("method", "")
+        target = row.get("target_security_bits", "")
+        joined = " ".join(row.values())
+        if "KPA/leakage" in joined or "EPSet" in joined:
+            raise ValueError(f"{method}: forbidden legacy FHE-IND taxonomy")
+        if row.get("measurement_status") not in {
+            "measured", "extrapolated", "infeasible", "skipped", "error"
+        }:
+            raise ValueError(f"{method}: invalid measurement_status")
+        if row.get("secure_division_included") != "false":
+            raise ValueError(f"{method}: secure division token must be false")
+        if row.get("security_basis") in {"", "not-applicable"}:
+            raise ValueError(f"{method}: missing implemented security_basis")
+
+        evidence = "accuracy" if row.get("measurement_kind", "").endswith(
+            "accuracy") else "timing"
+        if method in {"piccard", "piccard_sqrt"}:
+            sqrt = method == "piccard_sqrt"
+            _expect_taxonomy(row, {
+                "cryptographic_profile": (
+                    "live-BFV-TOY" if target == "0" else f"live-BFV-STD{target}"
+                ),
+                "nominal_security_bits": target,
+                "security_match": "true",
+                "comparison_eligible": "false" if target == "0" else "true",
+                "comparison_scope": "end-to-end-estimator",
+                "primitive": "bfv-sqrt-minhash" if sqrt else "bfv-onehot-minhash",
+                "protocol_model": (
+                    "piccard-sqrt-two-owner-outsourced" if sqrt
+                    else "piccard-two-owner-outsourced"
+                ),
+                "output_semantics": "bias-corrected-jaccard-estimate",
+                "assurance_scope": "live-bfv+empirical-sanitizer-poc",
+                "security_basis": "openfhe-hesea-standard-live-context",
+                "cost_scope": "full-query-excluding-one-time-setup",
+                "precomputation_mode": "crs-and-keys-only",
+                "measurement_kind": f"fhe-{evidence}",
+            })
+            _require_positive_numeric(row, ("k", "m", "ring_dim"))
+            if row.get("sanitizer_model") == "not-applicable":
+                raise ValueError(f"{method}: Piccard sanitizer cannot be absent")
+            _require_positive_numeric(
+                row, ("actual_ring_dim", "log_q_bits", "plaintext_modulus",
+                      "num_limbs"))
+        elif method == "baseline":
+            _expect_taxonomy(row, {
+                "cryptographic_profile": (
+                    "live-BFV-TOY" if target == "0" else f"live-BFV-STD{target}"
+                ),
+                "nominal_security_bits": target,
+                "security_match": "true",
+                "comparison_eligible": "false",
+                "comparison_scope": "diagnostic-only",
+                "primitive": "bfv-indicator-comparison",
+                "protocol_model": "local-universe-sized-BFV-comparator",
+                "output_semantics": "intersection-indicator-vector",
+                "assurance_scope": "live-bfv-primitive-only",
+                "security_basis": "openfhe-hesea-standard-live-context",
+                "cost_scope": "primitive-only",
+                "precomputation_mode": "not-applicable",
+                "measurement_kind": "diagnostic",
+                "k": "", "m": "",
+                "sanitizer_model": "not-applicable",
+            })
+            _require_positive_numeric(
+                row, ("ring_dim", "actual_ring_dim", "log_q_bits",
+                      "plaintext_modulus", "num_limbs"))
+        elif method.startswith("bcg12_"):
+            parts = method.split("_")
+            if len(parts) != 3 or parts[1] not in {"mh", "exact"} or \
+                    parts[2] not in {"ff", "ec"}:
+                raise ValueError(f"unknown BCG12 method {method!r}")
+            exact, ff = parts[1] == "exact", parts[2] == "ff"
+            matched = target == "128"
+            _expect_taxonomy(row, {
+                "cryptographic_profile": "FF-3072/256" if ff else "P-256",
+                "nominal_security_bits": "128",
+                "security_match": "true" if matched else "false",
+                "comparison_eligible": "true" if matched else "false",
+                "comparison_scope": (
+                    "matched-cardinality-component" if exact
+                    else "matched-estimator-component"
+                ),
+                "primitive": "bcg12-ff" if ff else "bcg12-ec",
+                "protocol_model": (
+                    "bcg12-exact-cardinality" if exact
+                    else "bcg12-cardinality-on-minhash"
+                ),
+                "output_semantics": (
+                    "harness-reconstructed-exact-jaccard" if exact
+                    else "minhash-collision-jaccard-estimate"
+                ),
+                "assurance_scope": "implemented-baseline-parameter-map",
+                "security_basis": (
+                    "finite-field-dh-3072-subgroup-256-parameter-map" if ff
+                    else "nist-p256-parameter-map"
+                ),
+                "cost_scope": "full-query-excluding-one-time-setup",
+                "precomputation_mode": "crs-and-keys-only",
+                "measurement_kind": f"psi-{evidence}" if matched else "diagnostic",
+                "m": "", "ring_dim": "",
+                "sanitizer_model": "not-applicable",
+                "openfhe_version": "not-applicable",
+            })
+            if exact:
+                if row.get("k") != "":
+                    raise ValueError(f"{method}: exact mode requires empty k")
+            else:
+                _require_positive_numeric(row, ("k",))
+                if row.get("hash_randomness", "") == "" or \
+                        row.get("hash_seed", "") == "":
+                    raise ValueError(
+                        f"{method}: MinHash mode requires workload hash seed")
+        elif method in {"sj16", "sj16_precomputed"}:
+            profile = row.get("cryptographic_profile", "")
+            try:
+                bits = int(profile.removeprefix("Paillier-"))
+            except ValueError as error:
+                raise ValueError(f"{method}: invalid Paillier profile") from error
+            if bits not in {1024, 2048, 3072} or profile != f"Paillier-{bits}":
+                raise ValueError(f"{method}: unsupported Paillier profile")
+            nominal = {1024: "80", 2048: "112", 3072: "128"}[bits]
+            basis = {
+                1024: "rsa-ifc-modulus-size-proxy-approximately-80-bits",
+                2048: "rsa-ifc-modulus-size-proxy-approximately-112-bits",
+                3072:
+                    "rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+            }[bits]
+            matched = bits == 3072 and target == "128"
+            precomputed = method == "sj16_precomputed"
+            _expect_taxonomy(row, {
+                "nominal_security_bits": nominal,
+                "security_match": "true" if matched else "false",
+                "comparison_eligible": (
+                    "true" if matched and not precomputed else "false"
+                ),
+                "comparison_scope": "component-lower-bound",
+                "primitive": f"paillier-{bits}",
+                "protocol_model": "sj16-intersection-shares",
+                "output_semantics":
+                    "harness-reconstructed-jaccard-with-plaintext-union",
+                "assurance_scope": "intersection-shares-lower-bound",
+                "security_basis": basis,
+                "cost_scope": (
+                    "online-query-with-precomputed-randomizers" if precomputed
+                    else "full-query-excluding-one-time-setup"
+                ),
+                "precomputation_mode": (
+                    "randomizers-precomputed" if precomputed
+                    else "randomizer-generation-included"
+                ),
+                "measurement_kind": f"ahe-{evidence}" if matched else "diagnostic",
+                "k": "", "m": "", "ring_dim": "",
+                "sanitizer_model": "not-applicable",
+                "openfhe_version": "not-applicable",
+            })
+        else:
+            raise ValueError(f"unknown comparison method {method!r}")
+
+        key = (row.get("scenario", ""), method, row.get("measurement_kind", ""))
+        if key in row_keys:
+            raise ValueError(f"duplicate comparison taxonomy row {key}")
+        row_keys.add(key)
+        boundaries[(method, row.get("measurement_kind", ""))].add((
+            row.get("cost_scope", ""), row.get("precomputation_mode", "")))
+
+    for key, values in boundaries.items():
+        if len(values) != 1:
+            raise ValueError(f"mixed cost/precomputation scopes for {key}: {values}")
+    for row in rows:
+        if row.get("method") == "sj16_precomputed":
+            companion = (row.get("scenario", ""), "sj16",
+                         row.get("measurement_kind", ""))
+            if companion not in row_keys:
+                raise ValueError(
+                    "sj16_precomputed cannot replace the included-cost sj16 row")
 
 
 def has_sj16_row(rows):
@@ -304,7 +535,10 @@ def method_tag(method, row=None):
     if method in _METHOD_LABELS:
         base = _METHOD_LABELS[method]
     elif row is not None and _boundary_match(method, "bcg12"):
-        base = f"{method} [{row.get('security_class', '')}]"
+        base = (
+            f"{method} [{row.get('comparison_scope', '')}; "
+            f"{row.get('primitive', '')}]"
+        )
     else:
         base = method
     if row is not None and row.get("measurement_kind", "measured") == "extrapolated":
@@ -1104,6 +1338,7 @@ def main():
         piccard_accuracy = read_csv(d / f"piccard_accuracy{suffix}.csv")
         piccard_combined = read_csv(d / f"piccard_combined{suffix}.csv")
         comparison_timing = read_csv(d / f"comparison_timing{suffix}.csv")
+        validate_comparison_taxonomy(comparison_timing)
         dynamic_timing = read_csv(d / f"dynamic_timing{suffix}.csv")
         dynamic_accuracy = read_csv(d / f"dynamic_accuracy{suffix}.csv")
         threshold_timing = read_csv(d / f"threshold_timing{suffix}.csv")

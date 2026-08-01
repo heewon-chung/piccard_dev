@@ -62,9 +62,6 @@ public:
     SJ16& operator=(const SJ16&) = delete;
 
     const char* Name() const override { return "sj16"; }
-    SecurityClass Security() const override {
-        return SecurityClass::AHE_NoLeakage;
-    }
 
     // One-time Paillier key generation. Safe to call again (regenerates keys).
     void Setup() override;

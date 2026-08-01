@@ -110,6 +110,12 @@ const char* BenchmarkMeasurementKindName(BenchmarkMeasurementKind kind) {
     switch (kind) {
         case BenchmarkMeasurementKind::FheTiming: return "fhe-timing";
         case BenchmarkMeasurementKind::FheAccuracy: return "fhe-accuracy";
+        case BenchmarkMeasurementKind::PlaintextEstimator:
+            return "plaintext-estimator";
+        case BenchmarkMeasurementKind::PsiTiming: return "psi-timing";
+        case BenchmarkMeasurementKind::PsiAccuracy: return "psi-accuracy";
+        case BenchmarkMeasurementKind::AheTiming: return "ahe-timing";
+        case BenchmarkMeasurementKind::AheAccuracy: return "ahe-accuracy";
         case BenchmarkMeasurementKind::Diagnostic: return "diagnostic";
     }
     throw std::logic_error("unknown benchmark measurement kind");

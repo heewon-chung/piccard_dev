@@ -2,6 +2,7 @@
 
 #include "benchmark_profile.h"
 #include "benchmark_provenance.h"
+#include "baseline_profile.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -216,12 +217,13 @@ struct ComparisonResult {
     BenchmarkProfileMetadata profile;
     std::string scenario;
     std::string method;
+    std::optional<BaselineCapability> capability;
 
     uint32_t universe_size = 0;
     size_t set_size = 0;
-    uint32_t k = 0;
-    uint32_t m = 0;
-    uint32_t ring_dim = 0;
+    std::optional<uint32_t> k;
+    std::optional<uint32_t> m;
+    std::optional<uint32_t> ring_dim;
     uint32_t num_cts = 0;
     uint32_t mult_depth = 0;
 

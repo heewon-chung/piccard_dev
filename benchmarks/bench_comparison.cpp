@@ -23,13 +23,52 @@ using namespace piccard;
 using namespace piccard::benchmark;
 using namespace piccard::baseline;
 
+static uint32_t SecurityBits(SecurityLevel security) {
+    switch (security) {
+        case SecurityLevel::TOY: return 0;
+        case SecurityLevel::STD128: return 128;
+        case SecurityLevel::STD192: return 192;
+        case SecurityLevel::STD256: return 256;
+    }
+    throw std::logic_error("unknown security level");
+}
+
+static BaselineEvidenceKind EvidenceKind(
+    BenchmarkMeasurementKind measurement_kind) {
+    return measurement_kind == BenchmarkMeasurementKind::FheAccuracy
+        ? BaselineEvidenceKind::Accuracy
+        : BaselineEvidenceKind::Timing;
+}
+
+static void SetCapability(
+    ComparisonResult& row,
+    BaselineMethod method,
+    uint32_t target_security_bits,
+    BaselineEvidenceKind evidence_kind = BaselineEvidenceKind::Timing,
+    bool precomputed_randomizers = false) {
+    row.capability = ResolveBaselineCapability(
+        method, target_security_bits, evidence_kind,
+        BaselineSecurityPolicy::AllowDiagnostic, precomputed_randomizers);
+    row.method = BaselineCapabilityMethodName(*row.capability);
+}
+
+static BaselineMethod Sj16Method(uint32_t key_bits) {
+    switch (key_bits) {
+        case 1024: return BaselineMethod::Sj16Paillier1024;
+        case 2048: return BaselineMethod::Sj16Paillier2048;
+        case 3072: return BaselineMethod::Sj16Paillier3072;
+    }
+    throw std::invalid_argument(
+        "SJ16 key size must be exactly 1024, 2048, or 3072 bits");
+}
+
 // NOTE (task 10-2, FHE-IND relabel): the std::cerr progress lines below print
 // the lowercase method key "baseline" as shorthand for the FHE-IND comparator
 // (baseline_engine.h) — this is developer-facing stderr progress output, not
 // a reporting surface (verify_reporting_gaps.py does not capture it), so it
 // is intentionally left unchanged. CSV/table/CLI-help text uses the FHE-IND
-// relabel exclusively; see FHE_IND_DISCLOSURE in scripts/summarize_results.py
-// and PrintUsage() below.
+// capability label exclusively; see FHE_IND_DISCLOSURE in
+// scripts/summarize_results.py and PrintUsage() below.
 
 // ============================================================================
 // Shared helpers
@@ -194,6 +233,13 @@ static void BindReviewerRow(
     row.realized_union = workload.union_size;
     row.realized_jaccard = workload.realized_jaccard;
 
+    if (!row.capability.has_value()) {
+        throw std::logic_error("reviewer row is missing typed capability");
+    }
+    SetCapability(row, row.capability->method,
+                  config.profile.target_security_bits,
+                  EvidenceKind(measurement_kind));
+
     // FHE-IND is a diagnostic comparator, not a Piccard-family evidence row.
     // Leave its default legacy profile metadata intact instead of applying the
     // primary Piccard profile to the common comparison writer.
@@ -220,7 +266,8 @@ static ComparisonResult RunPiccardTimed(
     cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     cr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
-    cr.method = "piccard";
+    SetCapability(cr, BaselineMethod::Piccard,
+                  SecurityBits(engine.GetParams().security));
     cr.universe_size = universe_size;
     cr.set_size = set_x.size();
     cr.k = engine.GetParams().k;
@@ -302,11 +349,10 @@ static ComparisonResult RunBaselineTimed(
     cr.sanitizer = NotApplicableSanitizerMetadata();
     cr.provenance = MakeFheIndBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
-    cr.method = "baseline";
+    SetCapability(cr, BaselineMethod::FheInd,
+                  SecurityBits(engine.GetParams().security));
     cr.universe_size = engine.GetParams().universe_size;
     cr.set_size = set_x.size();
-    cr.k = 0;
-    cr.m = 0;
     cr.ring_dim = engine.GetParams().ring_dim;
     cr.num_cts = engine.GetParams().num_ciphertexts;
 
@@ -395,7 +441,9 @@ static ComparisonResult RunMultiTrialPiccard(
 
     ComparisonResult r;
     r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
-    r.scenario = scenario; r.method = "piccard";
+    r.scenario = scenario;
+    SetCapability(r, BaselineMethod::Piccard,
+                  SecurityBits(engine.GetParams().security));
     r.universe_size = universe_size; r.set_size = set_x.size();
     r.k = engine.GetParams().k; r.m = engine.GetParams().m;
     r.ring_dim = engine.GetParams().ring_dim;
@@ -455,7 +503,7 @@ static ComparisonResult RunMultiTrialBaseline(
         sum_j_err += cr.jaccard_error;
         if (j_true > 0.0) { sum_rel_err += cr.jaccard_error / j_true; rel_eligible++; }
         ct_size = cr.ct_size_bytes; comm_b = cr.comm_bytes;
-        ring_d = cr.ring_dim; ncts = cr.num_cts;
+        ring_d = cr.ring_dim.value(); ncts = cr.num_cts;
     }
 
     auto d_enc = ComputeDispersion(v_encode);
@@ -469,9 +517,11 @@ static ComparisonResult RunMultiTrialBaseline(
     r.estimator_model = EstimatorModel::NotApplicable;
     r.sanitizer = NotApplicableSanitizerMetadata();
     r.provenance = MakeFheIndBenchmarkProvenance(engine.GetBFVContext());
-    r.scenario = scenario; r.method = "baseline";
+    r.scenario = scenario;
+    SetCapability(r, BaselineMethod::FheInd,
+                  SecurityBits(engine.GetParams().security));
     r.universe_size = engine.GetParams().universe_size;
-    r.set_size = set_x.size(); r.k = 0; r.m = 0;
+    r.set_size = set_x.size();
     r.ring_dim = ring_d; r.num_cts = ncts;
     r.trials = num_trials;
     r.phase_encode_ms = d_enc.mean;  r.phase_encode_ms_sd = d_enc.sd;  r.phase_encode_ms_median = d_enc.median;
@@ -503,7 +553,8 @@ static ComparisonResult RunMultiTrialBaseline(
 static ComparisonResult RunBCG12MultiTrial(
     piccard::baselines::BCG12& eng, const std::vector<uint64_t>& x,
     const std::vector<uint64_t>& y, double j_true, const std::string& scenario,
-    uint32_t universe, const char* method, uint32_t k, size_t trials) {
+    uint32_t universe, BaselineMethod method, uint32_t target_security_bits,
+    size_t trials) {
     eng.RunQuery(x,y);                                  // warmup (excluded)
     std::vector<double> enc,encr,comp,dec,tot;
     double sum_j_hat=0.0, sum_j_err=0.0, sum_rel=0.0; size_t rel_elig=0;
@@ -524,8 +575,10 @@ static ComparisonResult RunBCG12MultiTrial(
     cr.estimator_model = EstimatorModel::NotApplicable;
     cr.sanitizer = NotApplicableSanitizerMetadata();
     cr.provenance = MakeAheBenchmarkProvenance();
-    cr.scenario=scenario; cr.method=method; cr.universe_size=universe;
-    cr.set_size=x.size(); cr.k=k; cr.m=0; cr.ring_dim=0; cr.num_cts=0; cr.mult_depth=0;
+    cr.scenario=scenario;
+    SetCapability(cr, method, target_security_bits);
+    cr.universe_size=universe;
+    cr.set_size=x.size(); cr.num_cts=0; cr.mult_depth=0;
     cr.trials=trials;
     cr.phase_encode_ms=de.mean;  cr.phase_encode_ms_sd=de.sd;  cr.phase_encode_ms_median=de.median;
     cr.phase_encrypt_ms=dr.mean; cr.phase_encrypt_ms_sd=dr.sd; cr.phase_encrypt_ms_median=dr.median;
@@ -574,7 +627,8 @@ static ComparisonResult RunSqrtPiccardTimed(
     cr.sanitizer = MakeSanitizerMetadata(engine.GetParams());
     cr.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
     cr.scenario = scenario;
-    cr.method = "piccard_sqrt";
+    SetCapability(cr, BaselineMethod::PiccardSqrt,
+                  SecurityBits(engine.GetParams().security));
     cr.universe_size = universe_size;
     cr.set_size = set_x.size();
     cr.k = engine.GetParams().k;
@@ -696,7 +750,9 @@ static ComparisonResult RunMultiTrialSqrtPiccard(
 
     ComparisonResult r;
     r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
-    r.scenario = scenario; r.method = "piccard_sqrt";
+    r.scenario = scenario;
+    SetCapability(r, BaselineMethod::PiccardSqrt,
+                  SecurityBits(engine.GetParams().security));
     r.universe_size = universe_size; r.set_size = set_x.size();
     r.k = engine.GetParams().k; r.m = engine.GetParams().m;
     r.ring_dim = engine.GetParams().ring_dim;
@@ -798,11 +854,12 @@ static ComparisonResult RunReviewerHashedAccuracy(
     const ReviewerWorkload& workload,
     uint32_t universe_size,
     const std::string& scenario,
-    const char* method,
+    BaselineMethod method,
     uint32_t mult_depth) {
     ComparisonResult row;
     row.scenario = scenario;
-    row.method = method;
+    SetCapability(row, method,
+                  SecurityBits(engine.GetParams().security));
     row.universe_size = universe_size;
     row.set_size = workload.set_a.size();
     row.k = engine.GetParams().k;
@@ -846,7 +903,8 @@ static ComparisonResult RunReviewerBaselineAccuracy(
     const std::string& scenario) {
     ComparisonResult row;
     row.scenario = scenario;
-    row.method = "baseline";
+    SetCapability(row, BaselineMethod::FheInd,
+                  SecurityBits(engine.GetParams().security));
     row.universe_size = engine.GetParams().universe_size;
     row.set_size = workload.set_a.size();
     row.ring_dim = engine.GetParams().ring_dim;
@@ -934,13 +992,13 @@ static void WriteReviewerRowsForPoint(
         } else {
             auto piccard_row = RunReviewerHashedAccuracy(
                 piccard, config, workload, point.universe_size, scenario,
-                "piccard", 1);
+                BaselineMethod::Piccard, 1);
             BindReviewerRow(config, workload, kind, piccard_row);
             csv.WriteRow(piccard_row);
 
             auto sqrt_row = RunReviewerHashedAccuracy(
                 sqrt_piccard, config, workload, point.universe_size, scenario,
-                "piccard_sqrt", 3);
+                BaselineMethod::PiccardSqrt, 3);
             BindReviewerRow(config, workload, kind, sqrt_row);
             csv.WriteRow(sqrt_row);
 
@@ -1043,13 +1101,13 @@ static void BenchVaryK(const ComparisonConfig& cfg,
             csv.WriteRow(sr);
 
             std::cerr << "  k=" << k
-                      << " piccard: N=" << pr.ring_dim
+                      << " piccard: N=" << pr.ring_dim.value_or(0)
                       << " total=" << pr.total_ms << "ms"
-                      << " | sqrt: N=" << sr.ring_dim
+                      << " | sqrt: N=" << sr.ring_dim.value_or(0)
                       << " total=" << sr.total_ms << "ms";
         } else {
             std::cerr << "  k=" << k
-                      << " piccard: N=" << pr.ring_dim
+                      << " piccard: N=" << pr.ring_dim.value_or(0)
                       << " total=" << pr.total_ms << "ms"
                       << " | sqrt: SKIPPED (m=" << config.m << " not sqrt-valid)";
         }
@@ -1059,7 +1117,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
         br_copy.scenario = scenario;
         csv.WriteRow(br_copy);
 
-        std::cerr << " | baseline: N=" << br_copy.ring_dim
+        std::cerr << " | baseline: N=" << br_copy.ring_dim.value_or(0)
                   << " total=" << br_copy.total_ms << "ms\n";
     }
 }
@@ -1124,13 +1182,13 @@ static void BenchVaryM(const ComparisonConfig& cfg,
             csv.WriteRow(sr);
 
             std::cerr << "  m=" << m
-                      << " piccard: N=" << pr.ring_dim
+                      << " piccard: N=" << pr.ring_dim.value_or(0)
                       << " total=" << pr.total_ms << "ms"
-                      << " | sqrt: N=" << sr.ring_dim
+                      << " | sqrt: N=" << sr.ring_dim.value_or(0)
                       << " total=" << sr.total_ms << "ms";
         } else {
             std::cerr << "  m=" << m
-                      << " piccard: N=" << pr.ring_dim
+                      << " piccard: N=" << pr.ring_dim.value_or(0)
                       << " total=" << pr.total_ms << "ms"
                       << " | sqrt: SKIPPED (not sqrt-valid)";
         }
@@ -1140,7 +1198,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
         br_copy.scenario = scenario;
         csv.WriteRow(br_copy);
 
-        std::cerr << " | baseline: N=" << br_copy.ring_dim
+        std::cerr << " | baseline: N=" << br_copy.ring_dim.value_or(0)
                   << " total=" << br_copy.total_ms << "ms\n";
     }
 }
@@ -1203,6 +1261,10 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                 er.estimator_model = EstimatorModel::NotApplicable;
                 er.sanitizer = NotApplicableSanitizerMetadata();
                 er.provenance = MakeAheBenchmarkProvenance();
+                SetCapability(er, Sj16Method(cfg.sj16_key_bits),
+                              SecurityBits(config.security_level),
+                              BaselineEvidenceKind::Timing,
+                              cfg.sj16_precompute);
                 csv.WriteRow(er);
             }
         }
@@ -1434,7 +1496,9 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
 
             ComparisonResult pr;
             pr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
-            pr.scenario = scenario; pr.method = "piccard";
+            pr.scenario = scenario;
+            SetCapability(pr, BaselineMethod::Piccard,
+                          SecurityBits(config.security_level));
             pr.universe_size = u; pr.set_size = config.set_size;
             pr.k = piccard.GetParams().k; pr.m = piccard.GetParams().m;
             pr.ring_dim = piccard.GetParams().ring_dim;
@@ -1471,7 +1535,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             csv.WriteRow(pr);
 
             std::cerr << "  U=" << u
-                      << " piccard: N=" << pr.ring_dim
+                      << " piccard: N=" << pr.ring_dim.value_or(0)
                       << " total=" << pr.total_ms << "ms"
                       << " comm=" << (pr.comm_bytes / 1024) << "KB"
                       << " err=" << pr.jaccard_error << "\n";
@@ -1488,7 +1552,9 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
 
             ComparisonResult sr;
             sr.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
-            sr.scenario = scenario; sr.method = "piccard_sqrt";
+            sr.scenario = scenario;
+            SetCapability(sr, BaselineMethod::PiccardSqrt,
+                          SecurityBits(config.security_level));
             sr.universe_size = u; sr.set_size = config.set_size;
             sr.k = s_last.k; sr.m = s_last.m;
             sr.ring_dim = s_last.ring_dim;
@@ -1526,7 +1592,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             csv.WriteRow(sr);
 
             std::cerr << "  U=" << u
-                      << " sqrt: N=" << sr.ring_dim
+                      << " sqrt: N=" << sr.ring_dim.value_or(0)
                       << " total=" << sr.total_ms << "ms"
                       << " comm=" << (sr.comm_bytes / 1024) << "KB"
                       << " err=" << sr.jaccard_error << "\n";
@@ -1546,9 +1612,10 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             br.sanitizer = NotApplicableSanitizerMetadata();
             br.provenance =
                 MakeFheIndBenchmarkProvenance(baseline.GetBFVContext());
-            br.scenario = scenario; br.method = "baseline";
+            br.scenario = scenario;
+            SetCapability(br, BaselineMethod::FheInd,
+                          SecurityBits(config.security_level));
             br.universe_size = u; br.set_size = config.set_size;
-            br.k = 0; br.m = 0;
             br.ring_dim = b_last.ring_dim; br.num_cts = b_last.num_cts;
             br.trials = config.trials;
             br.phase_encode_ms = d_enc.mean;  br.phase_encode_ms_sd = d_enc.sd;  br.phase_encode_ms_median = d_enc.median;
@@ -1572,7 +1639,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             csv.WriteRow(br);
 
             std::cerr << "  U=" << u
-                      << " baseline: N=" << br.ring_dim
+                      << " baseline: N=" << br.ring_dim.value_or(0)
                       << " cts=" << br.num_cts
                       << " total=" << br.total_ms << "ms"
                       << " comm=" << (br.comm_bytes / 1024) << "KB"
@@ -1581,7 +1648,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
 
         // BCG12: aggregate + emit per-variant rows (mirrors the Piccard aggregate block).
 #ifdef HAVE_PICCARD_BASELINES
-        auto emit_bcg12=[&](const char* method, std::vector<double>& ve,std::vector<double>& vr,
+        auto emit_bcg12=[&](BaselineMethod method, std::vector<double>& ve,std::vector<double>& vr,
                             std::vector<double>& vc,std::vector<double>& vd,std::vector<double>& vt,
                             double acc_err, double acc_jhat, double acc_jtrue_last,
                             const piccard::baselines::QueryCost& last){
@@ -1592,8 +1659,10 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             r.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
             r.sanitizer = NotApplicableSanitizerMetadata();
             r.provenance = MakeAheBenchmarkProvenance();
-            r.scenario=scenario; r.method=method; r.universe_size=u;
-            r.set_size=config.set_size; r.k=config.k; r.m=0; r.ring_dim=0; r.num_cts=0; r.mult_depth=0;
+            r.scenario=scenario;
+            SetCapability(r, method, SecurityBits(config.security_level));
+            r.universe_size=u;
+            r.set_size=config.set_size; r.k=config.k; r.num_cts=0; r.mult_depth=0;
             r.trials=config.trials;
             r.phase_encode_ms=de.mean;  r.phase_encode_ms_sd=de.sd;  r.phase_encode_ms_median=de.median;
             r.phase_encrypt_ms=dr.mean; r.phase_encrypt_ms_sd=dr.sd; r.phase_encrypt_ms_median=dr.median;
@@ -1616,10 +1685,10 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
                                     ? config.seed : timing_crs;
             r.accuracy_trials = config.accuracy_trials;
             csv.WriteRow(r);
-            std::cerr << "  U=" << u << " " << method << ": total=" << r.total_ms
+            std::cerr << "  U=" << u << " " << BaselineMethodName(method) << ": total=" << r.total_ms
                       << "ms comm=" << (r.comm_bytes/1024) << "KB err=" << r.jaccard_error << "\n"; };
-        emit_bcg12("bcg12_mh_ff", f_enc,f_encr,f_comp,f_dec,f_tot, acc_sum_f_err, acc_sum_f_jhat, acc_f_jtrue_last, f_last);
-        emit_bcg12("bcg12_mh_ec", e_enc,e_encr,e_comp,e_dec,e_tot, acc_sum_e_err, acc_sum_e_jhat, acc_e_jtrue_last, e_last);
+        emit_bcg12(BaselineMethod::Bcg12MinHashFf, f_enc,f_encr,f_comp,f_dec,f_tot, acc_sum_f_err, acc_sum_f_jhat, acc_f_jtrue_last, f_last);
+        emit_bcg12(BaselineMethod::Bcg12MinHashEc, e_enc,e_encr,e_comp,e_dec,e_tot, acc_sum_e_err, acc_sum_e_jhat, acc_e_jtrue_last, e_last);
 #endif
 #ifdef HAVE_SJ16
         // Aggregate SJ16 trials into one published row (median timing + mean
@@ -1629,6 +1698,10 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             sr.estimator_model = EstimatorModel::NotApplicable;
             sr.sanitizer = NotApplicableSanitizerMetadata();
             sr.provenance = MakeAheBenchmarkProvenance();
+            SetCapability(sr, Sj16Method(cfg.sj16_key_bits),
+                          SecurityBits(config.security_level),
+                          BaselineEvidenceKind::Timing,
+                          cfg.sj16_precompute);
             csv.WriteRow(sr);
 
             std::cerr << "  U=" << u
@@ -1731,19 +1804,21 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
             // capturing structured bindings in a lambda is a C++20 extension.
             const std::vector<uint64_t>& bcg12_sa = set_a;
             const std::vector<uint64_t>& bcg12_sb = set_b;
-            auto run_exact=[&](Bcg12Backend be,const char* m,size_t tr){
+            auto run_exact=[&](Bcg12Backend be,BaselineMethod method,size_t tr){
                 Bcg12Params bp; bp.mode=Bcg12Mode::Exact; bp.backend=be;   // exact mode ignores CRS
                 BCG12 eng(bp); eng.Setup();
-                csv.WriteRow(RunBCG12MultiTrial(eng,bcg12_sa,bcg12_sb,j_true,scenario,eff_u,m,0,tr));
-                std::cerr << "  size=" << sz << " " << m << ": ran trials=" << tr << "\n"; };
+                csv.WriteRow(RunBCG12MultiTrial(
+                    eng,bcg12_sa,bcg12_sb,j_true,scenario,eff_u,method,
+                    SecurityBits(config.security_level),tr));
+                std::cerr << "  size=" << sz << " " << BaselineMethodName(method) << ": ran trials=" << tr << "\n"; };
             // EC exact
-            if (sz <= 10000) run_exact(Bcg12Backend::EC,"bcg12_exact_ec",config.trials);
-            else if (sz <= 100000){ run_exact(Bcg12Backend::EC,"bcg12_exact_ec",std::min<size_t>(config.trials,1));
+            if (sz <= 10000) run_exact(Bcg12Backend::EC,BaselineMethod::Bcg12ExactEc,config.trials);
+            else if (sz <= 100000){ run_exact(Bcg12Backend::EC,BaselineMethod::Bcg12ExactEc,std::min<size_t>(config.trials,1));
                 std::cerr << "  CAP: bcg12_exact_ec size=" << sz << " ~"
                           << (4.0*sz*0.037/1000.0) << "s/query -> trials=1\n"; }
             else std::cerr << "  SKIP: bcg12_exact_ec size=" << sz << " exceeds budget\n";
             // FF exact (faithful cost, expensive)
-            if (sz <= 1000) run_exact(Bcg12Backend::FF,"bcg12_exact_ff",config.trials);
+            if (sz <= 1000) run_exact(Bcg12Backend::FF,BaselineMethod::Bcg12ExactFf,config.trials);
             else std::cerr << "  SKIP: bcg12_exact_ff size=" << sz << " ~"
                            << (4.0*sz*0.55/1000.0) << "s/query > budget\n";
         }
@@ -1760,8 +1835,8 @@ static void PrintUsage() {
         << "Usage: bench_comparison [options]\n"
         << "\n"
         << "Comparator suite: Piccard vs SqrtPiccard vs the FHE-IND indicator-vector\n"
-        << "comparator (universe-sized BFV protocol; not a faithful [11]\n"
-        << "reimplementation). Reports compute time, end-to-end time, and\n"
+        << "comparator (local-universe-sized BFV diagnostic primitive; not a\n"
+        << "reviewed deployment protocol). Reports compute time and\n"
         << "communication cost.\n"
         << "\n"
         << "Timing scenarios (--mode=timing):\n"

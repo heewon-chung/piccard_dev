@@ -4,12 +4,11 @@
  * @file pjs_baseline.h
  * @brief Common contract for private Jaccard similarity (PJS) baselines
  *
- * Piccard is compared against protocols built on very different primitives
- * (BFV, AHE, DH-based PSI-CA), so bench_comparison drives them through one
- * interface and records the security class alongside the cost. Reporting the
- * security class is what keeps "comparison within the same security class"
- * (BCG12, SJ16) separate from "comparison against a weaker baseline"
- * (ZLG+24, which is KPA-secure and leaks during execution).
+ * Piccard is compared against protocols built on different primitives (BFV,
+ * AHE, and DH-based PSI-CA), so bench_comparison drives their query execution
+ * through one cost interface. Security and reporting capability metadata are
+ * deliberately not part of this engine API: benchmarks bind each concrete
+ * implementation through the strict typed map in baseline_profile.h.
  */
 
 #include <cstddef>
@@ -18,24 +17,6 @@
 
 namespace piccard {
 namespace baselines {
-
-// What a protocol guarantees, used to group rows in the comparison table.
-enum class SecurityClass {
-    CPA_NoLeakage,  // IND-CPA, no during-execution leakage (Piccard)
-    AHE_NoLeakage,  // AHE/DH-based, no during-execution leakage (BCG12, SJ16)
-    KPA_Leakage,    // KPA-secure, leaks during execution (ZLG+24)
-    Unknown,
-};
-
-inline const char* ToString(SecurityClass sc) {
-    switch (sc) {
-        case SecurityClass::CPA_NoLeakage: return "CPA/no-leakage";
-        case SecurityClass::AHE_NoLeakage: return "AHE/no-leakage";
-        case SecurityClass::KPA_Leakage:   return "KPA/leakage";
-        case SecurityClass::Unknown:       return "unknown";
-    }
-    return "unknown";
-}
 
 // Cost of a single PJS query, uniform across protocols. Phases that a given
 // protocol does not have (e.g. no encrypt step) stay at 0.
@@ -59,8 +40,6 @@ public:
     virtual ~PJSBaseline() = default;
 
     virtual const char* Name() const = 0;
-    virtual SecurityClass Security() const = 0;
-
     virtual void Setup() = 0;
 
     virtual QueryCost RunQuery(const std::vector<uint64_t>& set_x,

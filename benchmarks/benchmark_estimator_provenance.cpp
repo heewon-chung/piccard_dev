@@ -167,24 +167,76 @@ void WriteBenchmarkProfileFields(std::ostringstream& out,
         << "," << BenchmarkMeasurementKindName(profile.measurement_kind);
 }
 
-const char* SecurityClassOf(const std::string& method) {
-    if (method == "piccard" || method == "piccard_sqrt") {
-        return "CPA/no-leakage";
+const BaselineCapability& RequireComparisonCapability(
+    const ComparisonResult& row) {
+    if (!row.capability.has_value()) {
+        throw std::logic_error(
+            "comparison row is missing typed baseline capability");
     }
-    if (method == "baseline") return "KPA/leakage";
-    if (method.rfind("bcg12", 0) == 0 ||
-        method.rfind("sj16", 0) == 0) {
-        return "AHE/no-leakage";
+    ValidateBaselineCapability(*row.capability);
+    if (row.method != BaselineCapabilityMethodName(*row.capability)) {
+        throw std::logic_error(
+            "comparison method label disagrees with typed capability");
     }
-    return "unknown";
+    return *row.capability;
 }
 
-const char* ProtocolModelOf(const std::string& method) {
-    if (method.rfind("bcg12", 0) == 0 ||
-        method.rfind("sj16", 0) == 0) {
-        return "2-party";
+bool IsBcg12MinHash(BaselineMethod method) {
+    return method == BaselineMethod::Bcg12MinHashFf ||
+           method == BaselineMethod::Bcg12MinHashEc;
+}
+
+bool IsBcg12Exact(BaselineMethod method) {
+    return method == BaselineMethod::Bcg12ExactFf ||
+           method == BaselineMethod::Bcg12ExactEc;
+}
+
+bool IsSj16(BaselineMethod method) {
+    return method == BaselineMethod::Sj16Paillier1024 ||
+           method == BaselineMethod::Sj16Paillier2048 ||
+           method == BaselineMethod::Sj16Paillier3072;
+}
+
+void RequireComparisonParameters(const ComparisonResult& row,
+                                 BaselineMethod method) {
+    const auto positive = [](const std::optional<uint32_t>& value) {
+        return value.has_value() && *value > 0;
+    };
+    if (method == BaselineMethod::Piccard ||
+        method == BaselineMethod::PiccardSqrt) {
+        if (!positive(row.k) || !positive(row.m) || !positive(row.ring_dim)) {
+            throw std::logic_error(
+                "Piccard comparison rows require numeric k, m, and N");
+        }
+        return;
     }
-    return "3-party-outsourced";
+    if (method == BaselineMethod::FheInd) {
+        if (row.k.has_value() || row.m.has_value() || !positive(row.ring_dim)) {
+            throw std::logic_error(
+                "FHE-IND rows require empty k/m and numeric live BFV N");
+        }
+        return;
+    }
+    if (IsBcg12MinHash(method)) {
+        if (!positive(row.k) || row.m.has_value() || row.ring_dim.has_value() ||
+            row.hash_randomness.empty()) {
+            throw std::logic_error(
+                "BCG12-MinHash rows require k/hash CRS and empty m/N");
+        }
+        return;
+    }
+    if (IsBcg12Exact(method) || IsSj16(method)) {
+        if (row.k.has_value() || row.m.has_value() || row.ring_dim.has_value()) {
+            throw std::logic_error(
+                "exact BCG12 and SJ16 rows require empty k/m/N");
+        }
+        if (IsBcg12Exact(method) && !row.hash_randomness.empty()) {
+            throw std::logic_error(
+                "BCG12-exact rows must not fabricate a hash CRS");
+        }
+        return;
+    }
+    throw std::logic_error("unknown comparison method parameters");
 }
 
 }  // namespace
@@ -422,7 +474,11 @@ std::string SerializeDynamicRow(
 
 std::string SerializeComparisonHeader() {
     return
-        "scenario,method,security_class,"
+        "scenario,method,cryptographic_profile,nominal_security_bits,"
+        "security_match,comparison_eligible,comparison_scope,primitive,"
+        "protocol_model,output_semantics,assurance_scope,security_basis,"
+        "cost_scope,precomputation_mode,secure_division_included,"
+        "measurement_kind,"
         "universe_size,set_size,k,m,ring_dim,num_cts,mult_depth,"
         "phase_encode_ms,phase_encrypt_ms,phase_compute_ms,"
         "phase_decrypt_ms,total_ms,"
@@ -435,7 +491,6 @@ std::string SerializeComparisonHeader() {
         "phase_compute_ms_sd,phase_compute_ms_median,"
         "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
         "rel_error_eligible_n,"
-        "model,"
         "hash_randomness,hash_seed,hash_root_seed,accuracy_trials,"
         "phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
         "transcript_stat_bits,max_queries,query_stat_bits,"
@@ -445,7 +500,7 @@ std::string SerializeComparisonHeader() {
         "measurement_status,extrapolation_alpha,extrapolation_beta,"
         "extrapolation_residual,extrapolation_source,"
         "omp_threads,estimator_model,profile_id,run_class,"
-        "target_security_bits,comparison_eligible,measurement_kind,"
+        "target_security_bits,"
         "target_jaccard,realized_intersection,realized_union,"
         "realized_jaccard,actual_ring_dim,log_q_bits,plaintext_modulus,"
         "num_limbs,openfhe_version\n";
@@ -456,15 +511,35 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
                                    const BenchmarkProvenance& provenance) {
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
     RequireMatchingSanitizer(r.sanitizer, r.scaling_mod_size, provenance);
+    const BaselineCapability& capability = RequireComparisonCapability(r);
+    RequireComparisonParameters(r, capability.method);
     std::ostringstream out;
     out << r.scenario << ","
         << r.method << ","
-        << SecurityClassOf(r.method) << ","
+        << capability.cryptographic_profile << ",";
+    WriteOptional(out, capability.nominal_security_bits);
+    out << "," << (capability.security_match ? "true" : "false")
+        << "," << (capability.comparison_eligible ? "true" : "false")
+        << "," << ComparisonScopeName(capability.comparison_scope)
+        << "," << PrimitiveName(capability.primitive)
+        << "," << ProtocolModelName(capability.protocol_model)
+        << "," << OutputSemanticsName(capability.output_semantics)
+        << "," << AssuranceScopeName(capability.assurance_scope)
+        << "," << SecurityBasisName(capability.security_basis)
+        << "," << CostScopeName(capability.cost_scope)
+        << "," << PrecomputationModeName(capability.precomputation_mode)
+        << "," << (capability.secure_division_included ? "true" : "false")
+        << "," << BenchmarkMeasurementKindName(capability.measurement_kind)
+        << ","
         << r.universe_size << ","
         << r.set_size << ","
-        << r.k << ","
-        << r.m << ","
-        << r.ring_dim << ","
+        ;
+    WriteOptional(out, r.k);
+    out << ",";
+    WriteOptional(out, r.m);
+    out << ",";
+    WriteOptional(out, r.ring_dim);
+    out << ","
         << r.num_cts << ","
         << r.mult_depth << ","
         << std::fixed << std::setprecision(3)
@@ -494,7 +569,6 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << r.phase_decrypt_ms_sd << ","
         << r.phase_decrypt_ms_median << ","
         << r.rel_error_eligible_n << ","
-        << ProtocolModelOf(r.method) << ","
         << r.hash_randomness << ","
         << r.hash_seed << ","
         << r.hash_root_seed << ","
@@ -511,8 +585,10 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << r.extrapolation_residual << ","
         << r.extrapolation_source << ","
         << omp_threads << ","
-        << estimator_model;
-    WriteBenchmarkProfileFields(out, r.profile);
+        << estimator_model << ","
+        << r.profile.profile_id << ","
+        << BenchmarkRunClassName(r.profile.run_class) << ","
+        << capability.target_security_bits;
     out << "," << std::fixed << std::setprecision(6)
         << r.target_jaccard << ","
         << r.realized_intersection << ","

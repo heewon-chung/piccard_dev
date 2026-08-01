@@ -141,6 +141,7 @@ endif()
 # Shared deterministic serializers for all non-threshold benchmark schemas.
 add_library(
     piccard_benchmark_serializers
+    benchmarks/baseline_profile.cpp
     benchmarks/benchmark_profile.cpp
     benchmarks/benchmark_estimator_provenance.cpp
 )
@@ -557,6 +558,21 @@ if(BUILD_TESTS)
             add_test(NAME BenchmarkProfile COMMAND test_benchmark_profile)
 
             add_executable(
+                test_baseline_profile
+                tests/unit/test_baseline_profile.cpp
+            )
+            target_link_libraries(
+                test_baseline_profile
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_baseline_profile
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME BaselineProfile COMMAND test_baseline_profile)
+
+            add_executable(
                 test_noise_calibration_schema
                 tests/unit/test_noise_calibration_schema.cpp
             )
@@ -657,6 +673,10 @@ if(BUILD_TESTS)
     add_test(NAME CalibrationArchive
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_make_calibration_archive
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME ReportingTaxonomy
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_reporting_taxonomy
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

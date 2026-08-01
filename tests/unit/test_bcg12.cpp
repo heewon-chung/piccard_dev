@@ -20,7 +20,6 @@ TEST(Bcg12, MinHashMatchesPlaintextEstimator) {
     piccard::MinHasher mh(p.k, UINT64_MAX, p.minhash_seed);
     double ref = piccard::MinHasher::EstimateJaccard(mh.ComputeSignature(X), mh.ComputeSignature(Y));
     EXPECT_DOUBLE_EQ(qc.jaccard_estimate, ref);
-    EXPECT_EQ(e.Security(), SecurityClass::AHE_NoLeakage);
     EXPECT_STREQ(e.Name(), "bcg12_mh_ec");
     EXPECT_GT(qc.total_ms, 0.0);
     EXPECT_GT(qc.comm_bytes, 0u);
