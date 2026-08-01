@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -360,17 +361,75 @@ def validate_rows(rows: list[dict[str, str]]) -> None:
                         f"row {row_number}: {hash_column} is not lowercase SHA-256")
 
 
+def resolve_manifest_csv(manifest_path: Path, cell_id: str) -> Path:
+    """Resolve one checksum-bound CSV beneath the manifest's declared root."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"cannot read run manifest: {error}") from error
+    require(manifest.get("schema") == "piccard-pre-threshold-run-v1",
+            "invalid run manifest schema")
+    root = manifest_path.resolve().parent
+    directories = manifest.get("directories")
+    require(isinstance(directories, dict) and directories.get("csv") == "csv",
+            "run manifest CSV subroot is invalid")
+    cells = manifest.get("cells")
+    require(isinstance(cells, list), "run manifest cells are invalid")
+    matches = [cell for cell in cells
+               if isinstance(cell, dict) and cell.get("cell_id") == cell_id]
+    require(len(matches) == 1, "run manifest cell_id is missing or duplicate")
+    output = matches[0].get("output")
+    require(isinstance(output, dict), "run manifest cell output is invalid")
+    relative = output.get("csv")
+    require(isinstance(relative, str) and relative != "" and
+            not Path(relative).is_absolute(), "run manifest CSV path is invalid")
+    path = (root / relative).resolve(strict=False)
+    csv_root = (root / "csv").resolve()
+    try:
+        path.relative_to(csv_root)
+    except ValueError as error:
+        raise VerificationError("run manifest CSV path escapes declared subroot") from error
+    require(path.is_file(), "run manifest CSV is missing")
+    expected = output.get("csv_sha256")
+    require(isinstance(expected, str) and HEX64.fullmatch(expected) is not None,
+            "run manifest CSV checksum is invalid")
+    require(hashlib.sha256(path.read_bytes()).hexdigest() == expected,
+            "run manifest CSV checksum mismatch")
+    try:
+        with path.open(newline="", encoding="utf-8") as stream:
+            row_count = len(list(csv.reader(stream, strict=True))) - 1
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise VerificationError(f"cannot count manifest CSV rows: {error}") from error
+    require(output.get("csv_row_count") == row_count,
+            "run manifest CSV row count mismatch")
+    require(output.get("expected_csv_rows") == row_count,
+            "run manifest frozen expected row count mismatch")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv_path", nargs="?", type=Path)
     parser.add_argument("--csv", dest="csv_option", type=Path)
+    parser.add_argument("--run-manifest", type=Path)
+    parser.add_argument("--cell-id")
     args = parser.parse_args(argv)
-    path = args.csv_option or args.csv_path
-    if path is None:
-        parser.error("one CSV path is required")
-    if args.csv_option is not None and args.csv_path is not None:
-        parser.error("provide the CSV once, positionally or with --csv")
     try:
+        explicit = args.csv_option or args.csv_path
+        if args.run_manifest is not None:
+            if explicit is not None:
+                parser.error("--run-manifest cannot be combined with a CSV path")
+            if not args.cell_id:
+                parser.error("--run-manifest requires --cell-id")
+            path = resolve_manifest_csv(args.run_manifest, args.cell_id)
+        else:
+            if args.cell_id is not None:
+                parser.error("--cell-id requires --run-manifest")
+            if explicit is None:
+                parser.error("one CSV path is required")
+            if args.csv_option is not None and args.csv_path is not None:
+                parser.error("provide the CSV once, positionally or with --csv")
+            path = explicit
         _, rows = load_csv(path)
         validate_rows(rows)
     except VerificationError as error:

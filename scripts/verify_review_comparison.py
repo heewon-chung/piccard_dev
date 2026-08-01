@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -360,16 +361,89 @@ def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: st
                     f"row {row_number}: diagnostic suite cannot be comparison eligible")
 
 
+def resolve_manifest_artifacts(manifest_path: Path, cell_id: str):
+    """Resolve checksum-bound review artifacts under declared manifest subroots."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"cannot read run manifest: {error}") from error
+    require(manifest.get("schema") == "piccard-pre-threshold-run-v1",
+            "invalid run manifest schema")
+    root = manifest_path.resolve().parent
+    directories = manifest.get("directories")
+    require(isinstance(directories, dict), "run manifest directories are invalid")
+    expected_roots = {"csv": "csv", "workload": "workloads", "trace": "traces"}
+    require(all(directories.get(subroot) == subroot
+                for subroot in expected_roots.values()),
+            "run manifest review subroots are invalid")
+    cells = manifest.get("cells")
+    require(isinstance(cells, list), "run manifest cells are invalid")
+    matches = [cell for cell in cells
+               if isinstance(cell, dict) and cell.get("cell_id") == cell_id]
+    require(len(matches) == 1, "run manifest cell_id is missing or duplicate")
+    require(matches[0].get("producer") == "bench_review_comparison",
+            "run manifest cell is not a review producer")
+    output = matches[0].get("output")
+    require(isinstance(output, dict), "run manifest cell output is invalid")
+    resolved = {}
+    for key, subroot in expected_roots.items():
+        relative = output.get(key)
+        require(isinstance(relative, str) and relative != "" and
+                not Path(relative).is_absolute(),
+                f"run manifest {key} path is invalid")
+        path = (root / relative).resolve(strict=False)
+        declared = (root / subroot).resolve()
+        try:
+            path.relative_to(declared)
+        except ValueError as error:
+            raise VerificationError(
+                f"run manifest {key} path escapes declared subroot") from error
+        require(path.is_file(), f"run manifest {key} is missing")
+        expected = output.get(f"{key}_sha256")
+        require(isinstance(expected, str) and len(expected) == 64 and
+                all(character in "0123456789abcdef" for character in expected),
+                f"run manifest {key} checksum is invalid")
+        require(hashlib.sha256(path.read_bytes()).hexdigest() == expected,
+                f"run manifest {key} checksum mismatch")
+        resolved[key] = path
+    try:
+        with resolved["csv"].open(newline="", encoding="utf-8") as stream:
+            row_count = len(list(csv.reader(stream, strict=True))) - 1
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise VerificationError(f"cannot count manifest CSV rows: {error}") from error
+    require(output.get("csv_row_count") == row_count,
+            "run manifest CSV row count mismatch")
+    require(output.get("expected_csv_rows") == row_count,
+            "run manifest frozen expected row count mismatch")
+    return resolved["csv"], resolved["workload"], resolved["trace"]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--csv", required=True, type=Path)
-    parser.add_argument("--workload", required=True, type=Path)
-    parser.add_argument("--execution-trace", "--trace", dest="trace", required=True, type=Path)
+    parser.add_argument("--csv", type=Path)
+    parser.add_argument("--workload", type=Path)
+    parser.add_argument("--execution-trace", "--trace", dest="trace", type=Path)
+    parser.add_argument("--run-manifest", type=Path)
+    parser.add_argument("--cell-id")
     args = parser.parse_args(argv)
     try:
-        _, rows = load_csv(args.csv, REVIEW_REQUIRED_COLUMNS)
-        workload = parse_workload(args.workload)
-        trace_digest = verify_trace(args.trace, workload)
+        explicit = (args.csv, args.workload, args.trace)
+        if args.run_manifest is not None:
+            if any(value is not None for value in explicit):
+                parser.error("--run-manifest cannot be combined with explicit artifacts")
+            if not args.cell_id:
+                parser.error("--run-manifest requires --cell-id")
+            csv_path, workload_path, trace_path = resolve_manifest_artifacts(
+                args.run_manifest, args.cell_id)
+        else:
+            if args.cell_id is not None:
+                parser.error("--cell-id requires --run-manifest")
+            if any(value is None for value in explicit):
+                parser.error("--csv, --workload, and --execution-trace are required")
+            csv_path, workload_path, trace_path = explicit
+        _, rows = load_csv(csv_path, REVIEW_REQUIRED_COLUMNS)
+        workload = parse_workload(workload_path)
+        trace_digest = verify_trace(trace_path, workload)
         verify_rows(rows, workload, trace_digest)
         validate_rows(rows)
     except (VerificationError, OSError, ValueError, OverflowError) as error:

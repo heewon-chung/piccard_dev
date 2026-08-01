@@ -43,5 +43,8 @@ BenchmarkProvenance MakeAheBenchmarkProvenance();
 /** @brief Validate that provenance is exactly live-FHE or not-applicable. */
 bool ValidateBenchmarkProvenance(const BenchmarkProvenance& provenance);
 
+/** @brief Print configured source/build identity and return true on request. */
+bool PrintBuildProvenanceIfRequested(int argc, char** argv);
+
 }  // namespace benchmark
 }  // namespace piccard

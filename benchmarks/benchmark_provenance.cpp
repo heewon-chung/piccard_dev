@@ -4,6 +4,7 @@
 #include "fhe/bfv_context.h"
 
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 
 namespace piccard {
@@ -120,6 +121,20 @@ bool ValidateBenchmarkProvenance(const BenchmarkProvenance& provenance) {
         throw std::logic_error("Piccard sanitizer requires live FHE provenance");
     }
     return all_fhe;
+}
+
+bool PrintBuildProvenanceIfRequested(int argc, char** argv) {
+    if (argc != 2 || std::string(argv[1]) != "--print-build-provenance") {
+        return false;
+    }
+    std::cout
+        << "{\"build_type\":\"" << PICCARD_BUILD_TYPE
+        << "\",\"commit\":\"" << PICCARD_BUILD_COMMIT
+        << "\",\"dirty\":" << (PICCARD_BUILD_DIRTY ? "true" : "false")
+        << ",\"openfhe_version\":\"" << PICCARD_BUILD_OPENFHE_VERSION
+        << "\",\"schema\":\"piccard-build-provenance-v1\""
+        << ",\"source_dir\":\"" << PICCARD_BUILD_SOURCE_DIR << "\"}\n";
+    return true;
 }
 
 }  // namespace benchmark

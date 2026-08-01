@@ -754,6 +754,9 @@ int Run(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
+        if (piccard::benchmark::PrintBuildProvenanceIfRequested(argc, argv)) {
+            return 0;
+        }
         return Run(argc, argv);
     } catch (const std::exception& error) {
         std::cerr << "bench_review_comparison: " << error.what() << "\n";

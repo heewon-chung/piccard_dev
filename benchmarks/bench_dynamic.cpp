@@ -695,6 +695,7 @@ static void RunProfileGrid(const BenchmarkConfig& config,
 // ============================================================================
 
 int main(int argc, char** argv) {
+    if (PrintBuildProvenanceIfRequested(argc, argv)) return 0;
     if (argc < 2) {
         std::cout << "Usage: bench_dynamic [options]\n"
                   << "Options:\n"

@@ -1145,6 +1145,7 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv) {
 // ============================================================================
 
 int main(int argc, char** argv) {
+    if (PrintBuildProvenanceIfRequested(argc, argv)) return 0;
     if (argc < 2) {
         BenchmarkConfig::PrintUsage();
         return 0;

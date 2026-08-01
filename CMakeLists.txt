@@ -48,6 +48,38 @@ if(OpenFHE_FOUND)
         message(FATAL_ERROR "OpenFHE package did not expose BASE_OPENFHE_VERSION")
     endif()
     set(PICCARD_CONFIGURED_OPENFHE_VERSION "${BASE_OPENFHE_VERSION}")
+    execute_process(
+        COMMAND git rev-parse HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE PICCARD_BUILD_GIT_RESULT
+        OUTPUT_VARIABLE PICCARD_CONFIGURED_BUILD_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    string(LENGTH "${PICCARD_CONFIGURED_BUILD_COMMIT}"
+           PICCARD_CONFIGURED_BUILD_COMMIT_LENGTH)
+    if(NOT PICCARD_BUILD_GIT_RESULT EQUAL 0 OR
+       NOT PICCARD_CONFIGURED_BUILD_COMMIT_LENGTH EQUAL 40 OR
+       PICCARD_CONFIGURED_BUILD_COMMIT MATCHES "[^0-9a-f]")
+        message(FATAL_ERROR
+                "Evidence builds require a full Git source commit")
+    endif()
+    execute_process(
+        COMMAND git status --porcelain=v1 --untracked-files=all
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE PICCARD_BUILD_DIRTY_RESULT
+        OUTPUT_VARIABLE PICCARD_BUILD_DIRTY_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT PICCARD_BUILD_DIRTY_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot determine evidence build dirty state")
+    endif()
+    if(PICCARD_BUILD_DIRTY_OUTPUT STREQUAL "")
+        set(PICCARD_CONFIGURED_BUILD_DIRTY 0)
+    else()
+        set(PICCARD_CONFIGURED_BUILD_DIRTY 1)
+    endif()
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
     configure_file(
         "${CMAKE_SOURCE_DIR}/cmake/build_info.h.in"
@@ -710,6 +742,10 @@ if(BUILD_TESTS)
     add_test(NAME ReportingTaxonomy
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_reporting_taxonomy
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME PreThresholdProfileRunner
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_pre_threshold_profiles
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 

@@ -687,6 +687,7 @@ static void PrintUsage() {
 }
 
 int main(int argc, char** argv) {
+    if (PrintBuildProvenanceIfRequested(argc, argv)) return 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--help" || arg == "-h") {
