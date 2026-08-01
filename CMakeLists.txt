@@ -156,6 +156,20 @@ target_include_directories(
     PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
 )
 
+# Canonical binary workload/trace support for reviewer comparisons.
+add_library(
+    piccard_comparison_workload
+    benchmarks/comparison_workload.cpp
+)
+target_include_directories(
+    piccard_comparison_workload
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_comparison_workload
+    PUBLIC OpenSSL::Crypto
+)
+
 # =============================================================================
 # piccard_core: Pure math modules (no OpenFHE dependency)
 # =============================================================================
@@ -364,6 +378,21 @@ if(BUILD_TESTS)
         add_executable(test_minhash tests/unit/test_minhash.cpp)
         target_link_libraries(test_minhash piccard_core test_main)
         add_test(NAME MinHash COMMAND test_minhash)
+
+        add_executable(
+            test_comparison_workload
+            tests/unit/test_comparison_workload.cpp
+        )
+        target_link_libraries(
+            test_comparison_workload
+            piccard_comparison_workload
+            test_main
+        )
+        target_include_directories(
+            test_comparison_workload
+            PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+        )
+        add_test(NAME ComparisonWorkload COMMAND test_comparison_workload)
 
         add_executable(
             test_estimator_diagnostic
@@ -736,6 +765,44 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         find_library(GMPXX_LIBRARY NAMES gmpxx HINTS /opt/homebrew/lib /usr/local/lib)
         if(GMPXX_LIBRARY)
             target_link_libraries(bench_comparison ${GMPXX_LIBRARY})
+        endif()
+    endif()
+
+    if(HAVE_PICCARD_BASELINES)
+        add_executable(
+            bench_review_comparison
+            benchmarks/bench_review_comparison.cpp
+        )
+        target_link_libraries(
+            bench_review_comparison
+            PRIVATE
+                piccard_fhe
+                piccard_baselines
+                piccard_benchmark_serializers
+                piccard_comparison_workload
+        )
+        target_include_directories(
+            bench_review_comparison
+            PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+        )
+        find_library(
+            PICCARD_REVIEW_GMPXX_LIBRARY
+            NAMES gmpxx
+            HINTS /opt/homebrew/lib /usr/local/lib
+        )
+        if(PICCARD_REVIEW_GMPXX_LIBRARY)
+            target_link_libraries(
+                bench_review_comparison
+                PRIVATE ${PICCARD_REVIEW_GMPXX_LIBRARY}
+            )
+        endif()
+        if(BUILD_TESTS)
+            add_test(
+                NAME ReviewComparisonCli
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_SOURCE_DIR}/tests/scripts/test_review_comparison_cli.py
+                        $<TARGET_FILE:bench_review_comparison>
+            )
         endif()
     endif()
 
