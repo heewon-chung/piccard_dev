@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import pathlib
@@ -231,6 +232,18 @@ class PreThresholdRunnerTest(unittest.TestCase):
             if os.environ.get("FAIL_STD192") == "1" and "--security=STD192" in args:
                 print("missing sanitizer calibration for STD192", file=sys.stderr)
                 raise SystemExit(2)
+            feasibility_failure = os.environ.get("FAIL_FEASIBILITY")
+            if feasibility_failure and any("t128-feasibility" in arg for arg in args):
+                required = "130" if feasibility_failure == "capacity" else "90"
+                print(
+                    "bench_piccard: infeasible sanitizer calibration for fixture: "
+                    "transcript target 128, query cap 1048576, query adjustment 20, "
+                    "coefficient adjustment 14, coefficient target 162, margin 8, "
+                    "eval noise 56, required capacity " + required +
+                    ", available log2(q/t) 95.75",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
             evidence = pathlib.Path(os.environ["FAKE_EVIDENCE"])
             if pathlib.Path(sys.argv[0]).name == "bench_review_comparison":
                 manifest = pathlib.Path(next(a.split("=", 1)[1] for a in args if a.startswith("--manifest-out=")))
@@ -267,6 +280,13 @@ class PreThresholdRunnerTest(unittest.TestCase):
         return self.run_command([
             str(project / "scripts" / RUNNER.name),
             "--suite=smoke", "--seed=7", "--threads=2",
+            f"--build-dir={build}", f"--results-root={results}", *extra,
+        ], cwd=project, env=env)
+
+    def run_feasibility(self, project, build, results, env, *extra):
+        return self.run_command([
+            str(project / "scripts" / RUNNER.name),
+            "--suite=feasibility", "--seed=20260729", "--threads=2",
             f"--build-dir={build}", f"--results-root={results}", *extra,
         ], cwd=project, env=env)
 
@@ -385,6 +405,88 @@ class PreThresholdRunnerTest(unittest.TestCase):
             cell["reason_code"] == "MISSING_CALIBRATION"
             for cell in manifest["cells"]
         ))
+        blocked_resume = self.run_command([
+            str(project / "scripts" / RUNNER.name),
+            "--suite=primary", "--seed=20260729", "--threads=8",
+            f"--build-dir={build}", f"--results-root={results}", "--resume",
+        ], cwd=project, env=dict(env, FAIL_STD192="1"))
+        self.assertEqual(blocked_resume.returncode, 2)
+        self.assertIn("blocking INFEASIBLE", blocked_resume.stderr)
+
+    def test_capacity_shortfall_uses_real_diagnostic_fields_and_resumes(self):
+        project, build, log, env = self.make_harness()
+        env = dict(env, FAIL_FEASIBILITY="capacity")
+        results = self.tmp / "results-capacity"
+        first = self.run_feasibility(project, build, results, env)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+
+        with (results / "terminal-cells.tsv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        self.assertEqual(len(rows), 4)
+        for row in rows:
+            self.assertEqual(row["status"], "INFEASIBLE")
+            self.assertEqual(row["reason_code"], "CAPACITY_SHORTFALL")
+            self.assertEqual(row["required_bits"], "130")
+            self.assertEqual(row["available_bits"], "95.75")
+            self.assertEqual(row["shortfall_bits"], "34.25")
+
+        manifest = json.loads((results / "manifest.json").read_text())
+        for cell in manifest["cells"]:
+            self.assertEqual(cell["output"]["measurement_output"],
+                             "absent-empty-csv")
+            self.assertEqual(cell["output"]["csv_row_count"], 0)
+            self.assertEqual(cell["output"]["csv_sha256"],
+                             "e3b0c44298fc1c149afbf4c8996fb924"
+                             "27ae41e4649b934ca495991b7852b855")
+
+        before = log.read_text()
+        resumed = self.run_feasibility(
+            project, build, results, env, "--resume")
+        self.assertEqual(resumed.returncode, 0,
+                         resumed.stderr + resumed.stdout)
+        self.assertEqual(log.read_text(), before)
+        self.assertEqual(resumed.stdout.count("RESUME skip"), 4)
+
+        original = (results / "manifest.json").read_text()
+        mutations = (
+            ("inconsistent bit fields",
+             lambda data: data["cells"][0].update(shortfall_bits="34.24")),
+            ("must have empty bit fields",
+             lambda data: data["cells"][0].update(
+                 reason_code="MISSING_CALIBRATION")),
+            ("infeasible CSV representation mismatch",
+             lambda data: data["cells"][0]["output"].update(
+                 measurement_output="measured-csv")),
+            ("output hash mismatch",
+             lambda data: data["cells"][0]["output"].update(
+                 log_sha256="0" * 64)),
+        )
+        for cause, mutate in mutations:
+            with self.subTest(cause=cause):
+                data = json.loads(original)
+                mutate(data)
+                (results / "manifest.json").write_text(
+                    json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n")
+                rejected = self.run_feasibility(
+                    project, build, results, env, "--resume")
+                self.assertEqual(rejected.returncode, 2, rejected.stdout)
+                self.assertIn(cause, rejected.stderr)
+                (results / "manifest.json").write_text(original)
+
+    def test_non_shortfall_capacity_diagnostic_is_process_error(self):
+        project, build, _, env = self.make_harness()
+        env = dict(env, FAIL_FEASIBILITY="not-shortfall")
+        results = self.tmp / "results-not-shortfall"
+        result = self.run_feasibility(project, build, results, env)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        with (results / "terminal-cells.tsv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "ERROR")
+        self.assertEqual(rows[0]["reason_code"], "PROCESS_ERROR")
+        self.assertEqual(rows[0]["required_bits"], "")
+        self.assertEqual(rows[0]["available_bits"], "")
+        self.assertEqual(rows[0]["shortfall_bits"], "")
 
     def test_seed_is_frozen_per_suite(self):
         wrong = self.dry_run("primary", seed=7)

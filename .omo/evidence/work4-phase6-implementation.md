@@ -52,7 +52,7 @@ python3 -m unittest \
 
 Result: `Ran 29 tests in 10.040s`, `OK`.
 
-The eight runner tests use fake binaries and cover:
+The runner tests use fake binaries and cover:
 
 - byte-pinned primary, sensitivity, feasibility, and smoke argv matrices;
 - explicit seed and `OMP_NUM_THREADS`/`OMP_DYNAMIC` policy;
@@ -128,3 +128,58 @@ The undefined symbols were `BenchmarkRunClassName`,
 modify that target or its linkage, `ThresholdProfileCompat` passes, and the
 task explicitly forbids threshold edits, so this unrelated failure was not
 changed or hidden.
+
+## REQUEST_CHANGES follow-up
+
+The independent review in
+`.omo/evidence/work4-phase6-code-review.md` identified two blocking runner
+defects. Both were reproduced with fake binaries before correction.
+
+RED command:
+
+```text
+python3 -m unittest -v \
+  tests.scripts.test_run_pre_threshold_profiles.PreThresholdRunnerTest.test_capacity_shortfall_uses_real_diagnostic_fields_and_resumes \
+  tests.scripts.test_run_pre_threshold_profiles.PreThresholdRunnerTest.test_non_shortfall_capacity_diagnostic_is_process_error
+```
+
+RED result: two failures. The positive fixture recorded available capacity as
+`2` rather than `95.75`; the negative non-shortfall fixture incorrectly exited
+0 as an accepted infeasible feasibility run.
+
+The correction parses the complete producer suffix
+`required capacity <N>, available log2(q/t) <Q>` with a line-anchored,
+field-aware decimal regex. Decimal subtraction is exact and canonical. The
+positive terminal rows bind `required_bits=130`, `available_bits=95.75`, and
+`shortfall_bits=34.25`; the negative `90 <= 95.75` fixture records
+`ERROR/PROCESS_ERROR` with empty bit fields.
+
+An explicitly infeasible feasibility cell now binds a zero-byte CSV as
+`measurement_output=absent-empty-csv`, SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+and `csv_row_count=0`. Resume revalidates that representation, the nonzero
+producer exit, suite policy, status/reason truth table, exact bit arithmetic,
+and log/output hashes before skipping. Four fake feasibility cells run and
+resume with no additional producer invocation. Tampered shortfall, reason, or
+output representation fails resume; a primary `INFEASIBLE` cell remains
+blocking and cannot resume as success.
+
+Fresh follow-up verification:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_run_pre_threshold_profiles \
+  tests.scripts.test_verify_review_comparison \
+  tests.scripts.test_verify_benchmark_provenance \
+  tests.scripts.test_verify_sj16_extrapolation
+```
+
+Result: `Ran 31 tests in 12.133s`, `OK`.
+
+```text
+ctest --test-dir build --output-on-failure \
+  -R 'PreThresholdProfileRunner|ReviewComparisonCli|BenchmarkProfileExecutables|ThresholdProfileCompat'
+```
+
+Result: `100% tests passed out of 4` in `9.12 sec`. No benchmark or
+calibration was run.

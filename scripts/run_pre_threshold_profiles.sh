@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
@@ -35,6 +36,7 @@ DOMAIN = b"piccard-benchmark-cell-v1\0"
 PAPER_SEED = 20260729
 SMOKE_SEED = 7
 ENVIRONMENT_NAMES = ("OMP_DYNAMIC", "OMP_NUM_THREADS")
+DECIMAL_PATTERN = r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?"
 
 
 class RunnerError(ValueError):
@@ -224,6 +226,50 @@ def csv_row_count(path: pathlib.Path) -> int:
     return len(rows) - 1
 
 
+def canonical_decimal(text: str) -> tuple[Decimal, str]:
+    try:
+        value = Decimal(text)
+    except InvalidOperation as error:
+        fail(f"invalid capacity decimal: {text}")
+    if not value.is_finite() or value < 0:
+        fail(f"invalid capacity decimal: {text}")
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return value, rendered or "0"
+
+
+def validate_terminal_record(cell: dict[str, Any]) -> None:
+    status = cell.get("status")
+    reason = cell.get("reason_code")
+    required = cell.get("required_bits", "")
+    available = cell.get("available_bits", "")
+    shortfall = cell.get("shortfall_bits", "")
+    if status == "MEASURED":
+        if reason != "NONE" or any((required, available, shortfall)):
+            fail("MEASURED terminal cell has invalid reason/bit fields")
+        return
+    if status == "INFEASIBLE" and reason == "MISSING_CALIBRATION":
+        if any((required, available, shortfall)):
+            fail("MISSING_CALIBRATION terminal cell must have empty bit fields")
+        return
+    if status == "INFEASIBLE" and reason == "CAPACITY_SHORTFALL":
+        required_value, required_text = canonical_decimal(str(required))
+        available_value, available_text = canonical_decimal(str(available))
+        shortfall_value, shortfall_text = canonical_decimal(str(shortfall))
+        if (str(required) != required_text or str(available) != available_text or
+                str(shortfall) != shortfall_text or
+                required_value <= available_value or
+                shortfall_value != required_value - available_value):
+            fail("CAPACITY_SHORTFALL terminal cell has inconsistent bit fields")
+        return
+    if status == "ERROR" and reason in {"PROCESS_ERROR", "TIMEOUT"}:
+        if any((required, available, shortfall)):
+            fail("ERROR terminal cell must have empty bit fields")
+        return
+    fail("terminal cell status/reason truth table violation")
+
+
 def atomic_json(path: pathlib.Path, value: dict[str, Any]) -> None:
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as output:
@@ -379,6 +425,7 @@ def ensure_contained(root: pathlib.Path, relative: Any, label: str) -> pathlib.P
 def terminal_text(cells: list[dict[str, Any]]) -> str:
     rows = []
     for cell in sorted(cells, key=lambda value: value["cell_id"].encode("utf-8")):
+        validate_terminal_record(cell)
         fields = (
             TERMINAL_SCHEMA, cell["cell_id"], cell["profile_id"],
             cell["producer"], cell["parameter_sha256"], cell["status"],
@@ -492,12 +539,29 @@ def validate_resume(
                 fail(f"output hash mismatch for {path_key}")
         if output.get("expected_csv_rows") != cell.expected_csv_rows():
             fail("resume expected CSV row count mismatch")
-        actual_rows = csv_row_count(root / output["csv"])
-        if output.get("csv_row_count") != actual_rows:
-            fail("resume CSV row count mismatch")
-        if actual_rows != cell.expected_csv_rows():
-            fail("resume CSV does not have the frozen expected row count")
-        if record.get("status") not in {"MEASURED", "INFEASIBLE"}:
+        status = record.get("status")
+        validate_terminal_record(record)
+        if status == "MEASURED":
+            if output.get("measurement_output") != "measured-csv":
+                fail("resume measured CSV representation mismatch")
+            actual_rows = csv_row_count(root / output["csv"])
+            if output.get("csv_row_count") != actual_rows:
+                fail("resume CSV row count mismatch")
+            if actual_rows != cell.expected_csv_rows():
+                fail("resume CSV does not have the frozen expected row count")
+        elif status == "INFEASIBLE":
+            if suite != "feasibility":
+                fail("resume cannot skip blocking INFEASIBLE cell")
+            if cell.review:
+                fail("feasibility INFEASIBLE cell cannot be a review producer")
+            if output.get("measurement_output") != "absent-empty-csv":
+                fail("resume infeasible CSV representation mismatch")
+            csv_path = root / output["csv"]
+            if csv_path.stat().st_size != 0 or output.get("csv_row_count") != 0:
+                fail("resume infeasible cell requires an empty zero-row CSV")
+            if not isinstance(record.get("exit_code"), int) or record["exit_code"] == 0:
+                fail("resume infeasible cell requires a nonzero producer exit")
+        else:
             fail("resume cannot skip a nonterminal-success cell")
         by_id[cell_id] = record
 
@@ -550,13 +614,17 @@ def classify_failure(stderr: str) -> tuple[str, str, str, str, str]:
     if "missing sanitizer calibration" in lower or "no noise calibration" in lower:
         return "INFEASIBLE", "MISSING_CALIBRATION", "", "", ""
     capacity = re.search(
-        r"(?:required(?:_bits)?)[^0-9]*(\d+).*?"
-        r"(?:available(?:_bits)?)[^0-9]*(\d+)", stderr, re.IGNORECASE | re.DOTALL)
-    if "infeasible sanitizer calibration" in lower and capacity:
-        required, available = int(capacity.group(1)), int(capacity.group(2))
-        if required >= available:
-            return ("INFEASIBLE", "CAPACITY_SHORTFALL", str(required),
-                    str(available), str(required - available))
+        rf"(?m)^[^\r\n]*\binfeasible sanitizer calibration\b[^\r\n]*"
+        rf", required capacity (?P<required>{DECIMAL_PATTERN}),"
+        rf" available log2\(q/t\) (?P<available>{DECIMAL_PATTERN})\s*$",
+        stderr, re.IGNORECASE)
+    if capacity:
+        required, required_text = canonical_decimal(capacity.group("required"))
+        available, available_text = canonical_decimal(capacity.group("available"))
+        if required > available:
+            _, shortfall_text = canonical_decimal(str(required - available))
+            return ("INFEASIBLE", "CAPACITY_SHORTFALL", required_text,
+                    available_text, shortfall_text)
     return "ERROR", "PROCESS_ERROR", "", "", ""
 
 
@@ -681,6 +749,7 @@ def execute(args: argparse.Namespace, cells: list[Cell], project: pathlib.Path) 
                 fail(f"producer did not create CSV: {cell_id}")
             output["csv_sha256"] = sha256_file(csv_path)
             output["csv_row_count"] = csv_row_count(csv_path)
+            output["measurement_output"] = "measured-csv"
             if output["csv_row_count"] != output["expected_csv_rows"]:
                 record.update({
                     "status": "ERROR", "reason_code": "PROCESS_ERROR",
@@ -702,6 +771,9 @@ def execute(args: argparse.Namespace, cells: list[Cell], project: pathlib.Path) 
                 })
         else:
             status, reason, required, available, shortfall = classify_failure(stderr_text)
+            if status == "INFEASIBLE" and csv_path.stat().st_size != 0:
+                status, reason, required, available, shortfall = (
+                    "ERROR", "PROCESS_ERROR", "", "", "")
             record.update({
                 "status": status, "reason_code": reason,
                 "required_bits": required, "available_bits": available,
@@ -709,6 +781,9 @@ def execute(args: argparse.Namespace, cells: list[Cell], project: pathlib.Path) 
             })
             if csv_path.is_file():
                 output["csv_sha256"] = sha256_file(csv_path)
+            if status == "INFEASIBLE":
+                output["csv_row_count"] = 0
+                output["measurement_output"] = "absent-empty-csv"
         manifest["cells"].append(record)
         write_state(results_root, manifest)
         if record["status"] == "ERROR" and result.returncode == 0:
