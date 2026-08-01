@@ -19,7 +19,7 @@ FIELDS = [
     "comparison_scope", "primitive", "protocol_model", "output_semantics",
     "assurance_scope", "security_basis", "cost_scope",
     "precomputation_mode", "secure_division_included", "measurement_kind",
-    "measurement_status", "universe_size", "set_size", "k", "m",
+    "evidence_arm", "measurement_status", "universe_size", "set_size", "k", "m",
     "ring_dim", "num_cts", "mult_depth", "total_ms", "total_ms_sd",
     "trials", "ct_size_bytes", "comm_bytes", "phase_flood_ms",
     "phase_flood_ms_sd", "profile_id", "run_class",
@@ -37,6 +37,7 @@ def base_row(method):
     row.update({
         "scenario": "vary_universe_64",
         "method": method,
+        "evidence_arm": "timing",
         "measurement_status": "measured",
         "universe_size": "64",
         "set_size": "16",
@@ -59,22 +60,26 @@ def base_row(method):
     return row
 
 
-def piccard_row():
-    row = base_row("piccard")
+def piccard_row(evidence_arm="timing", sqrt=False):
+    row = base_row("piccard_sqrt" if sqrt else "piccard")
     row.update({
         "cryptographic_profile": "live-BFV-STD128",
         "nominal_security_bits": "128",
         "security_match": "true",
         "comparison_eligible": "true",
         "comparison_scope": "end-to-end-estimator",
-        "primitive": "bfv-onehot-minhash",
-        "protocol_model": "piccard-two-owner-outsourced",
+        "primitive": "bfv-sqrt-minhash" if sqrt else "bfv-onehot-minhash",
+        "protocol_model": (
+            "piccard-sqrt-two-owner-outsourced" if sqrt
+            else "piccard-two-owner-outsourced"
+        ),
         "output_semantics": "bias-corrected-jaccard-estimate",
         "assurance_scope": "live-bfv+empirical-sanitizer-poc",
         "security_basis": "openfhe-hesea-standard-live-context",
         "cost_scope": "full-query-excluding-one-time-setup",
         "precomputation_mode": "crs-and-keys-only",
-        "measurement_kind": "fhe-timing",
+        "measurement_kind": f"fhe-{evidence_arm}",
+        "evidence_arm": evidence_arm,
         "k": "16", "m": "16", "ring_dim": "1024",
         "actual_ring_dim": "1024", "log_q_bits": "160",
         "plaintext_modulus": "12289", "num_limbs": "4",
@@ -90,7 +95,7 @@ def piccard_row():
     return row
 
 
-def fhe_ind_row():
+def fhe_ind_row(evidence_arm="timing"):
     row = base_row("baseline")
     row.update({
         "cryptographic_profile": "live-BFV-STD128",
@@ -106,6 +111,7 @@ def fhe_ind_row():
         "cost_scope": "primitive-only",
         "precomputation_mode": "not-applicable",
         "measurement_kind": "diagnostic",
+        "evidence_arm": evidence_arm,
         "ring_dim": "1024",
         "actual_ring_dim": "1024", "log_q_bits": "120",
         "plaintext_modulus": "12289", "num_limbs": "2",
@@ -219,6 +225,36 @@ class ReportingTaxonomyTest(unittest.TestCase):
         self.assertIn("intersection-shares-lower-bound", combined)
         self.assertNotIn("KPA/leakage", combined)
         self.assertNotIn("EPSet", combined)
+
+    def test_combined_producer_shape_is_rendered_and_verified(self):
+        piccard_timing = piccard_row()
+        piccard_timing["total_ms"] = "3.0"
+        sqrt_timing = piccard_row(sqrt=True)
+        sqrt_timing["total_ms"] = "5.0"
+        fhe_ind_timing = fhe_ind_row()
+        fhe_ind_timing["total_ms"] = "7.0"
+
+        piccard_accuracy = piccard_row("accuracy")
+        piccard_accuracy["total_ms"] = "0.0"
+        sqrt_accuracy = piccard_row("accuracy", sqrt=True)
+        sqrt_accuracy["total_ms"] = "0.0"
+        fhe_ind_accuracy = fhe_ind_row("accuracy")
+        fhe_ind_accuracy["total_ms"] = "0.0"
+
+        summary, verify = self.run_programs([
+            piccard_timing, sqrt_timing, fhe_ind_timing,
+            piccard_accuracy, sqrt_accuracy, fhe_ind_accuracy,
+        ])
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertEqual(verify.returncode, 0, verify.stderr)
+        self.assertIn("7.0", summary.stdout)
+
+    def test_same_arm_duplicate_is_still_rejected(self):
+        summary, verify = self.run_programs([
+            piccard_row(), fhe_ind_row(), fhe_ind_row(),
+        ])
+        self.assertNotEqual(summary.returncode, 0)
+        self.assertNotEqual(verify.returncode, 0)
 
     def test_old_fhe_ind_taxonomy_is_rejected_by_both_programs(self):
         old = fhe_ind_row()

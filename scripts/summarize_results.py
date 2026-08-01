@@ -197,12 +197,8 @@ COMPARISON_EXTRA_METHODS = (
     "piccard_sqrt", "bcg12", "sj16", "sj16_precomputed"
 )
 
-# Row labels carrying each method's security class, and for SJ16 the
-# lower-bound caveat the design doc requires the emitted table to carry.
-# Only exact-match methods live here — bcg12 variant names (bcg12_mh_ff,
-# bcg12_exact_ec, ...) have no exact key and fall back to method_tag()'s
-# boundary-aware branch below, which reads security_class off their own CSV
-# row instead of a hardcoded string.
+# Static labels for exact-key supplementary methods. BCG12 variant labels are
+# built from each row's typed comparison scope and primitive below.
 _METHOD_LABELS = {
     "piccard_sqrt":
         "piccard_sqrt [end-to-end-estimator; bfv-sqrt-minhash]",
@@ -228,11 +224,10 @@ SJ16_LOWER_BOUND_NOTE = (
 )
 
 # Printed in the Method column of every primary (Piccard-vs-comparator) row.
-# The CSV method key stays "baseline" for internal/legacy compatibility; this
-# is the display-only relabel (R3-5(ii)): the "baseline" engine is NOT a
-# faithful reimplementation of [11] (Zheng et al., EPSet/ZLG+24) — it is a
-# universe-sized BFV indicator-vector protocol with KPA/leakage security, and
-# must not be read as reproducing [11]'s numbers.
+# The CSV method key stays "baseline" for internal compatibility. Its typed
+# capability identifies only the local universe-sized BFV primitive and marks
+# it diagnostic-only and comparison-ineligible; no external protocol or
+# security theorem is attributed to this implementation.
 FHE_IND_DISCLOSURE = (
     "FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only]"
 )
@@ -243,7 +238,8 @@ _REQUIRED_TAXONOMY = {
     "comparison_eligible", "comparison_scope", "primitive",
     "protocol_model", "output_semantics", "assurance_scope",
     "security_basis", "cost_scope", "precomputation_mode",
-    "secure_division_included", "measurement_kind", "measurement_status",
+    "secure_division_included", "measurement_kind", "evidence_arm",
+    "measurement_status",
     "target_security_bits", "k", "m", "ring_dim", "sanitizer_model",
     "openfhe_version", "actual_ring_dim", "log_q_bits",
     "plaintext_modulus", "num_limbs", "hash_randomness", "hash_seed",
@@ -296,8 +292,9 @@ def validate_comparison_taxonomy(rows):
         if row.get("security_basis") in {"", "not-applicable"}:
             raise ValueError(f"{method}: missing implemented security_basis")
 
-        evidence = "accuracy" if row.get("measurement_kind", "").endswith(
-            "accuracy") else "timing"
+        evidence = row.get("evidence_arm", "")
+        if evidence not in {"timing", "accuracy"}:
+            raise ValueError(f"{method}: invalid evidence_arm")
         if method in {"piccard", "piccard_sqrt"}:
             sqrt = method == "piccard_sqrt"
             _expect_taxonomy(row, {
@@ -441,7 +438,8 @@ def validate_comparison_taxonomy(rows):
         else:
             raise ValueError(f"unknown comparison method {method!r}")
 
-        key = (row.get("scenario", ""), method, row.get("measurement_kind", ""))
+        key = (row.get("scenario", ""), method,
+               row.get("measurement_kind", ""), evidence)
         if key in row_keys:
             raise ValueError(f"duplicate comparison taxonomy row {key}")
         row_keys.add(key)
@@ -454,7 +452,8 @@ def validate_comparison_taxonomy(rows):
     for row in rows:
         if row.get("method") == "sj16_precomputed":
             companion = (row.get("scenario", ""), "sj16",
-                         row.get("measurement_kind", ""))
+                         row.get("measurement_kind", ""),
+                         row.get("evidence_arm", ""))
             if companion not in row_keys:
                 raise ValueError(
                     "sj16_precomputed cannot replace the included-cost sj16 row")
@@ -470,9 +469,7 @@ def _boundary_match(name, base):
 
     Boundary-aware on purpose: a bare `name.startswith(base)` would also
     match an unrelated future method name that merely shares the prefix
-    (e.g. a hypothetical "bcg12x"). Mirrors the C++ SecurityClassOf's
-    intent (bench_comparison.cpp) but with an explicit boundary instead of
-    a bare prefix match.
+    (e.g. a hypothetical "bcg12x").
     """
     return name == base or name.startswith(base + "_")
 
@@ -517,20 +514,11 @@ def _extra_method_keys(methods):
 def method_tag(method, row=None):
     """Plain (ASCII) supplementary-row label for a comparison method.
 
-    Exact-key methods (piccard_sqrt, bcg12, sj16) use the static table
-    above. BCG12 variant names (bcg12_mh_ff, bcg12_exact_ec, ...) have no
-    exact entry; their label is built from the CSV row's own
-    `security_class` field so the bracketed text always matches the row it
-    describes (R2-W1: security level next to the numbers), rather than a
-    hardcoded string that could drift from SecurityClassOf in the C++ side.
+    Exact-key methods (piccard_sqrt, bcg12, sj16) use the static table above.
+    BCG12 variant labels are built from the row's typed comparison scope and
+    primitive so display metadata cannot drift from serialized capability.
 
-    Plan 13-2: rows carrying `measurement_kind == "extrapolated"` (currently
-    only SJ16 rows beyond sj16_max_universe) get an `[extrapolated]` token
-    appended as a SEPARATE bracket from the security-class one, so
-    verify_reporting_gaps.py's `f"[{security_class}" in lab` invariant keeps
-    matching the leading bracket regardless of this suffix.
-    `row.get("measurement_kind", "measured")` keeps legacy CSVs (no such
-    column) rendering exactly as before.
+    Rows marked extrapolated append an explicit status suffix.
     """
     if method in _METHOD_LABELS:
         base = _METHOD_LABELS[method]
@@ -800,7 +788,10 @@ def table_piccard_combined(data, scenario, tnum, title, latex=False, ci=False):
 
 def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
     """Comparison timing: Piccard vs the FHE-IND comparator side by side."""
-    rows_data = filter_rows(data, "scenario", scenario)
+    rows_data = [
+        row for row in filter_rows(data, "scenario", scenario)
+        if row.get("evidence_arm") == "timing"
+    ]
     if not rows_data:
         return
 
@@ -960,6 +951,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
 
 def table_communication_cost(data, tnum, latex=False):
     """Communication cost comparison across all scenarios."""
+    data = [row for row in data if row.get("evidence_arm") == "timing"]
     if not data:
         return
 

@@ -1,0 +1,48 @@
+Command: python3 scripts/summarize_results.py <csv-dir> --latex
+Input copied from: .omo/evidence/work4-phase3-toy-combined.csv
+Return code: 0
+stderr: empty
+
+======================================================================
+  Table 13: Piccard vs. Comparators (FHE-IND) — Varying |U|
+======================================================================
+                                                          Method          Scenario  Tri   k   m   n  |U|   N_p   N_c  Piccard (ms)  Comparator (ms)  Speedup  Piccard CT  Comparator CT    Comm P   Comm C  Flood
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only]  vary_universe_64    1  16  16  16   64  1024  1024           6.8              3.1     0.5x     65.1 KB        32.8 KB  195.2 KB  98.5 KB  0.734
+           piccard_sqrt [end-to-end-estimator; bfv-sqrt-minhash]  vary_universe_64    1  16  16  16   64  1024                 9.9                      1.5x     81.2 KB                 243.6 KB           0.960
+
+\begin{table}[t]
+\centering
+\caption{Piccard vs. Comparators (FHE-IND) — Varying |U|}
+\label{tab:comparison-vary-universe}
+\begin{tabular}{rrrrrrrrrrr}
+\toprule
+Method & $|U|$ & Trials & $N_P$ & $N_C$ & Piccard (ms) & Comparator (ms) & Speedup & Comm P & Comm C & Flood \\
+\midrule
+FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only] & 64 & 1 & 1024 & 1024 & 6.8 & 3.1 & 0.5$\times$ & 195.2 KB & 98.5 KB & 0.734 \\
+piccard\_sqrt [end-to-end-estimator; bfv-sqrt-minhash] & 64 & 1 & 1024 &  & 9.9 &  & 1.5$\times$ & 243.6 KB &  & 0.960 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+======================================================================
+  Table 14: Communication Cost — Piccard vs. Comparators (FHE-IND)
+======================================================================
+                                                          Method          Scenario   k  |U|   n  Piccard CTs  Piccard Comm  Comparator CTs  Comparator Comm  Ratio
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only]  vary_universe_64  16   64  16            1      195.2 KB               1          98.5 KB   0.5x
+           piccard_sqrt [end-to-end-estimator; bfv-sqrt-minhash]  vary_universe_64  16   64  16            1      243.6 KB                                    1.2x
+
+\begin{table}[t]
+\centering
+\caption{Communication cost: Piccard vs.\ Comparators (FHE-IND).}
+\label{tab:communication-cost}
+\begin{tabular}{rrrrrrrrrr}
+\toprule
+Method & Scenario & $k$ & $|U|$ & $n$ & P CTs & P Comm & C CTs & C Comm & Ratio \\
+\midrule
+FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only] & vary_universe_64 & 16 & 64 & 16 & 1 & 195.2 KB & 1 & 98.5 KB & 0.5x \\
+  piccard_sqrt [end-to-end-estimator; bfv-sqrt-minhash] & vary_universe_64 & 16 & 64 & 16 & 1 & 243.6 KB &  &  & 1.2x \\
+\bottomrule
+\end{tabular}
+\end{table}

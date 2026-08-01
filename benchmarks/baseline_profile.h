@@ -97,6 +97,7 @@ enum class ComparisonScope {
 /** @brief Complete method-conditioned capability metadata for one row. */
 struct BaselineCapability {
     BaselineMethod method = BaselineMethod::FheInd;
+    BaselineEvidenceKind evidence_kind = BaselineEvidenceKind::Timing;
     uint32_t target_security_bits = 0;
     std::string cryptographic_profile;
     std::optional<uint32_t> nominal_security_bits;
@@ -139,6 +140,7 @@ void ValidateBaselineCapability(const BaselineCapability& capability);
 const char* BaselineMethodName(BaselineMethod method);
 const char* BaselineCapabilityMethodName(
     const BaselineCapability& capability);
+const char* BaselineEvidenceKindName(BaselineEvidenceKind evidence_kind);
 const char* PrimitiveName(Primitive primitive);
 const char* ProtocolModelName(ProtocolModel model);
 const char* OutputSemanticsName(OutputSemantics semantics);

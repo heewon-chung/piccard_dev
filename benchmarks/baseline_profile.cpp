@@ -66,6 +66,7 @@ BaselineCapability ResolveBaselineCapability(
     bool precomputed_randomizers) {
     BaselineCapability capability;
     capability.method = method;
+    capability.evidence_kind = evidence_kind;
     capability.target_security_bits = target_security_bits;
     capability.secure_division_included = false;
 
@@ -199,28 +200,14 @@ BaselineCapability ResolveBaselineCapability(
 }
 
 void ValidateBaselineCapability(const BaselineCapability& capability) {
-    BaselineEvidenceKind evidence = BaselineEvidenceKind::Timing;
-    switch (capability.measurement_kind) {
-        case BenchmarkMeasurementKind::FheAccuracy:
-        case BenchmarkMeasurementKind::PsiAccuracy:
-        case BenchmarkMeasurementKind::AheAccuracy:
-            evidence = BaselineEvidenceKind::Accuracy;
-            break;
-        case BenchmarkMeasurementKind::FheTiming:
-        case BenchmarkMeasurementKind::PsiTiming:
-        case BenchmarkMeasurementKind::AheTiming:
-        case BenchmarkMeasurementKind::Diagnostic:
-            break;
-        case BenchmarkMeasurementKind::PlaintextEstimator:
-            throw std::logic_error(
-                "implemented comparison method cannot be plaintext-estimator");
-    }
     const bool precomputed = capability.precomputation_mode ==
         PrecomputationMode::RandomizersPrecomputed;
     const BaselineCapability expected = ResolveBaselineCapability(
-        capability.method, capability.target_security_bits, evidence,
+        capability.method, capability.target_security_bits,
+        capability.evidence_kind,
         BaselineSecurityPolicy::AllowDiagnostic, precomputed);
-    if (capability.cryptographic_profile != expected.cryptographic_profile ||
+    if (capability.evidence_kind != expected.evidence_kind ||
+        capability.cryptographic_profile != expected.cryptographic_profile ||
         capability.nominal_security_bits != expected.nominal_security_bits ||
         capability.security_match != expected.security_match ||
         capability.comparison_eligible != expected.comparison_eligible ||
@@ -264,6 +251,14 @@ const char* BaselineCapabilityMethodName(
         return "sj16_precomputed";
     }
     return BaselineMethodName(capability.method);
+}
+
+const char* BaselineEvidenceKindName(BaselineEvidenceKind evidence_kind) {
+    switch (evidence_kind) {
+        case BaselineEvidenceKind::Timing: return "timing";
+        case BaselineEvidenceKind::Accuracy: return "accuracy";
+    }
+    throw std::logic_error("unknown baseline evidence kind");
 }
 
 const char* PrimitiveName(Primitive primitive) {

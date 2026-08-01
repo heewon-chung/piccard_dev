@@ -1,0 +1,22 @@
+Working directory: /Users/heewonchung/Documents/orca/workspace/piccard/pre-threshold-poc
+Command: OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE ./build/bench_comparison --profile=toy-smoke --security=TOY --mode=combined --evidence_point --k=16 --m=16 --set_size=16 --universe=64 --target-jaccard=0.5 --trials=1 --accuracy_trials=1 --seed=7
+Return code: 0
+
+stderr:
+Benchmark Configuration:
+  k:         16
+  m:         16
+  Set size:  16
+  Trials:    1
+  Mode:      combined
+  Security:  TOY
+  Seed:      7
+  Overlap:   0.3
+  Acc trials:1
+  Hash rand: resampled
+  Transcript stat bits: 40
+  Max queries: 1048576
+  Profile:    toy-smoke (smoke)
+  Evidence point: yes
+  Target Jaccard: 0.5
+  Universe: 64

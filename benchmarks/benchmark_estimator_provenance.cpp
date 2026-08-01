@@ -478,7 +478,7 @@ std::string SerializeComparisonHeader() {
         "security_match,comparison_eligible,comparison_scope,primitive,"
         "protocol_model,output_semantics,assurance_scope,security_basis,"
         "cost_scope,precomputation_mode,secure_division_included,"
-        "measurement_kind,"
+        "measurement_kind,evidence_arm,"
         "universe_size,set_size,k,m,ring_dim,num_cts,mult_depth,"
         "phase_encode_ms,phase_encrypt_ms,phase_compute_ms,"
         "phase_decrypt_ms,total_ms,"
@@ -530,6 +530,7 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
         << "," << PrecomputationModeName(capability.precomputation_mode)
         << "," << (capability.secure_division_included ? "true" : "false")
         << "," << BenchmarkMeasurementKindName(capability.measurement_kind)
+        << "," << BaselineEvidenceKindName(capability.evidence_kind)
         << ","
         << r.universe_size << ","
         << r.set_size << ","

@@ -286,11 +286,29 @@ TEST(BaselineProfile, SerializerEmitsTypedFheIndTaxonomyAndLiveProvenance) {
     EXPECT_EQ(value("precomputation_mode"), "not-applicable");
     EXPECT_EQ(value("secure_division_included"), "false");
     EXPECT_EQ(value("measurement_kind"), "diagnostic");
+    EXPECT_EQ(value("evidence_arm"), "timing");
     EXPECT_EQ(value("k"), "");
     EXPECT_EQ(value("m"), "");
     EXPECT_EQ(value("ring_dim"), "8192");
     EXPECT_EQ(value("actual_ring_dim"), "8192");
     EXPECT_EQ(value("sanitizer_model"), "not-applicable");
+}
+
+TEST(BaselineProfile, SerializerPreservesDiagnosticAccuracyArm) {
+    ComparisonResult row = BaseComparisonRow();
+    row.method = "baseline";
+    row.capability = Capability(
+        BaselineMethod::FheInd, 128, BaselineEvidenceKind::Accuracy);
+    row.ring_dim = 8192;
+    row.provenance = LiveBfvProvenance();
+
+    const std::string header = SerializeComparisonHeader();
+    const auto cells = CsvCells(
+        SerializeComparisonRow(row, 2, row.provenance));
+    const size_t arm_index = ColumnIndex(header, "evidence_arm");
+    ASSERT_LT(arm_index, cells.size());
+    EXPECT_EQ(cells[arm_index], "accuracy");
+    EXPECT_EQ(cells[ColumnIndex(header, "measurement_kind")], "diagnostic");
 }
 
 TEST(BaselineProfile, SerializerEnforcesBcg12ParameterRules) {
