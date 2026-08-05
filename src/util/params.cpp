@@ -596,10 +596,13 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
             ": transcript target " + std::to_string(transcript_stat_bits) +
             ", query cap " + std::to_string(max_queries) +
             ", margin " + std::to_string(flood_margin_bits) +
-            ". Measure the exact calibration key with `bench_noise "
-            "--pre_threshold ... --emit-rows="
-            "noise_calibration.inc.fragment`, "
-            "regenerate include/util/noise_calibration.inc, and rebuild.");
+            ". Measure the exact calibration key by regenerating via "
+            "scripts/run_noise_profiles.sh (evidence run + --finalize-dir), "
+            "then python3 scripts/make_calibration_table.py "
+            "--manifest=<finalized-manifest> --emit-rows="
+            "include/util/noise_calibration_pre_threshold_rows.inc, "
+            "then python3 scripts/apply_calibration_cutover.py ... "
+            "--dest=include/util/noise_calibration.inc, and rebuild.");
     }
 
     throw std::invalid_argument(
