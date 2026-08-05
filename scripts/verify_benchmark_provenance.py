@@ -49,7 +49,7 @@ FLOAT_COLUMNS = {
     "total_ms_sd", "total_ms_median", "jaccard_computed",
     "jaccard_expected", "jaccard_error", "phase_encode_ms",
     "phase_intersect_ms", "phase_aggregate_ms", "phase_decrypt_ms",
-    "extrapolation_alpha",
+    "extrapolation_alpha", "time_ms", "time_ms_sd", "time_ms_median",
 }
 BOOLEAN_COLUMNS = {
     "security_match", "comparison_eligible", "secure_division_included",
@@ -64,6 +64,32 @@ PROFILES = {
     "std128-t128-feasibility": ("feasibility", 128, 128, False),
     "std192-t128-feasibility": ("feasibility", 192, 128, False),
     "toy-smoke": ("smoke", 0, 40, False),
+}
+
+BENCHMARK_REQUIRED_COLUMNS = {
+    "k", "m", "set_size", "trials", "accuracy_trials", "encoding",
+    "hash_seed", "hash_root_seed",
+    "estimator_model", "sanitizer_model", "sanitizer_assurance",
+    "transcript_stat_bits", "max_queries", "query_stat_bits",
+    "coefficient_stat_bits", "flood_margin_bits", "eval_noise_bits",
+    "flood_noise_bits", "scaling_mod_size",
+    "profile_id", "run_class", "target_security_bits",
+    "comparison_eligible", "measurement_kind",
+    "actual_ring_dim", "log_q_bits", "plaintext_modulus", "num_limbs",
+    "openfhe_version",
+    "time_ms", "time_ms_sd", "time_ms_median",
+    "jaccard_computed", "jaccard_expected", "jaccard_error",
+}
+DYNAMIC_REQUIRED_COLUMNS = (
+    (BENCHMARK_REQUIRED_COLUMNS - {"time_ms", "time_ms_sd",
+                                   "time_ms_median", "encoding"})
+    | {"total_ms", "total_ms_sd", "total_ms_median", "depth"}
+)
+FAMILY_SCHEMAS = {
+    "benchmark": (BENCHMARK_REQUIRED_COLUMNS,
+                  ("time_ms", "time_ms_median")),
+    "dynamic": (DYNAMIC_REQUIRED_COLUMNS,
+                ("total_ms", "total_ms_median")),
 }
 
 SANITIZER_NUMERIC = (
@@ -361,6 +387,30 @@ def validate_rows(rows: list[dict[str, str]]) -> None:
                         f"row {row_number}: {hash_column} is not lowercase SHA-256")
 
 
+def validate_family_rows(rows: list[dict[str, str]], schema_name: str) -> None:
+    """Fail-closed validation for real Piccard-family producer CSVs."""
+    metric_columns = FAMILY_SCHEMAS[schema_name][1]
+    for row_number, row in enumerate(rows, 2):
+        _validate_numeric_cells(row, row_number)
+        target, transcript, profile_eligible = _validate_profile(row, row_number)
+        kind = row["measurement_kind"]
+        require(kind in {"fhe-timing", "fhe-accuracy"},
+                f"row {row_number}: invalid Piccard-family measurement_kind {kind!r}")
+        require(row["comparison_eligible"] ==
+                ("true" if profile_eligible else "false"),
+                f"row {row_number}: comparison_eligible mismatch for profile")
+        _validate_models(row, row_number, "piccard")
+        _validate_fhe(row, row_number, True)
+        require(int(row["transcript_stat_bits"]) == transcript,
+                f"row {row_number}: sanitizer profile transcript_stat_bits mismatch")
+        for column in (*metric_columns,
+                       "jaccard_computed", "jaccard_expected", "jaccard_error"):
+            value = row.get(column, "")
+            require(value != "",
+                    f"row {row_number}: measured {column} is required")
+            _finite(value, column, row_number)
+
+
 def resolve_manifest_csv(manifest_path: Path, cell_id: str) -> Path:
     """Resolve one checksum-bound CSV beneath the manifest's declared root."""
     try:
@@ -413,6 +463,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--csv", dest="csv_option", type=Path)
     parser.add_argument("--run-manifest", type=Path)
     parser.add_argument("--cell-id")
+    parser.add_argument("--schema", choices=("review", "benchmark", "dynamic"),
+                        default="review")
     args = parser.parse_args(argv)
     try:
         explicit = args.csv_option or args.csv_path
@@ -430,12 +482,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.csv_option is not None and args.csv_path is not None:
                 parser.error("provide the CSV once, positionally or with --csv")
             path = explicit
-        _, rows = load_csv(path)
-        validate_rows(rows)
+        if args.schema == "review":
+            _, rows = load_csv(path)
+            validate_rows(rows)
+        else:
+            _, rows = load_csv(path, required=FAMILY_SCHEMAS[args.schema][0])
+            validate_family_rows(rows, args.schema)
     except VerificationError as error:
         print(f"verify_benchmark_provenance: FAIL: {error}", file=sys.stderr)
         return 2
-    print(json.dumps({"verifier": "benchmark-provenance", "verdict": "PASS", "rows": len(rows)}, sort_keys=True))
+    print(json.dumps({"verifier": "benchmark-provenance", "verdict": "PASS",
+                       "rows": len(rows), "schema": args.schema}, sort_keys=True))
     return 0
 
 
