@@ -1869,11 +1869,98 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             f"--bench-noise={self.fake}",
             "--finalize-manifest=legacy.json",
             "--archive=legacy.tar.zst",
+            "--reps=5",
+            "--seed=20260729",
+            "--max-queries=1048576",
+            "--margin=8",
         ):
             with self.subTest(extra=extra):
                 result = self.run_finalize(
                     result_root, final_dir, extra)
                 self.assertNotEqual(result.returncode, 0)
+
+    def test_phase5_profile_arguments_accepted_when_matching(self):
+        result_root = self.root / "phase5-match"
+        baseline_args = (
+            "--profile=primary40",
+            f"--results-root={result_root}",
+        )
+        confirmed_args = (
+            "--profile=primary40",
+            "--reps=5",
+            "--seed=20260729",
+            "--max-queries=1048576",
+            "--margin=8",
+            f"--results-root={result_root}",
+        )
+        baseline = self.run_runner(*baseline_args, dry_run=True)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        confirmed = self.run_runner(*confirmed_args, dry_run=True)
+        self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+        self.assertEqual(confirmed.stdout, baseline.stdout)
+        self.assertEqual(confirmed.stdout.count("SHARD "), 28)
+        self.assertFalse(result_root.exists())
+
+    def test_phase5_profile_arguments_rejected_on_mismatch(self):
+        result_root = self.root / "phase5-mismatch"
+        correct = {
+            "--reps": "5",
+            "--seed": "20260729",
+            "--max-queries": "1048576",
+            "--margin": "8",
+        }
+        wrong = {
+            "--reps": "4",
+            "--seed": "1",
+            "--max-queries": "65536",
+            "--margin": "9",
+        }
+        for option in correct:
+            with self.subTest(option=option):
+                args = [
+                    "--profile=primary40",
+                    f"--results-root={result_root}",
+                ] + [
+                    f"{other}={value}"
+                    for other, value in correct.items()
+                    if other != option
+                ] + [f"{option}={wrong[option]}"]
+                result = self.run_runner(*args, dry_run=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("SHARD ", result.stdout)
+                self.assertIn(f"{option}={wrong[option]}", result.stderr)
+                self.assertIn(correct[option], result.stderr)
+                self.assertFalse(result_root.exists())
+
+    def test_smoke_reps_validated_against_effective_value(self):
+        mismatch_root = self.root / "phase5-smoke-mismatch"
+        mismatch = self.run_runner(
+            "--profile=sensitivity64", "--smoke", "--reps=5",
+            f"--results-root={mismatch_root}",
+            dry_run=True,
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertNotIn("SHARD ", mismatch.stdout)
+        self.assertIn("--reps=5", mismatch.stderr)
+        self.assertFalse(mismatch_root.exists())
+
+        matching_root = self.root / "phase5-smoke-match"
+        matching = self.run_runner(
+            "--profile=sensitivity64", "--smoke", "--reps=1",
+            f"--results-root={matching_root}",
+            dry_run=True,
+        )
+        self.assertEqual(matching.returncode, 0, matching.stderr)
+
+    def test_unknown_runner_argument_still_rejected(self):
+        result_root = self.root / "phase5-unknown"
+        result = self.run_runner(
+            "--profile=primary40", "--frobnicate=1",
+            f"--results-root={result_root}",
+            dry_run=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown runner argument", result.stderr)
 
 
 if __name__ == "__main__":

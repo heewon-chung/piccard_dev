@@ -137,13 +137,22 @@ def parse_cli(arguments):
         "bench_noise": None,
         "smoke": False,
         "finalize_dir": None,
+        "reps": None,
+        "seed": None,
+        "max_queries": None,
+        "margin": None,
     }
     names = {
         "--results-root": "results_root",
         "--profile": "profile",
         "--bench-noise": "bench_noise",
         "--finalize-dir": "finalize_dir",
+        "--reps": "reps",
+        "--seed": "seed",
+        "--max-queries": "max_queries",
+        "--margin": "margin",
     }
+    integer_options = {"reps", "seed", "max_queries", "margin"}
     index = 0
     while index < len(arguments):
         argument = arguments[index]
@@ -165,6 +174,10 @@ def parse_cli(arguments):
                     value = argument[len(prefix):]
                     if not value:
                         fail(option + " requires a value")
+                    if key in integer_options:
+                        if not value.isdigit():
+                            fail(option + " requires a nonnegative integer")
+                        value = int(value)
                     result[key] = value
                     matched = True
                     break
@@ -174,7 +187,12 @@ def parse_cli(arguments):
                     index += 1
                     if index >= len(arguments) or arguments[index].startswith("--"):
                         fail(option + " requires a value")
-                    result[key] = arguments[index]
+                    value = arguments[index]
+                    if key in integer_options:
+                        if not value.isdigit():
+                            fail(option + " requires a nonnegative integer")
+                        value = int(value)
+                    result[key] = value
                     matched = True
                     break
             if not matched:
@@ -187,6 +205,10 @@ def parse_cli(arguments):
             or result["resume"]
             or result["bench_noise"] is not None
             or result["smoke"]
+            or result["reps"] is not None
+            or result["seed"] is not None
+            or result["max_queries"] is not None
+            or result["margin"] is not None
         ):
             fail(
                 "--finalize-dir requires only one --results-root and "
@@ -456,6 +478,23 @@ def profile_policy(matrix, profile_id):
         policy for policy in matrix["profiles"]
         if policy["profile_id"] == profile_id
     )
+
+
+def validate_cli_confirmations(options, policy):
+    expected = {
+        # effective values -- what the shard commands actually receive,
+        # not the raw policy: smoke shards run with --reps=1
+        "reps": 1 if options["smoke"] else policy["repetitions"],
+        "seed": ROOT_SEED,
+        "max_queries": policy["max_queries"],
+        "margin": policy["flood_margin_bits"],
+    }
+    for name, expected_value in expected.items():
+        supplied = options[name]
+        if supplied is not None and supplied != expected_value:
+            fail(f"--{name.replace('_', '-')}={supplied} contradicts the "
+                 f"effective run value {expected_value}; the CLI may "
+                 "confirm but never override the profile matrix")
 
 
 def consumer_argument(partition):
@@ -2343,6 +2382,7 @@ if options["smoke"]:
     if len(partitions) != 4:
         fail("smoke matrix must contain exactly four singleton cells")
 policy = profile_policy(matrix, options["profile"])
+validate_cli_confirmations(options, policy)
 
 profile_dir = resolved_root / "profiles" / options["profile"]
 if not dry_run:
