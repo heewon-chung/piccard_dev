@@ -1,0 +1,30 @@
+key	value
+schema_version	piccard-real-processed-v1
+dataset	dblp_acm
+variant	dblp_acm_u65536
+preprocessing_version	dblp-acm-trigram-v1
+universe_size	65536
+seed	7
+source_manifest_file	source.manifest.tsv
+source_manifest_sha256	0b40cef7bfe0eb259a66d094b26685a0bb72f5f5a35371a404a8cb1691de81b4
+records_file	records.tsv
+records_sha256	8d16438f582019396d9a546479870ec660c8b8a2c01a618cd898181fcc23b885
+record_count	8
+pairs_file	pairs.tsv
+pairs_sha256	c77eceddab3626ee01655f50900965d56511653560499af4ebc3e1b14babed39
+pair_count	6
+raw_set_size_min	34
+raw_set_size_median	37.5
+raw_set_size_p95	42
+raw_set_size_max	42
+bucketed_set_size_min	34
+bucketed_set_size_median	37.5
+bucketed_set_size_p95	42
+bucketed_set_size_max	42
+original_positive_count	3
+retained_positive_count	3
+requested_pair_count	6
+max_documents	
+min_related_pairs	
+dropped.empty_features_dblp	0
+dropped.empty_features_acm	0

@@ -21,7 +21,10 @@ those phases' own tests stay RED until implemented.
 """
 
 import argparse
+import csv
 import hashlib
+import heapq
+import io
 import math
 import os
 import re
@@ -722,21 +725,375 @@ def write_processed_output(output_dir, records, pairs, manifest_pairs,
 
 
 # ---------------------------------------------------------------------------
-# CLI skeleton (dataset subcommands land in Phases 2-3)
+# DBLP-ACM: CSV parsing, normalization/trigram features, ground-truth pairs,
+# deterministic negative sampling (Work 5 Phase 2)
+# ---------------------------------------------------------------------------
+
+_DBLP_ACM_RECORD_CSV_HEADER = ("id", "title", "authors", "venue", "year")
+_DBLP_ACM_MAPPING_CSV_HEADER = ("idDBLP", "idACM")
+_DBLP_ACM_FEATURE_FIELD_ORDER = ("title", "authors", "venue", "year")
+_DBLP_NEGATIVE_HASH_DOMAIN = b"piccard-dblp-negative-v1"
+
+
+def _strip_utf8_bom(raw: bytes) -> bytes:
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:]
+    return raw
+
+
+def _read_strict_csv_rows(path: Path, expected_header: tuple) -> list:
+    """Strict RFC4180 CSV decode: UTF-8 (optional leading BOM stripped),
+    exact header, and exactly len(expected_header) columns per data row."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ManifestError(f"cannot read CSV: {path}") from exc
+    raw = _strip_utf8_bom(raw)
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ManifestError(f"invalid UTF-8 in CSV: {path}") from exc
+    try:
+        rows = list(csv.reader(io.StringIO(text), delimiter=",", quotechar='"',
+                                strict=True))
+    except csv.Error as exc:
+        raise ManifestError(f"malformed CSV: {path}: {exc}") from exc
+    if not rows:
+        raise ManifestError(f"empty CSV (missing header): {path}")
+    header = tuple(rows[0])
+    if header != expected_header:
+        raise ManifestError(
+            f"unexpected CSV header in {path}: expected {expected_header!r}, "
+            f"got {header!r}")
+    data_rows = []
+    for line_number, row in enumerate(rows[1:], start=2):
+        if len(row) != len(expected_header):
+            raise ManifestError(
+                f"malformed CSV row at line {line_number} in {path}: {row!r}")
+        data_rows.append(tuple(row))
+    return data_rows
+
+
+def _extract_trigrams(value: str) -> list:
+    """Overlapping three-code-point substrings, no padding for len < 3."""
+    if len(value) < 3:
+        return []
+    return [value[i:i + 3] for i in range(len(value) - 2)]
+
+
+def _record_features(fields: dict) -> list:
+    """Sorted/unique canonical_feature_hash ints over field_name=trigram for
+    every (title, authors, venue, year) field, in that fixed order. Empty
+    normalized values never create features."""
+    hashes = set()
+    for field in _DBLP_ACM_FEATURE_FIELD_ORDER:
+        normalized = normalize_text(fields[field])
+        if normalized == "":
+            continue
+        for trigram in _extract_trigrams(normalized):
+            hashes.add(canonical_feature_hash(f"{field}={trigram}"))
+    return sorted(hashes)
+
+
+def _parse_dblp_acm_records_csv(path: Path, prefix: str) -> dict:
+    """Parse a dblp_records/acm_records CSV into an ordered
+    {generated_record_id: {title, authors, venue, year}} map, rejecting
+    empty raw ids and duplicate generated ids."""
+    rows = _read_strict_csv_rows(path, _DBLP_ACM_RECORD_CSV_HEADER)
+    records = {}
+    for raw_id, title, authors, venue, year in rows:
+        if raw_id == "":
+            raise ManifestError(f"empty id field in {path}")
+        record_id = prefix + raw_id.encode("utf-8").hex()
+        if record_id in records:
+            raise ManifestError(f"duplicate record id in {path}: {record_id!r}")
+        records[record_id] = {
+            "title": title, "authors": authors, "venue": venue, "year": year}
+    return records
+
+
+def _parse_dblp_acm_mapping_csv(path: Path) -> list:
+    """Parse the idDBLP,idACM mapping CSV into an ordered list of
+    (generated_dblp_id, generated_acm_id) tuples, rejecting empty raw ids
+    and exact duplicate rows."""
+    rows = _read_strict_csv_rows(path, _DBLP_ACM_MAPPING_CSV_HEADER)
+    pairs = []
+    seen = set()
+    for raw_dblp_id, raw_acm_id in rows:
+        if raw_dblp_id == "" or raw_acm_id == "":
+            raise ManifestError(f"empty mapping id in {path}")
+        dblp_id = "dblp:" + raw_dblp_id.encode("utf-8").hex()
+        acm_id = "acm:" + raw_acm_id.encode("utf-8").hex()
+        key = (dblp_id, acm_id)
+        if key in seen:
+            raise ManifestError(f"duplicate mapping row: {key!r}")
+        seen.add(key)
+        pairs.append(key)
+    return pairs
+
+
+def _validate_one_to_one_mapping(pairs) -> None:
+    dblp_seen = {}
+    acm_seen = {}
+    for dblp_id, acm_id in pairs:
+        if dblp_id in dblp_seen and dblp_seen[dblp_id] != acm_id:
+            raise ManifestError(
+                f"non-one-to-one mapping: {dblp_id!r} maps to multiple ACM ids")
+        dblp_seen[dblp_id] = acm_id
+        if acm_id in acm_seen and acm_seen[acm_id] != dblp_id:
+            raise ManifestError(
+                f"non-one-to-one mapping: {acm_id!r} maps to multiple DBLP ids")
+        acm_seen[acm_id] = dblp_id
+
+
+def _dblp_acm_pair_id(pair_kind: str, record_a: str, record_b: str) -> str:
+    payload = (pair_kind.encode("utf-8") + b"\x00" + record_a.encode("utf-8")
+               + b"\x00" + record_b.encode("utf-8"))
+    return "dblp_acm-pair:" + hashlib.sha256(payload).hexdigest()
+
+
+def _dblp_negative_rank_key(seed: int, dblp_id: str, acm_id: str) -> bytes:
+    dblp_bytes = dblp_id.encode("utf-8")
+    acm_bytes = acm_id.encode("utf-8")
+    payload = (_DBLP_NEGATIVE_HASH_DOMAIN
+               + seed.to_bytes(8, "big")
+               + len(dblp_bytes).to_bytes(4, "big") + dblp_bytes
+               + len(acm_bytes).to_bytes(4, "big") + acm_bytes)
+    return hashlib.sha256(payload).digest()
+
+
+def _dblp_negative_candidates(dblp_ids, acm_ids, known_matches, seed: int):
+    """Yield ((rank_key_bytes, dblp_id, acm_id), (dblp_id, acm_id)) for every
+    cross-source pair that is not a known match. rank_key_bytes is the
+    piccard-dblp-negative-v1 digest; the trailing (dblp_id, acm_id) in the
+    sort key is the documented tie-break by generated endpoint IDs."""
+    for dblp_id in dblp_ids:
+        for acm_id in acm_ids:
+            if (dblp_id, acm_id) in known_matches:
+                continue
+            digest = _dblp_negative_rank_key(seed, dblp_id, acm_id)
+            yield (digest, dblp_id, acm_id), (dblp_id, acm_id)
+
+
+class _MaxHeapOrder:
+    """Wraps a sort key with reversed comparison so heapq (a min-heap) can
+    be used as a bounded max-heap: the item with the largest key sits at
+    heap[0] and is evicted first via heapreplace."""
+    __slots__ = ("key", "payload")
+
+    def __init__(self, key, payload):
+        self.key = key
+        self.payload = payload
+
+    def __lt__(self, other):
+        return self.key > other.key
+
+
+def _bounded_top_k_ascending(candidates, k: int):
+    """Streaming bounded top-k: return the k smallest-key (key, payload)
+    pairs from `candidates`, ascending by key, using only O(k) memory (a
+    fixed-size max-heap that evicts its current largest element whenever a
+    smaller candidate arrives) rather than materializing every candidate.
+    Must equal sorted(candidates)[:k] for any input order."""
+    if k <= 0:
+        return []
+    heap = []
+    for key, payload in candidates:
+        item = _MaxHeapOrder(key, payload)
+        if len(heap) < k:
+            heapq.heappush(heap, item)
+        elif item.key < heap[0].key:
+            heapq.heapreplace(heap, item)
+    ordered = sorted(heap, key=lambda it: it.key)
+    return [(it.key, it.payload) for it in ordered]
+
+
+def cmd_dblp_acm(*, source_manifest, output_dir, universe: int, pairs: int,
+                  seed: int, strict: bool = True, overwrite: bool = False) -> None:
+    """Validate a dblp_acm source manifest, parse its three CSV inputs,
+    build normalized trigram features, assemble known-match and sampled
+    negative pairs, and atomically publish processed/<variant>/ via
+    write_processed_output.
+
+    `strict` is accepted for CLI-shape compatibility with the normative
+    evidence command; validate_source_manifest is unconditionally strict
+    (there is no non-strict mode to select), so this flag currently has no
+    additional effect.
+    """
+    del strict  # no non-strict mode exists; see docstring
+    if universe != 65536:
+        raise ManifestError(f"dblp-acm only accepts universe=65536, got {universe!r}")
+    if pairs < 0:
+        raise ManifestError(f"pairs must be non-negative: {pairs!r}")
+    if seed < 0:
+        raise ManifestError(f"seed must be non-negative: {seed!r}")
+
+    manifest = validate_source_manifest(source_manifest, "dblp_acm")
+    inputs_by_role = {i.role: i for i in manifest.inputs}
+    dblp_records = _parse_dblp_acm_records_csv(
+        inputs_by_role["dblp_records"].resolved_path, "dblp:")
+    acm_records = _parse_dblp_acm_records_csv(
+        inputs_by_role["acm_records"].resolved_path, "acm:")
+    mapping_pairs = _parse_dblp_acm_mapping_csv(
+        inputs_by_role["dblp_acm_mapping"].resolved_path)
+    _validate_one_to_one_mapping(mapping_pairs)
+
+    mapped_dblp_ids = {dblp_id for dblp_id, _ in mapping_pairs}
+    mapped_acm_ids = {acm_id for _, acm_id in mapping_pairs}
+    for dblp_id, acm_id in mapping_pairs:
+        if dblp_id not in dblp_records:
+            raise ManifestError(f"unknown mapping DBLP id: {dblp_id!r}")
+        if acm_id not in acm_records:
+            raise ManifestError(f"unknown mapping ACM id: {acm_id!r}")
+
+    records = []
+    retained_dblp_ids = []
+    retained_acm_ids = []
+    dropped_dblp = 0
+    dropped_acm = 0
+
+    for record_id, fields in dblp_records.items():
+        raw_features = _record_features(fields)
+        if not raw_features:
+            if record_id in mapped_dblp_ids:
+                raise ManifestError(
+                    f"mapped DBLP record has zero features: {record_id!r}")
+            dropped_dblp += 1
+            continue
+        bucketed = bucket_features(raw_features, universe)
+        records.append(RecordRow(record_id=record_id, raw_features=tuple(raw_features),
+                                  bucketed_features=tuple(bucketed)))
+        retained_dblp_ids.append(record_id)
+
+    for record_id, fields in acm_records.items():
+        raw_features = _record_features(fields)
+        if not raw_features:
+            if record_id in mapped_acm_ids:
+                raise ManifestError(
+                    f"mapped ACM record has zero features: {record_id!r}")
+            dropped_acm += 1
+            continue
+        bucketed = bucket_features(raw_features, universe)
+        records.append(RecordRow(record_id=record_id, raw_features=tuple(raw_features),
+                                  bucketed_features=tuple(bucketed)))
+        retained_acm_ids.append(record_id)
+
+    positive_count = len(mapping_pairs)
+    if pairs < positive_count:
+        raise ManifestError(
+            f"insufficient pair request: --pairs={pairs} is below the "
+            f"{positive_count} required known-match pairs")
+    negatives_needed = pairs - positive_count
+
+    pair_rows = []
+    known_matches = set(mapping_pairs)
+    for dblp_id, acm_id in mapping_pairs:
+        record_a, record_b = sorted((dblp_id, acm_id))
+        pair_rows.append(PairRow(
+            pair_id=_dblp_acm_pair_id("known_match", record_a, record_b),
+            record_a=record_a, record_b=record_b,
+            pair_kind="known_match", label=1))
+
+    if negatives_needed > 0:
+        candidates = _dblp_negative_candidates(
+            sorted(retained_dblp_ids), sorted(retained_acm_ids),
+            known_matches, seed)
+        selected = _bounded_top_k_ascending(candidates, negatives_needed)
+        if len(selected) < negatives_needed:
+            raise ManifestError(
+                f"insufficient negative candidates: needed {negatives_needed}, "
+                f"found {len(selected)}")
+        for _, (dblp_id, acm_id) in selected:
+            record_a, record_b = sorted((dblp_id, acm_id))
+            pair_rows.append(PairRow(
+                pair_id=_dblp_acm_pair_id("sampled_nonmatch", record_a, record_b),
+                record_a=record_a, record_b=record_b,
+                pair_kind="sampled_nonmatch", label=0))
+
+    raw_stats = summarize_set_sizes([len(r.raw_features) for r in records])
+    bucketed_stats = summarize_set_sizes([len(r.bucketed_features) for r in records])
+
+    records_bytes = _canonicalize_records(records)
+    pairs_bytes = _canonicalize_pairs(pair_rows)
+    source_bytes = manifest.manifest_path.read_bytes()
+
+    values = {
+        "schema_version": "piccard-real-processed-v1",
+        "dataset": "dblp_acm",
+        "variant": f"dblp_acm_u{universe}",
+        "preprocessing_version": "dblp-acm-trigram-v1",
+        "universe_size": str(universe),
+        "seed": str(seed),
+        "source_manifest_file": "source.manifest.tsv",
+        "source_manifest_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "records_file": "records.tsv",
+        "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
+        "record_count": str(len(records)),
+        "pairs_file": "pairs.tsv",
+        "pairs_sha256": hashlib.sha256(pairs_bytes).hexdigest(),
+        "pair_count": str(len(pair_rows)),
+        "raw_set_size_min": str(raw_stats.min),
+        "raw_set_size_median": format_float(raw_stats.median),
+        "raw_set_size_p95": str(raw_stats.p95),
+        "raw_set_size_max": str(raw_stats.max),
+        "bucketed_set_size_min": str(bucketed_stats.min),
+        "bucketed_set_size_median": format_float(bucketed_stats.median),
+        "bucketed_set_size_p95": str(bucketed_stats.p95),
+        "bucketed_set_size_max": str(bucketed_stats.max),
+        "original_positive_count": str(positive_count),
+        "retained_positive_count": str(positive_count),
+        "requested_pair_count": str(pairs),
+        "max_documents": "",
+        "min_related_pairs": "",
+        "dropped.empty_features_dblp": str(dropped_dblp),
+        "dropped.empty_features_acm": str(dropped_acm),
+    }
+    manifest_pairs = [(key, values[key])
+                       for key in _processed_manifest_key_order("dblp_acm")]
+
+    write_processed_output(output_dir, records, pair_rows, manifest_pairs,
+                            manifest.manifest_path, overwrite=overwrite)
+
+
+# ---------------------------------------------------------------------------
+# CLI (Phase 3's enron subcommand stays a dormant "not implemented" stub)
 # ---------------------------------------------------------------------------
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="prepare_real_datasets.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("dblp-acm", "enron"):
-        sub = subparsers.add_parser(name, add_help=False)
-        sub.add_argument("extra", nargs=argparse.REMAINDER)
+
+    dblp_acm = subparsers.add_parser("dblp-acm")
+    dblp_acm.add_argument("--source-manifest", required=True)
+    dblp_acm.add_argument("--output-dir", required=True)
+    dblp_acm.add_argument("--universe", required=True, type=int)
+    dblp_acm.add_argument("--pairs", required=True, type=int)
+    dblp_acm.add_argument("--seed", required=True, type=int)
+    dblp_acm.add_argument("--strict", action="store_true")
+
+    enron = subparsers.add_parser("enron", add_help=False)
+    enron.add_argument("extra", nargs=argparse.REMAINDER)
+
     return parser
 
 
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.command == "dblp-acm":
+        try:
+            cmd_dblp_acm(
+                source_manifest=args.source_manifest,
+                output_dir=args.output_dir,
+                universe=args.universe,
+                pairs=args.pairs,
+                seed=args.seed,
+                strict=args.strict,
+            )
+        except ManifestError as exc:
+            sys.stderr.write(f"dblp-acm: {exc}\n")
+            return 1
+        return 0
     sys.stderr.write(f"{args.command}: not implemented\n")
     return 2
 

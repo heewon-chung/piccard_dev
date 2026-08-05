@@ -1,0 +1,19 @@
+key	value
+schema_version	piccard-real-source-v1
+dataset	dblp_acm
+dataset_version	2026-release
+source_url	https://example.invalid/dblp-acm
+citation	Example Citation 2020
+license_or_terms_url	https://example.invalid/terms
+acquisition_note	acquired locally on 2026-01-01 (synthetic quick fixture, not real DBLP-ACM data)
+parsing_schema	dblp-acm-csv-v1
+preprocessing_profile	dblp-acm-trigram-v1
+input.0.role	dblp_records
+input.0.path	dblp_records.csv
+input.0.sha256	a80ed9079a32ca327294b6b5322d8ae4f154def6173049ce2c87b0659c0755ff
+input.1.role	acm_records
+input.1.path	acm_records.csv
+input.1.sha256	b6b19f46f7a676b306fb3b01b9bc3cafd663c0acb7d502cb6f4815db70224925
+input.2.role	dblp_acm_mapping
+input.2.path	mapping.csv
+input.2.sha256	d06e984531ac67ea222e8527942f1a5a4bbb32a8aea899175c4a8c342eaf5ab8

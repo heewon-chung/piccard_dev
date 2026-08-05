@@ -1,0 +1,7 @@
+pair_id	record_a	record_b	pair_kind	label
+dblp_acm-pair:3df24e6e8fd4fc939161bf9bd8a0dc5dfecbb2d8c921359b1f46dc6b163caf9f	acm:6134	dblp:6433	sampled_nonmatch	0
+dblp_acm-pair:69a97fe7cddfdee14cd7a110f94cd0045dc4d7411f10367a447585135f2ce0b8	acm:6131	dblp:6434	sampled_nonmatch	0
+dblp_acm-pair:aa5825610d0c7b9e8b6fa6979b18f0430ad9440d8baf3824df9ae4c5aad2832e	acm:6133	dblp:6433	known_match	1
+dblp_acm-pair:dcec86f2e95525f9226169218da2aa127c7a0c0095f6136fa0d67c9799f2761b	acm:6132	dblp:6433	sampled_nonmatch	0
+dblp_acm-pair:e3fb6f21a8e5475d85550981696e6e3289b9442535f4ac86b21196e98f8f924f	acm:6132	dblp:6432	known_match	1
+dblp_acm-pair:e9467f3e236472120ab30be1cab1e8ab8348d573ee8a1e8f876ebfcc448484ed	acm:6131	dblp:6431	known_match	1

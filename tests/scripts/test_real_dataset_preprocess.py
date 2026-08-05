@@ -8,8 +8,10 @@ Hermetic: every test builds its inputs under tempfile.TemporaryDirectory();
 none of them touch the real datasets/ tree or the network.
 """
 
+import csv
 import hashlib
 import importlib.util
+import io
 import os
 import shutil
 import subprocess
@@ -73,6 +75,21 @@ def sha256_hex(data: bytes) -> str:
 
 def write_lf(path: Path, text: str) -> None:
     path.write_bytes(text.encode("utf-8"))
+
+
+def write_csv_lf(path: Path, header, rows) -> None:
+    """Write a strict RFC4180 CSV with LF line endings (Python's csv module
+    quotes fields containing commas/quotes/newlines automatically)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow(row)
+    path.write_bytes(buf.getvalue().encode("utf-8"))
+
+
+QUICK_DBLP_ACM_DIR = (REPO / "tests" / "fixtures" / "real_datasets" / "quick"
+                      / "dblp_acm_u65536")
 
 
 class CoreTests(unittest.TestCase):
@@ -642,7 +659,11 @@ class CoreTests(unittest.TestCase):
     # CLI skeleton
     # ------------------------------------------------------------------
 
-    def test_cli_dblp_acm_not_implemented_exit_code(self):
+    def test_cli_dblp_acm_missing_required_args_exit_code(self):
+        # Phase 2 replaces the Phase-1 "not implemented" stub with a real
+        # subcommand that requires --output-dir/--universe/--pairs/--seed;
+        # argparse itself now produces exit code 2 for the incomplete
+        # invocation below (not the old "not implemented" stub message).
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "dblp-acm", "--source-manifest=x"],
             capture_output=True, text=True)
@@ -913,6 +934,481 @@ class CoreTests(unittest.TestCase):
                               original_records_bytes)
             leftovers = list(tmp_dir.glob(".out.tmp-*")) + list(tmp_dir.glob(".out.old-*"))
             self.assertEqual(leftovers, [])
+
+
+class DblpAcmTests(unittest.TestCase):
+    """Behavior tests for cmd_dblp_acm (Work 5 Phase 2): CSV parsing,
+    normalization/trigram features, ground-truth pairs, and deterministic
+    negative sampling.
+
+    Hermetic: every test builds its CSV/manifest inputs under
+    tempfile.TemporaryDirectory(), except the frozen golden-fixture test
+    which reads only the tracked tests/fixtures/real_datasets/quick/
+    dblp_acm_u65536/ directory (never datasets/, never the network).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    # ------------------------------------------------------------------
+    # fixture builders
+    # ------------------------------------------------------------------
+
+    def _default_dblp_rows(self):
+        return [
+            ["d1", "Distributed Hash Tables", "Alice Smith", "VLDB", "2019"],
+            ["d2", "Bucketized Feature Encoding", "Bob Jones", "SIGMOD", "2020"],
+            ["d3", "Trigram Based Record Linkage", "Carol Lee", "ICDE", "2018"],
+            ["d4", "Approximate Nearest Neighbor Search", "Dave Kim", "KDD", "2021"],
+        ]
+
+    def _default_acm_rows(self):
+        return [
+            ["a1", "Distributed Hash Tables", "Alice Smith", "VLDB", "2019"],
+            ["a2", "Bucketized Feature Encoding", "Bob Jones", "SIGMOD", "2020"],
+            ["a3", "Trigram Based Record Linkage", "Carol Lee", "ICDE", "2018"],
+            ["a4", "Private Set Intersection Protocols", "Erin Zhao", "CCS", "2022"],
+        ]
+
+    def _default_mapping_rows(self):
+        return [["d1", "a1"], ["d2", "a2"], ["d3", "a3"]]
+
+    def _write_source_manifest(self, tmp_dir: Path, dblp_path: Path, acm_path: Path,
+                                mapping_path: Path) -> Path:
+        lines = [
+            "key\tvalue",
+            "schema_version\tpiccard-real-source-v1",
+            "dataset\tdblp_acm",
+            "dataset_version\t2026-release",
+            "source_url\thttps://example.invalid/dblp-acm",
+            "citation\tExample Citation 2020",
+            "license_or_terms_url\thttps://example.invalid/terms",
+            "acquisition_note\tacquired locally on 2026-01-01",
+            "parsing_schema\tdblp-acm-csv-v1",
+            "preprocessing_profile\tdblp-acm-trigram-v1",
+            "input.0.role\tdblp_records",
+            f"input.0.path\t{dblp_path.name}",
+            f"input.0.sha256\t{sha256_hex(dblp_path.read_bytes())}",
+            "input.1.role\tacm_records",
+            f"input.1.path\t{acm_path.name}",
+            f"input.1.sha256\t{sha256_hex(acm_path.read_bytes())}",
+            "input.2.role\tdblp_acm_mapping",
+            f"input.2.path\t{mapping_path.name}",
+            f"input.2.sha256\t{sha256_hex(mapping_path.read_bytes())}",
+        ]
+        manifest_path = tmp_dir / "source.manifest.tsv"
+        write_lf(manifest_path, "\n".join(lines) + "\n")
+        return manifest_path
+
+    def _build_manifest(self, tmp_dir: Path, *, dblp_rows=None, acm_rows=None,
+                         mapping_rows=None, dblp_bom=False):
+        dblp_rows = self._default_dblp_rows() if dblp_rows is None else dblp_rows
+        acm_rows = self._default_acm_rows() if acm_rows is None else acm_rows
+        mapping_rows = (self._default_mapping_rows() if mapping_rows is None
+                         else mapping_rows)
+        dblp_path = tmp_dir / "dblp_records.csv"
+        acm_path = tmp_dir / "acm_records.csv"
+        mapping_path = tmp_dir / "mapping.csv"
+        write_csv_lf(dblp_path, ("id", "title", "authors", "venue", "year"), dblp_rows)
+        write_csv_lf(acm_path, ("id", "title", "authors", "venue", "year"), acm_rows)
+        write_csv_lf(mapping_path, ("idDBLP", "idACM"), mapping_rows)
+        if dblp_bom:
+            dblp_path.write_bytes(b"\xef\xbb\xbf" + dblp_path.read_bytes())
+        return self._write_source_manifest(tmp_dir, dblp_path, acm_path, mapping_path)
+
+    def _generated_id(self, prefix: str, raw_id: str) -> str:
+        return prefix + raw_id.encode("utf-8").hex()
+
+    # ------------------------------------------------------------------
+    # CSV decoding: quoted commas, BOM
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_handles_bom_and_quoted_commas(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            dblp_rows = self._default_dblp_rows()
+            dblp_rows[0] = ["d1", "Hashing, Trigrams and Sets", "Alice Smith",
+                             "VLDB", "2019"]
+            acm_rows = self._default_acm_rows()
+            acm_rows[0] = ["a1", "Hashing, Trigrams and Sets", "Alice Smith",
+                            "VLDB", "2019"]
+            manifest_path = self._build_manifest(
+                tmp_dir, dblp_rows=dblp_rows, acm_rows=acm_rows, dblp_bom=True)
+            output_dir = tmp_dir / "out"
+            module.cmd_dblp_acm(source_manifest=manifest_path, output_dir=output_dir,
+                                 universe=65536, pairs=6, seed=7)
+            records_text = (output_dir / "records.tsv").read_text("utf-8")
+            self.assertIn(self._generated_id("dblp:", "d1"), records_text)
+            self.assertIn(self._generated_id("acm:", "a1"), records_text)
+
+    # ------------------------------------------------------------------
+    # duplicate record ids
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_duplicate_record_id_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            dblp_rows = self._default_dblp_rows() + [
+                ["d1", "Duplicate Title", "Someone Else", "OSDI", "2021"]]
+            manifest_path = self._build_manifest(tmp_dir, dblp_rows=dblp_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # unknown mapping ids
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_unknown_dblp_mapping_id_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            mapping_rows = self._default_mapping_rows() + [["d-missing", "a4"]]
+            manifest_path = self._build_manifest(tmp_dir, mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    def test_cmd_dblp_acm_unknown_acm_mapping_id_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            mapping_rows = self._default_mapping_rows() + [["d4", "a-missing"]]
+            manifest_path = self._build_manifest(tmp_dir, mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # duplicate / non-one-to-one mapping rows
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_duplicate_mapping_row_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            mapping_rows = self._default_mapping_rows() + [["d1", "a1"]]
+            manifest_path = self._build_manifest(tmp_dir, mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    def test_cmd_dblp_acm_non_one_to_one_mapping_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            mapping_rows = self._default_mapping_rows() + [["d1", "a4"]]
+            manifest_path = self._build_manifest(tmp_dir, mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # pair-count sufficiency
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_insufficient_pair_request_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_manifest(tmp_dir)  # 3 known matches
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=2, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    def test_cmd_dblp_acm_insufficient_negative_candidates_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            # Exactly 3 dblp + 3 acm records, all mapped 1:1: only
+            # 3*3 - 3 == 6 negative candidates exist.
+            dblp_rows = [
+                ["d1", "Distributed Hash Tables", "Alice Smith", "VLDB", "2019"],
+                ["d2", "Bucketized Feature Encoding", "Bob Jones", "SIGMOD", "2020"],
+                ["d3", "Trigram Based Record Linkage", "Carol Lee", "ICDE", "2018"],
+            ]
+            acm_rows = [
+                ["a1", "Distributed Hash Tables", "Alice Smith", "VLDB", "2019"],
+                ["a2", "Bucketized Feature Encoding", "Bob Jones", "SIGMOD", "2020"],
+                ["a3", "Trigram Based Record Linkage", "Carol Lee", "ICDE", "2018"],
+            ]
+            mapping_rows = [["d1", "a1"], ["d2", "a2"], ["d3", "a3"]]
+            manifest_path = self._build_manifest(
+                tmp_dir, dblp_rows=dblp_rows, acm_rows=acm_rows,
+                mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                # 3 positives + 7 negatives requested, only 6 negatives exist.
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=10, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # known-match leakage into negatives
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_no_negative_is_a_known_match(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_manifest(tmp_dir)
+            output_dir = tmp_dir / "out"
+            module.cmd_dblp_acm(source_manifest=manifest_path, output_dir=output_dir,
+                                 universe=65536, pairs=6, seed=7)
+            known_match_endpoints = {
+                frozenset((self._generated_id("dblp:", d), self._generated_id("acm:", a)))
+                for d, a in self._default_mapping_rows()
+            }
+            pairs_text = (output_dir / "pairs.tsv").read_text("utf-8")
+            lines = pairs_text.splitlines()[1:]
+            sampled_nonmatch_count = 0
+            for line in lines:
+                pair_id, record_a, record_b, pair_kind, label = line.split("\t")
+                if pair_kind == "sampled_nonmatch":
+                    sampled_nonmatch_count += 1
+                    self.assertNotIn(frozenset((record_a, record_b)),
+                                      known_match_endpoints)
+                    self.assertEqual(label, "0")
+                else:
+                    self.assertEqual(pair_kind, "known_match")
+                    self.assertEqual(label, "1")
+                    self.assertIn(frozenset((record_a, record_b)),
+                                  known_match_endpoints)
+            self.assertEqual(sampled_nonmatch_count, 3)
+
+    # ------------------------------------------------------------------
+    # input-row permutation invariance
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_row_permutation_invariance(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            fwd_dir = tmp_dir / "fwd"
+            rev_dir = tmp_dir / "rev"
+            fwd_dir.mkdir()
+            rev_dir.mkdir()
+            manifest_fwd = self._build_manifest(
+                fwd_dir, dblp_rows=self._default_dblp_rows(),
+                acm_rows=self._default_acm_rows(),
+                mapping_rows=self._default_mapping_rows())
+            manifest_rev = self._build_manifest(
+                rev_dir, dblp_rows=list(reversed(self._default_dblp_rows())),
+                acm_rows=list(reversed(self._default_acm_rows())),
+                mapping_rows=list(reversed(self._default_mapping_rows())))
+            out_fwd = tmp_dir / "out_fwd"
+            out_rev = tmp_dir / "out_rev"
+            module.cmd_dblp_acm(source_manifest=manifest_fwd, output_dir=out_fwd,
+                                 universe=65536, pairs=6, seed=7)
+            module.cmd_dblp_acm(source_manifest=manifest_rev, output_dir=out_rev,
+                                 universe=65536, pairs=6, seed=7)
+            self.assertEqual((out_fwd / "records.tsv").read_bytes(),
+                              (out_rev / "records.tsv").read_bytes())
+            self.assertEqual((out_fwd / "pairs.tsv").read_bytes(),
+                              (out_rev / "pairs.tsv").read_bytes())
+
+    # ------------------------------------------------------------------
+    # streaming bounded top-k == full sort (>=3 seeds)
+    # ------------------------------------------------------------------
+
+    def test_bounded_top_k_matches_full_sort_multiple_seeds(self):
+        module = self.module
+        dblp_ids = sorted(self._generated_id("dblp:", f"{i:04x}") for i in range(30))
+        acm_ids = sorted(self._generated_id("acm:", f"{i:04x}") for i in range(30))
+        known_matches = {(dblp_ids[0], acm_ids[0]), (dblp_ids[1], acm_ids[1])}
+        for seed in (7, 42, 20260729):
+            k = 25
+            full_list = sorted(
+                module._dblp_negative_candidates(dblp_ids, acm_ids, known_matches, seed),
+                key=lambda item: item[0])
+            expected = [payload for _, payload in full_list[:k]]
+            bounded = module._bounded_top_k_ascending(
+                module._dblp_negative_candidates(dblp_ids, acm_ids, known_matches, seed),
+                k)
+            actual = [payload for _, payload in bounded]
+            self.assertEqual(actual, expected)
+            # Sanity: the property is non-trivial (results are not just the
+            # naive enumeration order) and no known match leaks through.
+            self.assertEqual(len(actual), k)
+            for dblp_id, acm_id in actual:
+                self.assertNotIn((dblp_id, acm_id), known_matches)
+
+    # ------------------------------------------------------------------
+    # empty-feature drop / abort semantics
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_mapped_record_with_empty_features_aborts(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            dblp_rows = self._default_dblp_rows() + [["d5", "", "", "", ""]]
+            mapping_rows = self._default_mapping_rows() + [["d5", "a4"]]
+            manifest_path = self._build_manifest(
+                tmp_dir, dblp_rows=dblp_rows, mapping_rows=mapping_rows)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=65536,
+                                     pairs=7, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    def test_cmd_dblp_acm_unmapped_record_with_empty_features_dropped_and_counted(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            dblp_rows = self._default_dblp_rows() + [["d6", "", "", "", ""]]
+            manifest_path = self._build_manifest(tmp_dir, dblp_rows=dblp_rows)
+            output_dir = tmp_dir / "out"
+            module.cmd_dblp_acm(source_manifest=manifest_path, output_dir=output_dir,
+                                 universe=65536, pairs=6, seed=7)
+            records_text = (output_dir / "records.tsv").read_text("utf-8")
+            self.assertNotIn(self._generated_id("dblp:", "d6"), records_text)
+            manifest_values = dict(module.parse_two_column_tsv(
+                output_dir / "dataset.manifest.tsv"))
+            self.assertEqual(manifest_values["dropped.empty_features_dblp"], "1")
+            self.assertEqual(manifest_values["dropped.empty_features_acm"], "0")
+            self.assertEqual(manifest_values["record_count"], "8")
+
+    # ------------------------------------------------------------------
+    # pass conditions: exact pair count, sorted/unique features, manifest
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_pass_conditions_on_default_fixture(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_manifest(tmp_dir)
+            output_dir = tmp_dir / "out"
+            module.cmd_dblp_acm(source_manifest=manifest_path, output_dir=output_dir,
+                                 universe=65536, pairs=6, seed=7)
+
+            pairs_lines = (output_dir / "pairs.tsv").read_text("utf-8").splitlines()
+            self.assertEqual(len(pairs_lines) - 1, 6)
+
+            records_lines = (output_dir / "records.tsv").read_text("utf-8").splitlines()
+            self.assertEqual(len(records_lines) - 1, 8)
+            for line in records_lines[1:]:
+                (record_id, raw_count, raw_csv, bucketed_count,
+                 bucketed_csv) = line.split("\t")
+                for count_str, csv_str in ((raw_count, raw_csv),
+                                            (bucketed_count, bucketed_csv)):
+                    values = [] if csv_str == "" else [int(x) for x in csv_str.split(",")]
+                    self.assertEqual(int(count_str), len(values))
+                    self.assertEqual(values, sorted(set(values)))
+                    self.assertEqual(len(values), len(set(values)))
+
+            manifest_values = dict(module.parse_two_column_tsv(
+                output_dir / "dataset.manifest.tsv"))
+            self.assertEqual(manifest_values["schema_version"],
+                              "piccard-real-processed-v1")
+            self.assertEqual(manifest_values["dataset"], "dblp_acm")
+            self.assertEqual(manifest_values["variant"], "dblp_acm_u65536")
+            self.assertEqual(manifest_values["preprocessing_version"],
+                              "dblp-acm-trigram-v1")
+            self.assertEqual(manifest_values["universe_size"], "65536")
+            self.assertEqual(manifest_values["seed"], "7")
+            self.assertEqual(manifest_values["record_count"], "8")
+            self.assertEqual(manifest_values["pair_count"], "6")
+            self.assertEqual(manifest_values["original_positive_count"], "3")
+            self.assertEqual(manifest_values["retained_positive_count"], "3")
+            self.assertEqual(manifest_values["requested_pair_count"], "6")
+            self.assertEqual(manifest_values["max_documents"], "")
+            self.assertEqual(manifest_values["min_related_pairs"], "")
+            self.assertEqual(manifest_values["dropped.empty_features_dblp"], "0")
+            self.assertEqual(manifest_values["dropped.empty_features_acm"], "0")
+            self.assertEqual(
+                manifest_values["records_sha256"],
+                sha256_hex((output_dir / "records.tsv").read_bytes()))
+            self.assertEqual(
+                manifest_values["pairs_sha256"],
+                sha256_hex((output_dir / "pairs.tsv").read_bytes()))
+            self.assertEqual(
+                manifest_values["source_manifest_sha256"],
+                sha256_hex((output_dir / "source.manifest.tsv").read_bytes()))
+
+    # ------------------------------------------------------------------
+    # universe validation
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_rejects_non_65536_universe(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_manifest(tmp_dir)
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.cmd_dblp_acm(source_manifest=manifest_path,
+                                     output_dir=output_dir, universe=1024,
+                                     pairs=6, seed=7)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # CLI end-to-end
+    # ------------------------------------------------------------------
+
+    def test_cli_dblp_acm_full_invocation_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            dblp_path = tmp_dir / "dblp_records.csv"
+            acm_path = tmp_dir / "acm_records.csv"
+            mapping_path = tmp_dir / "mapping.csv"
+            write_csv_lf(dblp_path, ("id", "title", "authors", "venue", "year"),
+                         self._default_dblp_rows())
+            write_csv_lf(acm_path, ("id", "title", "authors", "venue", "year"),
+                         self._default_acm_rows())
+            write_csv_lf(mapping_path, ("idDBLP", "idACM"),
+                         self._default_mapping_rows())
+            manifest_path = self._write_source_manifest(
+                tmp_dir, dblp_path, acm_path, mapping_path)
+            output_dir = tmp_dir / "out"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "dblp-acm",
+                 f"--source-manifest={manifest_path}",
+                 f"--output-dir={output_dir}",
+                 "--universe=65536", "--pairs=6", "--seed=7", "--strict"],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output_dir / "dataset.manifest.tsv").exists())
+
+    # ------------------------------------------------------------------
+    # frozen quick fixture (golden)
+    # ------------------------------------------------------------------
+
+    def test_cmd_dblp_acm_quick_fixture_byte_identical_to_golden(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "out"
+            module.cmd_dblp_acm(
+                source_manifest=QUICK_DBLP_ACM_DIR / "source.manifest.tsv",
+                output_dir=output_dir, universe=65536, pairs=6, seed=7)
+            for name in ("records.tsv", "pairs.tsv", "source.manifest.tsv",
+                         "dataset.manifest.tsv"):
+                self.assertEqual(
+                    (output_dir / name).read_bytes(),
+                    (QUICK_DBLP_ACM_DIR / name).read_bytes(),
+                    f"golden mismatch for {name}")
 
 
 if __name__ == "__main__":

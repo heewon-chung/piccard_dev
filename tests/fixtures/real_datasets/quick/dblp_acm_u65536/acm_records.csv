@@ -1,0 +1,5 @@
+id,title,authors,venue,year
+a1,Distributed Hash Tables,Alice Smith,VLDB,2019
+a2,Bucketized Feature Encoding,Bob Jones,SIGMOD,2020
+a3,Trigram Based Record Linkage,Carol Lee,ICDE,2018
+a4,Private Set Intersection Protocols,Erin Zhao,CCS,2022

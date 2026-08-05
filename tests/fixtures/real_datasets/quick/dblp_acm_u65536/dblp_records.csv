@@ -1,0 +1,5 @@
+id,title,authors,venue,year
+d1,Distributed Hash Tables,Alice Smith,VLDB,2019
+d2,Bucketized Feature Encoding,Bob Jones,SIGMOD,2020
+d3,Trigram Based Record Linkage,Carol Lee,ICDE,2018
+d4,Approximate Nearest Neighbor Search,Dave Kim,KDD,2021
