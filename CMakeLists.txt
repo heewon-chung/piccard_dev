@@ -188,6 +188,21 @@ target_include_directories(
     PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
 )
 
+# Typed Work-4-prefix CSV schema for real-dataset benchmark rows (Work 5
+# Phase 5.2). Pure string/typed-token serialization, no OpenFHE dependency.
+add_library(
+    piccard_real_dataset_csv_schema
+    benchmarks/real_dataset_csv_schema.cpp
+)
+target_include_directories(
+    piccard_real_dataset_csv_schema
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(
+    piccard_real_dataset_csv_schema
+    PUBLIC piccard_benchmark_serializers piccard_data
+)
+
 # Canonical binary workload/trace support for reviewer comparisons.
 add_library(
     piccard_comparison_workload
@@ -437,7 +452,12 @@ if(BUILD_TESTS)
         target_link_libraries(
             test_real_dataset_metrics
             piccard_data
+            piccard_real_dataset_csv_schema
             test_main
+        )
+        target_include_directories(
+            test_real_dataset_metrics
+            PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
         )
         add_test(NAME RealDatasetMetrics COMMAND test_real_dataset_metrics)
 

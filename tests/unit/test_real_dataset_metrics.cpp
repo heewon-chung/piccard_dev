@@ -1,7 +1,13 @@
 #include "data/real_dataset_metrics.h"
+#include "real_dataset_csv_schema.h"
+
+#include "baseline_profile.h"
+#include "benchmark_estimator_provenance.h"
+#include "benchmark_profile.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -225,4 +231,276 @@ TEST(SummarizeTest, NearestRankP95DiffersFromMaxAtTwentyValues) {
     // mae = (sum(0.01..0.19) + 5.0) / 20 = (1.9 + 5.0) / 20 = 0.345.
     EXPECT_NEAR(stats.median, 0.105, 1e-12);
     EXPECT_NEAR(stats.mae, 0.345, 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// Typed Work-4-prefix CSV schema (adjudications A1/A2, normative §Phase 5).
+// ---------------------------------------------------------------------------
+
+using namespace piccard::bench;
+using piccard::benchmark::AssuranceScope;
+using piccard::benchmark::AssuranceScopeName;
+using piccard::benchmark::BaselineCapability;
+using piccard::benchmark::BaselineEvidenceKind;
+using piccard::benchmark::BaselineMethod;
+using piccard::benchmark::BenchmarkMeasurementKind;
+using piccard::benchmark::BenchmarkMeasurementKindName;
+using piccard::benchmark::BenchmarkRunClass;
+using piccard::benchmark::BenchmarkRunClassName;
+using piccard::benchmark::ComparisonScope;
+using piccard::benchmark::ComparisonScopeName;
+using piccard::benchmark::CostScope;
+using piccard::benchmark::CostScopeName;
+using piccard::benchmark::EstimatorModel;
+using piccard::benchmark::EstimatorModelName;
+using piccard::benchmark::OutputSemantics;
+using piccard::benchmark::OutputSemanticsName;
+using piccard::benchmark::PrecomputationMode;
+using piccard::benchmark::PrecomputationModeName;
+using piccard::benchmark::Primitive;
+using piccard::benchmark::PrimitiveName;
+using piccard::benchmark::ProtocolModel;
+using piccard::benchmark::ProtocolModelName;
+using piccard::benchmark::ResolveBaselineCapability;
+
+namespace {
+
+// Pasted byte-for-byte from normative §Phase 5 (starting `profile_id,
+// run_class,...`, ending `...,omp_dynamic,measurement_status`) — adjudication
+// A1. Not `bench_review_comparison.cpp`'s CsvHeader() or
+// SerializeComparisonHeader() order.
+const char* kExpectedPrefixHeader =
+    "profile_id,run_class,target_security_bits,cryptographic_profile,"
+    "nominal_security_bits,security_match,comparison_eligible,"
+    "comparison_scope,primitive,protocol_model,output_semantics,"
+    "assurance_scope,security_basis,cost_scope,precomputation_mode,"
+    "secure_division_included,measurement_kind,"
+    "workload_id,workload_manifest_sha256,execution_trace_sha256,"
+    "root_seed,omp_threads,"
+    "estimator_model,sanitizer_model,sanitizer_assurance,"
+    "transcript_stat_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+    "flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,openfhe_version,"
+    "target_semantics,target_jaccard,realized_intersection,realized_union,"
+    "realized_jaccard,timing_trials,accuracy_trials,omp_dynamic,"
+    "measurement_status";
+
+const char* kExpectedAccuracySuffix =
+    "dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,"
+    "pair_id,pair_kind,label,record_a,record_b,"
+    "k,m,hash_randomness,accuracy_trial_index,hash_seed,"
+    "set_size_a_raw,set_size_b_raw,set_size_a_bucketed,set_size_b_bucketed,"
+    "exact_jaccard_raw,exact_jaccard_bucketed,estimated_jaccard,"
+    "bucket_match_fraction,abs_error,rel_error,jaccard_bucket,"
+    "accuracy_workload_sha256";
+
+const char* kExpectedTimingSuffix =
+    "dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,"
+    "pair_id,pair_kind,label,record_a,record_b,"
+    "k,m,hash_seed,trial_index,phase_minhash_ms,phase_encode_ms,"
+    "phase_encrypt_ms,phase_cloud_multiply_ms,phase_cloud_rotate_ms,"
+    "phase_sanitize_ms,phase_decrypt_ms,phase_bias_correction_ms,"
+    "total_query_ms,result_value,ciphertext_bytes,upload_bytes,"
+    "download_bytes";
+
+}  // namespace
+
+TEST(RealDatasetPrefixHeaderTest, MatchesNormativeA1ColumnListExactly) {
+    EXPECT_EQ(RealDatasetPrefixHeader(), kExpectedPrefixHeader);
+    // 46 columns, per adjudication A1.
+    const std::string prefix_header = kExpectedPrefixHeader;
+    EXPECT_EQ(std::count(prefix_header.begin(), prefix_header.end(), ',') + 1,
+             46);
+}
+
+TEST(RealAccuracyHeaderTest, IsPrefixPlusAccuracySuffix) {
+    const std::string expected =
+        std::string(kExpectedPrefixHeader) + "," + kExpectedAccuracySuffix + "\n";
+    EXPECT_EQ(RealAccuracyHeader(), expected);
+}
+
+TEST(RealTimingHeaderTest, IsPrefixPlusTimingSuffix) {
+    const std::string expected =
+        std::string(kExpectedPrefixHeader) + "," + kExpectedTimingSuffix + "\n";
+    EXPECT_EQ(RealTimingHeader(), expected);
+}
+
+TEST(MakePlaintextAccuracyPrefixTest, FixedValuesMatchNormativeTableViaTypedSources) {
+    const RealDatasetPrefixValues v = MakePlaintextAccuracyPrefix(
+        "dblp_acm_u65536", "deadbeef00112233445566778899aabbccddeeff00112233445566778899aa",
+        5, 20260729ULL);
+
+    EXPECT_EQ(v.profile_id, "plaintext-estimator");
+    EXPECT_EQ(v.run_class, "diagnostic");  // new token: no BenchmarkRunClass case
+    EXPECT_FALSE(v.target_security_bits.has_value());
+    EXPECT_EQ(v.cryptographic_profile, "not-applicable");
+    EXPECT_FALSE(v.nominal_security_bits.has_value());
+    EXPECT_FALSE(v.security_match);
+    EXPECT_FALSE(v.comparison_eligible);
+    // Typed-source pins [F1][F4]: compare against the function call, not a
+    // re-typed literal.
+    EXPECT_EQ(v.comparison_scope, ComparisonScopeName(ComparisonScope::DiagnosticOnly));
+    EXPECT_EQ(v.primitive, "sha256-minhash");
+    EXPECT_EQ(v.protocol_model, "plaintext-estimator-pipeline");
+    EXPECT_EQ(v.output_semantics,
+             OutputSemanticsName(OutputSemantics::BiasCorrectedJaccardEstimate));
+    EXPECT_EQ(v.assurance_scope, "empirical-poc");
+    EXPECT_EQ(v.security_basis, "not-applicable");
+    EXPECT_EQ(v.cost_scope, "not-applicable");
+    EXPECT_EQ(v.precomputation_mode,
+             PrecomputationModeName(PrecomputationMode::NotApplicable));
+    EXPECT_FALSE(v.secure_division_included);
+    EXPECT_EQ(v.measurement_kind,
+             BenchmarkMeasurementKindName(BenchmarkMeasurementKind::PlaintextEstimator));
+    EXPECT_EQ(v.workload_id, "real:dblp_acm_u65536:accuracy");
+    EXPECT_EQ(v.workload_manifest_sha256,
+             "deadbeef00112233445566778899aabbccddeeff00112233445566778899aa");
+    EXPECT_EQ(v.execution_trace_sha256, "not-applicable");
+    EXPECT_EQ(v.root_seed, 20260729ULL);
+    EXPECT_EQ(v.omp_threads, 1u);
+    EXPECT_EQ(v.estimator_model,
+             EstimatorModelName(EstimatorModel::Sha256RandomRankingPocV1));
+    EXPECT_EQ(v.sanitizer_model, "not-applicable");
+    EXPECT_EQ(v.sanitizer_assurance, "not-applicable");
+    EXPECT_FALSE(v.transcript_stat_bits.has_value());
+    EXPECT_FALSE(v.max_queries.has_value());
+    EXPECT_FALSE(v.actual_ring_dim.has_value());
+    EXPECT_FALSE(v.log_q_bits.has_value());
+    EXPECT_EQ(v.openfhe_version, "not-applicable");
+    EXPECT_EQ(v.target_semantics, "observed-dataset-pair");
+    EXPECT_FALSE(v.target_jaccard.has_value());
+    EXPECT_FALSE(v.realized_intersection.has_value());
+    EXPECT_FALSE(v.timing_trials.has_value());
+    ASSERT_TRUE(v.accuracy_trials.has_value());
+    EXPECT_EQ(*v.accuracy_trials, 5u);
+    EXPECT_FALSE(v.omp_dynamic);
+    EXPECT_EQ(v.measurement_status, "measured");
+}
+
+TEST(MakePlaintextAccuracyPrefixTest, RejectsEmptyVariantOrWorkloadSha) {
+    EXPECT_THROW(MakePlaintextAccuracyPrefix("", "abc", 1, 1), std::invalid_argument);
+    EXPECT_THROW(MakePlaintextAccuracyPrefix("dblp_acm_u65536", "", 1, 1),
+                std::invalid_argument);
+}
+
+TEST(SerializeRealDatasetPrefixTest, AccuracyGoldenRow) {
+    RealDatasetPrefixValues v = MakePlaintextAccuracyPrefix(
+        "dblp_acm_u65536", "0000000000000000000000000000000000000000000000000000000000000abc",
+        2, 7ULL);
+    // The accuracy driver (Sub-phase 5.3) fills these per pair.
+    v.realized_intersection = 3;
+    v.realized_union = 5;
+    v.realized_jaccard = 0.6;  // exercises FormatReal17 reuse (17-sig-digit form)
+
+    const std::string row = SerializeRealDatasetPrefix(v);
+    const std::string expected =
+        "plaintext-estimator,diagnostic,,not-applicable,,false,false,"
+        "diagnostic-only,sha256-minhash,plaintext-estimator-pipeline,"
+        "bias-corrected-jaccard-estimate,empirical-poc,not-applicable,"
+        "not-applicable,not-applicable,false,plaintext-estimator,"
+        "real:dblp_acm_u65536:accuracy,"
+        "0000000000000000000000000000000000000000000000000000000000000abc,"
+        "not-applicable,7,1,"
+        "sha256-random-ranking-poc-v1,not-applicable,not-applicable,,,,,,,,"
+        ",,,,not-applicable,"
+        "observed-dataset-pair,,3,5,0.59999999999999998,,2,false,measured";
+    EXPECT_EQ(row, expected);
+}
+
+TEST(SerializeRealDatasetPrefixTest, ThrowsWhenRequiredStringFieldIsMissing) {
+    RealDatasetPrefixValues v = MakePlaintextAccuracyPrefix(
+        "dblp_acm_u65536", "abc", 1, 1);
+    v.openfhe_version.clear();
+    EXPECT_THROW(SerializeRealDatasetPrefix(v), std::invalid_argument);
+}
+
+TEST(MakeFheTimingPrefixTest, ResolvesWork4ProfileAndCapabilityViaTypedSources) {
+    const RealDatasetPrefixValues v = MakeFheTimingPrefix(
+        "dblp_acm_u65536", "toy-smoke",
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        20260729ULL, 2, 1);
+
+    EXPECT_EQ(v.profile_id, "toy-smoke");
+    EXPECT_EQ(v.run_class, BenchmarkRunClassName(BenchmarkRunClass::Smoke));
+    ASSERT_TRUE(v.target_security_bits.has_value());
+    EXPECT_EQ(*v.target_security_bits, 0u);  // TOY profile
+
+    const BaselineCapability capability = ResolveBaselineCapability(
+        BaselineMethod::Piccard, 0, BaselineEvidenceKind::Timing);
+    EXPECT_EQ(v.cryptographic_profile, capability.cryptographic_profile);
+    EXPECT_EQ(v.security_match, capability.security_match);
+    EXPECT_EQ(v.comparison_eligible, capability.comparison_eligible);
+    EXPECT_EQ(v.comparison_scope, ComparisonScopeName(ComparisonScope::EndToEndEstimator));
+    EXPECT_EQ(v.primitive, PrimitiveName(Primitive::BfvOneHotMinHash));
+    EXPECT_EQ(v.protocol_model, ProtocolModelName(ProtocolModel::PiccardTwoOwnerOutsourced));
+    EXPECT_EQ(v.output_semantics,
+             OutputSemanticsName(OutputSemantics::BiasCorrectedJaccardEstimate));
+    EXPECT_EQ(v.assurance_scope,
+             AssuranceScopeName(AssuranceScope::LiveBfvEmpiricalSanitizerPoc));
+    EXPECT_EQ(v.cost_scope, CostScopeName(CostScope::FullQueryExcludingOneTimeSetup));
+    EXPECT_EQ(v.precomputation_mode,
+             PrecomputationModeName(PrecomputationMode::CrsAndKeysOnly));
+    EXPECT_FALSE(v.secure_division_included);
+    EXPECT_EQ(v.measurement_kind, BenchmarkMeasurementKindName(BenchmarkMeasurementKind::FheTiming));
+    EXPECT_EQ(v.workload_id, "real:dblp_acm_u65536:timing:toy-smoke");
+    EXPECT_EQ(v.workload_manifest_sha256,
+             "1111111111111111111111111111111111111111111111111111111111111111");
+    EXPECT_EQ(v.execution_trace_sha256, "not-applicable");
+    EXPECT_EQ(v.root_seed, 20260729ULL);
+    EXPECT_EQ(v.omp_threads, 1u);
+    EXPECT_EQ(v.estimator_model,
+             EstimatorModelName(EstimatorModel::Sha256RandomRankingPocV1));
+    // Live sanitizer/FHE provenance is not yet known at this call site
+    // (Sub-phase 5.4 fills it from a real BFV context).
+    EXPECT_TRUE(v.sanitizer_model.empty());
+    EXPECT_TRUE(v.openfhe_version.empty());
+    EXPECT_EQ(v.target_semantics, "observed-dataset-pair");
+    EXPECT_FALSE(v.target_jaccard.has_value());
+    ASSERT_TRUE(v.timing_trials.has_value());
+    EXPECT_EQ(*v.timing_trials, 2u);
+    EXPECT_FALSE(v.accuracy_trials.has_value());
+    EXPECT_FALSE(v.omp_dynamic);
+    EXPECT_EQ(v.measurement_status, "measured");
+}
+
+TEST(SerializeRealDatasetPrefixTest, TimingGoldenRowWithLiveProvenanceFilledIn) {
+    RealDatasetPrefixValues v = MakeFheTimingPrefix(
+        "dblp_acm_u65536", "toy-smoke",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        7ULL, 3, 4);
+    // The timing driver (Sub-phase 5.4) fills these from the live context.
+    v.sanitizer_model = "phase-smudging-enc0-poc-v1";
+    v.sanitizer_assurance = "empirical-phase-statistical+ciphertext-computational";
+    v.transcript_stat_bits = 40;
+    v.max_queries = UINT64_C(1) << 20;
+    v.query_stat_bits = 20;
+    v.coefficient_stat_bits = 12;
+    v.flood_margin_bits = 8;
+    v.eval_noise_bits = 4;
+    v.flood_noise_bits = 6;
+    v.actual_ring_dim = 8192;
+    v.log_q_bits = 218.5;
+    v.plaintext_modulus = 65537;
+    v.num_limbs = 4;
+    v.openfhe_version = "1.2.3";
+    v.realized_intersection = 10;
+    v.realized_union = 20;
+    v.realized_jaccard = 0.5;
+
+    const std::string row = SerializeRealDatasetPrefix(v);
+    const std::string expected =
+        "toy-smoke,smoke,0,live-BFV-TOY,0,true,false,"
+        "end-to-end-estimator,bfv-onehot-minhash,piccard-two-owner-outsourced,"
+        "bias-corrected-jaccard-estimate,live-bfv+empirical-sanitizer-poc,"
+        "openfhe-hesea-standard-live-context,full-query-excluding-one-time-setup,"
+        "crs-and-keys-only,false,fhe-timing,"
+        "real:dblp_acm_u65536:timing:toy-smoke,"
+        "2222222222222222222222222222222222222222222222222222222222222222,"
+        "not-applicable,7,4,"
+        "sha256-random-ranking-poc-v1,phase-smudging-enc0-poc-v1,"
+        "empirical-phase-statistical+ciphertext-computational,"
+        "40,1048576,20,12,8,4,6,"
+        "8192,218.5,65537,4,1.2.3,"
+        "observed-dataset-pair,,10,20,0.5,3,,false,measured";
+    EXPECT_EQ(row, expected);
 }
