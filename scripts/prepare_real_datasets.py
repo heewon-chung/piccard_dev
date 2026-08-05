@@ -134,6 +134,35 @@ _PLACEHOLDER_CHECKED_KEYS = (
     "acquisition_note",
 )
 
+# The exact piccard-real-processed-v1 dataset.manifest.tsv key sequence
+# (normative plan "Exact shared file grammar" / Phase 1 GREEN), shared
+# prefix plus the dataset-specific drop-key tail.
+_PROCESSED_MANIFEST_KEY_PREFIX = (
+    "schema_version", "dataset", "variant", "preprocessing_version",
+    "universe_size", "seed",
+    "source_manifest_file", "source_manifest_sha256",
+    "records_file", "records_sha256", "record_count",
+    "pairs_file", "pairs_sha256", "pair_count",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_p95", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median",
+    "bucketed_set_size_p95", "bucketed_set_size_max",
+    "original_positive_count", "retained_positive_count", "requested_pair_count",
+    "max_documents", "min_related_pairs",
+)
+
+_PROCESSED_MANIFEST_DROP_KEYS = {
+    "dblp_acm": ("dropped.empty_features_dblp", "dropped.empty_features_acm"),
+    "enron": ("dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
+              "dropped.duplicate_message_id"),
+}
+
+
+def _processed_manifest_key_order(dataset) -> tuple:
+    if dataset not in _PROCESSED_MANIFEST_DROP_KEYS:
+        raise ManifestError(
+            f"unknown dataset for processed manifest key order: {dataset!r}")
+    return _PROCESSED_MANIFEST_KEY_PREFIX + _PROCESSED_MANIFEST_DROP_KEYS[dataset]
+
 
 # ---------------------------------------------------------------------------
 # sha256_file / parse_two_column_tsv
@@ -219,9 +248,15 @@ def _resolve_manifest_relative_path(base_dir: Path, rel: str) -> Path:
     parts = rel.split("/")
     if any(part in ("", ".", "..") for part in parts):
         raise ManifestError(f"invalid path component: {rel!r}")
-    candidate = base_dir.joinpath(*parts)
-    if candidate.is_symlink():
-        raise ManifestError(f"symlink input path not allowed: {rel!r}")
+    # Reject a symlink at ANY path component, not just the final leaf: an
+    # intermediate symlinked directory can lead outside the manifest
+    # directory just as easily as a symlinked leaf file can.
+    current = base_dir
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise ManifestError(f"symlink input path not allowed: {rel!r}")
+    candidate = current
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
@@ -233,6 +268,13 @@ def _resolve_manifest_relative_path(base_dir: Path, rel: str) -> Path:
     return resolved
 
 
+def _raise_walk_error(error: OSError) -> None:
+    # os.walk's default onerror=None silently skips a subtree it cannot
+    # list (e.g. a permission-denied directory), which would let the tree
+    # digest quietly omit files. Abort instead.
+    raise ManifestError(f"cannot list maildir_root subtree: {error}") from error
+
+
 def _directory_tree_digest(root: Path) -> str:
     """Canonical source-tree digest for a directory-role manifest input
     (e.g. Enron's `maildir_root`):
@@ -242,9 +284,13 @@ def _directory_tree_digest(root: Path) -> str:
         BE32(len(path_utf8)) || path_utf8 || BE64(file_size) || raw_sha256)
 
     Symlinks and non-regular files abort rather than being skipped/dropped.
+    Paths must already be Unicode NFC (normative: "Canonical paths must ...
+    be Unicode NFC already"); a subtree os.walk cannot list, or a file that
+    cannot be read, also aborts rather than being silently omitted.
     """
     entries = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(
+            root, onerror=_raise_walk_error, followlinks=False):
         current_dir = Path(dirpath)
         for name in dirnames:
             if (current_dir / name).is_symlink():
@@ -259,8 +305,15 @@ def _directory_tree_digest(root: Path) -> str:
                 raise ManifestError(
                     f"non-regular file not allowed under maildir_root: {full_path}")
             rel = full_path.relative_to(root).as_posix()
-            file_size = full_path.stat().st_size
-            file_digest = bytes.fromhex(sha256_file(full_path))
+            if unicodedata.normalize("NFC", rel) != rel:
+                raise ManifestError(
+                    f"maildir_root path is not Unicode NFC: {rel!r}")
+            try:
+                file_size = full_path.stat().st_size
+                file_digest = bytes.fromhex(sha256_file(full_path))
+            except OSError as exc:
+                raise ManifestError(
+                    f"cannot read file under maildir_root: {full_path}: {exc}") from exc
             entries.append((rel.encode("utf-8"), file_size, file_digest))
     entries.sort(key=lambda item: item[0])
     hasher = hashlib.sha256()
@@ -598,6 +651,17 @@ def write_processed_output(output_dir, records, pairs, manifest_pairs,
             raise ManifestError(f"duplicate manifest key: {key!r}")
         manifest_lookup[key] = value
 
+    if "dataset" not in manifest_lookup:
+        raise ManifestError("missing manifest key: 'dataset'")
+    expected_key_order = _processed_manifest_key_order(manifest_lookup["dataset"])
+    actual_key_order = tuple(key for key, _ in manifest_pairs)
+    if actual_key_order != expected_key_order:
+        raise ManifestError(
+            "dataset.manifest.tsv key sequence does not match the exact "
+            f"piccard-real-processed-v1 order for dataset "
+            f"{manifest_lookup['dataset']!r}: expected {expected_key_order!r}, "
+            f"got {actual_key_order!r}")
+
     expected = _expected_auto_fields(records, pairs, records_bytes, pairs_bytes,
                                       source_bytes)
     for key, expected_value in expected.items():
@@ -640,11 +704,21 @@ def write_processed_output(output_dir, records, pairs, manifest_pairs,
         try:
             os.rename(tmp_dir, output_dir)
         except BaseException:
-            os.rename(backup_dir, output_dir)
+            # Restore the previous contents so a failed publish leaves the
+            # old output directory intact, not a bare backup name; either
+            # way, the staging temp dir must never be left behind.
+            try:
+                os.rename(backup_dir, output_dir)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
         shutil.rmtree(backup_dir, ignore_errors=True)
     else:
-        os.rename(tmp_dir, output_dir)
+        try:
+            os.rename(tmp_dir, output_dir)
+        except BaseException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
 
 # ---------------------------------------------------------------------------

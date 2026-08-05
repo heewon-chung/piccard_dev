@@ -10,10 +10,12 @@ none of them touch the real datasets/ tree or the network.
 
 import hashlib
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +24,39 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "prepare_real_datasets.py"
 COMMON_FIXTURES = REPO / "tests" / "fixtures" / "real_datasets" / "common"
+
+# The exact piccard-real-processed-v1 ordered key list (normative plan
+# "Exact shared file grammar" / Phase 1 GREEN, lines ~214-235), hardcoded
+# here independently of the module under test so the order check itself is
+# pinned rather than tautologically re-derived from the implementation.
+_DBLP_PROCESSED_KEY_ORDER = (
+    "schema_version", "dataset", "variant", "preprocessing_version",
+    "universe_size", "seed",
+    "source_manifest_file", "source_manifest_sha256",
+    "records_file", "records_sha256", "record_count",
+    "pairs_file", "pairs_sha256", "pair_count",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_p95", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median",
+    "bucketed_set_size_p95", "bucketed_set_size_max",
+    "original_positive_count", "retained_positive_count", "requested_pair_count",
+    "max_documents", "min_related_pairs",
+    "dropped.empty_features_dblp", "dropped.empty_features_acm",
+)
+
+_ENRON_PROCESSED_KEY_ORDER = (
+    "schema_version", "dataset", "variant", "preprocessing_version",
+    "universe_size", "seed",
+    "source_manifest_file", "source_manifest_sha256",
+    "records_file", "records_sha256", "record_count",
+    "pairs_file", "pairs_sha256", "pair_count",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_p95", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median",
+    "bucketed_set_size_p95", "bucketed_set_size_max",
+    "original_positive_count", "retained_positive_count", "requested_pair_count",
+    "max_documents", "min_related_pairs",
+    "dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
+    "dropped.duplicate_message_id",
+)
 
 
 def load_module():
@@ -109,24 +144,48 @@ class CoreTests(unittest.TestCase):
             pair_kind=pair_kind, label=label)
 
     def _manifest_pairs_for(self, records, pairs, records_sha, pairs_sha,
-                             source_sha, extra=()):
-        base = [
-            ("schema_version", "piccard-real-processed-v1"),
-            ("dataset", "dblp_acm"),
-            ("variant", "dblp_acm_u65536"),
-            ("preprocessing_version", "dblp-acm-trigram-v1"),
-            ("universe_size", "65536"),
-            ("seed", "7"),
-            ("source_manifest_file", "source.manifest.tsv"),
-            ("source_manifest_sha256", source_sha),
-            ("records_file", "records.tsv"),
-            ("records_sha256", records_sha),
-            ("record_count", str(len(records))),
-            ("pairs_file", "pairs.tsv"),
-            ("pairs_sha256", pairs_sha),
-            ("pair_count", str(len(pairs))),
-        ]
-        return base + list(extra)
+                             source_sha, dataset="dblp_acm", overrides=None):
+        is_dblp = dataset == "dblp_acm"
+        values = {
+            "schema_version": "piccard-real-processed-v1",
+            "dataset": dataset,
+            "variant": "dblp_acm_u65536" if is_dblp else "enron_u65536",
+            "preprocessing_version":
+                "dblp-acm-trigram-v1" if is_dblp else "enron-shingle5-v1",
+            "universe_size": "65536",
+            "seed": "7",
+            "source_manifest_file": "source.manifest.tsv",
+            "source_manifest_sha256": source_sha,
+            "records_file": "records.tsv",
+            "records_sha256": records_sha,
+            "record_count": str(len(records)),
+            "pairs_file": "pairs.tsv",
+            "pairs_sha256": pairs_sha,
+            "pair_count": str(len(pairs)),
+            "raw_set_size_min": "1",
+            "raw_set_size_median": "1",
+            "raw_set_size_p95": "1",
+            "raw_set_size_max": "1",
+            "bucketed_set_size_min": "1",
+            "bucketed_set_size_median": "1",
+            "bucketed_set_size_p95": "1",
+            "bucketed_set_size_max": "1",
+            "original_positive_count": "1" if is_dblp else "",
+            "retained_positive_count": "1" if is_dblp else "",
+            "requested_pair_count": str(len(pairs)),
+            "max_documents": "" if is_dblp else "10",
+            "min_related_pairs": "" if is_dblp else "2",
+            "dropped.empty_features_dblp": "0",
+            "dropped.empty_features_acm": "0",
+            "dropped.charset_or_mime": "0",
+            "dropped.empty_body": "0",
+            "dropped.short_body": "0",
+            "dropped.duplicate_message_id": "0",
+        }
+        if overrides:
+            values.update(overrides)
+        order = _DBLP_PROCESSED_KEY_ORDER if is_dblp else _ENRON_PROCESSED_KEY_ORDER
+        return [(key, values[key]) for key in order]
 
     def _write_valid_output(self, module, tmp_dir, output_dir, *, overwrite=False):
         manifest_path = self._build_dblp_acm_manifest(tmp_dir)
@@ -611,6 +670,249 @@ class CoreTests(unittest.TestCase):
                     "datasets/manifests/enron.source.template.tsv"):
             result = subprocess.run(["git", "check-ignore", "-q", rel], cwd=REPO)
             self.assertEqual(result.returncode, 1, f"{rel} unexpectedly ignored")
+
+    # ------------------------------------------------------------------
+    # Codex review finding 1: exact processed-manifest key sequence
+    # ------------------------------------------------------------------
+
+    def test_write_processed_output_accepts_full_dblp_acm_key_order(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("dblp:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            manifest_pairs = self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha)
+            output_dir = tmp_dir / "out"
+            module.write_processed_output(
+                output_dir, records, pairs, manifest_pairs, manifest_path,
+                overwrite=False)
+            self.assertTrue((output_dir / "dataset.manifest.tsv").exists())
+
+    def test_write_processed_output_accepts_full_enron_key_order(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("enron:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            manifest_pairs = self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha, dataset="enron")
+            output_dir = tmp_dir / "out"
+            module.write_processed_output(
+                output_dir, records, pairs, manifest_pairs, manifest_path,
+                overwrite=False)
+            self.assertTrue((output_dir / "dataset.manifest.tsv").exists())
+
+    def test_write_processed_output_rejects_missing_manifest_key(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("dblp:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            full_pairs = self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha)
+            truncated = [(k, v) for k, v in full_pairs if k != "raw_set_size_median"]
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.write_processed_output(
+                    output_dir, records, pairs, truncated, manifest_path,
+                    overwrite=False)
+            self.assertFalse(output_dir.exists())
+
+    def test_write_processed_output_rejects_reordered_manifest_keys(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("dblp:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            full_pairs = list(self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha))
+            idx_seed = next(i for i, (k, _) in enumerate(full_pairs) if k == "seed")
+            idx_universe = next(
+                i for i, (k, _) in enumerate(full_pairs) if k == "universe_size")
+            full_pairs[idx_seed], full_pairs[idx_universe] = (
+                full_pairs[idx_universe], full_pairs[idx_seed])
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.write_processed_output(
+                    output_dir, records, pairs, full_pairs, manifest_path,
+                    overwrite=False)
+            self.assertFalse(output_dir.exists())
+
+    def test_write_processed_output_rejects_extra_unexpected_manifest_key(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("dblp:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            full_pairs = list(self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha))
+            full_pairs.insert(6, ("unexpected_extra_key", "x"))
+            output_dir = tmp_dir / "out"
+            with self.assertRaises(module.ManifestError):
+                module.write_processed_output(
+                    output_dir, records, pairs, full_pairs, manifest_path,
+                    overwrite=False)
+            self.assertFalse(output_dir.exists())
+
+    # ------------------------------------------------------------------
+    # Codex review finding 2: symlink rejection in every path component
+    # ------------------------------------------------------------------
+
+    def test_validate_source_manifest_rejects_symlinked_intermediate_directory(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            real_subdir = tmp_dir / "real_subdir"
+            real_subdir.mkdir()
+            real_file = real_subdir / "dblp_records.csv"
+            real_file.write_bytes(b"payload-through-symlinked-dir")
+            linked_subdir = tmp_dir / "linked_subdir"
+            linked_subdir.symlink_to(real_subdir)
+            manifest_path = self._build_dblp_acm_manifest(
+                tmp_dir, bad_index0_path="linked_subdir/dblp_records.csv",
+                bad_index0_sha=sha256_hex(real_file.read_bytes()))
+            with self.assertRaises(module.ManifestError):
+                module.validate_source_manifest(manifest_path, "dblp_acm")
+
+    # ------------------------------------------------------------------
+    # Codex review finding 3: NFC-only paths in the Enron tree digest
+    # ------------------------------------------------------------------
+
+    def test_directory_tree_digest_rejects_non_nfc_path(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            maildir = tmp_dir / "maildir"
+            maildir.mkdir()
+            nfd_name = unicodedata.normalize("NFD", "café.txt")
+            self.assertNotEqual(nfd_name, unicodedata.normalize("NFC", nfd_name))
+            (maildir / nfd_name).write_bytes(b"body")
+            with self.assertRaises(module.ManifestError):
+                module._directory_tree_digest(maildir)
+
+    # ------------------------------------------------------------------
+    # Codex review finding 4: os.walk errors must abort, not skip
+    # ------------------------------------------------------------------
+
+    def test_directory_tree_digest_unreadable_subdirectory_aborts(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("permission checks are bypassed when running as root")
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            maildir = tmp_dir / "maildir"
+            blocked = maildir / "blocked"
+            blocked.mkdir(parents=True)
+            (blocked / "hidden.txt").write_bytes(b"x")
+            os.chmod(blocked, 0o000)
+            try:
+                with self.assertRaises(module.ManifestError):
+                    module._directory_tree_digest(maildir)
+            finally:
+                os.chmod(blocked, 0o755)
+
+    def test_directory_tree_digest_unreadable_file_aborts(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("permission checks are bypassed when running as root")
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            maildir = tmp_dir / "maildir"
+            maildir.mkdir()
+            blocked_file = maildir / "blocked.txt"
+            blocked_file.write_bytes(b"x")
+            os.chmod(blocked_file, 0o000)
+            try:
+                with self.assertRaises(module.ManifestError):
+                    module._directory_tree_digest(maildir)
+            finally:
+                os.chmod(blocked_file, 0o644)
+
+    # ------------------------------------------------------------------
+    # Codex review finding 5: failed final rename leaves no partial dir
+    # ------------------------------------------------------------------
+
+    def test_write_processed_output_rename_failure_leaves_no_partial_dir_fresh(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_dblp_acm_manifest(tmp_dir)
+            records = [self._minimal_record("dblp:01")]
+            pairs = []
+            records_sha = sha256_hex(module._canonicalize_records(records))
+            pairs_sha = sha256_hex(module._canonicalize_pairs(pairs))
+            source_sha = sha256_hex(manifest_path.read_bytes())
+            manifest_pairs = self._manifest_pairs_for(
+                records, pairs, records_sha, pairs_sha, source_sha)
+            output_dir = tmp_dir / "out"
+
+            real_rename = os.rename
+
+            def flaky_rename(src, dst):
+                if Path(dst) == output_dir:
+                    raise OSError("injected rename failure")
+                return real_rename(src, dst)
+
+            with mock.patch("os.rename", side_effect=flaky_rename):
+                with self.assertRaises(OSError):
+                    module.write_processed_output(
+                        output_dir, records, pairs, manifest_pairs, manifest_path,
+                        overwrite=False)
+
+            self.assertFalse(output_dir.exists())
+            leftovers = list(tmp_dir.glob(".out.tmp-*")) + list(tmp_dir.glob(".out.old-*"))
+            self.assertEqual(leftovers, [])
+
+    def test_write_processed_output_rename_failure_restores_old_dir_on_overwrite(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            output_dir = tmp_dir / "out"
+            self._write_valid_output(module, tmp_dir, output_dir)
+            original_records_bytes = (output_dir / "records.tsv").read_bytes()
+
+            real_rename = os.rename
+            state = {"failed_once": False}
+
+            def flaky_rename(src, dst):
+                # Fail only the first rename into output_dir (the forward
+                # tmp_dir -> output_dir publish); let the subsequent
+                # backup_dir -> output_dir restore succeed for real.
+                if Path(dst) == output_dir and not state["failed_once"]:
+                    state["failed_once"] = True
+                    raise OSError("injected rename failure")
+                return real_rename(src, dst)
+
+            with mock.patch("os.rename", side_effect=flaky_rename):
+                with self.assertRaises(OSError):
+                    self._write_valid_output(module, tmp_dir, output_dir, overwrite=True)
+
+            self.assertTrue(output_dir.exists())
+            self.assertEqual((output_dir / "records.tsv").read_bytes(),
+                              original_records_bytes)
+            leftovers = list(tmp_dir.glob(".out.tmp-*")) + list(tmp_dir.glob(".out.old-*"))
+            self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":
