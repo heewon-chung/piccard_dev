@@ -254,6 +254,7 @@ class PreThresholdRunnerTest(unittest.TestCase):
                 )
                 raise SystemExit(2)
             evidence = pathlib.Path(os.environ["FAKE_EVIDENCE"])
+            fixtures = pathlib.Path(os.environ["FAKE_FIXTURES"])
             if pathlib.Path(sys.argv[0]).name == "bench_review_comparison":
                 manifest = pathlib.Path(next(a.split("=", 1)[1] for a in args if a.startswith("--manifest-out=")))
                 trace = pathlib.Path(next(a.split("=", 1)[1] for a in args if a.startswith("--execution-trace-out=")))
@@ -261,17 +262,23 @@ class PreThresholdRunnerTest(unittest.TestCase):
                 shutil.copyfile(evidence / "work4-phase4-toy-trace.bin", trace)
                 sys.stdout.write((evidence / "work4-phase4-toy-results.csv").read_text())
             else:
-                lines = (evidence / "work4-phase4-toy-results.csv").read_text().splitlines(True)
                 name = pathlib.Path(sys.argv[0]).name
+                fixture = "dynamic_toy_rows.csv" if name == "bench_dynamic" \\
+                    else "benchmark_toy_rows.csv"
+                lines = (fixtures / fixture).read_text().splitlines(True)
+                timing_row, accuracy_row = (lines[1], lines[1]) if name == "bench_dynamic" \\
+                    else (lines[1], lines[2])
+                mode = next(a.split("=", 1)[1] for a in args if a.startswith("--mode="))
                 if "--evidence_point" in args:
-                    count = 2 if name == "bench_onehot_sqrt" else 1
-                elif name == "bench_piccard":
-                    count = 30
+                    rows = {"bench_onehot_sqrt": 2}.get(name, 1) * \\
+                        [timing_row if mode == "timing" else accuracy_row]
+                elif name == "bench_piccard":            # --mode=combined
+                    rows = [timing_row] * 15 + [accuracy_row] * 15
                 elif name == "bench_dynamic":
-                    count = 15
-                else:
-                    count = 28 if "--mode=timing" in args else 22
-                sys.stdout.write(lines[0] + lines[1] * count)
+                    rows = [timing_row] * 15
+                else:                                    # bench_onehot_sqrt native grids
+                    rows = [timing_row] * 28 if mode == "timing" else [accuracy_row] * 22
+                sys.stdout.write(lines[0] + "".join(rows))
         """
         for name in ("bench_piccard", "bench_onehot_sqrt", "bench_dynamic",
                      "bench_review_comparison"):
@@ -282,6 +289,7 @@ class PreThresholdRunnerTest(unittest.TestCase):
             "FAKE_SOURCE_DIR": str(project.resolve()),
             "FAKE_RUN_LOG": str(log),
             "FAKE_EVIDENCE": str(evidence),
+            "FAKE_FIXTURES": str(ROOT / "tests" / "fixtures" / "runner"),
         }
         return project, build, log, env
 
@@ -380,6 +388,40 @@ class PreThresholdRunnerTest(unittest.TestCase):
                 self.assertEqual(rejected.returncode, 2, rejected.stdout)
                 self.assertIn(cause, rejected.stderr)
                 (results / "manifest.json").write_text(original)
+
+    def test_review_fixture_replay_in_piccard_producer_fails_closed(self):
+        """A bench_piccard fake that masks as the review fixture must be caught.
+
+        This pins that --schema=benchmark rejects review-shaped rows even
+        when the row count happens to match: a wrong-schema fixture can no
+        longer pass as bench_piccard evidence.
+        """
+        project, build, log, env = self.make_harness()
+        masked = """
+            #!/usr/bin/env python3
+            import json, os, pathlib, sys
+
+            args = sys.argv[1:]
+            if args == ["--print-build-provenance"]:
+                print(json.dumps({
+                    "schema": "piccard-build-provenance-v1",
+                    "commit": os.environ["FAKE_COMMIT"],
+                    "dirty": os.environ.get("FAKE_DIRTY", "0") == "1",
+                    "build_type": os.environ.get("FAKE_BUILD_TYPE", "Release"),
+                    "source_dir": os.environ["FAKE_SOURCE_DIR"],
+                }, sort_keys=True))
+                raise SystemExit(0)
+            with open(os.environ["FAKE_RUN_LOG"], "a", encoding="utf-8") as log:
+                log.write(json.dumps([pathlib.Path(sys.argv[0]).name, *args]) + "\\n")
+            evidence = pathlib.Path(os.environ["FAKE_EVIDENCE"])
+            lines = (evidence / "work4-phase4-toy-results.csv").read_text().splitlines(True)
+            sys.stdout.write(lines[0] + lines[1])
+        """
+        make_executable(build / "bench_piccard", masked)
+        results = self.tmp / "results-masked-piccard"
+        result = self.run_smoke(project, build, results, env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("verify_benchmark_provenance", result.stderr + result.stdout)
 
     def test_build_provenance_and_primary_missing_calibration_fail_closed(self):
         project, build, _, env = self.make_harness()

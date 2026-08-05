@@ -601,6 +601,11 @@ if(BUILD_TESTS)
                 test_estimator_provenance_serializers
                 PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
             )
+            target_compile_definitions(
+                test_estimator_provenance_serializers
+                PRIVATE
+                    PICCARD_RUNNER_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/runner"
+            )
             add_test(
                 NAME EstimatorProvenanceSerializers
                 COMMAND test_estimator_provenance_serializers

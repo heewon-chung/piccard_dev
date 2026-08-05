@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,26 @@ std::string CrossoverProvenanceSuffix() {
 }
 
 }  // namespace
+
+namespace {
+std::string ReadFixtureLine(const char* name) {
+    std::ifstream stream(std::string(PICCARD_RUNNER_FIXTURE_DIR "/") + name);
+    EXPECT_TRUE(stream.is_open()) << name;
+    std::string line;
+    std::getline(stream, line);
+    return line + "\n";
+}
+}  // namespace
+
+TEST(RunnerFixtures, BenchmarkFixtureHeaderMatchesProduction) {
+    EXPECT_EQ(ReadFixtureLine("benchmark_toy_rows.csv"),
+              SerializeBenchmarkHeader());
+}
+
+TEST(RunnerFixtures, DynamicFixtureHeaderMatchesProduction) {
+    EXPECT_EQ(ReadFixtureLine("dynamic_toy_rows.csv"),
+              SerializeDynamicHeader());
+}
 
 TEST(EstimatorProvenanceSerializers, PiccardGoldenSchema) {
     BenchmarkResult row;
