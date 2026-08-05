@@ -600,7 +600,8 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
             "scripts/run_noise_profiles.sh (evidence run + --finalize-dir), "
             "then python3 scripts/make_calibration_table.py "
             "--manifest=<finalized-manifest> --emit-rows="
-            "include/util/noise_calibration_pre_threshold_rows.inc, "
+            "include/util/noise_calibration_pre_threshold_rows.inc "
+            "--out=<matrix summary path>, "
             "then python3 scripts/apply_calibration_cutover.py ... "
             "--dest=include/util/noise_calibration.inc, and rebuild.");
     }

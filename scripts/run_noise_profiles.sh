@@ -2200,6 +2200,8 @@ if matrix.get("source_commit") != "runtime-source-commit":
 if any(p["circuit"] == "threshold" for p in matrix["partitions"]):
     fail("threshold is forbidden in the profile runner")
 matrix_sha = sha256_bytes(matrix_bytes)
+policy = profile_policy(matrix, options["profile"])
+validate_cli_confirmations(options, policy)
 
 bench = Path(
     options["bench_noise"] or (repo_root / "build" / "bench_noise")
@@ -2381,8 +2383,6 @@ if options["smoke"]:
     ]
     if len(partitions) != 4:
         fail("smoke matrix must contain exactly four singleton cells")
-policy = profile_policy(matrix, options["profile"])
-validate_cli_confirmations(options, policy)
 
 profile_dir = resolved_root / "profiles" / options["profile"]
 if not dry_run:

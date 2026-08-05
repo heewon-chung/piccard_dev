@@ -1932,6 +1932,50 @@ class NoiseProfileRunnerTest(unittest.TestCase):
                 self.assertIn(correct[option], result.stderr)
                 self.assertFalse(result_root.exists())
 
+    def test_phase5_profile_arguments_accepted_space_separated(self):
+        result_root = self.root / "phase5-space-separated"
+        correct = {
+            "--reps": "5",
+            "--seed": "20260729",
+            "--max-queries": "1048576",
+            "--margin": "8",
+        }
+        for option in correct:
+            with self.subTest(option=option):
+                args = [
+                    "--profile=primary40",
+                    f"--results-root={result_root}",
+                ]
+                for other, value in correct.items():
+                    if other == option:
+                        args.extend([other, value])
+                    else:
+                        args.append(f"{other}={value}")
+                result = self.run_runner(*args, dry_run=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(result_root.exists())
+
+    def test_phase5_profile_arguments_duplicate_rejected(self):
+        result_root = self.root / "phase5-duplicate"
+        correct = {
+            "--reps": "5",
+            "--seed": "20260729",
+            "--max-queries": "1048576",
+            "--margin": "8",
+        }
+        for option in correct:
+            with self.subTest(option=option):
+                args = [
+                    "--profile=primary40",
+                    f"--results-root={result_root}",
+                ] + [
+                    f"{other}={value}" for other, value in correct.items()
+                ] + [f"{option}={correct[option]}"]
+                result = self.run_runner(*args, dry_run=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"duplicate {option}", result.stderr)
+                self.assertFalse(result_root.exists())
+
     def test_smoke_reps_validated_against_effective_value(self):
         mismatch_root = self.root / "phase5-smoke-mismatch"
         mismatch = self.run_runner(
@@ -1951,6 +1995,27 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             dry_run=True,
         )
         self.assertEqual(matching.returncode, 0, matching.stderr)
+
+    def test_evidence_confirmation_mismatch_leaves_no_results_root(self):
+        # Regression: on a real (non-dry-run) invocation, a mismatched
+        # CLI confirmation must be rejected before the results root is
+        # created. Otherwise a failed run leaves a populated root behind
+        # and the corrected retry dies on "first invocation requires a
+        # nonexistent results root" instead of succeeding.
+        result_root = self.root / "phase5-evidence-mismatch"
+        mismatch = self.run_runner(
+            "--profile=sensitivity64", "--smoke", "--reps=5",
+            f"--results-root={result_root}",
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("--reps=5", mismatch.stderr)
+        self.assertFalse(result_root.exists())
+
+        retry = self.run_runner(
+            "--profile=sensitivity64", "--smoke", "--reps=1",
+            f"--results-root={result_root}",
+        )
+        self.assertEqual(retry.returncode, 0, retry.stderr)
 
     def test_unknown_runner_argument_still_rejected(self):
         result_root = self.root / "phase5-unknown"

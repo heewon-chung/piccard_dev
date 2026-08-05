@@ -42,8 +42,10 @@ class BenchDynamicProbeIsolationTest(unittest.TestCase):
                 self.assertEqual(len(rows), 1)
 
     def test_signature_matches_uncorrupted_reference(self):
-        # d=105 > num_ops=100 probe batch: no original can ever be evicted,
-        # so this row is the uncorrupted reference for jaccard_computed.
+        # At most num_ops=100 probe values can beat the true minimum, so
+        # with d=105 >= 101 the true minimum is always retained and
+        # bottom_[i][0] is unchanged: this row is the uncorrupted
+        # reference for jaccard_computed.
         pristine = self.run_dynamic(100, 128, 64, depth=105)
         self.assertEqual(pristine.returncode, 0, pristine.stderr)
         pristine_rows = list(csv.DictReader(io.StringIO(pristine.stdout)))
