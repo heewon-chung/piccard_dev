@@ -234,6 +234,15 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(piccard_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# =============================================================================
+# piccard_data: Strict real-dataset processed-output loader (Work 5 Phase 4).
+# Pure parsing/validation, no OpenFHE dependency.
+# =============================================================================
+
+add_library(piccard_data src/data/real_dataset.cpp)
+target_include_directories(piccard_data PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(piccard_data PUBLIC OpenSSL::Crypto)
+
 option(BUILD_TESTS "Build unit and integration tests" ON)
 if(BUILD_TESTS)
     # Work 3 Phase 4: compile the frozen params.cpp in both current and
@@ -410,6 +419,19 @@ if(BUILD_TESTS)
         add_executable(test_minhash tests/unit/test_minhash.cpp)
         target_link_libraries(test_minhash piccard_core test_main)
         add_test(NAME MinHash COMMAND test_minhash)
+
+        add_executable(test_real_dataset tests/unit/test_real_dataset.cpp)
+        target_link_libraries(
+            test_real_dataset
+            piccard_data
+            OpenSSL::Crypto
+            test_main
+        )
+        target_compile_definitions(
+            test_real_dataset
+            PRIVATE PICCARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        )
+        add_test(NAME RealDataset COMMAND test_real_dataset)
 
         add_executable(
             test_comparison_workload
