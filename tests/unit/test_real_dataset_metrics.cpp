@@ -190,3 +190,39 @@ TEST(SummarizeTest, OddCountMedianIsCenterValue) {
     EXPECT_DOUBLE_EQ(stats.max, 0.5);
     EXPECT_NEAR(stats.mae, 0.3, 1e-12);
 }
+
+TEST(SummarizeTest, AsymmetricOddVectorPinsMedianDistinctFromMean) {
+    // Asymmetric n=3: sorted {0.1, 0.1, 0.7}; median is the center value
+    // (0.1) while the mean is 0.3 — a mean-as-median implementation fails.
+    SummaryStats stats = Summarize({0.7, 0.1, 0.1});
+    EXPECT_EQ(stats.n, 3u);
+    EXPECT_DOUBLE_EQ(stats.median, 0.1);
+    EXPECT_NEAR(stats.mae, 0.3, 1e-12);
+    EXPECT_DOUBLE_EQ(stats.max, 0.7);
+}
+
+TEST(SummarizeTest, AsymmetricEvenVectorPinsMeanOfTwoCentersDistinctFromMean) {
+    // Asymmetric n=4: sorted {0.1, 0.1, 0.2, 0.8}; median is the mean of the
+    // two center values (0.1+0.2)/2 = 0.15 while the mean is 0.3.
+    SummaryStats stats = Summarize({0.8, 0.1, 0.2, 0.1});
+    EXPECT_EQ(stats.n, 4u);
+    EXPECT_DOUBLE_EQ(stats.median, 0.15);
+    EXPECT_NEAR(stats.mae, 0.3, 1e-12);
+}
+
+TEST(SummarizeTest, NearestRankP95DiffersFromMaxAtTwentyValues) {
+    // n=20: for n < 20, ceil(0.95*n)-1 == n-1 makes p95 == max vacuously;
+    // at n=20, p95 = sorted[ceil(19)-1] = sorted[18] while max = sorted[19].
+    // Vector: 0.01..0.19 (19 values) plus an outlier 5.0.
+    std::vector<double> values;
+    for (int i = 1; i <= 19; ++i) values.push_back(i / 100.0);
+    values.push_back(5.0);
+    SummaryStats stats = Summarize(values);
+    EXPECT_EQ(stats.n, 20u);
+    EXPECT_NEAR(stats.p95, 0.19, 1e-12);
+    EXPECT_DOUBLE_EQ(stats.max, 5.0);
+    // median = (sorted[9] + sorted[10]) / 2 = (0.10 + 0.11) / 2 = 0.105;
+    // mae = (sum(0.01..0.19) + 5.0) / 20 = (1.9 + 5.0) / 20 = 0.345.
+    EXPECT_NEAR(stats.median, 0.105, 1e-12);
+    EXPECT_NEAR(stats.mae, 0.345, 1e-12);
+}
