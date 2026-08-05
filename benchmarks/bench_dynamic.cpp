@@ -99,11 +99,18 @@ static DynamicResult RunTimedDynamic(
     auto bottom_y = engine.InitSet(set_y);
     dr.phase_init_ms = timer.ElapsedMs();
 
-    // Phase 2: Insert throughput — batch of 100 inserts (plaintext only)
+    // Phase 2: Insert throughput — batch of 100 inserts (plaintext only).
+    // Probes run on a scratch copy: the d-depth bottom structure discards
+    // evicted originals permanently, so probing the signature-bearing
+    // structure can empty it once the probes are deleted again (and, on a
+    // hash collision, can drop a shared entry). The copy sits outside the
+    // timed region; its rows start at capacity==size, so the first
+    // displacing insert costs one reallocation per hash function.
+    BottomStructure probe_structure = *bottom_x;
     const size_t num_ops = 100;
     timer.Start();
     for (size_t i = 0; i < num_ops; i++) {
-        bottom_x->Insert(3000000 + i);
+        probe_structure.Insert(3000000 + i);
     }
     dr.phase_insert_ms = timer.ElapsedMs();
     dr.ops_insert_per_sec = (dr.phase_insert_ms > 0)
@@ -112,7 +119,7 @@ static DynamicResult RunTimedDynamic(
     // Phase 3: Delete throughput — undo the inserts (plaintext only)
     timer.Start();
     for (size_t i = 0; i < num_ops; i++) {
-        bottom_x->Delete(3000000 + i);
+        probe_structure.Delete(3000000 + i);
     }
     dr.phase_delete_ms = timer.ElapsedMs();
     dr.ops_delete_per_sec = (dr.phase_delete_ms > 0)
