@@ -19,6 +19,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run_pre_threshold_profiles.sh"
 TOY_EVIDENCE = ROOT / ".omo" / "evidence"
 
+SCHEMA_BY_PRODUCER = {
+    "bench_piccard": "benchmark",
+    "bench_onehot_sqrt": "benchmark",
+    "bench_dynamic": "dynamic",
+    "bench_review_comparison": "review",
+}
+
 
 def make_executable(path: pathlib.Path, body: str) -> None:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
@@ -91,7 +98,9 @@ class PreThresholdRunnerTest(unittest.TestCase):
         self.assertNotIn("bench_threshold", result.stdout)
         self.assertIn("GATE source commit/cleanliness", result.stdout)
         self.assertIn("GATE embedded Release build provenance and binary SHA-256", result.stdout)
-        self.assertIn("VERIFY verify_benchmark_provenance.py --run-manifest=<results-root>/manifest.json", result.stdout)
+        self.assertIn("VERIFY verify_benchmark_provenance.py --schema=benchmark --run-manifest=<results-root>/manifest.json", result.stdout)
+        self.assertIn("VERIFY verify_benchmark_provenance.py --schema=dynamic --run-manifest=<results-root>/manifest.json", result.stdout)
+        self.assertIn("VERIFY verify_benchmark_provenance.py --schema=review --run-manifest=<results-root>/manifest.json", result.stdout)
         self.assertIn("VERIFY verify_review_comparison.py --run-manifest=<results-root>/manifest.json", result.stdout)
 
     def test_sensitivity_feasibility_and_smoke_matrix_is_frozen(self):
@@ -487,6 +496,22 @@ class PreThresholdRunnerTest(unittest.TestCase):
         self.assertEqual(rows[0]["required_bits"], "")
         self.assertEqual(rows[0]["available_bits"], "")
         self.assertEqual(rows[0]["shortfall_bits"], "")
+
+    def test_verifier_commands_carry_producer_schema(self):
+        project, build, log, env = self.make_harness()
+        results = self.tmp / "results-schema"
+        result = self.run_smoke(project, build, results, env)
+        manifest = json.loads((results / "manifest.json").read_text())
+        self.assertEqual(len(manifest["cells"]), 2)
+        verify_lines = {
+            line.split()[-1]: line
+            for line in result.stdout.splitlines()
+            if line.startswith("VERIFY verify_benchmark_provenance ")
+        }
+        for cell in manifest["cells"]:
+            schema = SCHEMA_BY_PRODUCER[cell["producer"]]
+            line = verify_lines[f"--cell-id={cell['cell_id']}"]
+            self.assertIn(f"--schema={schema} ", line)
 
     def test_seed_is_frozen_per_suite(self):
         wrong = self.dry_run("primary", seed=7)

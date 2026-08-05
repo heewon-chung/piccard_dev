@@ -37,6 +37,12 @@ PAPER_SEED = 20260729
 SMOKE_SEED = 7
 ENVIRONMENT_NAMES = ("OMP_DYNAMIC", "OMP_NUM_THREADS")
 DECIMAL_PATTERN = r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?"
+SCHEMA_BY_PRODUCER = {
+    "bench_piccard": "benchmark",
+    "bench_onehot_sqrt": "benchmark",
+    "bench_dynamic": "dynamic",
+    "bench_review_comparison": "review",
+}
 
 
 class RunnerError(ValueError):
@@ -403,9 +409,10 @@ def dry_run(cells: list[Cell], threads: int, suite: str) -> int:
             f"stdout=<results-root>/csv/{cell.cell_id(threads)}.csv "
             f"stderr=<results-root>/logs/{cell.cell_id(threads)}.log")
     for cell in cells:
+        schema = SCHEMA_BY_PRODUCER[cell.producer]
         suffix = ("--run-manifest=<results-root>/manifest.json "
                   f"--cell-id={cell.cell_id(threads)}")
-        print(f"VERIFY verify_benchmark_provenance.py {suffix}")
+        print(f"VERIFY verify_benchmark_provenance.py --schema={schema} {suffix}")
         if cell.review:
             print(f"VERIFY verify_review_comparison.py {suffix}")
     return 0
@@ -586,7 +593,10 @@ def verifier_command(
     cell: dict[str, Any], review: bool,
 ) -> list[list[str]]:
     common = [f"--run-manifest={manifest_path}", f"--cell-id={cell['cell_id']}"]
-    commands = [[sys.executable, str(project / "scripts" / "verify_benchmark_provenance.py"), *common]]
+    schema = SCHEMA_BY_PRODUCER[cell["producer"]]
+    commands = [[sys.executable,
+                 str(project / "scripts" / "verify_benchmark_provenance.py"),
+                 f"--schema={schema}", *common]]
     if review:
         commands.append([sys.executable, str(project / "scripts" / "verify_review_comparison.py"), *common])
     return commands
