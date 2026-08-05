@@ -239,7 +239,7 @@ endif()
 # Pure parsing/validation, no OpenFHE dependency.
 # =============================================================================
 
-add_library(piccard_data src/data/real_dataset.cpp)
+add_library(piccard_data src/data/real_dataset.cpp src/data/real_dataset_metrics.cpp)
 target_include_directories(piccard_data PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(piccard_data PUBLIC OpenSSL::Crypto)
 
@@ -432,6 +432,14 @@ if(BUILD_TESTS)
             PRIVATE PICCARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
         )
         add_test(NAME RealDataset COMMAND test_real_dataset)
+
+        add_executable(test_real_dataset_metrics tests/unit/test_real_dataset_metrics.cpp)
+        target_link_libraries(
+            test_real_dataset_metrics
+            piccard_data
+            test_main
+        )
+        add_test(NAME RealDatasetMetrics COMMAND test_real_dataset_metrics)
 
         add_executable(
             test_comparison_workload

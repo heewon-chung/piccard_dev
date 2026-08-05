@@ -936,6 +936,64 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(leftovers, [])
 
 
+class FormattingGoldenTests(unittest.TestCase):
+    """Cross-language golden vectors for format_float() (Work 5 Phase 5,
+    sub-phase 5.1): this exact (input, expected) table is duplicated
+    byte-for-byte in tests/unit/test_real_dataset_metrics.cpp's
+    FormatGoldenVectors(), pinning piccard::data::FormatReal17 to reproduce
+    the same strings. Covers integers, halves, values needing all 17
+    significant digits, -0.0 -> "0", very small/large magnitudes, and the
+    jaccard-bucket boundaries 0.1/0.3/0.6/1.0.
+    """
+
+    # Keep in sync with FormatGoldenVectors() in
+    # tests/unit/test_real_dataset_metrics.cpp.
+    GOLDEN_VECTORS = (
+        (0.0, "0"),
+        (-0.0, "0"),
+        (1.0, "1"),
+        (-1.0, "-1"),
+        (0.5, "0.5"),
+        (-0.5, "-0.5"),
+        (2.5, "2.5"),
+        (7.5, "7.5"),
+        (100.0, "100"),
+        (-100.0, "-100"),
+        (5.0, "5"),
+        (42.0, "42"),
+        (0.001, "0.001"),
+        # Bucket boundaries (also exercised as JaccardBucketLabel inputs).
+        (0.1, "0.10000000000000001"),
+        (0.3, "0.29999999999999999"),
+        (0.6, "0.59999999999999998"),
+        # Needs all 17 significant digits.
+        (123456789.123456789, "123456789.12345679"),
+        (0.6000000000000001, "0.60000000000000009"),
+        (3.14159265358979, "3.14159265358979"),
+        (1234567890123456.0, "1234567890123456"),
+        (9999999999999998.0, "9999999999999998"),
+        # Very small / very large magnitudes.
+        (1e-300, "1e-300"),
+        (1e300, "1.0000000000000001e+300"),
+        (-1e300, "-1.0000000000000001e+300"),
+        (1e-5, "1.0000000000000001e-05"),
+        (1e16, "10000000000000000"),
+        (1e17, "1e+17"),
+        (1e-16, "9.9999999999999998e-17"),
+        (1.7976931348623157e308, "1.7976931348623157e+308"),
+        (2.2250738585072014e-308, "2.2250738585072014e-308"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def test_format_float_matches_shared_golden_vectors(self):
+        for value, expected in self.GOLDEN_VECTORS:
+            with self.subTest(value=value):
+                self.assertEqual(self.module.format_float(value), expected)
+
+
 class DblpAcmTests(unittest.TestCase):
     """Behavior tests for cmd_dblp_acm (Work 5 Phase 2): CSV parsing,
     normalization/trigram features, ground-truth pairs, and deterministic
