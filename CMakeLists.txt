@@ -764,6 +764,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_sj16_extrapolation
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RealDatasetPreprocess
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_real_dataset_preprocess
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
