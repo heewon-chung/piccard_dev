@@ -752,6 +752,18 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_pre_threshold_profiles
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME VerifyReviewComparison
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_review_comparison
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME VerifyBenchmarkProvenance
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_benchmark_provenance
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME VerifySJ16Extrapolation
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_sj16_extrapolation
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
