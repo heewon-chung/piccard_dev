@@ -99,7 +99,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.write(scripts / "run_pre_threshold_profiles.sh", """
             #!/usr/bin/env python3
             import json, os, pathlib, sys
-            root=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--results-root='))); root.mkdir(parents=True)
+            root=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--results-root='))); build=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--build-dir='))); root.mkdir(parents=True)
             if os.environ.get('FAKE_FAULT') == 'malformed': (root/'bad.csv').write_text('a,b\\n\"bad')
             elif os.environ.get('FAKE_FAULT') == 'count2': (root/'timing.csv').write_text('trials,status\\n2,MEASURED\\n')
             elif os.environ.get('FAKE_FAULT') == 'warmup': (root/'timing.csv').write_text('warmup,trials\\n2,1\\n')
@@ -129,7 +129,19 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             terminal='schema_version\\tcell_id\\tprofile_id\\tproducer\\tparameter_sha256\\tstatus\\treason_code\\trequired_bits\\tavailable_bits\\tshortfall_bits\\tlog_sha256\\n' + ''.join('piccard-benchmark-terminal-cell-v1\\t'+c['cell_id']+'\\ttoy-smoke\\t'+c['producer']+'\\t'+c['parameter_sha256']+'\\tMEASURED\\tNONE\\t\\t\\t\\t'+c['output']['log_sha256']+'\\n' for c in sorted(cells,key=lambda c:c['cell_id']))
             if os.environ.get('FAKE_FAULT') == 'terminal-row': terminal=terminal.replace('\\tMEASURED\\tNONE', '\\tREJECTED\\tNONE', 1)
             (root/'terminal-cells.tsv').write_text(terminal)
-            (root/'manifest.json').write_text(json.dumps({'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False,'dir':os.getcwd()},'thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'cells':cells,'terminal_cells':{'path':'terminal-cells.tsv','row_count':3,'sha256':hashlib.sha256(terminal.encode()).hexdigest()}}))
+            producers=['bench_review_comparison','bench_piccard','bench_dynamic']; provenance={'schema':'piccard-build-provenance-v1','commit':os.environ['FAKE_COMMIT'],'dirty':False,'build_type':'Release','openfhe_version':'1.9.0','source_dir':os.getcwd()}
+            binaries={name:{'path':str((build/name).resolve()),'sha256':hashlib.sha256((build/name).read_bytes()).hexdigest(),'provenance':provenance.copy()} for name in producers}
+            manifest={'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'classification':'diagnostic','thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'profiles':['toy-smoke'],'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False,'dir':os.getcwd()},'build':{'dir':str(build.resolve()),'type':'Release','binaries':binaries},'machine':{'cpu':'fake-cpu','ram':1,'os':'fake-os','compiler':'fake-c++','libraries':{'openfhe':['1.9.0']}},'directories':{'csv':'csv','workloads':'workloads','traces':'traces','logs':'logs'},'cells':cells,'terminal_cells':{'path':'terminal-cells.tsv','row_count':3,'sha256':hashlib.sha256(terminal.encode()).hexdigest()}}
+            fault=os.environ.get('FAKE_FAULT')
+            if fault == 'pre-top-missing': del manifest['machine']
+            if fault == 'pre-classification': manifest['classification']='evidence'
+            if fault == 'pre-binary-hash': manifest['build']['binaries']['bench_piccard']['sha256']='0'*64
+            if fault == 'pre-provenance-commit': manifest['build']['binaries']['bench_piccard']['provenance']['commit']='0'*40
+            if fault == 'pre-provenance-source': manifest['build']['binaries']['bench_piccard']['provenance']['source_dir']='/foreign'
+            if fault == 'pre-provenance-type': manifest['build']['binaries']['bench_piccard']['provenance']['build_type']='Debug'
+            if fault == 'pre-machine-openfhe': manifest['machine']['libraries']={'openfhe':['different']}
+            if fault == 'pre-directories': manifest['directories']['logs']='other'
+            (root/'manifest.json').write_text(json.dumps(manifest))
         """)
         self.write(scripts / "run_real_datasets.sh", """
             #!/usr/bin/env python3
@@ -200,6 +212,8 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 b=pathlib.Path(a[a.index('-B')+1]); b.mkdir(parents=True,exist_ok=True)
                 p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\\nfor r in 1 4 8; do echo ideal-independent-random-ranking-v1,64,3,8,'+('0.98' if __import__('os').environ.get('FAKE_FAULT') == 'deletion-survival' else '0.99')+',$r,1,1,1,0,1,1,1,1,1,1,7; done\\n'); p.chmod(0o755)
                 q=b/'bench_real_datasets'; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
+                for name in ('bench_review_comparison','bench_piccard','bench_dynamic'):
+                    q=b/name; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
                 print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
         """)
         self.write(fakebin / "ctest", """
@@ -251,6 +265,14 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
 
     def test_producer_evidence_tampering_has_targeted_failure(self):
         cases = {
+            "pre-top-missing": "invalid pre-threshold manifest schema",
+            "pre-classification": "invalid pre-threshold manifest identity",
+            "pre-binary-hash": "invalid pre-threshold binary binding",
+            "pre-provenance-commit": "invalid pre-threshold binary provenance",
+            "pre-provenance-source": "invalid pre-threshold binary provenance",
+            "pre-provenance-type": "invalid pre-threshold binary provenance",
+            "pre-machine-openfhe": "invalid pre-threshold machine provenance",
+            "pre-directories": "invalid pre-threshold manifest identity",
             "terminal-row": "pre-threshold terminal rows do not bind cells",
             "pre-extra-key": "invalid pre-threshold cell schema",
             "pre-symlink": "invalid pre-threshold artifact path",

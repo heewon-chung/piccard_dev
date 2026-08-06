@@ -214,12 +214,33 @@ def smoke_parameter_sha256(producer: str, argv: list[str]) -> str:
     return digest.hexdigest()
 
 
-def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], source: Path) -> Path:
+def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], source: Path, build: Path) -> Path:
     path = root / "manifest.json"; value = load_json(path, "pre-threshold manifest")
-    if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1:
+    top_keys = {"schema", "suite", "seed", "repetitions", "classification", "thread_policy", "profiles", "source", "build", "machine", "directories", "cells", "terminal_cells"}
+    if set(value) != top_keys:
+        raise Failure("invalid pre-threshold manifest schema")
+    if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1 or value.get("classification") != "diagnostic" or value.get("profiles") != ["toy-smoke"] or value.get("directories") != {"csv":"csv", "workloads":"workloads", "traces":"traces", "logs":"logs"}:
         raise Failure("invalid pre-threshold manifest identity")
-    if value.get("source", {}).get("commit") != commit or value.get("source", {}).get("dirty") is not False or value.get("source", {}).get("dir") != str(source) or value.get("thread_policy") != {"OMP_DYNAMIC":"FALSE", "OMP_NUM_THREADS":"2"}:
+    source_record = value.get("source")
+    if not isinstance(source_record, dict) or set(source_record) != {"commit", "dirty", "dir"} or source_record.get("commit") != commit or source_record.get("dirty") is not False or source_record.get("dir") != str(source) or value.get("thread_policy") != {"OMP_DYNAMIC":"FALSE", "OMP_NUM_THREADS":"2"}:
         raise Failure("invalid pre-threshold provenance")
+    build_record = value.get("build")
+    producers = ("bench_review_comparison", "bench_piccard", "bench_dynamic")
+    if not isinstance(build_record, dict) or set(build_record) != {"dir", "type", "binaries"} or build_record.get("dir") != str(build.resolve()) or build_record.get("type") != "Release" or not isinstance(build_record.get("binaries"), dict) or set(build_record["binaries"]) != set(producers):
+        raise Failure("invalid pre-threshold build provenance")
+    versions = []
+    for producer in producers:
+        binary = build_record["binaries"][producer]
+        expected_path = build.resolve() / producer
+        if not isinstance(binary, dict) or set(binary) != {"path", "sha256", "provenance"} or binary.get("path") != str(expected_path) or not expected_path.is_file() or not os.access(expected_path, os.X_OK) or binary.get("sha256") != sha256_file(expected_path):
+            raise Failure("invalid pre-threshold binary binding")
+        provenance = binary["provenance"]
+        if not isinstance(provenance, dict) or set(provenance) != {"schema", "commit", "dirty", "build_type", "openfhe_version", "source_dir"} or provenance.get("schema") != "piccard-build-provenance-v1" or provenance.get("commit") != commit or provenance.get("dirty") is not False or provenance.get("build_type") != "Release" or provenance.get("source_dir") != str(source) or not isinstance(provenance.get("openfhe_version"), str) or not provenance["openfhe_version"] or provenance["openfhe_version"].lower() == "unknown":
+            raise Failure("invalid pre-threshold binary provenance")
+        versions.append(provenance["openfhe_version"])
+    machine = value.get("machine")
+    if not isinstance(machine, dict) or set(machine) != {"cpu", "ram", "os", "compiler", "libraries"} or any(not isinstance(machine.get(key), str) or not machine[key] for key in ("cpu", "os", "compiler")) or not isinstance(machine.get("ram"), (str, int)) or (isinstance(machine.get("ram"), str) and not machine["ram"]) or not isinstance(machine.get("libraries"), dict) or machine["libraries"] != {"openfhe": sorted(set(versions))}:
+        raise Failure("invalid pre-threshold machine provenance")
     cells = value.get("cells")
     if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
         raise Failure("invalid pre-threshold cells")
@@ -413,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         real = runtime / "real-datasets"
         pre_command=(str(source / "scripts" / "run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(pre))
         checked_command(pre_command, source, commands, "pre-threshold")
-        pre_manifest=validate_prethreshold(pre, commit, pre_command, source)
+        pre_manifest=validate_prethreshold(pre, commit, pre_command, source, build)
         checked_command((str(source / "scripts" / "run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(real)), source, commands, "real-datasets")
         checked_command((sys.executable, str(source / "scripts" / "verify_real_dataset_outputs.py"), str(real)), source, commands, "verify-real-datasets")
         deletion = checked_command((str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"), source, commands, "deletion-survival")
