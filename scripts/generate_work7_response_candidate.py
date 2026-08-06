@@ -20,12 +20,12 @@ from pathlib import Path
 
 try:
     from work7_evidence import (assert_output_roots_outside, _atomic_create,
-                                _reject_symlink_components, canonical_json_bytes,
+                                _reject_symlink_components, _stable_regular_file, canonical_json_bytes,
                                 create_tree_seal, sha256_file, snapshot_git_worktree,
                                 verify_tree_seal)
 except ModuleNotFoundError:
     from scripts.work7_evidence import (assert_output_roots_outside, _atomic_create,
-                                        _reject_symlink_components, canonical_json_bytes,
+                                        _reject_symlink_components, _stable_regular_file, canonical_json_bytes,
                                         create_tree_seal, sha256_file, snapshot_git_worktree,
                                         verify_tree_seal)
 
@@ -110,11 +110,16 @@ def exact_state(phase0: Path, source: Path, paper: Path, threshold: Path, sessio
     commit = state["source"].get("head")
     if not isinstance(commit, str) or len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
         raise Failure("invalid Phase 0 source commit")
-    if snapshot_git_worktree(source) != state["source"]:
-        raise Failure("source worktree snapshot changed")
-    if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
-        raise Failure("external worktree snapshot changed")
+    assert_phase0_snapshots(state, source, paper, threshold)
     return state, commit
+
+
+def assert_phase0_snapshots(state: dict, source: Path, paper: Path, threshold: Path) -> None:
+    """Require all guarded worktrees to remain exactly as sealed in Phase 0."""
+    expected = {"source": source, "paper": paper, "threshold": threshold}
+    for name, root in expected.items():
+        if snapshot_git_worktree(root) != state.get(name):
+            raise Failure(f"Phase 0 snapshot changed: {name}")
 
 
 def verify_phase2_chain(phase2: Path, phase0: Path, session: Path) -> None:
@@ -137,15 +142,21 @@ def verify_phase2_chain(phase2: Path, phase0: Path, session: Path) -> None:
 
 def read_baseline(paper: Path) -> tuple[Path, bytes, str]:
     path = paper / "Revision" / "ResponseStrategy.md"
-    _reject_symlink_components(path)
+    try:
+        _reject_symlink_components(path)
+    except ValueError as error:
+        raise Failure("ResponseStrategy input is missing or not a regular file") from error
     if not path.exists() or path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
         raise Failure("ResponseStrategy input is missing or not a regular file")
-    raw = path.read_bytes()
+    try:
+        digest, _, raw = _stable_regular_file(path)
+    except ValueError as error:
+        raise Failure("ResponseStrategy input changed or is unsafe") from error
     try:
         raw.decode("utf-8", "strict")
     except UnicodeDecodeError as error:
         raise Failure("ResponseStrategy input is not UTF-8") from error
-    return path, raw, hashlib.sha256(raw).hexdigest()
+    return path, raw, digest
 
 
 def render_candidate(baseline: bytes) -> bytes:
@@ -330,33 +341,35 @@ def main(argv: list[str] | None = None) -> int:
         assert_output_roots_outside([source, paper, threshold], [session])
         for item, label in ((phase0, "Phase 0 seal"), (phase2, "Phase 2 closure seal")):
             under(session, item, label)
+        if phase0 != session / "phase0" / "seal.json" or phase2 != session / "phase2" / "closure-seal.json":
+            raise Failure("Phase seal path is outside the canonical session location")
         if (session / "phase3").exists() or (session / "phase3").is_symlink():
             raise Failure("candidate artifact collision")
         state, commit = exact_state(phase0, source, paper, threshold, session)
         verify_phase2_chain(phase2, phase0, session)
         _, baseline, _ = read_baseline(paper)
+        assert_phase0_snapshots(state, source, paper, threshold)
         candidate = render_candidate(baseline)
         ensure_safe_prose(candidate)
         diff = make_diff(baseline, candidate)
         dry_apply(baseline, diff, candidate)
+        assert_phase0_snapshots(state, source, paper, threshold)
         candidate_root = session / "phase3" / "candidate-artifacts"
         write_artifacts(candidate_root, baseline, candidate, diff, state, commit, phase0, phase2)
-        # Refuse to seal if any external byte/index state drifted while rendering.
-        if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
-            raise Failure("external worktree snapshot changed before candidate seal")
+        assert_phase0_snapshots(state, source, paper, threshold)
         candidate_seal = session / "phase3" / "candidate-seal.json"
         create_tree_seal(candidate_root, candidate_seal, sha256_file(phase2), "phase3-candidate-artifacts")
         verify_tree_seal(candidate_seal, sha256_file(phase2))
+        assert_phase0_snapshots(state, source, paper, threshold)
         run_claim7(source, paper, threshold, session, commit, phase0, phase2, candidate_seal)
         verify_tree_seal(candidate_seal, sha256_file(phase2))
-        if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
-            raise Failure("external worktree snapshot changed before Phase 3 closure")
+        assert_phase0_snapshots(state, source, paper, threshold)
         closure_root = session / "phase3" / "closure-artifacts"
         closure_seal = session / "phase3" / "closure-seal.json"
+        assert_phase0_snapshots(state, source, paper, threshold)
         create_tree_seal(closure_root, closure_seal, sha256_file(candidate_seal), "phase3-closure")
         verify_tree_seal(closure_seal, sha256_file(candidate_seal))
-        if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
-            raise Failure("external worktree snapshot changed after Phase 3 closure")
+        assert_phase0_snapshots(state, source, paper, threshold)
     except (Failure, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"generate_work7_response_candidate: FAIL: {error}", file=sys.stderr)
         return 2

@@ -9,9 +9,14 @@ import stat
 import sys
 from pathlib import Path
 
-from work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components,
-                            canonical_json_bytes, sha256_file, snapshot_git_worktree,
-                            verify_tree_seal)
+try:
+    from work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
+                                canonical_json_bytes, sha256_file, snapshot_git_worktree,
+                                verify_tree_seal)
+except ModuleNotFoundError:
+    from scripts.work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
+                                        canonical_json_bytes, sha256_file, snapshot_git_worktree,
+                                        verify_tree_seal)
 
 IDS = ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION",
        "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION")
@@ -227,9 +232,9 @@ def _safe_response_strategy(paper: Path) -> bytes:
     if path.is_symlink() or not path.exists() or not stat.S_ISREG(path.lstat().st_mode):
         raise Failure("ResponseStrategy baseline is missing or unsafe")
     try:
-        raw = path.read_bytes()
+        _, _, raw = _stable_regular_file(path)
         raw.decode("utf-8", "strict")
-    except (OSError, UnicodeDecodeError) as error:
+    except (OSError, ValueError, UnicodeDecodeError) as error:
         raise Failure("ResponseStrategy baseline is not UTF-8") from error
     return raw
 
