@@ -103,8 +103,10 @@ TEST(DynamicRefreshE2E, RefreshesOnlyOneOwnerAndRejectsReplay) {
     const auto outcome = store.TryReplace("owner-a", 0, replacement);
     EXPECT_EQ(outcome.status, ReplaceStatus::Applied);
     EXPECT_NE(old_a.serialized_ciphertext, replacement.serialized_ciphertext);
-    EXPECT_EQ(store.ReadPair().second, old_b);
-    EXPECT_EQ(StoredMatchCount(engine, codec, store.ReadPair()), new_local);
+    const CloudCiphertextPair snapshot = store.ReadPair();
+    EXPECT_EQ(snapshot.first, replacement);
+    EXPECT_EQ(snapshot.second, old_b);
+    EXPECT_EQ(StoredMatchCount(engine, codec, snapshot), new_local);
 
     auto replay_package = old_a;
     replay_package.epoch = 1;
