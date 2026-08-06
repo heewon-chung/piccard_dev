@@ -285,7 +285,7 @@ def _resolve_under(root: Path, relative: str, label: str) -> Path:
 # Roots / artifacts
 # ---------------------------------------------------------------------------
 
-def _parse_roots(values: dict, results_root: Path) -> dict:
+def _parse_roots(values: dict, results_root: Path, evidence_mode: str) -> dict:
     root_count = _indexed_count(values, "root_count")
     _check_contiguous_zero_padded(values, "root", root_count)
     roots = {}
@@ -308,6 +308,83 @@ def _parse_roots(values: dict, results_root: Path) -> dict:
     if roots["results-root"] != results_root:
         fail("run_metadata.tsv results-root does not match the directory "
              "the verifier was invoked against")
+    # Codex stop-gate bypass fix: a root ID's PATH is bound to its class
+    # RELATIVE to the run's declared committed-source-root, not merely
+    # trusted from run_metadata.tsv -- otherwise a tampered metadata file
+    # could relocate e.g. a processed-dataset root to any directory holding
+    # byte-identical files and every downstream checksum would still
+    # "verify" against the wrong provenance origin. (Binding is relative to
+    # the declared repo root, not this verifier's own location, so the
+    # hermetic scratch-repo test pattern remains valid; a whole-repo
+    # relocation is content-equal provenance and stays acceptable.)
+    committed = roots.get("committed-source-root")
+    if committed is not None:
+        # Content anchor (Codex stop-gate rounds 2-3): committed-source-root
+        # is itself declared by the mutable metadata, so before it is used
+        # as an anchor its pipeline scripts must be BYTE-IDENTICAL to the
+        # ones shipped next to this verifier -- a planted directory with
+        # renamed/edited scripts fails; '/' fails. THREAT-MODEL BOUNDARY
+        # (recorded in .omo evidence): a full content-equal replica of the
+        # repo remains indistinguishable by construction; provenance is
+        # content-based, and content-equal relocation is the accepted
+        # residual. Adversarial defense beyond that rests on the fixture
+        # fingerprints and the external approval records, not on
+        # run_metadata self-description.
+        for required in ("run_real_datasets.sh", "prepare_real_datasets.py",
+                         "summarize_real_datasets.py"):
+            candidate = committed / "scripts" / required
+            anchor = _SCRIPT_DIR / required
+            if not candidate.is_file():
+                fail("committed-source-root does not look like the pipeline "
+                     f"source tree (missing scripts/{required}): "
+                     f"{str(committed)!r}")
+            if sha256_file(candidate) != sha256_file(anchor):
+                fail(f"committed-source-root scripts/{required} does not "
+                     "byte-match the verifier's own pipeline script; "
+                     "the declared source root is not this pipeline")
+    fixture_tree = None if committed is None else committed / "tests" / "fixtures"
+    for root_id, resolved in roots.items():
+        variant = None
+        for prefix_name in ("source-root-", "processed-dataset-"):
+            if root_id.startswith(prefix_name):
+                variant = root_id[len(prefix_name):]
+        if variant is None:
+            continue
+        if committed is None:
+            fail(f"root {root_id!r} requires a committed-source-root entry "
+                 "to bind its location class")
+        if evidence_mode == "quick":
+            expected_quick = (committed / "tests" / "fixtures" /
+                              "real_datasets" / "quick" / variant)
+            if resolved != expected_quick:
+                fail(f"root {root_id!r} must be the tracked quick fixture "
+                     f"directory {str(expected_quick)!r} under evidence_mode="
+                     f"quick, not {str(resolved)!r}")
+            # Content anchor (Codex stop-gate round 4): a partially forged
+            # tree (genuine script copies + a fake fixture at the right
+            # relative path) must not pass. The quick fixture's files are
+            # bound byte-for-byte to the checked-in fixture shipped next
+            # to this verifier; the only accepted "forgery" is a full
+            # content-equal replica, per the recorded threat-model
+            # boundary.
+            anchor_dir = (_SCRIPT_DIR.parent / "tests" / "fixtures" /
+                          "real_datasets" / "quick" / variant)
+            for fixture_file in ("source.manifest.tsv", "dataset.manifest.tsv",
+                                 "records.tsv", "pairs.tsv"):
+                candidate = resolved / fixture_file
+                anchor = anchor_dir / fixture_file
+                if not anchor.is_file():
+                    fail(f"verifier's own tracked fixture is missing "
+                         f"{fixture_file} for variant {variant!r}")
+                if not candidate.is_file() or (sha256_file(candidate)
+                                               != sha256_file(anchor)):
+                    fail(f"quick fixture {fixture_file} under root "
+                         f"{root_id!r} does not byte-match the checked-in "
+                         "fixture next to this verifier")
+        else:
+            if resolved == fixture_tree or fixture_tree in resolved.parents:
+                fail(f"root {root_id!r} resolves inside the checked-in fixture "
+                     f"tree ({str(resolved)!r}) under evidence_mode=paper")
     return roots
 
 
@@ -621,6 +698,19 @@ def _validate_no_fixture_masquerade(processed_values: dict, source_manifest_valu
 # Top-level verify()
 # ---------------------------------------------------------------------------
 
+def _canonical_status_bytes(run_metadata_sha256: str) -> bytes:
+    """The one true serialization of verification_status.tsv for a given
+    run_metadata hash — used both to write the status and to byte-compare
+    any pre-existing status file."""
+    status_pairs = [
+        ("schema_version", VERIFICATION_SCHEMA_VERSION),
+        ("run_metadata_sha256", run_metadata_sha256),
+        ("status", "VERIFIED"),
+    ]
+    return ("key\tvalue\n" + "".join(f"{k}\t{v}\n" for k, v in status_pairs)
+            ).encode("utf-8")
+
+
 def _check_existing_status_not_stale(results_root: Path, run_metadata_sha256: str) -> None:
     """A pre-existing verification_status.tsv is never silently overwritten.
     If it exists, it must already agree with the current run_metadata.tsv
@@ -630,19 +720,21 @@ def _check_existing_status_not_stale(results_root: Path, run_metadata_sha256: st
     status_path = results_root / "verification_status.tsv"
     if not status_path.is_file():
         return
+    # Codex stop-gate bypass fix: comparing three PARSED values let a
+    # tampered-but-parseable status (extra keys, reordered lines, cosmetic
+    # edits) pass and then be silently rewritten in canonical form,
+    # destroying the tamper evidence. The only acceptable pre-existing
+    # status is the byte-exact canonical serialization this verifier
+    # would write for the current run_metadata.tsv.
+    expected_bytes = _canonical_status_bytes(run_metadata_sha256)
     try:
-        existing = _load_kv(status_path)
-    except (ManifestError, OSError) as exc:
-        fail(f"existing verification_status.tsv is unreadable/malformed: {exc}")
-    if existing.get("schema_version") != VERIFICATION_SCHEMA_VERSION:
-        fail("existing verification_status.tsv has a stale/unexpected "
-             "schema_version; delete it before re-verifying")
-    if existing.get("status") != "VERIFIED":
-        fail("existing verification_status.tsv does not read status=VERIFIED; "
-             "delete it before re-verifying")
-    if existing.get("run_metadata_sha256") != run_metadata_sha256:
-        fail("existing verification_status.tsv is stale (its run_metadata_sha256 "
-             "no longer matches run_metadata.tsv); delete it before re-verifying")
+        existing_bytes = status_path.read_bytes()
+    except OSError as exc:
+        fail(f"existing verification_status.tsv is unreadable: {exc}")
+    if existing_bytes != expected_bytes:
+        fail("existing verification_status.tsv is stale or non-canonical (its "
+             "bytes do not equal the canonical status for the current "
+             "run_metadata.tsv); delete it before re-verifying")
 
 
 def verify(results_root: Path) -> str:
@@ -681,13 +773,24 @@ def verify(results_root: Path) -> str:
     if evidence_mode == "paper" and build_type != "Release":
         fail(f"evidence_mode=paper requires build_type=Release, got {build_type!r}")
 
-    roots = _parse_roots(values, results_root)
+    roots = _parse_roots(values, results_root, evidence_mode)
     artifacts = _parse_artifacts(values, results_root)
     cells = _parse_cells(values, results_root, roots)
 
     if not cells:
         fail("run_metadata.tsv declares zero cells")
     _validate_cell_id_enumeration(cells, evidence_mode)
+    # Codex stop-gate round 2: root presence is bound to the cell
+    # enumeration in BOTH modes -- deleting a variant's source/processed
+    # root entries (and adjusting root_count) must fail, not silently skip
+    # the per-variant topology checks above.
+    for cell in cells:
+        variant = _cell_variant(cell["id"])
+        for required_root in (f"source-root-{variant}",
+                              f"processed-dataset-{variant}"):
+            if required_root not in roots:
+                fail(f"run_metadata.tsv is missing the {required_root!r} root "
+                     f"entry required by cell {cell['id']!r}")
 
     run_log_present = any(a["path"] == "run.log" for a in artifacts)
     if not run_log_present:
@@ -756,13 +859,7 @@ def verify(results_root: Path) -> str:
                      f"{variant!r}: {exc}")
             _validate_no_fixture_masquerade(processed_values, source_values)
 
-    status_pairs = [
-        ("schema_version", VERIFICATION_SCHEMA_VERSION),
-        ("run_metadata_sha256", run_metadata_sha256),
-        ("status", "VERIFIED"),
-    ]
-    status_bytes = ("key\tvalue\n" + "".join(f"{k}\t{v}\n" for k, v in status_pairs)
-                    ).encode("utf-8")
+    status_bytes = _canonical_status_bytes(run_metadata_sha256)
     status_path = results_root / "verification_status.tsv"
     fd, tmp_name = tempfile.mkstemp(prefix=".verification_status.tsv.tmp-",
                                     dir=str(results_root))

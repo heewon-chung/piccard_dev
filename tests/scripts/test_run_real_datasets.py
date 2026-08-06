@@ -855,6 +855,223 @@ class QuickEndToEndTest(unittest.TestCase):
         self.assertNotEqual(verify_result.returncode, 0)
         self.assertFalse((self.results_root / "verification_status.tsv").exists())
 
+    def test_verifier_rejects_noncanonical_status_bytes(self):
+        # Codex stop-gate bypass #1: the staleness check used to compare
+        # three PARSED values, so a tampered status that still parsed to
+        # the expected triple (e.g. with an injected extra key) passed and
+        # was silently rewritten in canonical form, destroying the tamper
+        # evidence. Only the byte-exact canonical status may pass.
+        self.run_quick()
+        first = run_verifier(self.results_root)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        status_path = self.results_root / "verification_status.tsv"
+        tampered_text = (status_path.read_text(encoding="utf-8")
+                         + "extra_key\tinjected\n")
+        status_path.write_text(tampered_text, encoding="utf-8")
+
+        second = run_verifier(self.results_root)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("non-canonical", second.stderr.lower())
+        self.assertEqual(status_path.read_text(encoding="utf-8"), tampered_text)
+
+    def test_verifier_rejects_relocated_processed_root(self):
+        # Codex stop-gate bypass #2: the role->root check pinned only the
+        # root ID string, not the root's PATH, so run_metadata.tsv could
+        # relocate the processed-dataset root to any directory holding
+        # byte-identical files (checksums still match) and sever the
+        # provenance origin. Under evidence_mode=quick the root must BE
+        # the tracked fixture directory.
+        self.run_quick()
+        relocated = pathlib.Path(tempfile.mkdtemp(prefix="fixture-copy-"))
+        self.addCleanup(shutil.rmtree, relocated, ignore_errors=True)
+        copy_dir = relocated / "dblp_acm_u65536"
+        shutil.copytree(QUICK_DATASET_MANIFEST.parent, copy_dir)
+
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        needle = None
+        for line in text.splitlines():
+            if line.endswith("\tprocessed-dataset-dblp_acm_u65536") and ".id\t" in line:
+                index = line.split(".id\t")[0]
+                needle = index
+                break
+        self.assertIsNotNone(needle, "processed-dataset root entry not found")
+        old_path_prefix = f"{needle}.path\t"
+        lines = text.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if line.startswith(old_path_prefix):
+                lines[i] = f"{old_path_prefix}{copy_dir}\n"
+                break
+        run_metadata_path.write_text("".join(lines), encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("tracked quick fixture", verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_nonrepo_committed_source_root(self):
+        # Codex stop-gate round 2, bypass #1: committed-source-root is
+        # declared by the same mutable metadata the verifier is checking,
+        # so pointing it at '/' used to neuter every binding derived from
+        # it. It must at least be a pipeline source tree (runner +
+        # preprocessing + summarizer scripts present).
+        self.run_quick()
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        needle = None
+        for line in text.splitlines():
+            if line.endswith("\tcommitted-source-root") and ".id\t" in line:
+                needle = line.split(".id\t")[0]
+                break
+        self.assertIsNotNone(needle, "committed-source-root entry not found")
+        lines = text.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if line.startswith(f"{needle}.path\t"):
+                lines[i] = f"{needle}.path\t/\n"
+                break
+        run_metadata_path.write_text("".join(lines), encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("does not look like the pipeline source tree",
+                      verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_forged_committed_source_root_with_planted_scripts(self):
+        # Codex stop-gate round 3: a directory with the three script
+        # FILENAMES planted (but different bytes) used to pass the shape
+        # check. The scripts must byte-match the verifier's own pipeline
+        # scripts (content anchor); a content-equal replica of the real
+        # repo remains the accepted residual per the recorded threat-model
+        # boundary.
+        self.run_quick()
+        forged = pathlib.Path(tempfile.mkdtemp(prefix="forged-repo-"))
+        self.addCleanup(shutil.rmtree, forged, ignore_errors=True)
+        (forged / "scripts").mkdir()
+        for name in ("run_real_datasets.sh", "prepare_real_datasets.py",
+                     "summarize_real_datasets.py"):
+            (forged / "scripts" / name).write_text("# forged\n", encoding="utf-8")
+        fixture_dir = (forged / "tests" / "fixtures" / "real_datasets" /
+                       "quick" / "dblp_acm_u65536")
+        fixture_dir.parent.mkdir(parents=True)
+        shutil.copytree(QUICK_DATASET_MANIFEST.parent, fixture_dir)
+
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        replacements = {
+            "committed-source-root": str(forged),
+            "source-root-dblp_acm_u65536": str(fixture_dir),
+            "processed-dataset-dblp_acm_u65536": str(fixture_dir),
+        }
+        ids = {}
+        for line in lines:
+            if ".id\t" in line and line.startswith("root."):
+                index, root_id = line.split(".id\t")
+                ids[root_id.strip()] = index
+        for i, line in enumerate(lines):
+            for root_id, new_path in replacements.items():
+                prefix = f"{ids[root_id]}.path\t"
+                if line.startswith(prefix):
+                    lines[i] = f"{prefix}{new_path}\n"
+        run_metadata_path.write_text("".join(lines), encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("does not byte-match the verifier's own pipeline script",
+                      verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_partially_forged_tree_with_genuine_scripts(self):
+        # Codex stop-gate round 4: genuine byte-identical script copies
+        # plus a TAMPERED fixture at the right relative path must still
+        # fail — the quick fixture content is anchored to the checked-in
+        # fixture next to the verifier, so only a full content-equal
+        # replica (harmless by construction) can pass.
+        self.run_quick()
+        forged = pathlib.Path(tempfile.mkdtemp(prefix="forged-repo2-"))
+        self.addCleanup(shutil.rmtree, forged, ignore_errors=True)
+        (forged / "scripts").mkdir()
+        for name in ("run_real_datasets.sh", "prepare_real_datasets.py",
+                     "summarize_real_datasets.py"):
+            shutil.copy2(ROOT / "scripts" / name, forged / "scripts" / name)
+        fixture_dir = (forged / "tests" / "fixtures" / "real_datasets" /
+                       "quick" / "dblp_acm_u65536")
+        fixture_dir.parent.mkdir(parents=True)
+        shutil.copytree(QUICK_DATASET_MANIFEST.parent, fixture_dir)
+        records = fixture_dir / "records.tsv"
+        records.write_text(records.read_text(encoding="utf-8") + "# tampered\n",
+                           encoding="utf-8")
+
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        replacements = {
+            "committed-source-root": str(forged),
+            "source-root-dblp_acm_u65536": str(fixture_dir),
+            "processed-dataset-dblp_acm_u65536": str(fixture_dir),
+        }
+        ids = {}
+        for line in lines:
+            if ".id\t" in line and line.startswith("root."):
+                index, root_id = line.split(".id\t")
+                ids[root_id.strip()] = index
+        for i, line in enumerate(lines):
+            for root_id, new_path in replacements.items():
+                prefix = f"{ids[root_id]}.path\t"
+                if line.startswith(prefix):
+                    lines[i] = f"{prefix}{new_path}\n"
+        run_metadata_path.write_text("".join(lines), encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("does not byte-match the checked-in fixture",
+                      verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_missing_variant_source_root(self):
+        # Codex stop-gate round 2, bypass #2: per-variant topology checks
+        # used to apply only to roots that were PRESENT, so deleting
+        # source-root-<variant> (and renumbering root_count) skipped them
+        # entirely. Root presence is now bound to the cell enumeration.
+        self.run_quick()
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        lines = run_metadata_path.read_text(encoding="utf-8").splitlines()
+        roots = []
+        other = []
+        root_count = None
+        for line in lines:
+            if line.startswith("root_count\t"):
+                root_count = int(line.split("\t", 1)[1])
+                other.append(None)  # placeholder position
+            elif line.startswith("root."):
+                key, value = line.split("\t", 1)
+                index = int(key.split(".")[1])
+                field = key.split(".", 2)[2]
+                while len(roots) <= index:
+                    roots.append({})
+                roots[index][field] = value
+            else:
+                other.append(line)
+        self.assertIsNotNone(root_count)
+        kept = [r for r in roots if r.get("id") != "source-root-dblp_acm_u65536"]
+        self.assertEqual(len(kept), root_count - 1)
+        rebuilt = []
+        for line in other:
+            if line is None:
+                rebuilt.append(f"root_count\t{len(kept)}")
+                for i, r in enumerate(kept):
+                    rebuilt.append(f"root.{i:03d}.id\t{r['id']}")
+                    rebuilt.append(f"root.{i:03d}.path\t{r['path']}")
+            else:
+                rebuilt.append(line)
+        run_metadata_path.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("source-root-dblp_acm_u65536", verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
     def test_verifier_rejects_nan_in_timing_csv(self):
         result = self.run_quick(env={
             "PICCARD_FAKE_BAD_FIELD": "phase_minhash_ms",
