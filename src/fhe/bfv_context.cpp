@@ -1,10 +1,15 @@
 #include "fhe/bfv_context.h"
 
+#include "fhe/public_ciphertext_codec.h"
+
 #include "build_info.h"
+#include "key/key-ser.h"
 #include "math/distributiongenerator.h"
 #include "scheme/bfvrns/bfvrns-cryptoparameters.h"
 #include "util/params_calibration.h"
 #include "version.h"
+
+#include <openssl/evp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +22,86 @@
 namespace piccard {
 
 namespace {
+
+void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        bytes.push_back(static_cast<uint8_t>(value >> shift));
+    }
+}
+
+void AppendBE64(std::vector<uint8_t>& bytes, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.push_back(static_cast<uint8_t>(value >> shift));
+    }
+}
+
+std::string Sha256Hex(const std::vector<uint8_t>& bytes) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size = 0;
+    EVP_MD_CTX* digest_context = EVP_MD_CTX_new();
+    if (!digest_context ||
+        EVP_DigestInit_ex(digest_context, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(digest_context, bytes.data(), bytes.size()) != 1 ||
+        EVP_DigestFinal_ex(digest_context, digest, &digest_size) != 1) {
+        EVP_MD_CTX_free(digest_context);
+        throw std::runtime_error("SHA-256 computation failed");
+    }
+    EVP_MD_CTX_free(digest_context);
+
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(digest_size * 2);
+    for (unsigned int i = 0; i < digest_size; ++i) {
+        hex.push_back(kHex[digest[i] >> 4]);
+        hex.push_back(kHex[digest[i] & 0x0f]);
+    }
+    return hex;
+}
+
+uint32_t SecurityCode(SecurityLevel security) {
+    switch (security) {
+        case SecurityLevel::TOY:
+            return 0;
+        case SecurityLevel::STD128:
+            return 1;
+        case SecurityLevel::STD192:
+            return 2;
+        case SecurityLevel::STD256:
+            return 3;
+    }
+    throw std::logic_error("unknown BFV security level");
+}
+
+std::string ContextFingerprintHex(const BFVContext& context) {
+    static constexpr char kDomain[] = "piccard-bfv-context-v1";
+    std::vector<uint8_t> bytes(kDomain, kDomain + sizeof(kDomain));
+    const auto crypto_params = context.GetCryptoContext()->GetCryptoParameters();
+    const auto element_params = crypto_params->GetElementParams();
+    AppendBE32(bytes, SecurityCode(context.GetParams().security));
+    AppendBE64(bytes, crypto_params->GetPlaintextModulus());
+    AppendBE32(bytes, context.GetSlotCount());
+    AppendBE32(bytes, context.GetParams().mult_depth);
+    AppendBE32(bytes, context.GetParams().scaling_mod_size);
+    const auto& towers = element_params->GetParams();
+    AppendBE32(bytes, static_cast<uint32_t>(towers.size()));
+    for (const auto& tower : towers) {
+        const std::string modulus = tower->GetModulus().ToString();
+        AppendBE32(bytes, static_cast<uint32_t>(modulus.size()));
+        bytes.insert(bytes.end(), modulus.begin(), modulus.end());
+    }
+    return Sha256Hex(bytes);
+}
+
+std::string PublicKeyFingerprintHex(
+    const lbcrypto::PublicKey<lbcrypto::DCRTPoly>& public_key) {
+    static constexpr char kDomain[] = "piccard-bfv-public-key-v1";
+    std::ostringstream stream(std::ios::out | std::ios::binary);
+    lbcrypto::Serial::Serialize(public_key, stream, lbcrypto::SerType::BINARY);
+    const std::string serialized = stream.str();
+    std::vector<uint8_t> bytes(kDomain, kDomain + sizeof(kDomain));
+    bytes.insert(bytes.end(), serialized.begin(), serialized.end());
+    return Sha256Hex(bytes);
+}
 
 double TowerSumLogQBits(
     const std::shared_ptr<lbcrypto::ILDCRTParams<lbcrypto::BigInteger>>&
@@ -125,6 +210,22 @@ void ValidatePackedPlaintextParameters(
 
 BFVContext::BFVContext(const PiccardParams& params)
     : params_(params), runtime_ring_dim_(params.ring_dim) {}
+
+std::shared_ptr<const PublicCiphertextCodec>
+BFVContext::ExportPublicCiphertextCodec() const {
+    if (!cc_ || !key_pair_.good() || !key_pair_.publicKey) {
+        throw std::logic_error(
+            "public ciphertext codec requires initialized context and keys");
+    }
+    const std::string key_tag = key_pair_.publicKey->GetKeyTag();
+    if (key_tag.empty()) {
+        throw std::logic_error("generated public key has an empty key tag");
+    }
+    return std::shared_ptr<const PublicCiphertextCodec>(
+        new PublicCiphertextCodec(
+            cc_, key_pair_.publicKey, ContextFingerprintHex(*this),
+            PublicKeyFingerprintHex(key_pair_.publicKey), key_tag));
+}
 
 std::string BFVContext::CalibrationRingDiagnostics() const {
     std::ostringstream out;

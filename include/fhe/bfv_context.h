@@ -4,10 +4,13 @@
 #include "openfhe.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace piccard {
+
+class PublicCiphertextCodec;
 
 /** @brief Parameters read from the realized OpenFHE BFV context. */
 struct BFVRuntimeMetadata {
@@ -36,6 +39,9 @@ public:
 
     std::vector<int64_t>
     Decrypt(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct) const;
+
+    std::shared_ptr<const PublicCiphertextCodec>
+    ExportPublicCiphertextCodec() const;
 
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     Multiply(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_a,
