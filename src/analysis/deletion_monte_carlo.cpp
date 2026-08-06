@@ -30,11 +30,11 @@ uint64_t UniformBelow(std::mt19937_64& generator, uint64_t bound) {
     if (bound == 0) {
         throw std::invalid_argument("uniform bound must be positive");
     }
-    const uint64_t threshold = (-bound) % bound;
+    const uint64_t cutoff = (-bound) % bound;
     uint64_t word = 0;
     do {
         word = generator();
-    } while (word < threshold);
+    } while (word < cutoff);
     return word % bound;
 }
 
