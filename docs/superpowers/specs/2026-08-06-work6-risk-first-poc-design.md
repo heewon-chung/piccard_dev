@@ -137,9 +137,10 @@ encryption, serialization, cloud replacement, total refresh time, serialized
 upload bytes, and epoch transition. It uploads exactly one ciphertext and
 does not label two-owner encryption as a single-owner refresh.
 
-Implementation-time benchmark verification uses only profile `toy-smoke` and
-exactly one timing or accuracy repetition. Paper-scale performance collection
-is deferred.
+Implementation-time performance measurement uses only profile `toy-smoke`
+and exactly one timing or accuracy trial. Correctness loops inside a test are
+governed separately by the repetition policy in Section 6.1. Paper-scale
+performance collection is deferred.
 
 ## 5. Failure model
 
@@ -173,16 +174,42 @@ state:
 - explicit FAIL/STOP conditions; and
 - the next-phase entry condition.
 
+### 6.1 Repetition policy
+
+`trials=1` applies only to performance measurements whose output is timing,
+throughput, communication size, or accuracy benchmarking. Correctness tests
+may repeat operations when repetition is necessary to expose state transition
+or seeded simulation behavior:
+
+- dynamic insert/update sequences perform exactly 10 operations per relevant
+  scenario;
+- deletion and bottom-structure exhaustion sequences perform up to 10
+  deterministic deletions, with the exact stopping deletion asserted;
+- successive epoch replacement and stale-replay sequences exercise exactly 10
+  transitions when the phase validates repeated state evolution;
+- other deterministic or seeded correctness checks use 5 repetitions by
+  default and 10 only when the test covers accumulated state;
+- expensive encryption/serialization checks use 5 repetitions when one check
+  cannot establish repeatability; and
+- the implementation-time Monte Carlo smoke uses 10 fixed-seed trials only to
+  verify determinism, range, histogram totals, and `T > r` counting.
+
+Ten Monte Carlo trials are not statistical convergence evidence. Exact
+survival values, safe-deletion budgets, and off-by-one semantics are validated
+by the analytic module. A larger Monte Carlo evidence run is deferred with
+paper-scale performance collection and is not a Work 6 implementation gate.
+
 Production behavior is implemented test-first. A phase passes only when its
 focused tests and named regressions exit zero and its required observable
 values match. A phase fails when RED does not fail for the stated reason,
 GREEN does not pass, an invariant is unverified, the worktree contains an
-unexpected change, or a command violates the TOY/one-repetition policy.
+unexpected change, or a command violates the repetition policy above.
 
 The final Work 6 gate requires a clean Release build, the focused Work 6 tests,
 the relevant existing dynamic/provenance regressions, one TOY refresh row,
-one TOY deletion CLI run, and the threshold-exclusion check. Full historical
-benchmark suites and paper-scale measurements are not part of this gate.
+one 10-trial TOY deletion CLI smoke, and the threshold-exclusion check. Full
+historical benchmark suites and paper-scale measurements are not part of this
+gate.
 
 ## 7. Plan authoring and approval contract
 
@@ -209,8 +236,9 @@ Work 6 is complete at PoC level when:
 - the unchanged owner remains byte-identical and stale replay cannot revert
   state;
 - refreshed FHE output equals the fresh local plaintext match count;
-- analytic fixtures and deterministic Monte Carlo checks agree within their
-  declared tolerances;
+- analytic fixtures pass their declared numeric tolerances;
+- the 10-trial deterministic Monte Carlo smoke reproduces exactly and reports
+  valid failure-time counts without claiming statistical convergence;
 - one TOY, one-repetition refresh benchmark row is internally consistent;
 - deletion evidence is explicitly labelled as an ideal model;
 - threshold exclusion passes; and
