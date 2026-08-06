@@ -69,7 +69,19 @@ _ACCURACY_SUFFIX = (
 )
 EXPECTED_ACCURACY_HEADER_LF = _PREFIX_HEADER + "," + _ACCURACY_SUFFIX + "\n"
 
+_TIMING_SUFFIX = (
+    "dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,"
+    "pair_id,pair_kind,label,record_a,record_b,"
+    "k,m,hash_seed,trial_index,phase_minhash_ms,phase_encode_ms,"
+    "phase_encrypt_ms,phase_cloud_multiply_ms,phase_cloud_rotate_ms,"
+    "phase_sanitize_ms,phase_decrypt_ms,phase_bias_correction_ms,"
+    "total_query_ms,result_value,ciphertext_bytes,upload_bytes,"
+    "download_bytes"
+)
+EXPECTED_TIMING_HEADER_LF = _PREFIX_HEADER + "," + _TIMING_SUFFIX + "\n"
+
 _ACCURACY_HASH_DOMAIN = b"piccard-real-crs-v1"
+_TIMING_HASH_DOMAIN = b"piccard-real-timing-crs-v1"
 
 # The driver TU's #include set is a closed allowlist [FA2][FA9]: no
 # BFV/OpenFHE header may appear, directly or transitively, so KeyGen can
@@ -133,6 +145,83 @@ def derive_hash_seed(root_seed: int, pair_id: str, trial_index: int) -> int:
     )
     digest = hashlib.sha256(buffer).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def derive_timing_hash_seed(root_seed: int, dataset_manifest_sha256_raw: bytes,
+                            k: int, m: int, profile_id: str) -> int:
+    """Independent Python re-implementation of the normative timing seed
+    derivation, for cross-checking the C++ driver's output (never imported
+    from the implementation under test)."""
+    profile_bytes = profile_id.encode("utf-8")
+    buffer = (
+        _TIMING_HASH_DOMAIN
+        + b"\x00"
+        + root_seed.to_bytes(8, "big")
+        + dataset_manifest_sha256_raw
+        + k.to_bytes(4, "big")
+        + m.to_bytes(4, "big")
+        + len(profile_bytes).to_bytes(4, "big")
+        + profile_bytes
+    )
+    digest = hashlib.sha256(buffer).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def parse_records_tsv(path: Path) -> dict:
+    """Maps record_id -> bucketed_feature_count from a records.tsv file."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    assert lines[-1] == ""
+    lines = lines[:-1]
+    header = lines[0].split("\t")
+    assert header[0] == "record_id"
+    assert header[3] == "bucketed_feature_count"
+    sizes = {}
+    for line in lines[1:]:
+        cells = line.split("\t")
+        sizes[cells[0]] = int(cells[3])
+    return sizes
+
+
+def parse_pairs_tsv(path: Path) -> list:
+    """Returns [(pair_id, record_a, record_b, pair_kind, label), ...]."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    assert lines[-1] == ""
+    lines = lines[:-1]
+    header = lines[0].split("\t")
+    assert header == ["pair_id", "record_a", "record_b", "pair_kind", "label"]
+    return [tuple(line.split("\t")) for line in lines[1:]]
+
+
+def expected_median_pair(fixture_dir: Path) -> str:
+    """Independently recomputes the median-combined-bucketed-size pair
+    selection (lexical pair_id tie-break) from the fixture's records.tsv
+    and pairs.tsv, mirroring the normative selection rule without importing
+    the implementation under test."""
+    sizes = parse_records_tsv(fixture_dir / "records.tsv")
+    pairs = parse_pairs_tsv(fixture_dir / "pairs.tsv")
+    combined = [
+        (pair_id, sizes[record_a] + sizes[record_b])
+        for pair_id, record_a, record_b, _kind, _label in pairs
+    ]
+    values = sorted(size for _pid, size in combined)
+    n = len(values)
+    median = (
+        values[n // 2]
+        if n % 2 == 1
+        else (values[n // 2 - 1] + values[n // 2]) / 2.0
+    )
+    best_pair_id = None
+    best_distance = None
+    for pair_id, size in combined:
+        distance = abs(size - median)
+        if (
+            best_distance is None
+            or distance < best_distance
+            or (distance == best_distance and pair_id < best_pair_id)
+        ):
+            best_distance = distance
+            best_pair_id = pair_id
+    return best_pair_id
 
 
 def parse_two_column_tsv(path: Path) -> dict:
@@ -306,12 +395,135 @@ class RealDatasetPipelineAccuracyTest(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertFalse(csv_path.exists())
 
-    def test_timing_mode_reports_not_implemented(self):
+class RealDatasetPipelineTimingTest(unittest.TestCase):
+    """--mode=timing (Work 5 Sub-phase 5.4). TOY scale, trials=1 for every
+    assertion except the contiguous-index/cardinality checks, which need
+    trials=2 (per the phase's benchmark execution policy)."""
+
+    maxDiff = None
+
+    def setUp(self):
+        require_binary()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out_dir = Path(self.temp.name)
+        self.fixture_dir = QUICK_FIXTURE_MANIFEST.parent
+
+    def run_timing(self, *, dataset_manifest: Path, profile="toy-smoke", k=16,
+                   m=16, trials=1, timing_pair="median", seed=7, suffix=""):
+        csv_path = self.out_dir / f"timing{suffix}.csv"
+        workload_manifest_path = self.out_dir / f"timing_workload{suffix}.manifest.tsv"
+        completed = subprocess.run(
+            [
+                str(BINARY),
+                f"--dataset-manifest={dataset_manifest}",
+                "--mode=timing",
+                f"--profile={profile}",
+                f"--k={k}",
+                f"--m={m}",
+                f"--trials={trials}",
+                f"--timing-pair={timing_pair}",
+                f"--seed={seed}",
+                f"--csv={csv_path}",
+                f"--workload-manifest-out={workload_manifest_path}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed, csv_path, workload_manifest_path
+
+    def test_exact_header_bytes(self):
+        _, csv_path, _ = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST)
+        content = csv_path.read_text(encoding="utf-8")
+        header_line = content.split("\n", 1)[0] + "\n"
+        self.assertEqual(header_line, EXPECTED_TIMING_HEADER_LF)
+
+    def test_row_count_equals_trials(self):
+        _, csv_path, _ = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST, trials=1)
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trial_index"], "0")
+
+    def test_input_pair_count_and_contiguous_indices(self):
+        _, _, manifest_path = self.run_timing(
+            dataset_manifest=QUICK_FIXTURE_MANIFEST, trials=2, suffix="-trials2")
+        manifest = parse_two_column_tsv(manifest_path)
+        self.assertEqual(manifest["schema_version"], "piccard-real-timing-workload-v1")
+        self.assertEqual(manifest["input_pair_count"], "3")
+        self.assertEqual(manifest["input.000.role"], "warmup")
+        self.assertEqual(manifest["input.000.trial_index"], "")
+        self.assertEqual(manifest["input.001.role"], "measured")
+        self.assertEqual(manifest["input.001.trial_index"], "0")
+        self.assertEqual(manifest["input.002.role"], "measured")
+        self.assertEqual(manifest["input.002.trial_index"], "1")
+        self.assertNotIn("input.003.role", manifest)
+
+        hash_re = re.compile(r"^[0-9a-f]{64}$")
+        all_hashes = []
+        for index in ("000", "001", "002"):
+            a = manifest[f"input.{index}.a_sha256"]
+            b = manifest[f"input.{index}.b_sha256"]
+            self.assertRegex(a, hash_re)
+            self.assertRegex(b, hash_re)
+            all_hashes.extend([a, b])
+        # Every trial (including the warmup) freshly re-encrypts under BFV's
+        # randomized encryption, so all six hashes must be pairwise distinct.
+        self.assertEqual(len(set(all_hashes)), len(all_hashes))
+
+    def test_prefix_workload_sha_equals_manifest_sha(self):
+        _, csv_path, manifest_path = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST)
+        expected_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["workload_manifest_sha256"], expected_sha)
+
+    def test_median_pair_selection(self):
+        expected_pair_id = expected_median_pair(self.fixture_dir)
+        _, csv_path, _ = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST)
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["pair_id"], expected_pair_id)
+
+    def test_timing_root_seed_sensitivity(self):
+        _, csv_a, _ = self.run_timing(
+            dataset_manifest=QUICK_FIXTURE_MANIFEST, seed=7, suffix="-seed7")
+        _, csv_b, _ = self.run_timing(
+            dataset_manifest=QUICK_FIXTURE_MANIFEST, seed=8, suffix="-seed8")
+        with csv_a.open(newline="", encoding="utf-8") as handle:
+            hash_a = list(csv.DictReader(handle))[0]["hash_seed"]
+        with csv_b.open(newline="", encoding="utf-8") as handle:
+            hash_b = list(csv.DictReader(handle))[0]["hash_seed"]
+        self.assertNotEqual(hash_a, hash_b)
+
+    def test_hash_seed_matches_independent_recomputation(self):
+        _, csv_path, _ = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST, seed=7)
+        dataset_manifest_sha256_raw = hashlib.sha256(
+            QUICK_FIXTURE_MANIFEST.read_bytes()).digest()
+        expected = derive_timing_hash_seed(
+            7, dataset_manifest_sha256_raw, 16, 16, "toy-smoke")
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(int(row["hash_seed"]), expected)
+
+    def test_missing_output_flags_are_rejected(self):
+        csv_path = self.out_dir / "timing.csv"
         completed = subprocess.run(
             [
                 str(BINARY),
                 f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
                 "--mode=timing",
+                "--profile=toy-smoke", "--k=16", "--m=16", "--trials=1",
+                "--timing-pair=median", "--seed=7",
+                f"--csv={csv_path}",
+                # --workload-manifest-out omitted.
             ],
             check=False,
             capture_output=True,
@@ -319,7 +531,16 @@ class RealDatasetPipelineAccuracyTest(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, "")
-        self.assertIn("not implemented", completed.stderr.lower())
+        self.assertFalse(csv_path.exists())
+
+    def test_measurement_kind_is_fhe_timing(self):
+        _, csv_path, _ = self.run_timing(dataset_manifest=QUICK_FIXTURE_MANIFEST)
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["measurement_kind"], "fhe-timing")
+            self.assertEqual(row["profile_id"], "toy-smoke")
 
 
 class DriverIncludeAllowlistTest(unittest.TestCase):

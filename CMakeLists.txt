@@ -567,6 +567,31 @@ if(BUILD_TESTS)
             target_link_libraries(test_sqrt_piccard piccard_fhe test_main)
             add_test(NAME SqrtPiccard COMMAND test_sqrt_piccard)
 
+            # Work 5 Sub-phase 5.4: TOY plaintext-vs-FHE equality and the
+            # STD192-never-falls-back-to-STD128 resolver-level regression.
+            # Kept out of test_real_dataset_metrics (OpenFHE-free) because
+            # this target links piccard_fhe.
+            add_executable(
+                test_real_dataset_timing
+                tests/unit/test_real_dataset_timing.cpp
+            )
+            target_link_libraries(
+                test_real_dataset_timing
+                piccard_fhe
+                piccard_data
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_real_dataset_timing
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_real_dataset_timing
+                PRIVATE PICCARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+            )
+            add_test(NAME RealDatasetTiming COMMAND test_real_dataset_timing)
+
             # Work 2 Phase 3: compile the production params adapter against a
             # toy requested-8192 / realized-16384 calibration fixture. This
             # target intentionally does not link piccard_core or piccard_fhe,
@@ -844,13 +869,25 @@ if(BUILD_BENCHMARKS)
     # processed datasets. No OpenFHE dependency -- built unconditionally,
     # like bench_estimator_bias above -- because benchmarks/
     # real_accuracy_driver.cpp is deliberately FHE-header-free [FA2][FA9]
-    # (see that file's top comment). --mode=timing (Sub-phase 5.4) will add
-    # an OpenFHE-dependent code path inside bench_real_datasets.cpp itself
-    # without touching this target's unconditional build gating.
+    # (see that file's top comment).
+    #
+    # Work 5 Sub-phase 5.4 adds --mode=timing behind
+    # benchmarks/real_timing_driver.h's plain-typed interface. That header
+    # has no OpenFHE dependency either, so bench_real_datasets.cpp keeps
+    # building unconditionally; only the *implementation* TU differs by
+    # configuration, selected here rather than by a preprocessor branch:
+    # real_timing_driver.cpp (live BFV context) when OpenFHE is available,
+    # real_timing_driver_stub.cpp (fails closed at runtime) otherwise.
+    if(OpenFHE_FOUND AND HAVE_PICCARD_FHE)
+        set(REAL_TIMING_DRIVER_SOURCE benchmarks/real_timing_driver.cpp)
+    else()
+        set(REAL_TIMING_DRIVER_SOURCE benchmarks/real_timing_driver_stub.cpp)
+    endif()
     add_executable(
         bench_real_datasets
         benchmarks/bench_real_datasets.cpp
         benchmarks/real_accuracy_driver.cpp
+        ${REAL_TIMING_DRIVER_SOURCE}
     )
     target_link_libraries(
         bench_real_datasets
@@ -859,6 +896,9 @@ if(BUILD_BENCHMARKS)
         piccard_real_dataset_csv_schema
         OpenSSL::Crypto
     )
+    if(OpenFHE_FOUND AND HAVE_PICCARD_FHE)
+        target_link_libraries(bench_real_datasets piccard_fhe)
+    endif()
     target_include_directories(
         bench_real_datasets
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks

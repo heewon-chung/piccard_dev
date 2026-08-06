@@ -1,10 +1,16 @@
 // CLI entry point + mode dispatch for the real-dataset accuracy/timing
-// benchmark (Work 5, master Tasks 7-8). This TU is free to include
-// OpenFHE/BFV headers (needed by --mode=timing, Sub-phase 5.4); the
-// KeyGen-free contract instead binds benchmarks/real_accuracy_driver.cpp,
-// which this file dispatches to for --mode=accuracy before any FHE code
-// path exists.
+// benchmark (Work 5, master Tasks 7-8). This TU stays FHE-header-free like
+// the accuracy driver it dispatches to: --mode=timing (Sub-phase 5.4) does
+// need a live BFV context, but that code lives entirely behind
+// real_timing_driver.h's plain-typed interface, in a separate translation
+// unit (benchmarks/real_timing_driver.cpp, or its OpenFHE-free stand-in
+// benchmarks/real_timing_driver_stub.cpp -- CMakeLists.txt selects which one
+// to compile in) so this file never needs to include an OpenFHE header
+// itself. The KeyGen-free contract for --mode=accuracy still binds
+// benchmarks/real_accuracy_driver.cpp, which this file dispatches to before
+// any FHE code path exists.
 #include "real_accuracy_driver.h"
+#include "real_timing_driver.h"
 
 #include <cstdint>
 #include <iostream>
@@ -15,7 +21,9 @@
 namespace {
 
 using piccard::bench::RealAccuracyCliArgs;
+using piccard::bench::RealTimingCliArgs;
 using piccard::bench::RunRealAccuracyMode;
+using piccard::bench::RunRealTimingMode;
 
 void PrintUsage(std::ostream& out) {
     out << "usage:\n"
@@ -24,8 +32,10 @@ void PrintUsage(std::ostream& out) {
            "      --accuracy_trials=<uint32> --seed=<uint64>\n"
            "      --hash_randomness=<name> --csv=<path>\n"
            "      --workload-manifest-out=<path> --workload-rows-out=<path>\n"
-           "  bench_real_datasets --dataset-manifest=<path> --mode=timing ...\n"
-           "      (not implemented yet)\n";
+           "  bench_real_datasets --dataset-manifest=<path> --mode=timing\n"
+           "      --profile=<id> --k=<uint32> --m=<uint32> --trials=<uint32>\n"
+           "      --timing-pair=median --seed=<uint64> --csv=<path>\n"
+           "      --workload-manifest-out=<path>\n";
 }
 
 uint64_t ParseUint64Option(const std::string& text, const std::string& option_name) {
@@ -144,6 +154,76 @@ RealAccuracyCliArgs ParseAccuracyArguments(int argc, char** argv) {
     return args;
 }
 
+RealTimingCliArgs ParseTimingArguments(int argc, char** argv) {
+    RealTimingCliArgs args;
+    bool saw_dataset_manifest = false;
+    bool saw_profile = false;
+    bool saw_k = false;
+    bool saw_m = false;
+    bool saw_trials = false;
+    bool saw_timing_pair = false;
+    bool saw_seed = false;
+    bool saw_csv = false;
+    bool saw_workload_manifest_out = false;
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        const size_t equals = argument.find('=');
+        if (equals == std::string::npos || equals == 0 || equals + 1 == argument.size()) {
+            throw std::invalid_argument("invalid argument: " + argument);
+        }
+        const std::string option = argument.substr(0, equals);
+        const std::string value = argument.substr(equals + 1);
+
+        if (option == "--mode") {
+            continue;  // already dispatched on in main()
+        } else if (option == "--dataset-manifest") {
+            args.dataset_manifest_path = value;
+            saw_dataset_manifest = true;
+        } else if (option == "--profile") {
+            args.profile_id = value;
+            saw_profile = true;
+        } else if (option == "--k") {
+            args.k = ParseUint32Option(value, option);
+            saw_k = true;
+        } else if (option == "--m") {
+            args.m = ParseUint32Option(value, option);
+            saw_m = true;
+        } else if (option == "--trials") {
+            args.trials = ParseUint32Option(value, option);
+            saw_trials = true;
+        } else if (option == "--timing-pair") {
+            args.timing_pair = value;
+            saw_timing_pair = true;
+        } else if (option == "--seed") {
+            args.root_seed = ParseUint64Option(value, option);
+            saw_seed = true;
+        } else if (option == "--csv") {
+            args.csv_path = value;
+            saw_csv = true;
+        } else if (option == "--workload-manifest-out") {
+            args.workload_manifest_out_path = value;
+            saw_workload_manifest_out = true;
+        } else {
+            throw std::invalid_argument("unknown option: " + option);
+        }
+    }
+
+    if (!saw_dataset_manifest || !saw_profile || !saw_k || !saw_m ||
+        !saw_trials || !saw_timing_pair || !saw_seed || !saw_csv ||
+        !saw_workload_manifest_out) {
+        throw std::invalid_argument(
+            "--mode=timing requires --dataset-manifest, --profile, --k, --m, "
+            "--trials, --timing-pair, --seed, --csv, and "
+            "--workload-manifest-out (all mandatory, no defaults)");
+    }
+    if (args.timing_pair != "median") {
+        throw std::invalid_argument(
+            "--timing-pair only supports 'median'");
+    }
+    return args;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -154,9 +234,8 @@ int main(int argc, char** argv) {
             return RunRealAccuracyMode(args);
         }
         if (mode == "timing") {
-            std::cerr << "bench_real_datasets: --mode=timing is not implemented yet\n";
-            PrintUsage(std::cerr);
-            return 1;
+            const RealTimingCliArgs args = ParseTimingArguments(argc, argv);
+            return RunRealTimingMode(args);
         }
         throw std::invalid_argument("unknown --mode: " + mode);
     } catch (const std::exception& error) {
