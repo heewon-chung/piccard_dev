@@ -420,7 +420,13 @@ std::string SerializeDynamicHeader() {
         "sanitizer_assurance,estimator_model,profile_id,run_class,"
         "target_security_bits,comparison_eligible,measurement_kind,"
         "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
-        "openfhe_version\n";
+        "openfhe_version,dynamic_scenario,refresh_owner_set_id,"
+        "refresh_updates,refresh_epoch_before,refresh_epoch_after,"
+        "refresh_status,phase_refresh_update_ms,phase_refresh_signature_ms,"
+        "phase_refresh_encode_ms,phase_refresh_encrypt_ms,"
+        "phase_refresh_serialize_ms,phase_cloud_replace_ms,refresh_total_ms,"
+        "refresh_upload_bytes,refresh_ciphertexts_uploaded,"
+        "refresh_context_fingerprint,refresh_public_key_fingerprint\n";
 }
 
 std::string SerializeDynamicRow(
@@ -468,6 +474,38 @@ std::string SerializeDynamicRow(
     out << "," << estimator_model;
     WriteBenchmarkProfileFields(out, r.profile);
     WriteBenchmarkProvenanceFields(out, provenance);
+    out << "," << r.dynamic_scenario << ",";
+    WriteOptional(out, r.refresh_owner_set_id);
+    out << ",";
+    WriteOptional(out, r.refresh_updates);
+    out << ",";
+    WriteOptional(out, r.refresh_epoch_before);
+    out << ",";
+    WriteOptional(out, r.refresh_epoch_after);
+    out << ",";
+    WriteOptional(out, r.refresh_status);
+    out << "," << std::fixed << std::setprecision(3);
+    WriteOptional(out, r.phase_refresh_update_ms);
+    out << ",";
+    WriteOptional(out, r.phase_refresh_signature_ms);
+    out << ",";
+    WriteOptional(out, r.phase_refresh_encode_ms);
+    out << ",";
+    WriteOptional(out, r.phase_refresh_encrypt_ms);
+    out << ",";
+    WriteOptional(out, r.phase_refresh_serialize_ms);
+    out << ",";
+    WriteOptional(out, r.phase_cloud_replace_ms);
+    out << ",";
+    WriteOptional(out, r.refresh_total_ms);
+    out << ",";
+    WriteOptional(out, r.refresh_upload_bytes);
+    out << ",";
+    WriteOptional(out, r.refresh_ciphertexts_uploaded);
+    out << ",";
+    WriteOptional(out, r.refresh_context_fingerprint);
+    out << ",";
+    WriteOptional(out, r.refresh_public_key_fingerprint);
     out << "\n";
     return out.str();
 }

@@ -245,6 +245,9 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
     row.sanitizer = ApplicableMetadata();
     row.provenance = ApplicableProvenance();
 
+    std::string expected_dynamic_provenance = StandardProvenanceSuffix();
+    expected_dynamic_provenance.pop_back();
+
     const std::string expected_header =
         "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
         "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
@@ -264,7 +267,13 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "sanitizer_model,sanitizer_assurance,estimator_model,profile_id,"
         "run_class,target_security_bits,comparison_eligible,measurement_kind,"
         "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
-        "openfhe_version\n";
+        "openfhe_version,dynamic_scenario,refresh_owner_set_id,"
+        "refresh_updates,refresh_epoch_before,refresh_epoch_after,"
+        "refresh_status,phase_refresh_update_ms,phase_refresh_signature_ms,"
+        "phase_refresh_encode_ms,phase_refresh_encrypt_ms,"
+        "phase_refresh_serialize_ms,phase_cloud_replace_ms,refresh_total_ms,"
+        "refresh_upload_bytes,refresh_ciphertexts_uploaded,"
+        "refresh_context_fingerprint,refresh_public_key_fingerprint\n";
     const std::string expected_row =
         "dynamic,128,64,0,0,0,"
         "0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0.000,0,0,"
@@ -275,7 +284,7 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
         "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic" +
-        StandardProvenanceSuffix();
+        expected_dynamic_provenance + ",legacy,,,,,,,,,,,,,,,,\n";
 
     ExpectGoldenCsv(SerializeDynamicHeader(),
                     SerializeDynamicRow(row, row.provenance),

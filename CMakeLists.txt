@@ -750,6 +750,18 @@ if(BUILD_TESTS)
             )
 
             add_executable(
+                test_dynamic_refresh_benchmark
+                tests/unit/test_dynamic_refresh_benchmark.cpp
+                benchmarks/dynamic_refresh_benchmark.cpp
+            )
+            target_include_directories(test_dynamic_refresh_benchmark PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+            target_link_libraries(
+                test_dynamic_refresh_benchmark
+                piccard_fhe piccard_benchmark_serializers test_main
+            )
+            add_test(NAME DynamicRefreshBenchmark COMMAND test_dynamic_refresh_benchmark)
+
+            add_executable(
                 test_benchmark_profile
                 tests/unit/test_benchmark_profile.cpp
             )
@@ -1077,7 +1089,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         endif()
     endif()
 
-    add_executable(bench_dynamic benchmarks/bench_dynamic.cpp)
+    add_executable(
+        bench_dynamic
+        benchmarks/bench_dynamic.cpp
+        benchmarks/dynamic_refresh_benchmark.cpp
+    )
     target_link_libraries(
         bench_dynamic
         piccard_fhe

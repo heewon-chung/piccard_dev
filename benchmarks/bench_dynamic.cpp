@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "dynamic_refresh_benchmark.h"
 #include "protocol/dynamic_piccard.h"
 #include "core/bottom_structure.h"
 
@@ -718,21 +719,70 @@ int main(int argc, char** argv) {
 
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
 
-    // Parse --depth flag (not in BenchmarkConfig)
+    // Parse dynamic-only flags before rejecting unknown benchmark options.
     uint32_t depth = 5;
+    std::string scenario = "legacy";
+    bool saw_refresh_updates = false;
+    uint64_t refresh_updates = 0;
     for (int i = 1; i < argc; i++) {
         std::string arg(argv[i]);
         if (arg.find("--depth=") == 0) {
             depth = static_cast<uint32_t>(std::stoul(arg.substr(8)));
+        } else if (arg.find("--scenario=") == 0) {
+            scenario = arg.substr(11);
+            if (scenario != "legacy" && scenario != "refresh") {
+                throw std::invalid_argument("Invalid scenario: " + scenario);
+            }
+        } else if (arg.find("--refresh_updates=") == 0) {
+            if (saw_refresh_updates) {
+                throw std::invalid_argument("Duplicate --refresh_updates");
+            }
+            saw_refresh_updates = true;
+            refresh_updates = std::stoull(arg.substr(18));
         }
     }
-    RejectUnknownBenchmarkOptions(argc, argv, {"--depth="});
+    RejectUnknownBenchmarkOptions(
+        argc, argv, {"--depth=", "--scenario=", "--refresh_updates="});
 
     config.Print();
     std::cerr << "  Depth:     " << depth << "\n";
 
     DynamicCSVWriter csv;
     csv.WriteHeader();
+
+    if (scenario == "refresh") {
+        if (config.profile.id != "toy-smoke" ||
+            config.security_level != SecurityLevel::TOY ||
+            config.mode != "timing" || !config.evidence_point ||
+            config.trials != 1 || !saw_refresh_updates || refresh_updates == 0) {
+            throw std::invalid_argument(
+                "refresh requires --profile=toy-smoke, --security=TOY, "
+                "--mode=timing, --evidence_point, --trials=1, and "
+                "--refresh_updates>0");
+        }
+        PiccardParams params;
+        params.k = config.k;
+        params.m = config.m;
+        params.bottom_depth = depth;
+        params.security = config.security_level;
+        params.hash_seed = config.seed;
+        ApplyBenchmarkProfile(config, params);
+        params.Validate();
+        DynamicPiccard engine(params);
+        engine.KeyGen();
+        const double intersection_fraction =
+            IntersectionFractionForJaccard(config.target_jaccard);
+        auto [set_a, set_b] = MakeSetsWithOverlap(
+            config.set_size, intersection_fraction);
+        auto row = RunSingleOwnerRefresh(
+            engine, set_a, set_b, depth, refresh_updates);
+        ApplyBenchmarkProfile(config, row, BenchmarkMeasurementKind::FheTiming);
+        csv.WriteRow(row);
+        return 0;
+    }
+    if (saw_refresh_updates) {
+        throw std::invalid_argument("--refresh_updates requires --scenario=refresh");
+    }
 
     if (config.profile.run_class != BenchmarkRunClass::Legacy) {
         RunProfileGrid(config, depth, csv);

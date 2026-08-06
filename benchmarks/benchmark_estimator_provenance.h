@@ -208,6 +208,24 @@ struct DynamicResult {
     std::optional<EstimatorModel> estimator_model;
     SanitizerMetadata sanitizer;
     BenchmarkProvenance provenance;
+
+    std::string dynamic_scenario = "legacy";
+    std::optional<std::string> refresh_owner_set_id;
+    std::optional<uint64_t> refresh_updates;
+    std::optional<uint64_t> refresh_epoch_before;
+    std::optional<uint64_t> refresh_epoch_after;
+    std::optional<std::string> refresh_status;
+    std::optional<double> phase_refresh_update_ms;
+    std::optional<double> phase_refresh_signature_ms;
+    std::optional<double> phase_refresh_encode_ms;
+    std::optional<double> phase_refresh_encrypt_ms;
+    std::optional<double> phase_refresh_serialize_ms;
+    std::optional<double> phase_cloud_replace_ms;
+    std::optional<double> refresh_total_ms;
+    std::optional<size_t> refresh_upload_bytes;
+    std::optional<uint32_t> refresh_ciphertexts_uploaded;
+    std::optional<std::string> refresh_context_fingerprint;
+    std::optional<std::string> refresh_public_key_fingerprint;
 };
 
 /**
