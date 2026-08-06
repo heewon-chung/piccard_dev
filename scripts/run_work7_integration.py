@@ -197,6 +197,15 @@ def load_json(path: Path, label: str) -> dict:
     return value
 
 
+def sealed_file(root: Path, relative: object, digest: object, label: str) -> Path:
+    if not isinstance(relative, str) or not isinstance(digest, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        raise Failure(f"invalid {label} path")
+    try: candidate=(root/relative).resolve(strict=True); candidate.relative_to(root.resolve())
+    except (OSError, ValueError): raise Failure(f"invalid {label} path") from None
+    if not candidate.is_file() or sha256_file(candidate)!=digest: raise Failure(f"invalid {label} digest")
+    return candidate
+
+
 def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> Path:
     path = root / "manifest.json"; value = load_json(path, "pre-threshold manifest")
     if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1:
@@ -206,8 +215,11 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> 
     cells = value.get("cells")
     if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
         raise Failure("invalid pre-threshold cells")
+    expected={"bench_review_comparison": {"--trials=1","--accuracy-trials=1","--seed=7"}, "bench_piccard":{"--trials=1","--seed=7"}, "bench_dynamic":{"--scenario=refresh","--refresh_updates=1","--trials=1","--seed=7"}}
     for row in cells:
-        if row.get("status") != "MEASURED" or not isinstance(row.get("argv"), list) or "--seed=7" not in row["argv"] or any(str(x) not in ("--trials=1", "--refresh_updates=1") for x in row["argv"] if str(x).startswith("--trials=") or str(x).startswith("--refresh_updates=")):
+        argv=row.get("argv")
+        sampling=[x for x in argv if isinstance(x,str) and (x.startswith("--trials=") or x.startswith("--accuracy-trials=") or x.startswith("--refresh_updates="))] if isinstance(argv,list) else []
+        if row.get("status") != "MEASURED" or not isinstance(argv,list) or set(argv[1:]) != expected[row["producer"]] or len(sampling) != len(set(sampling)):
             raise Failure("pre-threshold row/argv mismatch")
     terminal=value.get("terminal_cells")
     if not isinstance(terminal,dict) or set(terminal)!={"path","row_count","sha256"} or terminal["path"]!="terminal-cells.tsv" or terminal["row_count"]!=3:
@@ -219,8 +231,10 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> 
         output=row.get("output", {})
         if not isinstance(output,dict): raise Failure("missing pre-threshold output")
         for key, relative in output.items():
-            if key.endswith("_sha256") or key in {"expected_csv_rows","csv_row_count"}: continue
-            if not isinstance(relative,str) or Path(relative).is_absolute() or (root/relative).resolve().parent == root.parent or not (root/relative).is_file(): raise Failure("invalid pre-threshold artifact path")
+            if key.endswith("_sha256") or key in {"expected_csv_rows","csv_row_count","measurement_output"}: continue
+            digest_key=key+"_sha256"
+            if digest_key not in output: raise Failure("missing pre-threshold artifact digest")
+            sealed_file(root, relative, output[digest_key], "pre-threshold artifact")
     return path
 
 
@@ -244,19 +258,18 @@ def validate_real(root: Path, commit: str, build: Path) -> Path:
     for number in range(int(artifact_count)):
         prefix=f"artifact.{number:03d}."; expected_keys |= {prefix+"role",prefix+"path",prefix+"sha256"}
         relative=value.get(prefix+"path"); digest=value.get(prefix+"sha256")
-        candidate=root/(relative or "")
-        if not relative or Path(relative).is_absolute() or not candidate.is_file() or sha256_file(candidate)!=digest: raise Failure("invalid real-data artifact binding")
+        sealed_file(root, relative, digest, "real-data artifact")
     if any(key.startswith("artifact.") and key not in expected_keys for key in value): raise Failure("extra real-data artifact entry")
     for number in range(3):
         prefix=f"cell.{number:03d}."
         if value.get(prefix+"status") != "complete" or value.get(prefix+"argv_count") in (None,"0") or value.get(prefix+"argv.000") is None or value.get(prefix+"output_count") in (None,"0"): raise Failure("invalid real-data cell")
-        args=[item for key,item in value.items() if key.startswith(prefix+"argv.")]
-        if not any(item in ("--timing-trials=1", "--accuracy-trials=1", "--trials=1") for item in args): raise Failure("real-data argv/count mismatch")
+        args=[value[prefix+f"argv.{i:03d}"] for i in range(int(value[prefix+"argv_count"]))]
+        expected={"dblp_acm_u65536:accuracy":["bench_real_datasets","--accuracy_trials=1"],"dblp_acm_u65536:accuracy-summary":["summarize_real_datasets.py"],"dblp_acm_u65536:timing:toy-smoke":["bench_real_datasets","--trials=1"]}
+        if value.get(prefix+"id") not in expected or args != expected[value[prefix+"id"]]: raise Failure("real-data argv/count mismatch")
         count=int(value[prefix+"output_count"])
         for index in range(count):
             out=f"{prefix}output.{index:03d}."; relative=value.get(out+"path"); digest=value.get(out+"sha256")
-            candidate=root/(relative or "")
-            if not relative or Path(relative).is_absolute() or not candidate.is_file() or sha256_file(candidate)!=digest: raise Failure("invalid real-data output binding")
+            sealed_file(root, relative, digest, "real-data output")
     status = read_tsv(root / "verification_status.tsv")
     if status != {"schema_version":"piccard-real-verification-v1", "run_metadata_sha256":sha256_file(metadata), "status":"VERIFIED"}: raise Failure("stale real-data verification status")
     return metadata
