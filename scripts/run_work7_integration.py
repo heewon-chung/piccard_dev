@@ -209,7 +209,18 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> 
     for row in cells:
         if row.get("status") != "MEASURED" or not isinstance(row.get("argv"), list) or "--seed=7" not in row["argv"] or any(str(x) not in ("--trials=1", "--refresh_updates=1") for x in row["argv"] if str(x).startswith("--trials=") or str(x).startswith("--refresh_updates=")):
             raise Failure("pre-threshold row/argv mismatch")
-    if not isinstance(value.get("terminal_cells"), dict): raise Failure("missing pre-threshold terminal cells")
+    terminal=value.get("terminal_cells")
+    if not isinstance(terminal,dict) or set(terminal)!={"path","row_count","sha256"} or terminal["path"]!="terminal-cells.tsv" or terminal["row_count"]!=3:
+        raise Failure("missing pre-threshold terminal cells")
+    terminal_path=root/terminal["path"]
+    if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(terminal_path.read_text(encoding="utf-8").splitlines())!=4:
+        raise Failure("invalid pre-threshold terminal cells")
+    for row in cells:
+        output=row.get("output", {})
+        if not isinstance(output,dict): raise Failure("missing pre-threshold output")
+        for key, relative in output.items():
+            if key.endswith("_sha256") or key in {"expected_csv_rows","csv_row_count"}: continue
+            if not isinstance(relative,str) or Path(relative).is_absolute() or (root/relative).resolve().parent == root.parent or not (root/relative).is_file(): raise Failure("invalid pre-threshold artifact path")
     return path
 
 
@@ -227,11 +238,25 @@ def validate_real(root: Path, commit: str, build: Path) -> Path:
     metadata = root / "run_metadata.tsv"; value = read_tsv(metadata)
     if value.get("schema_version") != "piccard-real-run-v1" or value.get("evidence_mode") != "quick" or value.get("source_commit") != commit or value.get("git_dirty") != "false" or value.get("build_type") != "Release" or value.get("cell_count") != "3":
         raise Failure("invalid real-data metadata")
+    artifact_count=value.get("artifact_count")
+    if artifact_count is None or not artifact_count.isdigit(): raise Failure("invalid real-data artifact count")
+    expected_keys=set()
+    for number in range(int(artifact_count)):
+        prefix=f"artifact.{number:03d}."; expected_keys |= {prefix+"role",prefix+"path",prefix+"sha256"}
+        relative=value.get(prefix+"path"); digest=value.get(prefix+"sha256")
+        candidate=root/(relative or "")
+        if not relative or Path(relative).is_absolute() or not candidate.is_file() or sha256_file(candidate)!=digest: raise Failure("invalid real-data artifact binding")
+    if any(key.startswith("artifact.") and key not in expected_keys for key in value): raise Failure("extra real-data artifact entry")
     for number in range(3):
         prefix=f"cell.{number:03d}."
-        if value.get(prefix+"status") != "complete" or value.get(prefix+"argv_count") in (None,"0") or value.get(prefix+"argv.000") is None: raise Failure("invalid real-data cell")
+        if value.get(prefix+"status") != "complete" or value.get(prefix+"argv_count") in (None,"0") or value.get(prefix+"argv.000") is None or value.get(prefix+"output_count") in (None,"0"): raise Failure("invalid real-data cell")
         args=[item for key,item in value.items() if key.startswith(prefix+"argv.")]
         if not any(item in ("--timing-trials=1", "--accuracy-trials=1", "--trials=1") for item in args): raise Failure("real-data argv/count mismatch")
+        count=int(value[prefix+"output_count"])
+        for index in range(count):
+            out=f"{prefix}output.{index:03d}."; relative=value.get(out+"path"); digest=value.get(out+"sha256")
+            candidate=root/(relative or "")
+            if not relative or Path(relative).is_absolute() or not candidate.is_file() or sha256_file(candidate)!=digest: raise Failure("invalid real-data output binding")
     status = read_tsv(root / "verification_status.tsv")
     if status != {"schema_version":"piccard-real-verification-v1", "run_metadata_sha256":sha256_file(metadata), "status":"VERIFIED"}: raise Failure("stale real-data verification status")
     return metadata

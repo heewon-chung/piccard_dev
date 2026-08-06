@@ -106,15 +106,21 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             elif os.environ.get('FAKE_FAULT') == 'unlabelled': (root/'timing.csv').write_text('warmup,trials\\nmaybe,1\\n')
             elif os.environ.get('FAKE_FAULT') == 'actual': (root/'actual-data.csv').write_text('trials\\n1\\n')
             else: (root/'timing.csv').write_text('trials,warmup\\n1,discarded\\n')
-            cells=[{'producer':'bench_review_comparison','status':'MEASURED','argv':['bench_review_comparison','--trials=1','--seed=7']},{'producer':'bench_piccard','status':'MEASURED','argv':['bench_piccard','--trials=1','--seed=7']},{'producer':'bench_dynamic','status':'MEASURED','argv':['bench_dynamic','--trials=1','--refresh_updates=1','--seed=7']}]
-            (root/'manifest.json').write_text(json.dumps({'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False},'thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'cells':cells,'terminal_cells':{}}))
+            import hashlib
+            cells=[]
+            for name,args in [('bench_review_comparison',['--trials=1','--seed=7']),('bench_piccard',['--trials=1','--seed=7']),('bench_dynamic',['--trials=1','--refresh_updates=1','--seed=7'])]:
+                p=root/(name+'.csv'); p.write_text('trials\\n1\\n'); cells.append({'producer':name,'status':'MEASURED','argv':[name,*args],'output':{'csv':p.name}})
+            terminal='schema\\nrow\\nrow\\nrow\\n'; (root/'terminal-cells.tsv').write_text(terminal)
+            (root/'manifest.json').write_text(json.dumps({'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False},'thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'cells':cells,'terminal_cells':{'path':'terminal-cells.tsv','row_count':3,'sha256':hashlib.sha256(terminal.encode()).hexdigest()}}))
         """)
         self.write(scripts / "run_real_datasets.sh", """
             #!/usr/bin/env python3
             import os, pathlib, sys
             root=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--results-root='))); root.mkdir(parents=True)
-            rows=[('schema_version','piccard-real-run-v1'),('evidence_mode','quick'),('source_commit',os.environ['FAKE_COMMIT']),('git_dirty','false'),('build_type','Release'),('cell_count','3')]
-            for i in range(3): rows += [(f'cell.{i:03d}.status','complete'),(f'cell.{i:03d}.argv_count','2'),(f'cell.{i:03d}.argv.000','bench_real_datasets'),(f'cell.{i:03d}.argv.001','--trials=1')]
+            import hashlib
+            artifact=root/'artifact.txt'; artifact.write_text('artifact'); output=root/'output.csv'; output.write_text('trials\\n1\\n'); h=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+            rows=[('schema_version','piccard-real-run-v1'),('evidence_mode','quick'),('source_commit',os.environ['FAKE_COMMIT']),('git_dirty','false'),('build_type','Release'),('artifact_count','1'),('artifact.000.role','fake'),('artifact.000.path','artifact.txt'),('artifact.000.sha256',h(artifact)),('cell_count','3')]
+            for i in range(3): rows += [(f'cell.{i:03d}.status','complete'),(f'cell.{i:03d}.argv_count','2'),(f'cell.{i:03d}.argv.000','bench_real_datasets'),(f'cell.{i:03d}.argv.001','--trials=1'),(f'cell.{i:03d}.output_count','1'),(f'cell.{i:03d}.output.000.path','output.csv'),(f'cell.{i:03d}.output.000.sha256',h(output))]
             root.joinpath('run_metadata.tsv').write_text('key\\tvalue\\n' + ''.join(k+'\\t'+v+'\\n' for k,v in rows))
             if os.environ.get('FAKE_FAULT') == 'drift': pathlib.Path(os.environ['FAKE_PAPER']).joinpath('tracked').write_text('changed\\n')
             if os.environ.get('FAKE_FAULT') == 'threshold-drift': pathlib.Path(os.environ['FAKE_THRESHOLD']).joinpath('tracked').write_text('changed\\n')
