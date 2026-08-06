@@ -843,6 +843,15 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_real_dataset_preprocess
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # Work 5 Phase 6: runner + fail-fast verifier for the real-dataset
+    # benchmark matrix. Hermetic against a fake bench_real_datasets (never
+    # builds/links OpenFHE), so it is registered here unconditionally
+    # alongside the other pure-Python suites rather than inside the
+    # bench_real_datasets BUILD_BENCHMARKS block below.
+    add_test(NAME RunRealDatasets
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_real_datasets
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
