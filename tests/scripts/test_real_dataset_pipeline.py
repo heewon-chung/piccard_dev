@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
 import io
 import re
 import subprocess
@@ -33,6 +34,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 BINARY = REPO / "build" / "bench_real_datasets"
 DRIVER_SOURCE = REPO / "benchmarks" / "real_accuracy_driver.cpp"
+SUMMARIZE_SCRIPT = REPO / "scripts" / "summarize_real_datasets.py"
 QUICK_FIXTURE_MANIFEST = (
     REPO / "tests" / "fixtures" / "real_datasets" / "quick" / "dblp_acm_u65536"
     / "dataset.manifest.tsv"
@@ -79,6 +81,16 @@ _TIMING_SUFFIX = (
     "download_bytes"
 )
 EXPECTED_TIMING_HEADER_LF = _PREFIX_HEADER + "," + _TIMING_SUFFIX + "\n"
+
+# Sub-phase 5.5 (scripts/summarize_real_datasets.py) -- pasted byte-for-byte
+# from normative plan §Phase 5 "The exact summary header is:", independently
+# of the script under test.
+SUMMARY_HEADER_LF = (
+    "dataset,variant,jaccard_bucket,n,mae,sample_sd,median,p95,max,"
+    "ci95_low,ci95_high\n"
+)
+_BUCKET_ORDER = ("b00_10", "b10_30", "b30_60", "b60_100")
+_ACCURACY_HEADER_FIELDS = EXPECTED_ACCURACY_HEADER_LF.strip("\n").split(",")
 
 _ACCURACY_HASH_DOMAIN = b"piccard-real-crs-v1"
 _TIMING_HASH_DOMAIN = b"piccard-real-timing-crs-v1"
@@ -235,6 +247,32 @@ def parse_two_column_tsv(path: Path) -> dict:
         assert key not in values, f"duplicate manifest key: {key!r}"
         values[key] = value
     return values
+
+
+def load_summarizer_module():
+    """Loads scripts/summarize_real_datasets.py by file path (mirroring
+    load_module() in tests/scripts/test_real_dataset_preprocess.py), for
+    tests that check module-level attributes directly rather than through
+    the CLI subprocess boundary."""
+    spec = importlib.util.spec_from_file_location(
+        "summarize_real_datasets", SUMMARIZE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_accuracy_csv(path: Path, rows) -> None:
+    """Writes a synthetic accuracy CSV matching EXPECTED_ACCURACY_HEADER_LF's
+    exact 73-column shape. `rows` is a list of dicts; any of the header's
+    columns not present in a given dict default to the empty-field N/A
+    sentinel. summarize_real_datasets.py only reads dataset/variant/
+    exact_jaccard_bucketed/abs_error, so the untouched columns' placeholder
+    content never affects the tests built on this helper."""
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(_ACCURACY_HEADER_FIELDS)
+        for row in rows:
+            writer.writerow([row.get(name, "") for name in _ACCURACY_HEADER_FIELDS])
 
 
 class RealDatasetPipelineAccuracyTest(unittest.TestCase):
@@ -541,6 +579,325 @@ class RealDatasetPipelineTimingTest(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["measurement_kind"], "fhe-timing")
             self.assertEqual(row["profile_id"], "toy-smoke")
+
+
+class SummarizeRealDatasetsTest(unittest.TestCase):
+    """scripts/summarize_real_datasets.py (Work 5 Sub-phase 5.5): CLI
+    contract, bucket grouping/all-four-buckets emission, and statistics
+    identical to piccard::data::Summarize (Sub-phase 5.1), tested through
+    the real subprocess boundary (mandatory flags, exit codes, stdout
+    silence) exactly as the accuracy/timing modes are above.
+
+    Hermetic: every test writes its inputs/outputs under
+    tempfile.TemporaryDirectory(); none of them touch the real datasets/
+    tree or the network.
+    """
+
+    maxDiff = None
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out_dir = Path(self.temp.name)
+
+    def run_summarizer(self, input_path: Path, output_path: Path):
+        return subprocess.run(
+            [
+                sys.executable, str(SUMMARIZE_SCRIPT),
+                f"--input={input_path}",
+                f"--output={output_path}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def read_summary_rows(self, output_path: Path):
+        with output_path.open(newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+
+    def test_golden_summary_from_5_3_fixture_accuracy_run(self):
+        # Same TOY invocation as RealDatasetPipelineAccuracyTest above
+        # (k=16 m=16 max-pairs=2 accuracy_trials=1 seed=7), per the phase's
+        # benchmark execution policy.
+        require_binary()
+        accuracy_csv = self.out_dir / "accuracy.csv"
+        subprocess.run(
+            [
+                str(BINARY),
+                f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
+                "--mode=accuracy",
+                "--k=16", "--m=16", "--max-pairs=2", "--accuracy_trials=1",
+                "--seed=7", "--hash_randomness=resampled",
+                f"--csv={accuracy_csv}",
+                f"--workload-manifest-out={self.out_dir / 'wm.tsv'}",
+                f"--workload-rows-out={self.out_dir / 'wr.tsv'}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        with accuracy_csv.open(newline="", encoding="utf-8") as handle:
+            accuracy_rows = list(csv.DictReader(handle))
+        # Hand-verified against this fixture's actual output (independently
+        # of the summarizer under test): both pairs land in b00_10 with
+        # exact_jaccard_bucketed == abs_error == 0, so the summary's b00_10
+        # bucket has n=2 with every statistic equal to 0 and the other
+        # three buckets are empty (n=0).
+        self.assertEqual(len(accuracy_rows), 2)
+        for row in accuracy_rows:
+            self.assertEqual(row["jaccard_bucket"], "b00_10")
+            self.assertEqual(float(row["exact_jaccard_bucketed"]), 0.0)
+            self.assertEqual(float(row["abs_error"]), 0.0)
+
+        output_csv = self.out_dir / "summary.csv"
+        completed = self.run_summarizer(accuracy_csv, output_csv)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "")
+
+        content = output_csv.read_text(encoding="utf-8")
+        self.assertEqual(content.split("\n", 1)[0] + "\n", SUMMARY_HEADER_LF)
+
+        rows = self.read_summary_rows(output_csv)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([row["jaccard_bucket"] for row in rows], list(_BUCKET_ORDER))
+        by_bucket = {row["jaccard_bucket"]: row for row in rows}
+
+        golden = by_bucket["b00_10"]
+        self.assertEqual(golden["dataset"], "dblp_acm")
+        self.assertEqual(golden["variant"], "dblp_acm_u65536")
+        self.assertEqual(golden["n"], "2")
+        for field in ("mae", "sample_sd", "median", "p95", "max",
+                      "ci95_low", "ci95_high"):
+            self.assertEqual(golden[field], "0")
+
+        for bucket in ("b10_30", "b30_60", "b60_100"):
+            empty = by_bucket[bucket]
+            self.assertEqual(empty["n"], "0")
+            for field in ("mae", "sample_sd", "median", "p95", "max",
+                          "ci95_low", "ci95_high"):
+                self.assertEqual(empty[field], "")
+
+    def test_n0_n1_n2_bucket_cases(self):
+        # b10_30 n=1 mirrors SummarizeTest.SingleValueAllStatsEqualSoleValue
+        # (tests/unit/test_real_dataset_metrics.cpp); b30_60 n=2 mirrors
+        # SummarizeTest.GoldenTwoPairMedianIsMeanOfBothAndP95IsLargerNearestRank
+        # ({0.3, 0.1} unsorted); b00_10 and b60_100 stay at n=0.
+        rows = [
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.15", "abs_error": "0.25"},
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.35", "abs_error": "0.3"},
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.45", "abs_error": "0.1"},
+        ]
+        input_csv = self.out_dir / "accuracy_n012.csv"
+        _write_accuracy_csv(input_csv, rows)
+        output_csv = self.out_dir / "summary_n012.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        by_bucket = {row["jaccard_bucket"]: row
+                     for row in self.read_summary_rows(output_csv)}
+        self.assertEqual(set(by_bucket), set(_BUCKET_ORDER))
+
+        n0 = by_bucket["b00_10"]
+        self.assertEqual(n0["n"], "0")
+        for field in ("mae", "sample_sd", "median", "p95", "max",
+                      "ci95_low", "ci95_high"):
+            self.assertEqual(n0[field], "")
+
+        n1 = by_bucket["b10_30"]
+        self.assertEqual(n1["n"], "1")
+        self.assertEqual(n1["mae"], "0.25")
+        self.assertEqual(n1["median"], "0.25")
+        self.assertEqual(n1["p95"], "0.25")
+        self.assertEqual(n1["max"], "0.25")
+        self.assertEqual(n1["sample_sd"], "")
+        self.assertEqual(n1["ci95_low"], "")
+        self.assertEqual(n1["ci95_high"], "")
+
+        n2 = by_bucket["b30_60"]
+        self.assertEqual(n2["n"], "2")
+        self.assertAlmostEqual(float(n2["mae"]), 0.2, places=12)
+        self.assertAlmostEqual(float(n2["median"]), 0.2, places=12)
+        self.assertAlmostEqual(float(n2["p95"]), 0.3, places=12)
+        self.assertAlmostEqual(float(n2["max"]), 0.3, places=12)
+        self.assertAlmostEqual(float(n2["sample_sd"]), 0.02 ** 0.5, places=12)
+        self.assertAlmostEqual(float(n2["ci95_low"]), 0.2 - 0.196, places=9)
+        self.assertAlmostEqual(float(n2["ci95_high"]), 0.2 + 0.196, places=9)
+
+        n0_top = by_bucket["b60_100"]
+        self.assertEqual(n0_top["n"], "0")
+        self.assertEqual(n0_top["mae"], "")
+
+    def test_asymmetric_and_n20_vectors_mirror_5_1_gate_findings(self):
+        rows = []
+        # Mirrors SummarizeTest.AsymmetricOddVectorPinsMedianDistinctFromMean:
+        # sorted {0.1, 0.1, 0.7}; median (0.1) must differ from the mean (0.3).
+        for abs_error in (0.7, 0.1, 0.1):
+            rows.append({"dataset": "ds", "variant": "asym-odd",
+                         "exact_jaccard_bucketed": "0.05",
+                         "abs_error": repr(abs_error)})
+        # Mirrors
+        # SummarizeTest.AsymmetricEvenVectorPinsMeanOfTwoCentersDistinctFromMean:
+        # sorted {0.1, 0.1, 0.2, 0.8}; median (0.15) must differ from mean (0.3).
+        for abs_error in (0.8, 0.1, 0.2, 0.1):
+            rows.append({"dataset": "ds", "variant": "asym-even",
+                         "exact_jaccard_bucketed": "0.05",
+                         "abs_error": repr(abs_error)})
+        # Mirrors SummarizeTest.NearestRankP95DiffersFromMaxAtTwentyValues:
+        # 0.01..0.19 (19 values) plus an outlier 5.0; p95 (sorted[18]=0.19)
+        # must differ from max (5.0), which only diverges at n>=20.
+        for i in range(1, 20):
+            rows.append({"dataset": "ds", "variant": "n20",
+                         "exact_jaccard_bucketed": "0.05",
+                         "abs_error": repr(i / 100.0)})
+        rows.append({"dataset": "ds", "variant": "n20",
+                     "exact_jaccard_bucketed": "0.05", "abs_error": "5.0"})
+
+        input_csv = self.out_dir / "accuracy_gate.csv"
+        _write_accuracy_csv(input_csv, rows)
+        output_csv = self.out_dir / "summary_gate.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        by_variant_bucket = {
+            (row["variant"], row["jaccard_bucket"]): row
+            for row in self.read_summary_rows(output_csv)
+        }
+
+        odd = by_variant_bucket[("asym-odd", "b00_10")]
+        self.assertEqual(odd["n"], "3")
+        self.assertAlmostEqual(float(odd["median"]), 0.1, places=12)
+        self.assertAlmostEqual(float(odd["mae"]), 0.3, places=12)
+        self.assertAlmostEqual(float(odd["max"]), 0.7, places=12)
+        self.assertGreater(abs(float(odd["median"]) - float(odd["mae"])), 0.1)
+
+        even = by_variant_bucket[("asym-even", "b00_10")]
+        self.assertEqual(even["n"], "4")
+        self.assertAlmostEqual(float(even["median"]), 0.15, places=12)
+        self.assertAlmostEqual(float(even["mae"]), 0.3, places=12)
+        self.assertGreater(abs(float(even["median"]) - float(even["mae"])), 0.1)
+
+        n20 = by_variant_bucket[("n20", "b00_10")]
+        self.assertEqual(n20["n"], "20")
+        self.assertAlmostEqual(float(n20["p95"]), 0.19, places=12)
+        self.assertAlmostEqual(float(n20["max"]), 5.0, places=12)
+        self.assertAlmostEqual(float(n20["median"]), 0.105, places=12)
+        self.assertAlmostEqual(float(n20["mae"]), 0.345, places=12)
+        self.assertGreater(abs(float(n20["p95"]) - float(n20["max"])), 1.0)
+
+    def test_byte_identical_rerun(self):
+        rows = [
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.15", "abs_error": "0.25"},
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.35", "abs_error": "0.3"},
+            {"dataset": "ds", "variant": "v1",
+             "exact_jaccard_bucketed": "0.45", "abs_error": "0.1"},
+        ]
+        input_csv = self.out_dir / "accuracy_rerun.csv"
+        _write_accuracy_csv(input_csv, rows)
+        output_a = self.out_dir / "summary_a.csv"
+        output_b = self.out_dir / "summary_b.csv"
+        completed_a = self.run_summarizer(input_csv, output_a)
+        completed_b = self.run_summarizer(input_csv, output_b)
+        self.assertEqual(completed_a.returncode, 0, completed_a.stderr)
+        self.assertEqual(completed_b.returncode, 0, completed_b.stderr)
+        self.assertEqual(output_a.read_bytes(), output_b.read_bytes())
+
+    def test_missing_input_flag_exits_nonzero(self):
+        output_csv = self.out_dir / "summary.csv"
+        completed = subprocess.run(
+            [sys.executable, str(SUMMARIZE_SCRIPT), f"--output={output_csv}"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertFalse(output_csv.exists())
+
+    def test_missing_output_flag_exits_nonzero(self):
+        input_csv = self.out_dir / "accuracy.csv"
+        input_csv.write_text(EXPECTED_ACCURACY_HEADER_LF, encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(SUMMARIZE_SCRIPT), f"--input={input_csv}"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+
+    def test_wrong_header_is_rejected(self):
+        input_csv = self.out_dir / "bad_header.csv"
+        input_csv.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
+        output_csv = self.out_dir / "summary.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertNotEqual(completed.stderr, "")
+        self.assertFalse(output_csv.exists())
+
+    def test_nan_cell_is_rejected(self):
+        rows = [{"dataset": "ds", "variant": "v",
+                 "exact_jaccard_bucketed": "nan", "abs_error": "0.1"}]
+        input_csv = self.out_dir / "nan_accuracy.csv"
+        _write_accuracy_csv(input_csv, rows)
+        output_csv = self.out_dir / "summary.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertNotEqual(completed.stderr, "")
+        self.assertFalse(output_csv.exists())
+
+    def test_inf_abs_error_cell_is_rejected(self):
+        rows = [{"dataset": "ds", "variant": "v",
+                 "exact_jaccard_bucketed": "0.05", "abs_error": "inf"}]
+        input_csv = self.out_dir / "inf_accuracy.csv"
+        _write_accuracy_csv(input_csv, rows)
+        output_csv = self.out_dir / "summary.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertFalse(output_csv.exists())
+
+    def test_empty_input_no_groups_emits_no_rows(self):
+        input_csv = self.out_dir / "empty_accuracy.csv"
+        _write_accuracy_csv(input_csv, [])
+        output_csv = self.out_dir / "summary_empty.csv"
+        completed = self.run_summarizer(input_csv, output_csv)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        content = output_csv.read_text(encoding="utf-8")
+        self.assertEqual(content, SUMMARY_HEADER_LF)
+
+
+class SummarizerFormatFloatGoldenTest(unittest.TestCase):
+    """Confirms scripts/summarize_real_datasets.py's float formatting is
+    byte-identical to the shared golden vectors already pinned in
+    tests/scripts/test_real_dataset_preprocess.py::FormattingGoldenTests
+    and tests/unit/test_real_dataset_metrics.cpp::FormatGoldenVectors(). A
+    representative subset is duplicated here with a keep-in-sync comment,
+    following this repo's existing convention for this shared table."""
+
+    # Keep in sync with FormattingGoldenTests.GOLDEN_VECTORS in
+    # tests/scripts/test_real_dataset_preprocess.py.
+    GOLDEN_VECTORS = (
+        (0.0, "0"),
+        (-0.0, "0"),
+        (1.0, "1"),
+        (0.5, "0.5"),
+        (0.1, "0.10000000000000001"),
+        (0.6000000000000001, "0.60000000000000009"),
+        (1e-300, "1e-300"),
+        (1e300, "1.0000000000000001e+300"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_summarizer_module()
+
+    def test_format_float_matches_shared_golden_vectors(self):
+        for value, expected in self.GOLDEN_VECTORS:
+            with self.subTest(value=value):
+                self.assertEqual(self.module.format_float(value), expected)
 
 
 class DriverIncludeAllowlistTest(unittest.TestCase):
