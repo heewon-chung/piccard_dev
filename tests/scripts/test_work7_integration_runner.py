@@ -128,17 +128,39 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         """)
         self.write(scripts / "run_real_datasets.sh", """
             #!/usr/bin/env python3
-            import os, pathlib, sys
+            import hashlib, os, pathlib, sys
             root=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--results-root='))); root.mkdir(parents=True)
-            import hashlib
-            artifact=root/'artifact.txt'; artifact.write_text('artifact'); output=root/'output.csv'; output.write_text('trials\\n1\\n'); h=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
-            rows=[('schema_version','piccard-real-run-v1'),('evidence_mode','quick'),('source_commit',os.environ['FAKE_COMMIT']),('git_dirty','false'),('build_type','Release'),('artifact_count','1'),('artifact.000.role','fake'),('artifact.000.path','artifact.txt'),('artifact.000.sha256',h(artifact)),('cell_count','3')]
-            ids=[('dblp_acm_u65536:accuracy',['bench_real_datasets','--accuracy_trials=1']),('dblp_acm_u65536:accuracy-summary',['summarize_real_datasets.py']),('dblp_acm_u65536:timing:toy-smoke',['bench_real_datasets','--trials=1'])]
-            for i,(cid,args) in enumerate(ids): rows += [(f'cell.{i:03d}.id',cid),(f'cell.{i:03d}.status','complete'),(f'cell.{i:03d}.argv_count',str(len(args))),*[(f'cell.{i:03d}.argv.{j:03d}',arg) for j,arg in enumerate(args)],(f'cell.{i:03d}.output_count','1'),(f'cell.{i:03d}.output.000.path','output.csv'),(f'cell.{i:03d}.output.000.sha256',h(output))]
+            source=pathlib.Path.cwd(); build=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--build-dir='))); variant='dblp_acm_u65536'; fixture=source/'tests'/'fixtures'/'real_datasets'/'quick'/variant
+            h=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+            for relative, body in [('system_info.txt','system'),(f'input_manifests/{variant}/source.manifest.tsv','source'),(f'input_manifests/{variant}/dataset.manifest.tsv','dataset'),('run.log','log'),(f'csv/real_accuracy_{variant}.csv','trials\\n1\\n'),(f'workloads/accuracy_{variant}.manifest.tsv','a'),(f'workloads/accuracy_{variant}.rows.tsv','b'),(f'csv/real_accuracy_summary_{variant}.csv','summary'),(f'csv/real_timing_{variant}_toy-smoke.csv','trials\\n1\\n'),(f'workloads/timing_{variant}_toy-smoke.manifest.tsv','t')]:
+                p=root/relative; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(body)
+            roots=[('results-root',root),('build-dir',build),('committed-source-root',source),(f'source-root-{variant}',fixture),(f'processed-dataset-{variant}',fixture)]
+            rows=[('schema_version','piccard-real-run-v1'),('evidence_mode','quick'),('source_commit',os.environ['FAKE_COMMIT']),('git_dirty','false'),('build_type','Release'),('bench_real_datasets_sha256',h(build/'bench_real_datasets')),('summarize_real_datasets_sha256',h(source/'scripts'/'summarize_real_datasets.py')),('root_count',str(len(roots)))]
+            for i,(key,path) in enumerate(roots): rows += [(f'root.{i:03d}.id',key),(f'root.{i:03d}.path',str(path.resolve()))]
+            artifacts=[('system-info','system_info.txt'),(f'copied-source-manifest-{variant}',f'input_manifests/{variant}/source.manifest.tsv'),(f'copied-processed-manifest-{variant}',f'input_manifests/{variant}/dataset.manifest.tsv'),('run-log','run.log')]
+            rows += [('artifact_count',str(len(artifacts)))]
+            for i,(role,relative) in enumerate(artifacts): rows += [(f'artifact.{i:03d}.role',role),(f'artifact.{i:03d}.path',relative),(f'artifact.{i:03d}.sha256',h(root/relative))]
+            dataset=fixture/'dataset.manifest.tsv'; accuracy=root/'csv'/f'real_accuracy_{variant}.csv'; summary=root/'csv'/f'real_accuracy_summary_{variant}.csv'; timing=root/'csv'/f'real_timing_{variant}_toy-smoke.csv'
+            cells=[(f'{variant}:accuracy',['bench_real_datasets',f'--dataset-manifest={dataset}','--mode=accuracy','--k=128','--m=64','--max-pairs=2','--accuracy_trials=1','--seed=7','--hash_randomness=resampled',f'--csv={accuracy}',f'--workload-manifest-out={root / "workloads" / f"accuracy_{variant}.manifest.tsv"}',f'--workload-rows-out={root / "workloads" / f"accuracy_{variant}.rows.tsv"}'],{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'1'},[('processed-manifest',f'processed-dataset-{variant}',fixture,'dataset.manifest.tsv')],[accuracy,root/'workloads'/f'accuracy_{variant}.manifest.tsv',root/'workloads'/f'accuracy_{variant}.rows.tsv']),(f'{variant}:accuracy-summary',['summarize_real_datasets.py',f'--input={accuracy}',f'--output={summary}'],{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'1'},[('accuracy-csv','results-root',root,f'csv/real_accuracy_{variant}.csv')],[summary]),(f'{variant}:timing:toy-smoke',['bench_real_datasets',f'--dataset-manifest={dataset}','--mode=timing','--profile=toy-smoke','--k=128','--m=64','--trials=1','--timing-pair=median','--seed=7',f'--csv={timing}',f'--workload-manifest-out={root / "workloads" / f"timing_{variant}_toy-smoke.manifest.tsv"}'],{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},[('processed-manifest',f'processed-dataset-{variant}',fixture,'dataset.manifest.tsv')],[timing,root/'workloads'/f'timing_{variant}_toy-smoke.manifest.tsv'])]
+            rows += [('cell_count','3')]
+            frame=lambda a: hashlib.sha256(b''.join(len(x.encode()).to_bytes(4,'big')+x.encode() for x in a)).hexdigest()
+            for i,(cid,args,env,inputs,outputs) in enumerate(cells):
+                p=f'cell.{i:03d}'; rows += [(p+'.id',cid),(p+'.argv_count',str(len(args))),*[(p+f'.argv.{j:03d}',x) for j,x in enumerate(args)],(p+'.argv_sha256',frame(args)),(p+'.env_count',str(len(env))),*sum(([(p+f'.env.{j:03d}.key',k),(p+f'.env.{j:03d}.value',v)] for j,(k,v) in enumerate(sorted(env.items()))),[]),(p+'.input_count',str(len(inputs)))]
+                for j,(role,rid,base,relative) in enumerate(inputs): rows += [(p+f'.input.{j:03d}.role',role),(p+f'.input.{j:03d}.root_id',rid),(p+f'.input.{j:03d}.path',relative),(p+f'.input.{j:03d}.sha256',h(base/relative))]
+                rows += [(p+'.output_count',str(len(outputs)))]
+                for j,out in enumerate(outputs): rows += [(p+f'.output.{j:03d}.path',out.relative_to(root).as_posix()),(p+f'.output.{j:03d}.sha256',h(out))]
+                rows += [(p+'.status','complete')]
+            if os.environ.get('FAKE_FAULT') == 'real-argv': rows[rows.index(('cell.000.argv.001',f'--dataset-manifest={dataset}'))]=('cell.000.argv.001','--dataset-manifest=bad')
+            if os.environ.get('FAKE_FAULT') == 'real-root': rows=[x for x in rows if x[0] != 'root.004.path']
             root.joinpath('run_metadata.tsv').write_text('key\\tvalue\\n' + ''.join(k+'\\t'+v+'\\n' for k,v in rows))
             if os.environ.get('FAKE_FAULT') == 'drift': pathlib.Path(os.environ['FAKE_PAPER']).joinpath('tracked').write_text('changed\\n')
             if os.environ.get('FAKE_FAULT') == 'threshold-drift': pathlib.Path(os.environ['FAKE_THRESHOLD']).joinpath('tracked').write_text('changed\\n')
         """)
+        fixture = source / "tests" / "fixtures" / "real_datasets" / "quick" / "dblp_acm_u65536"
+        fixture.mkdir(parents=True)
+        (fixture / "source.manifest.tsv").write_text("source\n", encoding="utf-8")
+        (fixture / "dataset.manifest.tsv").write_text("dataset\n", encoding="utf-8")
+        (scripts / "summarize_real_datasets.py").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.write(scripts / "verify_real_dataset_outputs.py", """
             #!/usr/bin/env python3
             import hashlib, pathlib, sys
@@ -155,6 +177,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             if '-B' in a:
                 b=pathlib.Path(a[a.index('-B')+1]); b.mkdir(parents=True,exist_ok=True)
                 p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\\nfor r in 1 4 8; do echo ideal-independent-random-ranking-v1,64,3,8,0.99,$r,1,1,1,0,1,1,1,1,1,1,7; done\\n'); p.chmod(0o755)
+                q=b/'bench_real_datasets'; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
                 print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
         """)
         self.write(fakebin / "ctest", """
@@ -198,7 +221,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertTrue((session / "phase2" / "closure-artifacts" / "evidence-bound-report.json").is_file())
 
     def test_fake_tool_hard_failures(self):
-        cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification", "pre-argv", "pre-output", "pre-digest", "pre-escape")
+        cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification", "pre-argv", "pre-output", "pre-digest", "pre-escape", "real-argv", "real-root")
         for fault in cases:
             with self.subTest(fault=fault):
                 result, _, _ = self.invoke_fake_runner(fault)

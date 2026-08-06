@@ -263,28 +263,83 @@ def read_tsv(path: Path) -> dict[str, str]:
     return value
 
 
-def validate_real(root: Path, commit: str, build: Path) -> Path:
+def real_argv_sha256(argv: list[str]) -> str:
+    digest = hashlib.sha256()
+    for argument in argv:
+        raw = argument.encode("utf-8")
+        digest.update(len(raw).to_bytes(4, "big"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
+def validate_real(root: Path, commit: str, build: Path, source: Path) -> Path:
+    """Accept only the finalized, one-run quick manifest produced by Work 5.
+
+    The runner's TSV is a deliberately flat serialization.  Rebuild its complete
+    quick-mode value map here instead of accepting a prefix-shaped subset: this
+    makes counts, ordering, roots, argv framing, and every input/output digest
+    part of the evidence binding.
+    """
     metadata = root / "run_metadata.tsv"; value = read_tsv(metadata)
     if value.get("schema_version") != "piccard-real-run-v1" or value.get("evidence_mode") != "quick" or value.get("source_commit") != commit or value.get("git_dirty") != "false" or value.get("build_type") != "Release" or value.get("cell_count") != "3":
         raise Failure("invalid real-data metadata")
-    artifact_count=value.get("artifact_count")
-    if artifact_count is None or not artifact_count.isdigit(): raise Failure("invalid real-data artifact count")
-    expected_keys=set()
-    for number in range(int(artifact_count)):
-        prefix=f"artifact.{number:03d}."; expected_keys |= {prefix+"role",prefix+"path",prefix+"sha256"}
-        relative=value.get(prefix+"path"); digest=value.get(prefix+"sha256")
-        sealed_file(root, relative, digest, "real-data artifact")
-    if any(key.startswith("artifact.") and key not in expected_keys for key in value): raise Failure("extra real-data artifact entry")
-    for number in range(3):
-        prefix=f"cell.{number:03d}."
-        if value.get(prefix+"status") != "complete" or value.get(prefix+"argv_count") in (None,"0") or value.get(prefix+"argv.000") is None or value.get(prefix+"output_count") in (None,"0"): raise Failure("invalid real-data cell")
-        args=[value[prefix+f"argv.{i:03d}"] for i in range(int(value[prefix+"argv_count"]))]
-        expected={"dblp_acm_u65536:accuracy":["bench_real_datasets","--accuracy_trials=1"],"dblp_acm_u65536:accuracy-summary":["summarize_real_datasets.py"],"dblp_acm_u65536:timing:toy-smoke":["bench_real_datasets","--trials=1"]}
-        if value.get(prefix+"id") not in expected or args != expected[value[prefix+"id"]]: raise Failure("real-data argv/count mismatch")
-        count=int(value[prefix+"output_count"])
-        for index in range(count):
-            out=f"{prefix}output.{index:03d}."; relative=value.get(out+"path"); digest=value.get(out+"sha256")
-            sealed_file(root, relative, digest, "real-data output")
+    source = source.resolve(); root = root.resolve(); build = build.resolve()
+    variant = "dblp_acm_u65536"
+    fixture = source / "tests" / "fixtures" / "real_datasets" / "quick" / variant
+    roots = [
+        ("results-root", root), ("build-dir", build), ("committed-source-root", source),
+        (f"source-root-{variant}", fixture), (f"processed-dataset-{variant}", fixture),
+    ]
+    expected = {
+        "schema_version": "piccard-real-run-v1", "evidence_mode": "quick",
+        "source_commit": commit, "git_dirty": "false", "build_type": "Release",
+        "bench_real_datasets_sha256": sha256_file(build / "bench_real_datasets"),
+        "summarize_real_datasets_sha256": sha256_file(source / "scripts" / "summarize_real_datasets.py"),
+        "root_count": str(len(roots)),
+    }
+    for number, (root_id, path) in enumerate(roots):
+        if not path.is_dir() or path != path.resolve():
+            raise Failure("invalid real-data authoritative root")
+        expected[f"root.{number:03d}.id"] = root_id
+        expected[f"root.{number:03d}.path"] = str(path)
+
+    artifacts = [
+        ("system-info", "system_info.txt"),
+        (f"copied-source-manifest-{variant}", f"input_manifests/{variant}/source.manifest.tsv"),
+        (f"copied-processed-manifest-{variant}", f"input_manifests/{variant}/dataset.manifest.tsv"),
+        ("run-log", "run.log"),
+    ]
+    expected["artifact_count"] = str(len(artifacts))
+    for number, (role, relative) in enumerate(artifacts):
+        path = sealed_file(root, relative, value.get(f"artifact.{number:03d}.sha256"), "real-data artifact")
+        expected.update({f"artifact.{number:03d}.role": role, f"artifact.{number:03d}.path": relative,
+                         f"artifact.{number:03d}.sha256": sha256_file(path)})
+
+    dataset = fixture / "dataset.manifest.tsv"
+    cells = [
+        (f"{variant}:accuracy", ["bench_real_datasets", f"--dataset-manifest={dataset}", "--mode=accuracy", "--k=128", "--m=64", "--max-pairs=2", "--accuracy_trials=1", "--seed=7", "--hash_randomness=resampled", f"--csv={root / 'csv' / f'real_accuracy_{variant}.csv'}", f"--workload-manifest-out={root / 'workloads' / f'accuracy_{variant}.manifest.tsv'}", f"--workload-rows-out={root / 'workloads' / f'accuracy_{variant}.rows.tsv'}"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"}, [("processed-manifest", f"processed-dataset-{variant}", fixture, "dataset.manifest.tsv")], [f"csv/real_accuracy_{variant}.csv", f"workloads/accuracy_{variant}.manifest.tsv", f"workloads/accuracy_{variant}.rows.tsv"]),
+        (f"{variant}:accuracy-summary", ["summarize_real_datasets.py", f"--input={root / 'csv' / f'real_accuracy_{variant}.csv'}", f"--output={root / 'csv' / f'real_accuracy_summary_{variant}.csv'}"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"}, [("accuracy-csv", "results-root", root, f"csv/real_accuracy_{variant}.csv")], [f"csv/real_accuracy_summary_{variant}.csv"]),
+        (f"{variant}:timing:toy-smoke", ["bench_real_datasets", f"--dataset-manifest={dataset}", "--mode=timing", "--profile=toy-smoke", "--k=128", "--m=64", "--trials=1", "--timing-pair=median", "--seed=7", f"--csv={root / 'csv' / f'real_timing_{variant}_toy-smoke.csv'}", f"--workload-manifest-out={root / 'workloads' / f'timing_{variant}_toy-smoke.manifest.tsv'}"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}, [("processed-manifest", f"processed-dataset-{variant}", fixture, "dataset.manifest.tsv")], [f"csv/real_timing_{variant}_toy-smoke.csv", f"workloads/timing_{variant}_toy-smoke.manifest.tsv"]),
+    ]
+    for number, (cell_id, argv, env, inputs, outputs) in enumerate(cells):
+        prefix = f"cell.{number:03d}."
+        expected.update({prefix + "id": cell_id, prefix + "argv_count": str(len(argv)),
+                         prefix + "argv_sha256": real_argv_sha256(argv), prefix + "env_count": str(len(env)),
+                         prefix + "input_count": str(len(inputs)), prefix + "output_count": str(len(outputs)),
+                         prefix + "status": "complete"})
+        for index, item in enumerate(argv): expected[prefix + f"argv.{index:03d}"] = item
+        for index, (key, item) in enumerate(sorted(env.items())):
+            expected[prefix + f"env.{index:03d}.key"] = key; expected[prefix + f"env.{index:03d}.value"] = item
+        for index, (role, root_id, input_root, relative) in enumerate(inputs):
+            path = sealed_file(input_root, relative, value.get(prefix + f"input.{index:03d}.sha256"), "real-data input")
+            expected.update({prefix + f"input.{index:03d}.role": role, prefix + f"input.{index:03d}.root_id": root_id,
+                             prefix + f"input.{index:03d}.path": relative, prefix + f"input.{index:03d}.sha256": sha256_file(path)})
+        for index, relative in enumerate(outputs):
+            path = sealed_file(root, relative, value.get(prefix + f"output.{index:03d}.sha256"), "real-data output")
+            expected[prefix + f"output.{index:03d}.path"] = relative
+            expected[prefix + f"output.{index:03d}.sha256"] = sha256_file(path)
+    if value != expected:
+        raise Failure("real-data metadata does not exactly bind quick provenance")
     status = read_tsv(root / "verification_status.tsv")
     if status != {"schema_version":"piccard-real-verification-v1", "run_metadata_sha256":sha256_file(metadata), "status":"VERIFIED"}: raise Failure("stale real-data verification status")
     return metadata
@@ -352,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         checked_command((str(source / "scripts" / "run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(real)), source, commands, "real-datasets")
         checked_command((sys.executable, str(source / "scripts" / "verify_real_dataset_outputs.py"), str(real)), source, commands, "verify-real-datasets")
         deletion = checked_command((str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"), source, commands, "deletion-survival")
-        validate_real(real, commit, build)
+        validate_real(real, commit, build, source)
         validate_deletion(deletion)
         validate_records(runtime)
         index = runtime / "evidence-index.json"
