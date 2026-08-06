@@ -325,6 +325,7 @@ if(OpenFHE_FOUND)
     set(PICCARD_FHE_SOURCES
         src/fhe/bfv_context.cpp
         src/fhe/public_ciphertext_codec.cpp
+        src/protocol/dynamic_ciphertext_store.cpp
         src/protocol/piccard.cpp
         src/protocol/dynamic_piccard.cpp
         src/protocol/threshold_piccard.cpp
@@ -543,6 +544,13 @@ if(BUILD_TESTS)
             )
             target_link_libraries(test_public_ciphertext_codec piccard_fhe test_main)
             add_test(NAME PublicCiphertextCodec COMMAND test_public_ciphertext_codec)
+
+            add_executable(
+                test_dynamic_ciphertext_store
+                tests/unit/test_dynamic_ciphertext_store.cpp
+            )
+            target_link_libraries(test_dynamic_ciphertext_store piccard_fhe test_main)
+            add_test(NAME DynamicCiphertextStore COMMAND test_dynamic_ciphertext_store)
 
             add_executable(test_piccard_engine tests/unit/test_piccard_engine.cpp)
             target_link_libraries(test_piccard_engine piccard_fhe test_main)
