@@ -61,6 +61,7 @@
 | `benchmarks/bench_dynamic.cpp` | Modify | Strict `--scenario=legacy|refresh` and `--refresh_updates=N` routing. |
 | `tests/unit/test_estimator_provenance_serializers.cpp` | Modify | Extend the exact legacy dynamic header/row golden for the appended schema. |
 | `tests/unit/test_dynamic_refresh_benchmark.cpp` | Create | Serializer and TOY one-owner timing/upload test. |
+| `tests/scripts/test_bench_dynamic_refresh_cli.py` | Create | Durable strict refresh CLI matrix with exactly one successful TOY one-trial execution. |
 | `scripts/verify_benchmark_provenance.py` | Modify | Refresh-row provenance, arithmetic, epoch, upload, and one-trial gates. |
 | `tests/scripts/test_verify_benchmark_provenance.py` | Modify | Valid refresh fixture and targeted false-evidence mutations. |
 | `scripts/run_pre_threshold_profiles.sh` | Modify | Add one TOY refresh cell and pin smoke repetition/accuracy counts to one. |
@@ -1514,6 +1515,7 @@ Completion gate: reviewer checks the six pinned raw outcomes, Floyd interval and
 - Modify: `benchmarks/bench_dynamic.cpp`
 - Modify: `tests/unit/test_estimator_provenance_serializers.cpp`
 - Create: `tests/unit/test_dynamic_refresh_benchmark.cpp`
+- Create: `tests/scripts/test_bench_dynamic_refresh_cli.py`
 - Modify: `tests/fixtures/runner/dynamic_toy_rows.csv`
 - Modify: `CMakeLists.txt`
 
@@ -1857,6 +1859,7 @@ git add benchmarks/benchmark_estimator_provenance.h \
   benchmarks/dynamic_refresh_benchmark.cpp benchmarks/bench_dynamic.cpp \
   tests/unit/test_estimator_provenance_serializers.cpp \
   tests/unit/test_dynamic_refresh_benchmark.cpp \
+  tests/scripts/test_bench_dynamic_refresh_cli.py \
   tests/fixtures/runner/dynamic_toy_rows.csv CMakeLists.txt
 git commit -m "feat(benchmarks): measure one-owner dynamic refresh"
 ```
@@ -2282,6 +2285,7 @@ src/protocol/dynamic_ciphertext_store.cpp
 tests/fixtures/runner/dynamic_toy_rows.csv
 tests/integration/test_dynamic_refresh_e2e.cpp
 tests/scripts/test_bench_deletion_survival.py
+tests/scripts/test_bench_dynamic_refresh_cli.py
 tests/scripts/test_check_work6_scope.py
 tests/scripts/test_run_pre_threshold_profiles.py
 tests/scripts/test_verify_benchmark_provenance.py
