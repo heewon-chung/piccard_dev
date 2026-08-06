@@ -166,17 +166,14 @@ TEST(PublicCiphertextCodecTest, RejectsKeyTagMismatch) {
     params.m = 16;
     params.security = SecurityLevel::TOY;
     params.Validate();
-    BFVContext first(params);
-    BFVContext second(params);
-    first.Initialize();
-    second.Initialize();
-    const auto first_codec = first.ExportPublicCiphertextCodec();
-    const auto second_codec = second.ExportPublicCiphertextCodec();
-    EXPECT_EQ(first_codec->ContextFingerprintHex(),
-              second_codec->ContextFingerprintHex());
-    EXPECT_NE(first_codec->PublicKeyFingerprintHex(),
-              second_codec->PublicKeyFingerprintHex());
-    EXPECT_THROW(first_codec->Serialize(second.Encrypt({1, 2, 3})),
+    BFVContext context(params);
+    context.Initialize();
+    const auto codec = context.ExportPublicCiphertextCodec();
+    const auto ciphertext = context.Encrypt({1, 2, 3});
+    ASSERT_EQ(ciphertext->GetCryptoContext(), context.GetCryptoContext());
+    ciphertext->SetKeyTag("deliberately-wrong-key-tag");
+    ASSERT_NE(ciphertext->GetKeyTag(), codec->CiphertextKeyTag());
+    EXPECT_THROW(codec->Serialize(ciphertext),
                  std::invalid_argument);
 }
 
