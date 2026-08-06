@@ -552,6 +552,13 @@ if(BUILD_TESTS)
             target_link_libraries(test_dynamic_ciphertext_store piccard_fhe test_main)
             add_test(NAME DynamicCiphertextStore COMMAND test_dynamic_ciphertext_store)
 
+            add_executable(
+                test_dynamic_refresh_e2e
+                tests/integration/test_dynamic_refresh_e2e.cpp
+            )
+            target_link_libraries(test_dynamic_refresh_e2e piccard_fhe test_main)
+            add_test(NAME DynamicRefreshE2E COMMAND test_dynamic_refresh_e2e)
+
             add_executable(test_piccard_engine tests/unit/test_piccard_engine.cpp)
             target_link_libraries(test_piccard_engine piccard_fhe test_main)
             add_test(NAME PiccardEngine COMMAND test_piccard_engine)
