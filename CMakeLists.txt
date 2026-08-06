@@ -898,6 +898,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_work7_claim_contract
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME Work7IntegrationRunner
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_work7_integration_runner
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME SanitizerRunnerForwarding
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_sanitizer_runner_forwarding
