@@ -112,7 +112,7 @@ def inventory(path: Path) -> set[str]:
             raise Failure("malformed CTest inventory header")
         cursor = 1
         while cursor < len(lines) and lines[cursor]:
-            match = re.fullmatch(r"\s+Test #(\d+): ([A-Za-z0-9_]+)", lines[cursor])
+            match = re.fullmatch(r"\s+Test\s+#(\d+): ([A-Za-z0-9_]+)", lines[cursor])
             if match is None:
                 raise Failure("malformed CTest inventory line")
             number, name = int(match.group(1)), match.group(2)
@@ -182,7 +182,12 @@ def runtime_evidence(path: Path, commit: str, claims: list[dict]) -> set[str]:
     return evidence
 
 
-def report_claims(report: object, mode: str, commit: str, states: list[str]) -> None:
+def reference_list(value: object) -> bool:
+    return (isinstance(value, list) and bool(value) and
+            all(isinstance(item, str) and bool(item) for item in value) and len(set(value)) == len(value))
+
+
+def report_claims(report: object, mode: str, commit: str, states: list[str], contract_claims: list[dict]) -> None:
     top = {"schema", "source_commit", "mode", "threshold_gate_state", "work_gate_state", "claims",
            "status", "validation_errors", "input_seals"}
     row_keys = {"id", "implementation_state", "toy_evidence_state", "performance_state", "source_paths",
@@ -196,12 +201,14 @@ def report_claims(report: object, mode: str, commit: str, states: list[str]) -> 
             [row["id"] for row in report["claims"]] != list(IDS) or
             any(row["implementation_state"] != "IMPLEMENTED" or row["performance_state"] != "PERFORMANCE_PENDING" for row in report["claims"]) or
             [row["toy_evidence_state"] for row in report["claims"]] != states or
-            any(any(not isinstance(row[field], str) or not row[field] for field in ("deferred_rationale", "prohibited_overclaim")) or
-                any(not isinstance(item, str) or not item for item in row[field]) for row in report["claims"] for field in ("source_paths", "required_ctest_names", "evidence_keys"))):
+            any(not reference_list(row[field]) for row in report["claims"] for field in ("source_paths", "required_ctest_names", "evidence_keys")) or
+            any(any(not isinstance(row[field], str) or not row[field] for field in ("deferred_rationale", "prohibited_overclaim")) for row in report["claims"]) or
+            any(any(report_row[field] != contract_row[field] for field in ("source_paths", "required_ctest_names", "evidence_keys"))
+                for report_row, contract_row in zip(report["claims"], contract_claims))):
         raise Failure("invalid sealed claim report")
 
 
-def candidate_evidence(phase2: Path, candidate: Path, commit: str) -> None:
+def candidate_evidence(phase2: Path, candidate: Path, commit: str, claims: list[dict]) -> None:
     phase2_value = seal(phase2, "phase2-closure")
     if phase2_value["previous_seal_sha256"] is None:
         raise Failure("phase2 closure is not chained")
@@ -213,7 +220,7 @@ def candidate_evidence(phase2: Path, candidate: Path, commit: str) -> None:
         evidence_report = json.loads(report_path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid sealed evidence-bound report") from error
-    report_claims(evidence_report, "evidence-bound", commit, ["TOY_VERIFIED"] * 6 + ["PENDING"])
+    report_claims(evidence_report, "evidence-bound", commit, ["TOY_VERIFIED"] * 6 + ["PENDING"], claims)
     if evidence_report.get("input_seals") != {"runtime_seal_sha256": phase2_value["previous_seal_sha256"]}:
         raise Failure("evidence-bound report has wrong runtime seal")
     candidate_value = seal(candidate, "phase3-candidate-artifacts", sha256_file(phase2))
@@ -261,7 +268,7 @@ def review(path: Path, commit: str, packet: str, provider: str, model: str) -> N
             raise Failure("final review substantive confirmation is missing")
 
 
-def terminal(args: argparse.Namespace, commit: str) -> dict:
+def terminal(args: argparse.Namespace, commit: str, claims: list[dict]) -> dict:
     phase3 = require_absolute(args.phase3_closure_seal, "phase3 closure seal")
     work = require_absolute(args.work_review_seal, "work review seal")
     phase3_value = seal(phase3, "phase3-closure")
@@ -275,7 +282,7 @@ def terminal(args: argparse.Namespace, commit: str) -> dict:
         claim7_report = json.loads(claim7_path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid sealed claim7 report") from error
-    report_claims(claim7_report, "claim7", commit, ["TOY_VERIFIED"] * 7)
+    report_claims(claim7_report, "claim7", commit, ["TOY_VERIFIED"] * 7, claims)
     inputs = claim7_report.get("input_seals")
     if (not isinstance(inputs, dict) or set(inputs) != {"phase2_closure_seal_sha256", "phase3_candidate_seal_sha256"} or
             inputs["phase3_candidate_seal_sha256"] != phase3_value["previous_seal_sha256"]):
@@ -328,10 +335,10 @@ def main(argv: list[str] | None = None) -> int:
             for claim_id in runtime_evidence(runtime, args.source_commit, claims): toy[claim_id] = "TOY_VERIFIED"
         elif args.mode == "claim7":
             candidate_evidence(require_absolute(args.phase2_closure_seal, "phase2 closure seal"),
-                               require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"), args.source_commit)
+                               require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"), args.source_commit, claims)
             toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         elif args.mode == "terminal":
-            state = terminal(args, args.source_commit)
+            state = terminal(args, args.source_commit, claims)
             toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         report = {"schema": "piccard-work7-claim-report-v1", "source_commit": args.source_commit,
                   "mode": args.mode, "threshold_gate_state": "DEFERRED_EXPECTED",

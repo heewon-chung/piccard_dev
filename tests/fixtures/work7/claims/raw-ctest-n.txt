@@ -1,5 +1,5 @@
 Test project /tmp/piccard-work7-task1-build
-  Test #1: MinHash
-  Test #2: EstimatorDiagnostic
+  Test  #1: MinHash
+  Test #43: EstimatorDiagnostic
 
 Total Tests: 2

@@ -142,6 +142,10 @@ class Work7ClaimContractTests(unittest.TestCase):
         self.inventory.write_text("Test project x\n  Test #1: MinHash\n\nTotal Tests: 2\n")
         self.assert_fail("static")
 
+    def test_ctest_inventory_rejects_missing_executable_warning(self) -> None:
+        self.inventory.write_text("Test project x\nCould not find executable /missing/test\n  Test #1: MinHash\n\nTotal Tests: 1\n")
+        self.assert_fail("static")
+
     def test_static_rejects_unsafe_output_and_malformed_ctest_inventory(self) -> None:
         unsafe = self.source / "report.json"
         result = subprocess.run([sys.executable, str(VERIFIER), "--mode", "static", "--contract", str(self.contract),
@@ -188,6 +192,27 @@ class Work7ClaimContractTests(unittest.TestCase):
                 seal = self.root / f"hostile-{len(repr(hostile))}-{self.calls}.seal.json"
                 create_tree_seal(artifact, seal, None, "phase2-runtime-artifacts")
                 self.assert_fail("evidence-bound", runtime_seal=seal)
+
+    def test_inherited_claim_reference_types_fail_closed(self) -> None:
+        runtime = self.runtime()
+        evidence = self.invoke("evidence-bound", runtime_seal=runtime)
+        self.assertEqual(evidence.returncode, 0, evidence.stderr)
+        from work7_evidence import create_tree_seal, sha256_file
+        base = json.loads(evidence.output_path.read_text())  # type: ignore[attr-defined]
+        hostile = (None, 7, {}, "not-a-list", [])
+        for field in ("source_paths", "required_ctest_names", "evidence_keys"):
+            for value in hostile:
+                with self.subTest(field=field, value=repr(value)):
+                    bad = copy.deepcopy(base); bad["claims"][0][field] = value
+                    root = self.root / f"bad-{field}-{len(repr(value))}-{self.calls}"; root.mkdir()
+                    (root / "evidence-bound-report.json").write_text(json.dumps(bad))
+                    phase2 = self.root / f"bad-{field}-{len(repr(value))}-{self.calls}.seal.json"
+                    create_tree_seal(root, phase2, sha256_file(runtime), "phase2-closure")
+                    candidate_root = self.root / f"candidate-{field}-{len(repr(value))}-{self.calls}"; candidate_root.mkdir()
+                    (candidate_root / "candidate-validation.json").write_text(json.dumps({"schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT, "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2)}))
+                    candidate = self.root / f"candidate-{field}-{len(repr(value))}-{self.calls}.seal.json"
+                    create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
+                    self.assert_fail("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
 
     def test_claim7_requires_phase_two_and_candidate_seals(self) -> None:
         runtime = self.runtime()
