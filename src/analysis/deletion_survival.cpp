@@ -61,7 +61,8 @@ DeletionSurvivalSummary AnalyzeDeletionSurvival(
     uint64_t low = 0;
     uint64_t high = config.set_size;
     while (low < high) {
-        const uint64_t candidate = low + (high - low + 1) / 2;
+        const uint64_t interval = high - low;
+        const uint64_t candidate = low + interval / 2 + interval % 2;
         if (ExactDeletionSurvival(config, candidate) >= required_survival) {
             low = candidate;
         } else {
