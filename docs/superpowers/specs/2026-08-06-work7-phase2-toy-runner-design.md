@@ -25,9 +25,12 @@ avoiding actual-data and multi-run performance cost.
 7. Run one bounded-dynamic refresh probe.
 8. Run one deletion-survival probe.
 9. Validate every output row against its schema and exact argv.
-10. Run the Phase 1 `evidence-bound` verifier for claims 1–6.
-11. Hash artifacts and reports and write the immutable Phase 2 runtime seal,
-    chaining it to the Phase 0 seal.
+10. Hash raw command logs and artifacts and write the immutable Phase 2
+    runtime-artifact seal, chaining it to the Phase 0 seal.
+11. Run the Phase 1 `evidence-bound` verifier for claims 1–6 against that
+    immutable runtime-artifact seal.
+12. Write the Phase 2 closure seal containing the verifier report and chaining
+    the runtime-artifact seal.
 
 ## Success conditions
 
@@ -35,28 +38,29 @@ avoiding actual-data and multi-run performance cost.
 2. CMake reports Release, tests/benchmarks enabled, and OpenFHE, GMP, GTest,
    and Python 3 available; every frozen-registry test is present and passes
    once without a skip.
-3. Every benchmark-like invocation uses toy input and has all controlling
-   trial/repeat/iteration counts equal to `1`.
+3. Every benchmark-like invocation uses toy input and has all measured
+   trial/repeat/iteration counts equal to `1`; at most one implementation-
+   mandated discarded timing warmup is present and is explicitly labelled.
 4. The estimator, comparison, synthetic-data, refresh, and deletion artifacts
    are nonempty and schema-valid.
 5. Artifact metadata agrees with the recorded command line and source commit.
-6. Only whitelisted synthetic fixture roots are used; warmup and retry counts
-   are zero.
-7. All required artifacts and the evidence-bound claim report appear once in
-   the Phase 2 seal with matching SHA-256.
-8. A second seal verification pass succeeds without rewriting artifacts.
+6. Only whitelisted synthetic fixture roots are used and retry count is zero.
+7. All raw artifacts appear once in the runtime-artifact seal; the
+   evidence-bound claim report appears once in the closure seal; both have
+   matching SHA-256 and the required digest links.
+8. A second verification of both seals succeeds without rewriting artifacts.
 
 ## Failure conditions
 
 - A stale or pre-existing build directory is reused.
 - A required dependency, binary, or frozen-registry test is absent, skipped,
   `Not Run`, or fails.
-- Any performance-sampling count is absent when required, zero, or greater than
-  one.
+- Any measured performance-sampling count is absent when required, zero, or
+  greater than one, or a cell performs multiple/unlabelled warmups.
 - The runner invokes actual DBLP-ACM or Enron input.
 - A row/argv/profile/provenance mismatch occurs.
 - An artifact is empty, malformed, duplicated, unhashed, outside the session,
-  or changed after the Phase 2 seal.
+  or changed after its runtime-artifact seal.
 - The runner executes the original heavyweight full-suite campaign.
 
 ## Prohibited behavior
@@ -69,8 +73,9 @@ avoiding actual-data and multi-run performance cost.
 ## Verification
 
 Tests inspect the frozen registry and command construction before execution,
-enforce count `1`, zero warmups/retries, reject actual-data paths, exercise
-missing-test and manifest-tampering failures, and verify the Phase 0-to-Phase 2
-digest link. The authoritative smoke run executes each probe exactly once.
+enforce measured count `1`, at most one labelled discarded timing warmup, zero
+retries, reject actual-data paths, exercise missing-test and seal-tampering
+failures, and verify the Phase 0-to-runtime-to-closure digest links. The
+authoritative smoke run executes each measured probe exactly once.
 Timing values may be recorded as diagnostics but are not compared to
 performance thresholds.

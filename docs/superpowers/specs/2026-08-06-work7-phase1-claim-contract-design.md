@@ -8,17 +8,24 @@ deliberately deferred work.
 
 ## Input
 
-A tracked claim matrix with exactly seven stable claim identifiers, the three
-per-claim state axes, and the two top-level gate states defined by the Work 7
-integration design.
+A tracked, immutable lifecycle matrix with exactly seven stable claim
+identifiers, required references, allowed per-claim state transitions, and
+allowed top-level gate transitions. It contains no session-local current state.
 
 ## Output contract
 
-The verifier has two mandatory modes. `static` runs before Phase 2 and validates
-the matrix schema plus source/test references while requiring toy evidence to
-be `PENDING`. `evidence-bound` runs after Phase 2 and binds claims 1–6 to the
-runtime seal while leaving the Work 7 gate pending. Each mode emits a canonical
-JSON report containing:
+The same verifier has four mandatory modes and emits a new session-local state
+snapshot/report each time:
+
+- `static` runs before Phase 2 and validates schema/source/test references;
+- `evidence-bound` runs after the Phase 2 runtime-artifact seal and binds claims
+  1–6 to it;
+- `claim7` runs after the Phase 3 response-candidate seal and marks structural
+  readiness toy-verified without authorizing threshold work; and
+- `terminal` runs after both Phase 5 raw approvals, validates their exact
+  packet/commit/status fields, and alone emits the terminal Work 7 state.
+
+Each report contains:
 
 - matrix schema version;
 - source commit;
@@ -38,14 +45,17 @@ The process exits nonzero when any claim fails.
 3. Every automated test reference is discoverable or resolves to a tracked test
    source that the fresh build registers.
 4. In `static` mode no toy artifact is accepted; in `evidence-bound` mode every
-   claim 1–6 artifact belongs to the sealed Phase 2 manifest.
+   claim 1–6 artifact belongs to the Phase 2 runtime-artifact seal.
 5. Real-data and repeated-performance claims remain
    `PERFORMANCE_PENDING`.
-6. The top-level threshold gate remains `DEFERRED_EXPECTED` and the Work 7 gate
-   remains `PENDING`.
-7. Claim 7 records structural readiness and its non-authorization boundary;
-   it cannot reach terminal state in either Phase 1 pass.
-8. Each row contains a clear prohibited-overclaim statement.
+6. The top-level threshold gate remains `DEFERRED_EXPECTED`; the Work 7 gate is
+   `PENDING` in the first three modes and reaches the approved value only in
+   `terminal` mode.
+7. `claim7` requires the Phase 2 closure and Phase 3 candidate seals and keeps
+   the Work 7 gate pending.
+8. `terminal` requires two accepted raw approvals for the same final packet and
+   emits the only approved Work 7 state snapshot.
+9. Each lifecycle row contains a clear prohibited-overclaim statement.
 
 ## Failure conditions
 
@@ -55,6 +65,7 @@ The process exits nonzero when any claim fails.
 - A claim is marked verified without code, test, or current-session evidence.
 - Toy output is represented as paper-grade performance evidence.
 - Threshold work is represented as complete or authorized.
+- A tracked lifecycle contract is rewritten to represent session progress.
 - A historical model approval is invented or reconstructed.
 
 ## Prohibited behavior
@@ -68,5 +79,6 @@ The process exits nonzero when any claim fails.
 Tests mutate a valid fixture one field at a time: missing goal, duplicate goal,
 unknown/wrong-field state, disallowed combination, missing source, missing
 test, escaped path, preflight artifact, foreign-session artifact, toy
-overclaim, premature claim-7 terminalization, and invalid gate state. Each
-mutation must fail for the expected reason; both valid mode fixtures must pass.
+overclaim, premature claim-7 terminalization, mismatched review packet, invalid
+review verdict, and invalid gate state. Each mutation must fail for the
+expected reason; valid fixtures for all four modes must pass.

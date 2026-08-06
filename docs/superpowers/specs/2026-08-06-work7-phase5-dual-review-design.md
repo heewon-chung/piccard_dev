@@ -20,9 +20,9 @@ packet. Neither reviewer receives or reacts to the other's verdict.
 - approved Work 7 design and Phase 0–5 designs;
 - seven-row claim matrix and verifier report;
 - current code/test references for Works 1–6;
-- one-run toy manifest and verification summary;
+- one-run toy runtime/closure seals and verification summary;
 - candidate ResponseStrategy diff;
-- external-worktree before/after fingerprints; and
+- external-worktree before/after byte-level snapshot digests; and
 - Work 7 work-level approval.
 
 Every item, including the Work 7 raw approval and Phase 4 seal, is hashed into
@@ -46,16 +46,17 @@ echo its single digest.
 2. Both independently return exactly `APPROVED` with no required changes.
 3. Both explicitly approve the terminal status
    `POC_APPROVED_PERFORMANCE_PENDING`.
-4. Both raw responses are preserved unedited and mechanically parsed; their
-   hashes, the packet digest, and the Phase 4 seal chain into a terminal Phase
-   5 seal.
-5. Final external-worktree byte-level snapshots equal the Phase 0 baseline.
+4. Both raw responses are preserved unedited and supplied to the fail-closed
+   `terminal` verifier; its derived state report emits the approved status.
+5. The raw-response hashes, terminal report, packet digest, and Phase 4 seal
+   chain into the terminal Phase 5 seal.
+6. Final external-worktree byte-level snapshots equal the Phase 0 baseline.
 
 ## Failure conditions
 
 - Either verdict is conditional, requests a change, or is not `APPROVED`.
 - Reviewers inspect different source commits or packet digests, omit required
-  metadata, or return a non-exact verdict token.
+  metadata, return a non-exact verdict token, or fail terminal verification.
 - Either reviewer identifies an original-intent mismatch or overclaim.
 - Paper or threshold state differs from baseline.
 - The maximum of two remediation cycles is exhausted.

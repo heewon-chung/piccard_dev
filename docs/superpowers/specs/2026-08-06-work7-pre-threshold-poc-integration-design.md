@@ -98,11 +98,14 @@ The allowed combinations are also frozen:
   `threshold_gate_state=DEFERRED_EXPECTED` and
   `work_gate_state=POC_APPROVED_PERFORMANCE_PENDING`.
 
-The static verifier checks code and test references but prohibits toy evidence
-before a session exists. The evidence-bound verifier checks current-session
-artifacts for claims 1–6. Claim 7 becomes toy-verified after the runtime seal
-and response-candidate seal exist, but the work gate remains pending until both
-final reviews approve.
+The tracked matrix is an immutable lifecycle contract: it stores claim
+definitions, required references, and allowed transitions, not mutable current
+states. The verifier emits session-local derived state snapshots. `static`
+checks code/test references and emits `PENDING` toy states; `evidence-bound`
+checks claims 1–6 against the runtime-artifact seal; `claim7` runs after the
+response-candidate seal; and `terminal` runs after both final raw review
+responses exist. Only the terminal report may emit
+`work_gate_state=POC_APPROVED_PERFORMANCE_PENDING`.
 
 ## 5. Claim contract
 
@@ -116,23 +119,23 @@ The matrix contains one row for each original design goal:
 6. bounded-dynamic refresh and deletion-survival evidence; and
 7. integration gate and manuscript-response handoff.
 
-Each row contains:
+Each immutable lifecycle row contains:
 
 - stable claim identifier;
 - original-intent text;
-- `implementation_state`;
-- `toy_evidence_state`;
-- `performance_state`;
+- allowed `implementation_state` values;
+- allowed `toy_evidence_state` transitions;
+- allowed `performance_state` values;
 - source paths;
 - automated test names or paths;
 - toy artifact paths when exercised;
 - deferred-work rationale when applicable; and
 - explicit prohibited overclaim text.
 
-The document also contains the two top-level gate states. Paths are
-repository-relative and must resolve. Test references must be discoverable in
-the fresh Release build. Toy artifacts must belong to the current session and
-appear in its current phase seal.
+The contract also defines allowed transitions for the two top-level gate
+states. Paths are repository-relative and must resolve. Test references must be
+discoverable in the fresh Release build. Toy artifacts must belong to the
+current session and appear in the seal named by the derived state snapshot.
 
 ## 6. Architecture
 
@@ -183,16 +186,20 @@ seal's digest, forming this chain:
 
 ```text
 phase0 state seal
-  -> phase2 runtime + evidence-bound-claims seal
-  -> phase3 response-candidate seal
+  -> phase2 runtime-artifact seal
+  -> phase2 closure (evidence-bound claims) seal
+  -> phase3 response-candidate-artifact seal
+  -> phase3 closure (claim 7) seal
   -> phase4 work-review seal
   -> phase5 dual-review terminal seal
 ```
 
-No file covered by a seal may be changed. Later artifacts are appended under a
-new phase directory; the so-called runtime manifest is final only for Phase 2,
-not for the whole session. The terminal seal digest is the authoritative
-session digest. Across its layered records, the session records:
+No file covered by a seal may be changed. Phase 2 first seals raw runtime
+artifacts, then validates claims against that immutable seal, then writes a
+closure seal containing the claim report and chaining the runtime-artifact
+seal. Later artifacts are appended under a new phase directory; no intermediate
+manifest is final for the whole session. The terminal seal digest is the
+authoritative session digest. Across its layered records, the session records:
 
 - source commit and clean/dirty status;
 - Paper repository commit and canonical byte-level snapshot digest;
@@ -234,8 +241,10 @@ user's existing Paper changes.
 - Run the exact focused registry below plus Work 7 contract/provenance tests.
 - Use synthetic fixtures for real-dataset parsers.
 - Use toy parameter sizes for executable probes.
-- Set every repeat/trial/iteration count controlling performance sampling to
-  exactly `1`.
+- Set every measured repeat/trial/iteration count controlling performance
+  sampling to exactly `1`. One implementation-mandated discarded warmup per
+  timing cell is permitted and must be recorded distinctly as `warmup`; it is
+  not a measured repetition and is never summarized as evidence.
 - Do not run the original plan's full actual-data or repeated-performance gate.
 - Treat missing tools, stale binaries, skipped required tests, malformed rows,
   provenance mismatch, or a count greater than one as hard failures.
@@ -264,13 +273,16 @@ The executable probe registry is also fixed:
 
 | Probe | Command/policy | Output contract |
 |---|---|---|
-| estimator functional | execute `EstimatorDiagnostic` once and retain its CTest log; never call `bench_estimator_bias` | passing test log bound to build/source provenance |
-| comparison + refresh | `run_pre_threshold_profiles.sh --suite=smoke --seed=7 --threads=2` | existing benchmark/review/dynamic schemas; every trials/accuracy-trials/refresh-updates field is `1` |
-| synthetic real-data | `run_real_datasets.sh --quick --seed=7 --threads=2` | quick DBLP-ACM tracked fixture only; accuracy and timing trials are `1`; no warmup |
-| deletion survival | `bench_deletion_survival --n=64 --d=3 --k=8 --required_survival=0.99 --r_values=1,4,8 --trials=1 --seed=7` | existing 17-column CSV, three rows, `trials=1` |
+| estimator functional | execute `ctest --test-dir <fresh-build> --output-on-failure -R '^EstimatorDiagnostic$'` once and retain its log; never call `bench_estimator_bias` | passing test log bound to build/source provenance |
+| comparison + refresh | `scripts/run_pre_threshold_profiles.sh --suite=smoke --seed=7 --threads=2 --build-dir=<fresh-build> --results-root=<session>/phase2/runtime/pre-threshold` | existing benchmark/review/dynamic schemas; every measured trials/accuracy-trials/refresh-updates field is `1`; existing discarded timing warmup allowed and recorded |
+| synthetic real-data | `scripts/run_real_datasets.sh --quick --seed=7 --threads=2 --build-dir=<fresh-build> --results-root=<session>/phase2/runtime/real-datasets` | quick DBLP-ACM tracked fixture only; measured accuracy and timing trials are `1`; one recorded discarded timing warmup allowed |
+| deletion survival | `<fresh-build>/bench_deletion_survival --n=64 --d=3 --k=8 --required_survival=0.99 --r_values=1,4,8 --trials=1 --seed=7` | existing 17-column CSV, three rows, `trials=1` |
 
 All fixture inputs must resolve below `tests/fixtures/real_datasets/quick` or
-`tests/fixtures/runner`. Warmup count is zero; retry count is zero.
+`tests/fixtures/runner`. Retry count is zero. The verifier accepts only the
+single discarded warmup already emitted by each timing-cell implementation;
+it rejects warmups in accuracy/analytic cells or more than one warmup in any
+timing cell.
 
 ## 10. Review policy
 
@@ -299,10 +311,13 @@ Work 7 is complete only when:
 1. all Phase 0–5 success conditions pass;
 2. all claim rows resolve to allowed states and valid references;
 3. the fresh-build focused suite and every one-run toy probe pass;
-4. the hashed session manifest and candidate response diff are reproducible;
-5. Paper and threshold fingerprints are unchanged;
+4. the chained phase seals and candidate response diff are reproducible;
+5. Paper and threshold byte-level snapshots are unchanged;
 6. the Work 7 reviewer approves; and
-7. both final reviewers approve the same commit and status.
+7. both final reviewers approve the same commit, packet, and proposed status;
+   and
+8. the fail-closed terminal verifier validates both raw approvals and emits the
+   terminal state before the Phase 5 terminal seal is written.
 
 Actual-data and multi-run performance work remains visible as
 `PERFORMANCE_PENDING` in both the claim matrix and the response candidate.

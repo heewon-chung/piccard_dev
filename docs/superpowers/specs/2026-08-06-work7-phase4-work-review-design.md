@@ -16,7 +16,7 @@ the whole pre-threshold intent audit.
 - Terra implementation plan;
 - claim matrix and verifier report;
 - focused test and fresh-build summary;
-- toy session manifest;
+- Phase 2 runtime/closure and Phase 3 candidate/closure seals;
 - ResponseStrategy candidate diff; and
 - before/after Paper and threshold byte-level snapshot digests.
 
