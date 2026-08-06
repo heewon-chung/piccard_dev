@@ -212,13 +212,46 @@ class CheckWork6Scope(unittest.TestCase):
         self.assert_fail(self.repo.check(base, header + "\n" + source + "\n"), "missing unique anonymous namespace")
 
     def test_bfv_production_shaped_mutations_fail_after_subtraction(self):
+        export_decl = "    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n"
+        def move_helper(source, destination):
+            start = source.index("void AppendBE32")
+            end = source.index("\n}\n\n", start) + 3
+            helper = source[start:end]
+            source = source[:start] + source[end:]
+            return destination(source, helper)
+
+        def move_export_after_close(header):
+            header = header.replace(export_decl, "", 1)
+            return header.replace("};\n\n} // namespace piccard", "};\n" + export_decl + "\n} // namespace piccard", 1)
+
+        def move_export_nested(header):
+            header = header.replace(export_decl, "", 1)
+            return header.replace("void Initialize();", "void Initialize() {\n" + export_decl + "}", 1)
+
         cases = [
-            ("condition", lambda h, s: (h, s.replace("requested N=", "changed N=", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("condition", lambda h, s: (h, s.replace("top_bits < 32", "top_bits <= 32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
             ("body", lambda h, s: (h, s.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const { int injected = 0;", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
             ("header", lambda h, s: (h.replace("Decrypt(", "DecryptChanged(", 1), s), "include/fhe/bfv_context.h changes preexisting content"),
             ("private", lambda h, s: (h.replace("public:\n    explicit BFVContext", "private:\n    explicit BFVContext", 1), s), "codec export is not public"),
-            ("comment", lambda h, s: (h, s.replace("void AppendBE32", "// void AppendBE32", 1)), "unbalanced braces"),
-            ("prefix", lambda h, s: (h, s.replace("void AppendBE32", "// prefix\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("comment_prefix", lambda h, s: (h, s.replace("void AppendBE32", "// prefix\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("forward_wrong_namespace", lambda h, s: (h.replace("class PublicCiphertextCodec;", "namespace wrong { class PublicCiphertextCodec; }", 1), s), "codec forward declaration has wrong scope"),
+            ("protected", lambda h, s: (h.replace("public:\n    explicit BFVContext", "protected:\n    explicit BFVContext", 1), s), "codec export is not public"),
+            ("export_after_close", lambda h, s: (move_export_after_close(h), s), "codec export is not a class member"),
+            ("export_nested", lambda h, s: (move_export_nested(h), s), "codec export is not a class member"),
+            ("include_comment", lambda h, s: (h, s.replace('#include "fhe/public_ciphertext_codec.h"', '// #include "fhe/public_ciphertext_codec.h"\n#include "fhe/public_ciphertext_codec.h"', 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("include_string", lambda h, s: (h, s + '\nconst char* text = "#include \\"fhe/public_ciphertext_codec.h\\"";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("helper_string", lambda h, s: (h, s + '\nconst char* text = "void AppendBE32";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("helper_comment_decoy", lambda h, s: (h, s + "\n// void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) { }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("helper_char", lambda h, s: (h, s + "\nchar escaped = '\\\\'; char brace = '}';\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("helper_nested", lambda h, s: (h, s + "\nnamespace nested { void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {} }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("helper_moved_body", lambda h, s: (h, move_helper(s, lambda text, helper: text.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const {\n" + helper, 1))), "codec definition has wrong scope"),
+            ("helper_moved_namespace", lambda h, s: (h, move_helper(s, lambda text, helper: text + "\nnamespace nested {\n" + helper + "\n}\n")), "codec definition has wrong scope"),
+            ("attribute_prefix", lambda h, s: (h, s.replace("void AppendBE32", "[[maybe_unused]]\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("define_prefix", lambda h, s: (h, s.replace("void AppendBE32", "#define LOCAL 1\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("duplicate", lambda h, s: (h, s + "\nvoid AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {}\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("brace_comment", lambda h, s: (h, s + "\n// { }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("brace_string", lambda h, s: (h, s + '\nconst char* braces = "{ }";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("escaped_brace", lambda h, s: (h, s + "\nchar brace = '\\}';\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
         ]
         for name, mutate, reason in cases:
             with self.subTest(name=name):
@@ -243,32 +276,6 @@ class CheckWork6Scope(unittest.TestCase):
         self.repo.write(source, '#include "fhe/bfv_context.h"\n\n#include "fhe/public_ciphertext_codec.h"\n\n#include "build_info.h"\n#include "key/key-ser.h"\n#include "math/distributiongenerator.h"\n\n#include <openssl/evp.h>\n\nnamespace piccard {\n\nnamespace {\n\n' + defs + '\n\nvoid Keep() {}\n\n} // namespace\n\nstd::shared_ptr<const PublicCiphertextCodec>\nBFVContext::ExportPublicCiphertextCodec() const {}\n\nvoid BFVContext::Old() {}\n}\n')
         self.repo.commit("candidate")
         self.assert_pass(self.repo.check(base, header + "\n" + source + "\n"))
-
-    def test_bfv_lexical_scope_rejects_decoys_and_prefixes(self):
-        spec = importlib.util.spec_from_file_location("scope_checker", CHECKER)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        header = "#pragma once\n#include <memory>\nnamespace piccard {\nclass PublicCiphertextCodec;\n\nclass BFVContext { public:\n    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n\n};\n}\n"
-        with self.assertRaises(module.ScopeError):
-            module.subtract_header(header.replace("class PublicCiphertextCodec;", "// class PublicCiphertextCodec;"))
-        with self.assertRaises(module.ScopeError):
-            module.subtract_header(header.replace("public:", "private:"))
-        for changed in (header.replace("#include <memory>", "// #include <memory>"),
-                        header.replace("class PublicCiphertextCodec;", "namespace other { class PublicCiphertextCodec; }"),
-                        header.replace("ExportPublicCiphertextCodec() const;", "ExportPublicCiphertextCodec() const;\n};\nstd::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;")):
-            with self.subTest(header=changed[:20]):
-                with self.assertRaises(module.ScopeError): module.subtract_header(changed)
-        source = '#include "fhe/public_ciphertext_codec.h"\n\n#include "key/key-ser.h"\n#include <openssl/evp.h>\n\nnamespace piccard { namespace {\n\nvoid AppendBE32() {}\n\nvoid AppendBE64() {}\n\nvoid Sha256Hex() {}\n\nvoid ContextFingerprintHex() {}\n\nvoid PublicKeyFingerprintHex() {}\n\n} // namespace\n\nvoid BFVContext::ExportPublicCiphertextCodec() {}\n}\n'
-        with self.assertRaises(module.ScopeError):
-            module.subtract_source(source.replace("void AppendBE32", "int prefix;\nvoid AppendBE32"))
-        with self.assertRaises(module.ScopeError):
-            module.subtract_source(source.replace("void AppendBE32", '"void AppendBE32";\nvoid AppendBE32', 1))
-        for changed in (source.replace("void AppendBE32", "// void AppendBE32", 1),
-                        source.replace("void AppendBE32", "namespace nested { void AppendBE32", 1),
-                        source.replace("void AppendBE32", "/* attribute */\nvoid AppendBE32", 1),
-                        source.replace("void AppendBE32", "void AppendBE32", 1) + "\nvoid AppendBE32() {}\n"):
-            with self.subTest(source=changed[:20]):
-                with self.assertRaises(module.ScopeError): module.subtract_source(changed)
 
     def test_fail_closed_pure_inputs(self):
         spec = importlib.util.spec_from_file_location("scope_checker", CHECKER)
@@ -313,6 +320,13 @@ class CheckWork6Scope(unittest.TestCase):
         lookalike = "scripts/run_pre_" + STATE + "_profiles.py"
         self.repo.write(data_path, lookalike + "\n")
         self.repo.commit("bad")
+        self.assert_fail(self.repo.check(base, data_path + "\n"), "path data has excluded entry")
+
+    def test_path_data_candidate_update_entry_fails_exactly(self):
+        data_path = "scripts/" + "work6_" + "allowed_paths" + ".txt"
+        base = self.repo.commit("base")
+        self.repo.write(data_path, "src/" + "Apply" + "Delta" + ".cpp\n")
+        self.repo.commit("candidate")
         self.assert_fail(self.repo.check(base, data_path + "\n"), "path data has excluded entry")
 
     def test_checker_and_tests_pass_their_own_candidate_diff(self):
