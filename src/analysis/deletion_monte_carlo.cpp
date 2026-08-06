@@ -1,8 +1,10 @@
 #include "analysis/deletion_monte_carlo.h"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
+#include <vector>
 
 namespace piccard {
 namespace {
@@ -11,6 +13,14 @@ void ValidateConfig(const DeletionSurvivalConfig& config) {
     if (config.set_size == 0 || config.bottom_depth == 0 ||
         config.bottom_depth > config.set_size || config.hash_count == 0) {
         throw std::invalid_argument("invalid deletion survival configuration");
+    }
+}
+
+void ValidateHistogramSize(const DeletionSurvivalConfig& config) {
+    const size_t maximum_bins = std::vector<uint64_t>().max_size();
+    if (config.set_size == std::numeric_limits<uint64_t>::max() ||
+        config.set_size >= maximum_bins) {
+        throw std::invalid_argument("set size cannot represent histogram bins");
     }
 }
 
@@ -86,6 +96,7 @@ DeletionMonteCarloResult SimulateDeletionSurvival(
     if (trials == 0) {
         throw std::invalid_argument("trials must be positive");
     }
+    ValidateHistogramSize(config);
 
     DeletionMonteCarloResult result{trials, seed,
                                     std::vector<uint64_t>(config.set_size + 1, 0),

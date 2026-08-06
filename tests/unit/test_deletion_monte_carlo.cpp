@@ -2,8 +2,10 @@
 
 #include "analysis/deletion_monte_carlo.h"
 
+#include <limits>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 
 using namespace piccard;
 
@@ -39,4 +41,9 @@ TEST(DeletionMonteCarloTest, OneTrialIsSeededAndUsesStrictTGreaterThanR) {
     EXPECT_EQ(first.SurvivalAt(3), 0.0L);
     EXPECT_EQ(first.mean_first_failure_time, 3.0L);
     EXPECT_EQ(first.mean_safe_deletions, 2.0L);
+}
+
+TEST(DeletionMonteCarloTest, RejectsUnrepresentableHistogramSizeBeforeSampling) {
+    const DeletionSurvivalConfig config{std::numeric_limits<uint64_t>::max(), 1, 1};
+    EXPECT_THROW(SimulateDeletionSurvival(config, 1, 7), std::invalid_argument);
 }
