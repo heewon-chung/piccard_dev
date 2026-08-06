@@ -206,6 +206,14 @@ def sealed_file(root: Path, relative: object, digest: object, label: str) -> Pat
     return candidate
 
 
+def smoke_parameter_sha256(producer: str, argv: list[str]) -> str:
+    values=[producer,"toy-smoke",*[x for x in argv[1:] if not x.startswith("--manifest-out=") and not x.startswith("--execution-trace-out=")],"OMP_DYNAMIC=FALSE","OMP_NUM_THREADS=2"]
+    digest=hashlib.sha256(b"piccard-benchmark-cell-v1\0")
+    for value in values:
+        raw=value.encode(); digest.update(len(raw).to_bytes(4,"big")); digest.update(raw)
+    return digest.hexdigest()
+
+
 def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], source: Path) -> Path:
     path = root / "manifest.json"; value = load_json(path, "pre-threshold manifest")
     if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1:
@@ -216,21 +224,26 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], sou
     if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
         raise Failure("invalid pre-threshold cells")
     expected={"bench_review_comparison":["--suite=toy-smoke","--profile=toy-smoke","--k=16","--m=16","--set-size=10","--universe=64","--target-jaccard=0.5","--trials=1","--accuracy-trials=1","--seed=7","--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16","--sj16-key-bits=1024","--allow-unmatched-security"], "bench_piccard":["--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=10","--target-jaccard=0.5","--trials=1","--seed=7"], "bench_dynamic":["--scenario=refresh","--refresh_updates=1","--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=100","--target-jaccard=0.5","--depth=5","--trials=1","--seed=7"]}
+    expected_rows={"bench_review_comparison":10,"bench_piccard":1,"bench_dynamic":1}
     for row in cells:
         argv=row.get("argv")
         sampling=[x for x in argv if isinstance(x,str) and (x.startswith("--trials=") or x.startswith("--accuracy-trials=") or x.startswith("--refresh_updates="))] if isinstance(argv,list) else []
         output=row.get("output", {})
         dynamic=([f"--manifest-out={root/output.get('workload')}",f"--execution-trace-out={root/output.get('trace')}"] if row["producer"]=="bench_review_comparison" else [])
-        if row.get("status") != "MEASURED" or row.get("profile_id")!="toy-smoke" or row.get("environment")!={"OMP_DYNAMIC":"FALSE","OMP_NUM_THREADS":"2"} or not isinstance(argv,list) or argv != [row["producer"],*expected[row["producer"]],*dynamic] or len(sampling) != len(set(sampling)):
+        digest=smoke_parameter_sha256(row.get("producer",""), argv if isinstance(argv,list) else [])
+        if row.get("status") != "MEASURED" or row.get("profile_id")!="toy-smoke" or row.get("environment")!={"OMP_DYNAMIC":"FALSE","OMP_NUM_THREADS":"2"} or row.get("parameter_sha256")!=digest or row.get("cell_id")!=f"toy-smoke/{row.get('producer')}/{digest}" or row.get("reason_code")!="NONE" or any(row.get(k)!="" for k in ("required_bits","available_bits","shortfall_bits")) or not isinstance(argv,list) or argv != [row["producer"],*expected[row["producer"]],*dynamic] or len(sampling) != len(set(sampling)):
             raise Failure("pre-threshold row/argv mismatch")
     terminal=value.get("terminal_cells")
     if not isinstance(terminal,dict) or set(terminal)!={"path","row_count","sha256"} or terminal["path"]!="terminal-cells.tsv" or terminal["row_count"]!=3:
         raise Failure("missing pre-threshold terminal cells")
     terminal_path=root/terminal["path"]
-    if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(terminal_path.read_text(encoding="utf-8").splitlines())!=4:
+    header="schema_version\tcell_id\tprofile_id\tproducer\tparameter_sha256\tstatus\treason_code\trequired_bits\tavailable_bits\tshortfall_bits\tlog_sha256"
+    lines=terminal_path.read_text(encoding="utf-8").splitlines() if terminal_path.is_file() else []
+    if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(lines)!=4 or lines[0]!=header:
         raise Failure("invalid pre-threshold terminal cells")
     for row in cells:
-        if set(output) != ({"csv","csv_sha256","log","log_sha256","workload","workload_sha256","trace","trace_sha256","expected_csv_rows","csv_row_count","measurement_output"} if row["producer"]=="bench_review_comparison" else {"csv","csv_sha256","log","log_sha256","expected_csv_rows","csv_row_count","measurement_output"}) or output.get("measurement_output")!="measured-csv": raise Failure("invalid pre-threshold output schema")
+        output=row.get("output")
+        if not isinstance(output,dict) or set(output) != ({"csv","csv_sha256","log","log_sha256","workload","workload_sha256","trace","trace_sha256","expected_csv_rows","csv_row_count","measurement_output"} if row["producer"]=="bench_review_comparison" else {"csv","csv_sha256","log","log_sha256","expected_csv_rows","csv_row_count","measurement_output"}) or output.get("measurement_output")!="measured-csv" or output.get("expected_csv_rows") != expected_rows[row["producer"]] or output.get("csv_row_count") != expected_rows[row["producer"]]: raise Failure("invalid pre-threshold output schema")
         if not isinstance(output,dict): raise Failure("missing pre-threshold output")
         for key, relative in output.items():
             if key.endswith("_sha256") or key in {"expected_csv_rows","csv_row_count","measurement_output"}: continue
