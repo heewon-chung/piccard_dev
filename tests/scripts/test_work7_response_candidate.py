@@ -93,6 +93,16 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         return {path.relative_to(root).as_posix(): path.read_bytes()
                 for path in root.rglob("*") if path.is_file() and ".git" not in path.parts}
 
+    def assert_outside_session_unchanged(self, temporary: Path, source: Path, paper: Path, threshold: Path,
+                                         snapshots: dict, tree: dict[str, bytes]) -> None:
+        from scripts.work7_evidence import snapshot_git_worktree
+
+        self.assertEqual({"source": snapshot_git_worktree(source), "paper": snapshot_git_worktree(paper),
+                          "threshold": snapshot_git_worktree(threshold)}, snapshots)
+        after = self.tree_bytes(temporary)
+        self.assertEqual({path: value for path, value in after.items() if not path.startswith("session/")},
+                         {path: value for path, value in tree.items() if not path.startswith("session/")})
+
     def invoke(self, *, invalid_utf8: bool = False, tamper_phase2: bool = False,
                drift_external: bool = False, tamper_runtime: bool = False,
                assert_outside_session: bool = False) -> tuple[subprocess.CompletedProcess[bytes], Path, Path, Path, Path, str, bytes]:
@@ -116,12 +126,11 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                                  "--phase0-seal", str(session / "phase0" / "seal.json"),
                                  "--phase2-closure-seal", str(session / "phase2" / "closure-seal.json")), capture_output=True)
         if assert_outside_session:
-            self.assertEqual(result.returncode, 0, result.stderr.decode())
-            self.assertEqual({"source": snapshot_git_worktree(source), "paper": snapshot_git_worktree(paper),
-                              "threshold": snapshot_git_worktree(threshold)}, before_roots)
-            created = set(self.tree_bytes(temporary)) - set(before_tree)
-            self.assertTrue(created)
-            self.assertTrue(all(path.startswith("session/phase3/") for path in created), created)
+            self.assert_outside_session_unchanged(temporary, source, paper, threshold, before_roots, before_tree)
+            if result.returncode == 0:
+                created = set(self.tree_bytes(temporary)) - set(before_tree)
+                self.assertTrue(created)
+                self.assertTrue(all(path.startswith("session/phase3/") for path in created), created)
         return result, temporary, paper, threshold, session, commit, baseline
 
     def test_candidate_is_unapplied_deterministic_and_sealed(self):
@@ -140,7 +149,6 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         self.assertNotRegex(candidate.split("WORK7_RESPONSE_CANDIDATE_BEGIN", 1)[1], forbidden_measurement)
         for hostile in ("3 ms", "99% accuracy", "2x speedup"):
             self.assertIsNotNone(re.search(forbidden_measurement, hostile))
-        self.assertIn("result", "result: 1")
         for claim in ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION", "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION"):
             self.assertIn(claim, candidate)
         self.assertIn("PERFORMANCE_PENDING", candidate)
@@ -181,7 +189,7 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         self.assertEqual((paper_two / "Revision/ResponseStrategy.md").read_bytes(), baseline_two)
 
     def test_rejects_invalid_utf8_without_candidate_output(self):
-        result, _, paper, _, session, _, _ = self.invoke(invalid_utf8=True)
+        result, _, paper, _, session, _, _ = self.invoke(invalid_utf8=True, assert_outside_session=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"UTF-8", result.stderr)
         self.assertEqual((paper / "Revision/ResponseStrategy.md").read_bytes(), b"\xff")
@@ -220,7 +228,8 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         from scripts.work7_evidence import create_tree_seal, sha256_file
         import scripts.generate_work7_response_candidate as generator
 
-        for fault in ("phase0-kind", "phase0-root", "phase2-kind", "runtime-kind", "runtime-predecessor"):
+        for fault in ("phase0-kind", "phase0-root", "phase2-kind", "phase2-root", "phase2-predecessor",
+                      "runtime-kind", "runtime-root", "runtime-predecessor"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary_name:
                 temporary = Path(temporary_name)
                 source, paper, threshold, session, _, _ = self.make_phase_inputs(temporary)
@@ -235,10 +244,18 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                     phase0.unlink(); create_tree_seal(foreign, phase0, None, "phase0")
                 elif fault == "phase2-kind":
                     phase2.unlink(); create_tree_seal(closure_root, phase2, sha256_file(runtime), "foreign-phase2")
+                elif fault == "phase2-root":
+                    foreign = temporary / "foreign-phase2-artifacts"; shutil.copytree(closure_root, foreign)
+                    phase2.unlink(); create_tree_seal(foreign, phase2, sha256_file(runtime), "phase2-closure")
+                elif fault == "phase2-predecessor":
+                    phase2.unlink(); create_tree_seal(closure_root, phase2, "0" * 64, "phase2-closure")
                 else:
                     runtime.unlink()
                     predecessor = "0" * 64 if fault == "runtime-predecessor" else sha256_file(phase0)
-                    create_tree_seal(runtime_root, runtime, predecessor,
+                    runtime_artifacts = runtime_root
+                    if fault == "runtime-root":
+                        runtime_artifacts = temporary / "foreign-runtime-artifacts"; shutil.copytree(runtime_root, runtime_artifacts)
+                    create_tree_seal(runtime_artifacts, runtime, predecessor,
                                      "foreign-runtime" if fault == "runtime-kind" else "phase2-runtime-artifacts")
                     phase2.unlink(); create_tree_seal(closure_root, phase2, sha256_file(runtime), "phase2-closure")
                 result = generator.main(["--source-root", str(source), "--paper-root", str(paper),
@@ -316,11 +333,16 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                     if kind == "nonempty-stderr": stderr = b"warning\n"
                     return subprocess.CompletedProcess(argv, 0, stdout, stderr)
 
+                from scripts.work7_evidence import snapshot_git_worktree
+                before_roots = {"source": snapshot_git_worktree(source), "paper": snapshot_git_worktree(paper),
+                                "threshold": snapshot_git_worktree(threshold)}
+                before_tree = self.tree_bytes(temporary)
                 with mock.patch.object(generator.subprocess, "run", side_effect=fake_run):
                     with self.assertRaises(generator.Failure):
                         generator.run_claim7(source, paper, threshold, session, commit,
                                              session / "phase0" / "seal.json", session / "phase2" / "closure-seal.json", candidate_seal)
                 self.assertFalse((session / "phase3" / "closure-seal.json").exists())
+                self.assert_outside_session_unchanged(temporary, source, paper, threshold, before_roots, before_tree)
 
     def test_rejects_tampered_prior_seal_and_collision(self):
         tampered, _, _, _, tampered_session, _, _ = self.invoke(tamper_phase2=True)
@@ -393,6 +415,22 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                 checked = claim7(seal, temporary / f"{name}-claim7.json")
                 self.assertEqual(checked.returncode, 2, checked.stderr.decode())
                 self.assertFalse((temporary / f"{name}-claim7.json").exists())
+
+        # The candidate/diff/metadata/validation are mutually consistent here:
+        # rejection therefore proves the exact-prose gate, not a stale digest.
+        if (session / "phase3").exists():
+            shutil.rmtree(session / "phase3")
+        root = session / "phase3" / "candidate-artifacts"
+        hostile_candidate = (render_candidate(baseline) +
+                             b"\nResult: 1; measured 3 ms; 99% accuracy; 2x speedup.\n")
+        write_artifacts(root, baseline, hostile_candidate, make_diff(baseline, hostile_candidate),
+                        json.loads((session / "phase0" / "artifacts" / "state.json").read_bytes()), commit, phase0, phase2)
+        seal = session / "phase3" / "candidate-seal.json"
+        create_tree_seal(root, seal, sha256_file(phase2), "phase3-candidate-artifacts")
+        checked = claim7(seal, temporary / "numeric-claim7.json")
+        self.assertEqual(checked.returncode, 2, checked.stderr.decode())
+        self.assertIn(b"candidate prose or diff is not the exact conservative rendering", checked.stderr)
+        self.assertFalse((temporary / "numeric-claim7.json").exists())
 
         phase0_artifacts = temporary / "phase0-wrong-artifacts"
         shutil.copytree(session / "phase0" / "artifacts", phase0_artifacts)
