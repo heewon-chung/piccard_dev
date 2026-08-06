@@ -113,18 +113,33 @@ class Work7ClaimContractTests(unittest.TestCase):
         from work7_evidence import create_tree_seal
         artifact = self.root / f"runtime-{self.calls}"
         artifact.mkdir(exist_ok=True)
-        index = {"schema": "piccard-work7-evidence-index-v1", "source_commit": "c" * 40 if foreign else COMMIT,
-                 "claims": {f"W7-G{i}-{suffix}": [f"proof-{i}.txt"] for i, suffix in enumerate(
-                     ("ESTIMATOR", "SANITIZER", "CALIBRATION", "COMPARISON", "REAL-DATA", "DYNAMIC"), 1)}}
+        contract = json.loads(self.contract.read_text())
+        index = {"schema": "piccard-work7-evidence-index-v2", "source_commit": "c" * 40 if foreign else COMMIT,
+                 "claims": {claim["id"]: {} for claim in contract["claims"][:6]}}
+        for index_number, claim in enumerate(contract["claims"][:6], 1):
+            for key in claim["evidence_keys"]:
+                name = f"proof-{index_number}-{key}.bin"
+                (artifact / name).write_bytes(f"proof {key}\n".encode())
+                index["claims"][claim["id"]][key] = {
+                    "artifact_kind": "ctest-log", "path": name,
+                    "sha256": hashlib.sha256((artifact / name).read_bytes()).hexdigest(),
+                }
         if missing_claim:
             index["claims"].pop("W7-G1-ESTIMATOR")
-        for paths in index["claims"].values():
-            for path in paths:
-                (artifact / path).write_text("proof\n")
         (artifact / "evidence-index.json").write_text(json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n")
         seal = self.root / f"runtime-{self.calls}.seal.json"
         create_tree_seal(artifact, seal, None, "phase2-runtime-artifacts")
         return seal
+
+    def test_static_rejects_unsafe_output_and_malformed_ctest_inventory(self) -> None:
+        unsafe = self.source / "report.json"
+        result = subprocess.run([sys.executable, str(VERIFIER), "--mode", "static", "--contract", str(self.contract),
+                                 "--source-root", str(self.source), "--source-commit", COMMIT,
+                                 "--ctest-inventory", str(self.inventory), "--output", str(unsafe)],
+                                cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.inventory.write_text("Test #1: MinHash\nTest #1: Params\n")
+        self.assert_fail("static")
 
     def test_evidence_bound_binds_only_claims_one_to_six(self) -> None:
         report = self.assert_pass("evidence-bound", runtime_seal=self.runtime())
@@ -136,20 +151,34 @@ class Work7ClaimContractTests(unittest.TestCase):
         self.assert_fail("evidence-bound", runtime_seal=self.runtime(missing_claim=True))
         self.assert_fail("evidence-bound", runtime_seal=self.runtime(foreign=True))
         seal = self.runtime()
-        Path(json.loads(seal.read_text())["artifact_root"]).joinpath("proof-1.txt").write_text("tampered\n")
+        Path(json.loads(seal.read_text())["artifact_root"]).joinpath("proof-1-estimator.bin").write_text("tampered\n")
+        self.assert_fail("evidence-bound", runtime_seal=seal)
+
+    def test_evidence_bound_rejects_shared_index_or_arbitrary_evidence(self) -> None:
+        seal = self.runtime()
+        root = Path(json.loads(seal.read_text())["artifact_root"])
+        index = json.loads((root / "evidence-index.json").read_text())
+        index["claims"]["W7-G2-SANITIZER"]["sanitizer"] = index["claims"]["W7-G1-ESTIMATOR"]["estimator"]
+        (root / "evidence-index.json").write_text(json.dumps(index))
         self.assert_fail("evidence-bound", runtime_seal=seal)
 
     def test_claim7_requires_phase_two_and_candidate_seals(self) -> None:
         runtime = self.runtime()
         sys.path.insert(0, str(ROOT / "scripts"))
         from work7_evidence import create_tree_seal, sha256_file
+        evidence = self.invoke("evidence-bound", runtime_seal=runtime)
+        self.assertEqual(evidence.returncode, 0, evidence.stderr)
         closure_root = self.root / "phase2"
         closure_root.mkdir()
+        (closure_root / "evidence-bound-report.json").write_bytes(evidence.output_path.read_bytes())  # type: ignore[attr-defined]
         phase2 = self.root / "phase2.seal.json"
         create_tree_seal(closure_root, phase2, sha256_file(runtime), "phase2-closure")
         candidate_root = self.root / "candidate"
         candidate_root.mkdir()
-        (candidate_root / "candidate-validation.json").write_text('{"claim_id":"W7-G7-INTEGRATION"}\n')
+        (candidate_root / "candidate-validation.json").write_text(json.dumps({
+            "schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT,
+            "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2),
+        }) + "\n")
         candidate = self.root / "candidate.seal.json"
         create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
         report = self.assert_pass("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
@@ -166,19 +195,34 @@ class Work7ClaimContractTests(unittest.TestCase):
             (repo / "tracked.txt").write_text("stable\n"); subprocess.run(["git", "add", "."], cwd=repo, check=True)
             subprocess.run(["git", "-c", "user.email=x@y.z", "-c", "user.name=x", "commit", "-qm", "init"], cwd=repo, check=True)
         phase0_root = self.root / "phase0"; phase0_root.mkdir()
-        (phase0_root / "state.json").write_text(json.dumps({"schema": "piccard-work7-phase0-state-v1", "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold)}))
+        (phase0_root / "state.json").write_text(json.dumps({"schema": "piccard-work7-phase0-state-v1", "source": {"head": COMMIT}, "session_id": f"work7-{COMMIT}", "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold)}))
         phase0 = self.root / "phase0.seal.json"; create_tree_seal(phase0_root, phase0, None, "phase0")
+        runtime = self.runtime()
+        evidence = self.invoke("evidence-bound", runtime_seal=runtime)
+        self.assertEqual(evidence.returncode, 0, evidence.stderr)
+        phase2_root = self.root / "phase2-terminal"; phase2_root.mkdir()
+        (phase2_root / "evidence-bound-report.json").write_bytes(evidence.output_path.read_bytes())  # type: ignore[attr-defined]
+        phase2 = self.root / "phase2-terminal.seal.json"; create_tree_seal(phase2_root, phase2, sha256_file(runtime), "phase2-closure")
+        candidate_root = self.root / "candidate-terminal"; candidate_root.mkdir()
+        (candidate_root / "candidate-validation.json").write_text(json.dumps({"schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT, "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2)}) + "\n")
+        candidate = self.root / "candidate-terminal.seal.json"; create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
+        claim7 = self.invoke("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
+        self.assertEqual(claim7.returncode, 0, claim7.stderr)
         phase3_root = self.root / "phase3"; phase3_root.mkdir()
-        phase3 = self.root / "phase3.seal.json"; create_tree_seal(phase3_root, phase3, "d" * 64, "phase3-closure")
-        work_root = self.root / "work"; work_root.mkdir()
-        work = self.root / "work.seal.json"; create_tree_seal(work_root, work, sha256_file(phase3), "phase4-work-review")
+        (phase3_root / "claim7-report.json").write_bytes(claim7.output_path.read_bytes())  # type: ignore[attr-defined]
+        phase3 = self.root / "phase3.seal.json"; create_tree_seal(phase3_root, phase3, sha256_file(candidate), "phase3-closure")
         packet = self.root / "packet.json"; packet.write_bytes(b"packet\n")
         digest = hashlib.sha256(packet.read_bytes()).hexdigest()
         def review(provider: str, model: str) -> Path:
             path = self.root / f"{provider}.txt"
             path.write_text("\n".join(["VERDICT: APPROVED", f"PROVIDER: {provider}", f"MODEL: {model}", "EFFORT: high", f"SOURCE_COMMIT: {COMMIT}", f"PACKET_SHA256: {digest}", "STATUS: POC_APPROVED_PERFORMANCE_PENDING", "CHECK G1_G7_INTENT: CONFIRMED", "CHECK EVIDENCE_FRESHNESS: CONFIRMED", "CHECK PERFORMANCE_PENDING: CONFIRMED", "CHECK THRESHOLD_DEFERRED: CONFIRMED", "CHECK EXTERNAL_IMMUTABILITY: CONFIRMED", "CHECK TERMINAL_STATUS_MAXIMAL: CONFIRMED", "prose"]) + "\n")
             return path
-        report = self.assert_pass("terminal", phase3_closure_seal=phase3, work_review_seal=work, review_packet=packet, claude_review=review("anthropic", "claude-fable"), sol_review=review("openai", "gpt-5.6-sol"), phase0_seal=phase0, paper_root=paper, threshold_root=threshold)
+        claude_review, sol_review = review("anthropic", "claude-fable"), review("openai", "gpt-5.6-sol")
+        work_root = self.root / "work"; work_root.mkdir()
+        for path in (packet, claude_review, sol_review):
+            (work_root / path.name).write_bytes(path.read_bytes())
+        work = self.root / "work.seal.json"; create_tree_seal(work_root, work, sha256_file(phase3), "phase4-work-review")
+        report = self.assert_pass("terminal", phase3_closure_seal=phase3, work_review_seal=work, review_packet=packet, claude_review=claude_review, sol_review=sol_review, phase0_seal=phase0, paper_root=paper, threshold_root=threshold)
         self.assertEqual(report["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
 
         claude, sol = self.root / "anthropic.txt", self.root / "openai.txt"

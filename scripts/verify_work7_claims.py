@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from work7_evidence import (_atomic_create, _reject_symlink_components,
+from work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components,
                             canonical_json_bytes, sha256_file, snapshot_git_worktree,
                             verify_tree_seal)
 
@@ -105,8 +105,21 @@ def load_contract(path: Path, source: Path, inventory: set[str]) -> list[dict]:
 
 def inventory(path: Path) -> set[str]:
     try:
-        return {line.rsplit(":", 1)[1].strip() for line in path.read_text(encoding="utf-8").splitlines()
-                if ":" in line and line.rsplit(":", 1)[1].strip()}
+        import re
+        found: dict[int, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            match = re.fullmatch(r"Test #(\d+): ([A-Za-z0-9_]+)", line)
+            if match is None:
+                raise Failure("malformed CTest inventory line")
+            number, name = int(match.group(1)), match.group(2)
+            if number in found or name in found.values():
+                raise Failure("duplicate CTest inventory entry")
+            found[number] = name
+        if not found:
+            raise Failure("empty CTest inventory")
+        return set(found.values())
     except OSError as error:
         raise Failure("cannot read CTest inventory") from error
 
@@ -121,7 +134,7 @@ def seal(path: Path, kind: str, previous: str | None = None) -> dict:
     return value
 
 
-def runtime_evidence(path: Path, commit: str) -> set[str]:
+def runtime_evidence(path: Path, commit: str, claims: list[dict]) -> set[str]:
     value = seal(path, "phase2-runtime-artifacts")
     root = Path(value["artifact_root"])
     index_path = root / "evidence-index.json"
@@ -132,23 +145,55 @@ def runtime_evidence(path: Path, commit: str) -> set[str]:
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid runtime evidence index") from error
     if (not isinstance(index, dict) or set(index) != {"schema", "source_commit", "claims"} or
-            index["schema"] != "piccard-work7-evidence-index-v1" or index["source_commit"] != commit or
+            index["schema"] != "piccard-work7-evidence-index-v2" or index["source_commit"] != commit or
             not isinstance(index["claims"], dict)):
         raise Failure("foreign or invalid runtime evidence")
-    sealed = {entry["path"] for entry in value["entries"]}
+    sealed = {entry["path"]: entry for entry in value["entries"]}
     evidence: set[str] = set()
-    for claim_id in IDS[:6]:
-        paths = index["claims"].get(claim_id)
-        if not isinstance(paths, list) or not paths or any(not isinstance(item, str) or item not in sealed for item in paths):
+    used: set[str] = set()
+    for claim in claims[:6]:
+        claim_id = claim["id"]
+        records = index["claims"].get(claim_id)
+        if not isinstance(records, dict) or set(records) != set(claim["evidence_keys"]):
             raise Failure("missing sealed claim evidence")
+        for key, record in records.items():
+            if (not isinstance(record, dict) or set(record) != {"path", "sha256", "artifact_kind"} or
+                    not isinstance(record["path"], str) or record["path"] in {"evidence-index.json"} or
+                    record["path"] not in sealed or record["path"] in used or
+                    record["sha256"] != sealed[record["path"]]["sha256"] or
+                    record["artifact_kind"] not in {"ctest-log", "probe-output", "csv-artifact"}):
+                raise Failure("invalid sealed claim evidence")
+            used.add(record["path"])
         evidence.add(claim_id)
     if any(item not in IDS[:6] for item in index["claims"]):
         raise Failure("invalid runtime evidence claim")
     return evidence
 
 
-def candidate_evidence(phase2: Path, candidate: Path) -> None:
+def report_claims(report: dict, mode: str, commit: str, states: list[str]) -> None:
+    if (not isinstance(report, dict) or report.get("schema") != "piccard-work7-claim-report-v1" or
+            report.get("mode") != mode or report.get("source_commit") != commit or
+            not isinstance(report.get("claims"), list) or len(report["claims"]) != 7 or
+            [row.get("id") for row in report["claims"]] != list(IDS) or
+            [row.get("toy_evidence_state") for row in report["claims"]] != states):
+        raise Failure("invalid sealed claim report")
+
+
+def candidate_evidence(phase2: Path, candidate: Path, commit: str) -> None:
     phase2_value = seal(phase2, "phase2-closure")
+    if phase2_value["previous_seal_sha256"] is None:
+        raise Failure("phase2 closure is not chained")
+    phase2_root = Path(phase2_value["artifact_root"])
+    report_path = phase2_root / "evidence-bound-report.json"
+    if "evidence-bound-report.json" not in {entry["path"] for entry in phase2_value["entries"]}:
+        raise Failure("missing sealed evidence-bound report")
+    try:
+        evidence_report = json.loads(report_path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure("invalid sealed evidence-bound report") from error
+    report_claims(evidence_report, "evidence-bound", commit, ["TOY_VERIFIED"] * 6 + ["PENDING"])
+    if evidence_report.get("input_seals") != {"runtime_seal_sha256": phase2_value["previous_seal_sha256"]}:
+        raise Failure("evidence-bound report has wrong runtime seal")
     candidate_value = seal(candidate, "phase3-candidate-artifacts", sha256_file(phase2))
     root = Path(candidate_value["artifact_root"])
     path = root / "candidate-validation.json"
@@ -158,11 +203,10 @@ def candidate_evidence(phase2: Path, candidate: Path) -> None:
         value = json.loads(path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid claim 7 evidence") from error
-    if not isinstance(value, dict) or value.get("claim_id") != IDS[6]:
+    if (not isinstance(value, dict) or set(value) != {"schema", "source_commit", "claim_id", "phase2_closure_seal_sha256"} or
+            value.get("schema") != "piccard-work7-candidate-validation-v1" or value.get("source_commit") != commit or
+            value.get("claim_id") != IDS[6] or value.get("phase2_closure_seal_sha256") != sha256_file(phase2)):
         raise Failure("premature claim 7 verification")
-    # Ensures the closure's previous digest was parsed rather than merely accepting a kind label.
-    if not phase2_value["entries"] and phase2_value["previous_seal_sha256"] is None:
-        raise Failure("foreign phase2 closure")
 
 
 def review(path: Path, commit: str, packet: str, provider: str, model: str) -> None:
@@ -195,27 +239,48 @@ def review(path: Path, commit: str, packet: str, provider: str, model: str) -> N
             raise Failure("final review substantive confirmation is missing")
 
 
-def terminal(args: argparse.Namespace, commit: str) -> None:
+def terminal(args: argparse.Namespace, commit: str) -> dict:
     phase3 = require_absolute(args.phase3_closure_seal, "phase3 closure seal")
     work = require_absolute(args.work_review_seal, "work review seal")
-    seal(phase3, "phase3-closure")
-    seal(work, "phase4-work-review", sha256_file(phase3))
+    phase3_value = seal(phase3, "phase3-closure")
+    if phase3_value["previous_seal_sha256"] is None:
+        raise Failure("phase3 closure is not chained")
+    phase3_root = Path(phase3_value["artifact_root"])
+    claim7_path = phase3_root / "claim7-report.json"
+    if "claim7-report.json" not in {entry["path"] for entry in phase3_value["entries"]}:
+        raise Failure("missing sealed claim7 report")
+    try:
+        claim7_report = json.loads(claim7_path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure("invalid sealed claim7 report") from error
+    report_claims(claim7_report, "claim7", commit, ["TOY_VERIFIED"] * 7)
+    inputs = claim7_report.get("input_seals")
+    if (not isinstance(inputs, dict) or set(inputs) != {"phase2_closure_seal_sha256", "phase3_candidate_seal_sha256"} or
+            inputs["phase3_candidate_seal_sha256"] != phase3_value["previous_seal_sha256"]):
+        raise Failure("claim7 report has wrong candidate seal")
+    work_value = seal(work, "phase4-work-review", sha256_file(phase3))
     packet_path = require_absolute(args.review_packet, "review packet")
     packet = hashlib.sha256(packet_path.read_bytes()).hexdigest()
     review(require_absolute(args.claude_review, "claude review"), commit, packet, "anthropic", "claude-fable")
     review(require_absolute(args.sol_review, "sol review"), commit, packet, "openai", "gpt-5.6-sol")
+    sealed_work = {entry["sha256"] for entry in work_value["entries"]}
+    if {sha256_file(packet_path), sha256_file(args.claude_review), sha256_file(args.sol_review)} - sealed_work:
+        raise Failure("work review seal is missing packet or raw review")
     phase0 = seal(require_absolute(args.phase0_seal, "phase0 seal"), "phase0")
     state_path = Path(phase0["artifact_root"]) / "state.json"
     try:
         state = json.loads(state_path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid phase0 state") from error
-    if not isinstance(state, dict) or state.get("schema") != "piccard-work7-phase0-state-v1":
+    if (not isinstance(state, dict) or set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(state.get("source"), dict) or
+            state["source"].get("head") != commit or state.get("session_id") != f"work7-{commit}"):
         raise Failure("invalid phase0 state")
     paper = require_absolute(args.paper_root, "paper root")
     threshold = require_absolute(args.threshold_root, "threshold root")
     if snapshot_git_worktree(paper) != state.get("paper") or snapshot_git_worktree(threshold) != state.get("threshold"):
         raise Failure("external worktree snapshot changed")
+    return state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -230,17 +295,21 @@ def main(argv: list[str] | None = None) -> int:
         output = require_absolute(args.output, "output", exists=False)
         if output.exists() or output.is_symlink():
             raise Failure("output already exists")
+        guarded = [source]
+        if args.mode == "terminal":
+            guarded.extend([require_absolute(args.paper_root, "paper root"), require_absolute(args.threshold_root, "threshold root")])
+        assert_output_roots_outside(guarded, [output])
         claims = load_contract(contract, source, inventory(ctest))
         toy = {claim["id"]: "PENDING" for claim in claims}
         if args.mode == "evidence-bound":
             runtime = require_absolute(args.runtime_seal, "runtime seal")
-            for claim_id in runtime_evidence(runtime, args.source_commit): toy[claim_id] = "TOY_VERIFIED"
+            for claim_id in runtime_evidence(runtime, args.source_commit, claims): toy[claim_id] = "TOY_VERIFIED"
         elif args.mode == "claim7":
             candidate_evidence(require_absolute(args.phase2_closure_seal, "phase2 closure seal"),
-                               require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"))
-            toy[IDS[6]] = "TOY_VERIFIED"
+                               require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"), args.source_commit)
+            toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         elif args.mode == "terminal":
-            terminal(args, args.source_commit)
+            state = terminal(args, args.source_commit)
             toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         report = {"schema": "piccard-work7-claim-report-v1", "source_commit": args.source_commit,
                   "mode": args.mode, "threshold_gate_state": "DEFERRED_EXPECTED",
@@ -250,8 +319,12 @@ def main(argv: list[str] | None = None) -> int:
                               "source_paths": row["source_paths"], "required_ctest_names": row["required_ctest_names"],
                               "evidence_keys": row["evidence_keys"], "deferred_rationale": row["deferred_rationale"],
                               "prohibited_overclaim": row["prohibited_overclaim"]} for row in claims],
-                  "status": "PASS", "validation_errors": []}
+                  "status": "PASS", "validation_errors": [], "input_seals": ({"runtime_seal_sha256": sha256_file(runtime)} if args.mode == "evidence-bound" else {"phase2_closure_seal_sha256": sha256_file(args.phase2_closure_seal), "phase3_candidate_seal_sha256": sha256_file(args.phase3_candidate_seal)} if args.mode == "claim7" else {})}
         _atomic_create(output, canonical_json_bytes(report))
+        if args.mode == "terminal":
+            if snapshot_git_worktree(require_absolute(args.paper_root, "paper root")) != state.get("paper") or snapshot_git_worktree(require_absolute(args.threshold_root, "threshold root")) != state.get("threshold"):
+                output.unlink()
+                raise Failure("external worktree snapshot changed after report creation")
     except (Failure, ValueError, OSError) as error:
         print(f"verify_work7_claims: FAIL: {error}", file=sys.stderr)
         return 2
