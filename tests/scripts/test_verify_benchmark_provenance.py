@@ -135,6 +135,8 @@ def write_dynamic_csv(path, rows):
 
 def refresh_row(**overrides):
     values = {
+        "label": "refresh_owner_a_0_to_1",
+        "set_size": "100",
         "dynamic_scenario": "refresh",
         "refresh_owner_set_id": "owner-a",
         "refresh_updates": "1",
@@ -360,6 +362,23 @@ class PiccardFamilySchemaVerifierTest(unittest.TestCase):
         write_dynamic_csv(self.csv_path, [refresh_row()])
         result = self.run_verifier("--schema=dynamic")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dynamic_refresh_accepts_inclusive_serialized_decimal_boundaries(self):
+        cases = (
+            ("phase-total", refresh_row(
+                refresh_total_ms="21.010", total_ms="21.010",
+                total_ms_median="21.010")),
+            ("absolute-error", refresh_row(
+                jaccard_error="0.100752",
+                jaccard_rel_error="0.2018067100650976464697045568")),
+            ("relative-error", refresh_row(
+                jaccard_rel_error="0.2018077040560841261892839259")),
+        )
+        for label, row in cases:
+            with self.subTest(label=label):
+                write_dynamic_csv(self.csv_path, [row])
+                result = self.run_verifier("--schema=dynamic")
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dynamic_refresh_rejects_each_false_evidence_binding(self):
         mutations = {

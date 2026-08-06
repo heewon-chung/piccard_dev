@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable
 
@@ -168,10 +169,23 @@ def _finite(value: str, column: str, row_number: int) -> float:
     return parsed
 
 
+def _decimal(value: str, column: str, row_number: int) -> Decimal:
+    require(value != "", f"row {row_number}: {column} is required")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise VerificationError(
+            f"row {row_number}: {column} must be a finite numeric value"
+        ) from error
+    require(parsed.is_finite(),
+            f"row {row_number}: {column} must be a finite numeric value")
+    return parsed
+
+
 def _require_close(row: dict[str, str], row_number: int, left_name: str,
-                   right_name: str, tolerance: float) -> None:
-    left = _finite(row.get(left_name, ""), left_name, row_number)
-    right = _finite(row.get(right_name, ""), right_name, row_number)
+                   right_name: str, tolerance: Decimal) -> None:
+    left = _decimal(row.get(left_name, ""), left_name, row_number)
+    right = _decimal(row.get(right_name, ""), right_name, row_number)
     require(abs(left - right) <= tolerance,
             f"row {row_number}: {left_name} must equal {right_name}")
 
@@ -467,15 +481,16 @@ def _validate_dynamic_refresh(row: dict[str, str], row_number: int) -> None:
         "phase_refresh_encode_ms", "phase_refresh_encrypt_ms",
         "phase_refresh_serialize_ms", "phase_cloud_replace_ms",
     )
-    values = [_finite(row[column], column, row_number) for column in phases]
-    require(all(value >= 0 for value in values),
+    values = [_decimal(row[column], column, row_number) for column in phases]
+    require(all(value >= Decimal("0") for value in values),
             f"row {row_number}: refresh phases must be nonnegative")
-    refresh_total = _finite(row["refresh_total_ms"], "refresh_total_ms", row_number)
-    require(refresh_total > 0 and abs(refresh_total - sum(values)) <= 0.01,
+    refresh_total = _decimal(row["refresh_total_ms"], "refresh_total_ms", row_number)
+    require(refresh_total > Decimal("0") and
+            abs(refresh_total - sum(values)) <= Decimal("0.01"),
             f"row {row_number}: refresh_total_ms does not match refresh phases")
-    _require_close(row, row_number, "refresh_total_ms", "total_ms", 0.0)
-    _require_close(row, row_number, "refresh_total_ms", "total_ms_median", 0.0)
-    require(_finite(row["total_ms_sd"], "total_ms_sd", row_number) == -1,
+    _require_close(row, row_number, "refresh_total_ms", "total_ms", Decimal("0"))
+    _require_close(row, row_number, "refresh_total_ms", "total_ms_median", Decimal("0"))
+    require(_decimal(row["total_ms_sd"], "total_ms_sd", row_number) == Decimal("-1"),
             f"row {row_number}: total_ms_sd must be -1")
     aliases = {
         "phase_insert_ms": "phase_refresh_update_ms",
@@ -484,15 +499,15 @@ def _validate_dynamic_refresh(row: dict[str, str], row_number: int) -> None:
         "phase_encrypt_ms": "phase_refresh_encrypt_ms",
     }
     for inherited, refresh in aliases.items():
-        _require_close(row, row_number, inherited, refresh, 0.0)
-        _require_close(row, row_number, f"{inherited}_median", refresh, 0.0)
-        require(_finite(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == -1,
+        _require_close(row, row_number, inherited, refresh, Decimal("0"))
+        _require_close(row, row_number, f"{inherited}_median", refresh, Decimal("0"))
+        require(_decimal(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == Decimal("-1"),
                 f"row {row_number}: {inherited}_sd must be -1")
     for inherited in ("phase_init_ms", "phase_delete_ms", "phase_compute_ms",
                       "phase_decrypt_ms", "phase_flood_ms"):
-        require(_finite(row[inherited], inherited, row_number) == 0 and
-                _finite(row[f"{inherited}_median"], f"{inherited}_median", row_number) == 0 and
-                _finite(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == -1,
+        require(_decimal(row[inherited], inherited, row_number) == Decimal("0") and
+                _decimal(row[f"{inherited}_median"], f"{inherited}_median", row_number) == Decimal("0") and
+                _decimal(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == Decimal("-1"),
                 f"row {row_number}: {inherited} must be unused")
     size = _parse_int(row, "ct_size_bytes", row_number, positive=True)
     require(size == _parse_int(row, "refresh_upload_bytes", row_number, positive=True),
@@ -502,15 +517,16 @@ def _validate_dynamic_refresh(row: dict[str, str], row_number: int) -> None:
     for column in ("refresh_context_fingerprint", "refresh_public_key_fingerprint"):
         require(HEX64.fullmatch(row[column]) is not None,
                 f"row {row_number}: {column} is not lowercase SHA-256")
-    computed = _finite(row["jaccard_computed"], "jaccard_computed", row_number)
-    expected = _finite(row["jaccard_expected"], "jaccard_expected", row_number)
-    error = _finite(row["jaccard_error"], "jaccard_error", row_number)
-    relative = _finite(row["jaccard_rel_error"], "jaccard_rel_error", row_number)
-    require(0 <= computed <= 1 and 0 < expected <= 1,
+    computed = _decimal(row["jaccard_computed"], "jaccard_computed", row_number)
+    expected = _decimal(row["jaccard_expected"], "jaccard_expected", row_number)
+    error = _decimal(row["jaccard_error"], "jaccard_error", row_number)
+    relative = _decimal(row["jaccard_rel_error"], "jaccard_rel_error", row_number)
+    require(Decimal("0") <= computed <= Decimal("1") and
+            Decimal("0") < expected <= Decimal("1"),
             f"row {row_number}: refresh accuracy range is invalid")
-    require(abs(error - abs(computed - expected)) <= 0.000002,
+    require(abs(error - abs(computed - expected)) <= Decimal("0.000002"),
             f"row {row_number}: refresh jaccard_error is inconsistent")
-    require(abs(relative - error / expected) <= 0.000005,
+    require(abs(relative - error / expected) <= Decimal("0.000005"),
             f"row {row_number}: refresh jaccard_rel_error is inconsistent")
     require(_parse_int(row, "rel_error_eligible_n", row_number) == 1,
             f"row {row_number}: rel_error_eligible_n must be one")

@@ -354,6 +354,14 @@ class PreThresholdRunnerTest(unittest.TestCase):
         self.assertEqual(len(invocations), 3)
         self.assertTrue(all("--evidence_point" not in row or row[0] in {"bench_piccard", "bench_dynamic"}
                             for row in invocations))
+        refresh_cell = next(cell for cell in manifest["cells"]
+                            if cell["producer"] == "bench_dynamic")
+        with (results / refresh_cell["output"]["csv"]).open(newline="") as stream:
+            refresh_rows = list(csv.DictReader(stream))
+        self.assertEqual(len(refresh_rows), 1)
+        self.assertEqual(refresh_rows[0]["label"], "refresh_owner_a_0_to_1")
+        self.assertEqual(refresh_rows[0]["dynamic_scenario"], "refresh")
+        self.assertEqual(refresh_rows[0]["set_size"], "100")
         for cell in manifest["cells"]:
             for field in ("csv", "log"):
                 resolved = (results / cell["output"][field]).resolve()
