@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = ROOT / "scripts" / "verify_work7_claims.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "work7" / "claims" / "valid-contract.json"
+RAW_CTEST = ROOT / "tests" / "fixtures" / "work7" / "claims" / "raw-ctest-n.txt"
 COMMIT = "a" * 40
 PACKET = "b" * 64
 
@@ -30,11 +31,12 @@ class Work7ClaimContractTests(unittest.TestCase):
         self.contract.write_bytes(FIXTURE.read_bytes())
         contract = json.loads(self.contract.read_text())
         self.inventory = self.root / "ctest.txt"
-        self.inventory.write_text("\n".join(
-            f"Test #{index}: {name}" for index, name in enumerate(
+        records = "\n".join(
+            f"  Test #{index}: {name}" for index, name in enumerate(
                 sorted({test for claim in contract["claims"] for test in claim["required_ctest_names"]}), 1
             )
-        ) + "\n")
+        )
+        self.inventory.write_text(f"Test project {self.root / 'build'}\n{records}\n\nTotal Tests: {len(records.splitlines())}\n")
         for claim in contract["claims"]:
             for relative in claim["source_paths"]:
                 path = self.source / relative
@@ -131,6 +133,15 @@ class Work7ClaimContractTests(unittest.TestCase):
         create_tree_seal(artifact, seal, None, "phase2-runtime-artifacts")
         return seal
 
+    def test_ctest_inventory_accepts_raw_ctest_n_and_rejects_bad_trailer(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_work7_claims import inventory
+        self.inventory.write_bytes(RAW_CTEST.read_bytes())
+        self.assertEqual(inventory(self.inventory), {"MinHash", "EstimatorDiagnostic"})
+        self.assert_fail("static")  # fixture deliberately lacks this contract's complete registry
+        self.inventory.write_text("Test project x\n  Test #1: MinHash\n\nTotal Tests: 2\n")
+        self.assert_fail("static")
+
     def test_static_rejects_unsafe_output_and_malformed_ctest_inventory(self) -> None:
         unsafe = self.source / "report.json"
         result = subprocess.run([sys.executable, str(VERIFIER), "--mode", "static", "--contract", str(self.contract),
@@ -138,7 +149,7 @@ class Work7ClaimContractTests(unittest.TestCase):
                                  "--ctest-inventory", str(self.inventory), "--output", str(unsafe)],
                                 cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 2)
-        self.inventory.write_text("Test #1: MinHash\nTest #1: Params\n")
+        self.inventory.write_text("Test project x\n  Test #1: MinHash\n  Test #1: Params\n\nTotal Tests: 2\n")
         self.assert_fail("static")
 
     def test_evidence_bound_binds_only_claims_one_to_six(self) -> None:
@@ -161,6 +172,22 @@ class Work7ClaimContractTests(unittest.TestCase):
         index["claims"]["W7-G2-SANITIZER"]["sanitizer"] = index["claims"]["W7-G1-ESTIMATOR"]["estimator"]
         (root / "evidence-index.json").write_text(json.dumps(index))
         self.assert_fail("evidence-bound", runtime_seal=seal)
+
+    def test_hostile_sealed_index_types_fail_without_traceback(self) -> None:
+        for hostile in ([], {}, 7, ["ctest-log"]):
+            with self.subTest(hostile=repr(hostile)):
+                sys.path.insert(0, str(ROOT / "scripts"))
+                from work7_evidence import create_tree_seal
+                artifact = self.root / f"hostile-{len(repr(hostile))}-{self.calls}"
+                artifact.mkdir()
+                index = {"schema": "piccard-work7-evidence-index-v2", "source_commit": COMMIT,
+                         "claims": {claim_id: {} for claim_id in ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION", "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC")}}
+                index["claims"]["W7-G1-ESTIMATOR"] = {"estimator": {"path": "x", "sha256": "0" * 64, "artifact_kind": hostile}}
+                (artifact / "x").write_text("x")
+                (artifact / "evidence-index.json").write_text(json.dumps(index))
+                seal = self.root / f"hostile-{len(repr(hostile))}-{self.calls}.seal.json"
+                create_tree_seal(artifact, seal, None, "phase2-runtime-artifacts")
+                self.assert_fail("evidence-bound", runtime_seal=seal)
 
     def test_claim7_requires_phase_two_and_candidate_seals(self) -> None:
         runtime = self.runtime()
@@ -185,6 +212,25 @@ class Work7ClaimContractTests(unittest.TestCase):
         self.assertEqual(report["claims"][6]["toy_evidence_state"], "TOY_VERIFIED")
         self.assertEqual(report["work_gate_state"], "PENDING")
         self.assert_fail("claim7", phase2_closure_seal=phase2)
+
+        base_report = json.loads(evidence.output_path.read_text())  # type: ignore[attr-defined]
+        for name, mutate in {
+            "extra-report-field": lambda value: value.__setitem__("overclaim", True),
+            "performance-overclaim": lambda value: value["claims"][0].__setitem__("performance_state", "PERFORMANCE_VERIFIED"),
+            "threshold-overclaim": lambda value: value.__setitem__("threshold_gate_state", "AUTHORIZED"),
+            "non-object-claim": lambda value: value.__setitem__("claims", [None] * 7),
+        }.items():
+            with self.subTest(inherited_report=name):
+                bad_root = self.root / f"phase2-{name}"; bad_root.mkdir()
+                mutated = copy.deepcopy(base_report); mutate(mutated)
+                (bad_root / "evidence-bound-report.json").write_text(json.dumps(mutated))
+                bad_phase2 = self.root / f"phase2-{name}.seal.json"
+                create_tree_seal(bad_root, bad_phase2, sha256_file(runtime), "phase2-closure")
+                bad_candidate_root = self.root / f"candidate-{name}"; bad_candidate_root.mkdir()
+                (bad_candidate_root / "candidate-validation.json").write_text(json.dumps({"schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT, "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(bad_phase2)}))
+                bad_candidate = self.root / f"candidate-{name}.seal.json"
+                create_tree_seal(bad_candidate_root, bad_candidate, sha256_file(bad_phase2), "phase3-candidate-artifacts")
+                self.assert_fail("claim7", phase2_closure_seal=bad_phase2, phase3_candidate_seal=bad_candidate)
 
     def test_terminal_accepts_only_exact_dual_reviews_and_immutable_external_state(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))

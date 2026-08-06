@@ -107,16 +107,27 @@ def inventory(path: Path) -> set[str]:
     try:
         import re
         found: dict[int, str] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                continue
-            match = re.fullmatch(r"Test #(\d+): ([A-Za-z0-9_]+)", line)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) < 3 or re.fullmatch(r"Test project .+", lines[0]) is None:
+            raise Failure("malformed CTest inventory header")
+        cursor = 1
+        while cursor < len(lines) and lines[cursor]:
+            match = re.fullmatch(r"\s+Test #(\d+): ([A-Za-z0-9_]+)", lines[cursor])
             if match is None:
                 raise Failure("malformed CTest inventory line")
             number, name = int(match.group(1)), match.group(2)
             if number in found or name in found.values():
                 raise Failure("duplicate CTest inventory entry")
             found[number] = name
+            cursor += 1
+        if cursor >= len(lines) or lines[cursor] != "":
+            raise Failure("malformed CTest inventory trailer")
+        cursor += 1
+        if cursor != len(lines) - 1:
+            raise Failure("malformed CTest inventory trailer")
+        trailer = re.fullmatch(r"Total Tests: (\d+)", lines[cursor])
+        if trailer is None or int(trailer.group(1)) != len(found):
+            raise Failure("CTest inventory count does not match records")
         if not found:
             raise Failure("empty CTest inventory")
         return set(found.values())
@@ -158,7 +169,8 @@ def runtime_evidence(path: Path, commit: str, claims: list[dict]) -> set[str]:
             raise Failure("missing sealed claim evidence")
         for key, record in records.items():
             if (not isinstance(record, dict) or set(record) != {"path", "sha256", "artifact_kind"} or
-                    not isinstance(record["path"], str) or record["path"] in {"evidence-index.json"} or
+                    not isinstance(record["path"], str) or not isinstance(record["sha256"], str) or
+                    not isinstance(record["artifact_kind"], str) or record["path"] in {"evidence-index.json"} or
                     record["path"] not in sealed or record["path"] in used or
                     record["sha256"] != sealed[record["path"]]["sha256"] or
                     record["artifact_kind"] not in {"ctest-log", "probe-output", "csv-artifact"}):
@@ -170,12 +182,22 @@ def runtime_evidence(path: Path, commit: str, claims: list[dict]) -> set[str]:
     return evidence
 
 
-def report_claims(report: dict, mode: str, commit: str, states: list[str]) -> None:
-    if (not isinstance(report, dict) or report.get("schema") != "piccard-work7-claim-report-v1" or
-            report.get("mode") != mode or report.get("source_commit") != commit or
-            not isinstance(report.get("claims"), list) or len(report["claims"]) != 7 or
-            [row.get("id") for row in report["claims"]] != list(IDS) or
-            [row.get("toy_evidence_state") for row in report["claims"]] != states):
+def report_claims(report: object, mode: str, commit: str, states: list[str]) -> None:
+    top = {"schema", "source_commit", "mode", "threshold_gate_state", "work_gate_state", "claims",
+           "status", "validation_errors", "input_seals"}
+    row_keys = {"id", "implementation_state", "toy_evidence_state", "performance_state", "source_paths",
+                "required_ctest_names", "evidence_keys", "deferred_rationale", "prohibited_overclaim"}
+    if (not isinstance(report, dict) or set(report) != top or report["schema"] != "piccard-work7-claim-report-v1" or
+            report["mode"] != mode or report["source_commit"] != commit or report["threshold_gate_state"] != "DEFERRED_EXPECTED" or
+            report["work_gate_state"] != ("POC_APPROVED_PERFORMANCE_PENDING" if mode == "terminal" else "PENDING") or
+            report["status"] != "PASS" or report["validation_errors"] != [] or not isinstance(report["input_seals"], dict) or
+            not isinstance(report["claims"], list) or len(report["claims"]) != 7 or
+            any(not isinstance(row, dict) or set(row) != row_keys for row in report["claims"]) or
+            [row["id"] for row in report["claims"]] != list(IDS) or
+            any(row["implementation_state"] != "IMPLEMENTED" or row["performance_state"] != "PERFORMANCE_PENDING" for row in report["claims"]) or
+            [row["toy_evidence_state"] for row in report["claims"]] != states or
+            any(any(not isinstance(row[field], str) or not row[field] for field in ("deferred_rationale", "prohibited_overclaim")) or
+                any(not isinstance(item, str) or not item for item in row[field]) for row in report["claims"] for field in ("source_paths", "required_ctest_names", "evidence_keys"))):
         raise Failure("invalid sealed claim report")
 
 
