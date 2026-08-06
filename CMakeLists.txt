@@ -839,6 +839,38 @@ if(BUILD_BENCHMARKS)
         bench_estimator_bias
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
     )
+
+    # Work 5 Sub-phase 5.3: plaintext accuracy mode over real (DBLP-ACM)
+    # processed datasets. No OpenFHE dependency -- built unconditionally,
+    # like bench_estimator_bias above -- because benchmarks/
+    # real_accuracy_driver.cpp is deliberately FHE-header-free [FA2][FA9]
+    # (see that file's top comment). --mode=timing (Sub-phase 5.4) will add
+    # an OpenFHE-dependent code path inside bench_real_datasets.cpp itself
+    # without touching this target's unconditional build gating.
+    add_executable(
+        bench_real_datasets
+        benchmarks/bench_real_datasets.cpp
+        benchmarks/real_accuracy_driver.cpp
+    )
+    target_link_libraries(
+        bench_real_datasets
+        piccard_core
+        piccard_data
+        piccard_real_dataset_csv_schema
+        OpenSSL::Crypto
+    )
+    target_include_directories(
+        bench_real_datasets
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    if(BUILD_TESTS)
+        add_test(
+            NAME RealDatasetPipeline
+            COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                    tests.scripts.test_real_dataset_pipeline
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        )
+    endif()
 endif()
 
 if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
