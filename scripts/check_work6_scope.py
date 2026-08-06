@@ -125,7 +125,14 @@ def _lex(source):
         index += 1
     if state or level:
         raise ScopeError("unterminated lexical construct")
-    return "".join(masked), depth
+    pairs = {}; stack = []
+    for index, char in enumerate(masked):
+        if char == "{": stack.append(index)
+        elif char == "}":
+            if not stack: raise ScopeError("unbalanced braces")
+            pairs[stack.pop()] = index
+    if stack: raise ScopeError("unbalanced braces")
+    return "".join(masked), depth, pairs
 
 
 def _one(masked, text, label):
@@ -140,22 +147,37 @@ def _line_span(source, start):
     return left, len(source) if right < 0 else right + 1
 
 
-def _public_member(masked, depth, start):
-    class_match = re.search(r"\bclass\s+BFVContext\b[^\{]*\{", masked)
-    if not class_match: raise ScopeError("missing context class")
-    opening = masked.find("{", class_match.start())
-    member_depth = depth[opening] + 1
-    if not (opening < start and depth[start] == member_depth):
+def _containers(masked, depth, pairs, source, require_class=True, require_anon=False):
+    piccard = [m for m in re.finditer(r"\bnamespace\s+piccard\s*\{", masked)
+               if depth[m.start()] == 0]
+    if len(piccard) != 1: raise ScopeError("missing unique piccard namespace")
+    pic_open = masked.find("{", piccard[0].start()); pic_close = pairs[pic_open]
+    classes = [m for m in re.finditer(r"\bclass\s+BFVContext\b[^\{;]*\{", masked)
+               if pic_open < m.start() < pic_close and depth[m.start()] == 1]
+    if require_class and len(classes) != 1: raise ScopeError("missing unique context class")
+    class_open = masked.find("{", classes[0].start()) if classes else -1
+    class_close = pairs[class_open] if classes else -1
+    anon = [m for m in re.finditer(r"\bnamespace\s*\{", masked)
+            if pic_open < m.start() < pic_close and depth[m.start()] == 1]
+    if require_anon and len(anon) != 1: raise ScopeError("missing unique anonymous namespace")
+    anon_open = masked.find("{", anon[0].start()) if anon else -1
+    anon_close = pairs[anon_open] if anon else -1
+    return pic_open, pic_close, class_open, class_close, anon_open, anon_close
+
+
+def _public_member(masked, depth, class_open, class_close, start):
+    member_depth = depth[class_open] + 1
+    if not (class_open < start < class_close and depth[start] == member_depth):
         raise ScopeError("codec export is not a class member")
-    prefix = masked[opening + 1:start]
-    public = list(re.finditer(r"\bpublic\s*:", prefix))
-    private = list(re.finditer(r"\b(?:private|protected)\s*:", prefix))
-    if not public or (private and private[-1].start() > public[-1].start()):
+    labels = [m for m in re.finditer(r"\b(public|private|protected)\s*:", masked[class_open + 1:start])
+              if depth[class_open + 1 + m.start()] == member_depth]
+    if not labels or labels[-1].group(1) != "public":
         raise ScopeError("codec export is not public")
 
 
 def subtract_header(candidate):
-    masked, depth = _lex(candidate); spans = []
+    masked, depth, pairs = _lex(candidate); spans = []
+    pic_open, pic_close, class_open, class_close, _, _ = _containers(masked, depth, pairs, candidate)
     include = "#include <memory>"
     start = _one(masked, include, "codec memory include")
     left, right = _line_span(candidate, start)
@@ -165,7 +187,7 @@ def subtract_header(candidate):
     forward = "class PublicCiphertextCodec;"
     start = _one(masked, forward, "codec forward declaration")
     left, right = _line_span(candidate, start)
-    if candidate[left:right] != forward + "\n" or depth[start] != 1:
+    if candidate[left:right] != forward + "\n" or not (pic_open < start < pic_close and depth[start] == 1):
         raise ScopeError("codec forward declaration has wrong scope")
     if candidate[right:right + 1] != "\n":
         raise ScopeError("codec forward declaration lacks namespace spacing")
@@ -173,7 +195,7 @@ def subtract_header(candidate):
     spans.append((left, right))
     declaration = "    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n"
     start = _one(masked, declaration, "codec export declaration")
-    _public_member(masked, depth, start)
+    _public_member(masked, depth, class_open, class_close, start)
     right = start + len(declaration)
     if candidate[right:right + 1] != "\n": raise ScopeError("codec export lacks public spacing")
     spans.append((start, right + 1))
@@ -181,42 +203,21 @@ def subtract_header(candidate):
     return candidate
 
 
-def _brace_end(masked, opening):
-    level = 0
-    for index in range(opening, len(masked)):
-        if masked[index] == "{": level += 1
-        elif masked[index] == "}":
-            level -= 1
-            if level == 0: return index + 1
-    raise ScopeError("unbalanced codec definition")
-
-
-def _definition_span(source, masked, depth, name, expected_depth):
-    found = []
-    for match in re.finditer(r"(?<![A-Za-z0-9_:])" + re.escape(name) + r"\s*\(", masked):
-        if depth[match.start()] != expected_depth: continue
-        opening = masked.find("{", match.end())
-        if opening >= 0 and depth[opening] == expected_depth and not any(char in ";{}" for char in masked[match.end():opening]):
-            found.append(match)
+def _definition_span(source, masked, depth, pairs, pattern, left, right, expected_depth):
+    found = [m for m in re.finditer(pattern, masked, re.M)
+             if left < m.start() < right and depth[m.start()] == expected_depth]
     if len(found) != 1: raise ScopeError("codec definition has wrong scope")
-    match = found[0]; opening = masked.find("{", match.end())
-    if opening < 0 or depth[opening] != expected_depth:
-        raise ScopeError("codec definition has no top-level body")
-    if any(char in ";{}" for char in masked[match.end():opening]):
-        raise ScopeError("codec definition has malformed signature")
-    separator = masked.rfind("\n\n", 0, match.start())
-    if separator < 0: raise ScopeError("codec definition has no declaration boundary")
-    start = separator + 2
-    if any(char in ";{}" for char in masked[start:match.start()]):
-        raise ScopeError("codec definition has prefixed bytes")
-    end = _brace_end(masked, opening)
+    match = found[0]; opening = masked.find("{", match.end() - 1)
+    if opening < 0 or depth[opening] != expected_depth: raise ScopeError("codec definition has no top-level body")
+    end = pairs[opening] + 1
     if source[end:end + 2] == "\n\n": end += 2
     elif source[end:end + 1] == "\n": end += 1
-    return start, end
+    return match.start(), end
 
 
 def subtract_source(candidate):
-    masked, depth = _lex(candidate); spans = []
+    masked, depth, pairs = _lex(candidate); spans = []
+    pic_open, pic_close, _, _, anon_open, anon_close = _containers(masked, depth, pairs, candidate, False, True)
     for include in ['#include "fhe/public_ciphertext_codec.h"', '#include "key/key-ser.h"', '#include <openssl/evp.h>']:
         start = _one(masked, include, "codec include")
         left, right = _line_span(candidate, start)
@@ -226,9 +227,17 @@ def subtract_source(candidate):
             if candidate[right:right + 1] != "\n": raise ScopeError("codec include lacks spacing")
             right += 1
         spans.append((left, right))
-    helpers = ["AppendBE32", "AppendBE64", "Sha256Hex", "ContextFingerprintHex", "PublicKeyFingerprintHex"]
-    for name in helpers: spans.append(_definition_span(candidate, masked, depth, name, 2))
-    spans.append(_definition_span(candidate, masked, depth, "BFVContext::ExportPublicCiphertextCodec", 1))
+    helpers = [
+        r"^void\s+AppendBE32\s*\(std::vector<uint8_t>&\s+bytes,\s*uint32_t\s+value\)\s*\{",
+        r"^void\s+AppendBE64\s*\(std::vector<uint8_t>&\s+bytes,\s*uint64_t\s+value\)\s*\{",
+        r"^std::string\s+Sha256Hex\s*\(const\s+std::vector<uint8_t>&\s+bytes\)\s*\{",
+        r"^std::string\s+ContextFingerprintHex\s*\(const\s+BFVContext&\s+context\)\s*\{",
+        r"^std::string\s+PublicKeyFingerprintHex\s*\(\s*const\s+lbcrypto::PublicKey<lbcrypto::DCRTPoly>&\s+public_key\)\s*\{",
+    ]
+    for pattern in helpers:
+        spans.append(_definition_span(candidate, masked, depth, pairs, pattern, anon_open, anon_close, 2))
+    export = r"^std::shared_ptr<const\s+PublicCiphertextCodec>\s*\nBFVContext::ExportPublicCiphertextCodec\s*\(\)\s+const\s*\{"
+    spans.append(_definition_span(candidate, masked, depth, pairs, export, pic_open, pic_close, 1))
     for left, right in sorted(spans, reverse=True): candidate = candidate[:left] + candidate[right:]
     return candidate
 
@@ -248,11 +257,20 @@ def _scan_patch(base, head, path, state_rx, update_rx):
     patch = _text(_git("diff", "--text", "--unified=0", "--no-renames", base, head, "--", path), "patch")
     if any(line.startswith("Binary files ") for line in patch.splitlines()):
         raise ScopeError(path + " did not expose source lines")
-    header_records = 0
+    saw_old = False; saw_new = False; in_hunk = False
     for line in patch.splitlines():
-        if header_records < 2 and (line.startswith("--- a/") or line.startswith("+++ b/")):
-            header_records += 1
+        if not in_hunk:
+            if not saw_old and line.startswith("--- "):
+                saw_old = True
+                continue
+            if saw_old and not saw_new and line.startswith("+++ "):
+                saw_new = True
+                continue
+            if line.startswith("@@ "):
+                if not (saw_old and saw_new): raise ScopeError(path + " has malformed patch headers")
+                in_hunk = True
             continue
+        if line.startswith("@@ "): continue
         if line.startswith(("+", "-")) and (state_rx.search(line[1:]) or update_rx.search(line[1:])):
             raise ScopeError(path + " contains excluded content")
 
