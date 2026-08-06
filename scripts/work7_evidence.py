@@ -30,18 +30,25 @@ def _mode(mode: int) -> str:
     return format(stat.S_IMODE(mode), "04o")
 
 
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.normpath(os.path.abspath(os.fspath(path))))
+
+
+def _is_trusted_system_alias(path: Path) -> bool:
+    """Permit only macOS's fixed top-level aliases, not arbitrary links."""
+    expected = {Path("/tmp"): Path("/private/tmp"), Path("/var"): Path("/private/var")}
+    return path in expected and path.resolve(strict=True) == expected[path]
+
+
 def _reject_symlink_components(path: Path) -> None:
     """Reject an existing symlink anywhere in a lexical path before resolve."""
-    absolute = path.absolute()
+    absolute = _lexical_absolute(path)
     current = Path(absolute.anchor)
     for component in absolute.parts[1:]:
         current /= component
         try:
             if stat.S_ISLNK(current.lstat().st_mode):
-                # macOS exposes system aliases such as /var and /tmp at the
-                # filesystem root.  They are not caller-controlled path
-                # aliases; all deeper components remain fail-closed.
-                if current.parent == Path(absolute.anchor):
+                if _is_trusted_system_alias(current):
                     continue
                 raise ValueError(f"symlink path component is not allowed: {current}")
         except FileNotFoundError:
@@ -55,7 +62,7 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
                 right.st_mtime_ns, right.st_ctime_ns)
 
 
-def _stable_regular_file(path: Path) -> tuple[str, os.stat_result]:
+def _stable_regular_file(path: Path) -> tuple[str, os.stat_result, bytes]:
     """Read one regular path by descriptor and reject replacement or mutation."""
     try:
         before = path.lstat()
@@ -73,11 +80,13 @@ def _stable_regular_file(path: Path) -> tuple[str, os.stat_result]:
         if not stat.S_ISREG(opened.st_mode) or not _same_identity(before, opened):
             raise ValueError(f"file changed while opening: {path}")
         digest = hashlib.sha256()
+        chunks: list[bytes] = []
         while True:
             block = os.read(descriptor, 1024 * 1024)
             if not block:
                 break
             digest.update(block)
+            chunks.append(block)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
@@ -87,7 +96,7 @@ def _stable_regular_file(path: Path) -> tuple[str, os.stat_result]:
         raise ValueError(f"file changed while reading: {path}") from None
     if not _same_identity(opened, after) or not _same_identity(before, named_after):
         raise ValueError(f"file changed while reading: {path}")
-    return digest.hexdigest(), after
+    return digest.hexdigest(), after, b"".join(chunks)
 
 
 def _lstat_entry(path: Path, relative: str, missing_allowed: bool) -> dict[str, Any]:
@@ -98,11 +107,11 @@ def _lstat_entry(path: Path, relative: str, missing_allowed: bool) -> dict[str, 
             return {"path": relative, "type": "missing"}
         raise ValueError(f"snapshot entry disappeared: {relative}") from None
     if stat.S_ISREG(info.st_mode):
-        digest, stable_info = _stable_regular_file(path)
+        digest, stable_info, raw_bytes = _stable_regular_file(path)
         if not _same_identity(info, stable_info):
             raise ValueError(f"file changed while collecting snapshot: {relative}")
         return {"path": relative, "type": "file", "mode": _mode(stable_info.st_mode),
-                "size": stable_info.st_size, "sha256": digest}
+                "size": stable_info.st_size, "sha256": digest, "_raw_bytes": raw_bytes}
     if stat.S_ISLNK(info.st_mode):
         try:
             target = os.readlink(path).encode("utf-8", "surrogateescape")
@@ -157,6 +166,9 @@ def _update_entry_digest(digest: Any, root: Path, entry: dict[str, Any]) -> None
         if key in entry:
             _update_framed(digest, key.encode("ascii"))
             _update_framed(digest, str(entry[key]).encode("utf-8", "surrogateescape"))
+    if entry["type"] == "file":
+        _update_framed(digest, b"bytes")
+        _update_framed(digest, entry["_raw_bytes"])
 
 
 def _snapshot_digest(root: Path, state: dict[str, Any], index_raw: bytes) -> str:
@@ -213,6 +225,8 @@ def snapshot_git_worktree(root: Path) -> dict:
     # porcelain output is retained for diagnostics only and never fingerprints
     # state.
     state["snapshot_sha256"] = _snapshot_digest(root, state, index_raw)
+    for entry in tracked + untracked:
+        entry.pop("_raw_bytes", None)
     return state
 
 
@@ -230,6 +244,13 @@ def assert_output_roots_outside(guarded_roots: list[Path], output_roots: list[Pa
             except ValueError:
                 continue
             raise ValueError(f"output root is inside guarded worktree: {output}")
+
+        for guarded in resolved_guarded:
+            try:
+                guarded.relative_to(resolved_output)
+            except ValueError:
+                continue
+            raise ValueError(f"output root contains guarded worktree: {output}")
         for previous in resolved_outputs:
             try:
                 resolved_output.relative_to(previous)
@@ -259,7 +280,7 @@ def _seal_entries(artifact_root: Path) -> list[dict[str, Any]]:
             info = child.lstat()
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError(f"non-regular artifact entry: {child}")
-            digest, stable_info = _stable_regular_file(child)
+            digest, stable_info, _ = _stable_regular_file(child)
             if not _same_identity(info, stable_info):
                 raise ValueError(f"artifact entry changed while sealing: {child}")
             entries.append({"path": child.relative_to(artifact_root).as_posix(),

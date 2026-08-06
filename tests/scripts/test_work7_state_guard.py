@@ -2,6 +2,7 @@
 """Behavior tests for the Work 7 Phase 0 byte-level state guard."""
 
 import os
+import hashlib
 import stat
 import subprocess
 import sys
@@ -156,6 +157,23 @@ class Work7StateGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_output_roots_outside([self.source, self.paper, self.threshold], [alias / "evidence"])
 
+    def test_lexically_normalized_user_alias_is_rejected_but_system_tmp_is_usable(self) -> None:
+        safe_target = self.root / "safe-target"
+        safe_target.mkdir()
+        alias = self.root / "user-alias"
+        alias.symlink_to(safe_target, target_is_directory=True)
+        bypass = self.root / "missing" / ".." / "user-alias" / "evidence"
+        with self.assertRaises(ValueError):
+            assert_output_roots_outside([self.source, self.paper, self.threshold], [bypass])
+        assert_output_roots_outside(
+            [self.source, self.paper, self.threshold],
+            [Path("/tmp") / "piccard-work7-system-alias-regression"],
+        )
+
+    def test_output_ancestor_of_guarded_root_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            assert_output_roots_outside([self.source, self.paper, self.threshold], [self.root])
+
     def test_roots_must_be_distinct_and_output_roots_must_not_overlap(self) -> None:
         with self.assertRaises(ValueError):
             assert_output_roots_outside([self.source, self.source, self.threshold], [self.build, self.session])
@@ -245,6 +263,34 @@ class Work7StateGuardTest(unittest.TestCase):
         create_tree_seal(artifact, seal, None, "phase0")
         with self.assertRaises(ValueError):
             verify_tree_seal(seal, "not-a-digest")
+
+    def test_snapshot_digest_directly_frames_regular_file_bytes(self) -> None:
+        snapshot = snapshot_git_worktree(self.paper)
+
+        def frame(value: bytes) -> bytes:
+            return len(value).to_bytes(8, "big") + value
+
+        digest = hashlib.sha256()
+        for key in ("root", "branch", "head", "submodule_status"):
+            digest.update(frame(key.encode("ascii")))
+            digest.update(frame(str(snapshot[key]).encode("utf-8", "surrogateescape")))
+        index_raw = subprocess.run(
+            ["git", "ls-files", "-s", "-z"], cwd=self.paper, check=True,
+            capture_output=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        ).stdout
+        digest.update(frame(b"index_raw"))
+        digest.update(frame(index_raw))
+        for category in ("tracked_entries", "untracked_entries"):
+            digest.update(frame(category.encode("ascii")))
+            for entry in snapshot[category]:
+                for key in ("path", "type", "mode", "size", "sha256", "target", "target_sha256"):
+                    if key in entry:
+                        digest.update(frame(key.encode("ascii")))
+                        digest.update(frame(str(entry[key]).encode("utf-8", "surrogateescape")))
+                if entry["type"] == "file":
+                    digest.update(frame(b"bytes"))
+                    digest.update(frame((self.paper / entry["path"]).read_bytes()))
+        self.assertEqual(snapshot["snapshot_sha256"], digest.hexdigest())
 
 
 if __name__ == "__main__":
