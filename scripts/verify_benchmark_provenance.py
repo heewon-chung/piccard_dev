@@ -526,7 +526,8 @@ def _validate_dynamic_refresh(row: dict[str, str], row_number: int) -> None:
             f"row {row_number}: refresh accuracy range is invalid")
     require(abs(error - abs(computed - expected)) <= Decimal("0.000002"),
             f"row {row_number}: refresh jaccard_error is inconsistent")
-    require(abs(relative - error / expected) <= Decimal("0.000005"),
+    require(abs(relative * expected - error) <=
+            Decimal("0.000005") * expected,
             f"row {row_number}: refresh jaccard_rel_error is inconsistent")
     require(_parse_int(row, "rel_error_eligible_n", row_number) == 1,
             f"row {row_number}: rel_error_eligible_n must be one")

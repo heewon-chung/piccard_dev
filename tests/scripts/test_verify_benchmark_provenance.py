@@ -372,7 +372,8 @@ class PiccardFamilySchemaVerifierTest(unittest.TestCase):
                 jaccard_error="0.100752",
                 jaccard_rel_error="0.2018067100650976464697045568")),
             ("relative-error", refresh_row(
-                jaccard_rel_error="0.2018077040560841261892839259")),
+                jaccard_computed="0.5", jaccard_expected="0.5",
+                jaccard_error="0", jaccard_rel_error="0.000005")),
         )
         for label, row in cases:
             with self.subTest(label=label):
@@ -438,6 +439,13 @@ class PiccardFamilySchemaVerifierTest(unittest.TestCase):
                 write_dynamic_csv(self.csv_path, [row])
                 result = self.run_verifier("--schema=dynamic")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_dynamic_refresh_rejects_relative_error_just_outside_boundary(self):
+        write_dynamic_csv(self.csv_path, [refresh_row(
+            jaccard_computed="0.5", jaccard_expected="0.5",
+            jaccard_error="0", jaccard_rel_error="0.000006")])
+        result = self.run_verifier("--schema=dynamic")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
 
     def test_default_schema_still_rejects_piccard_family_csv(self):
         write_benchmark_csv(self.csv_path, [benchmark_row()])
