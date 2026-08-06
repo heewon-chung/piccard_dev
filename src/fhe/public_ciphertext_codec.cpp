@@ -21,11 +21,35 @@ std::vector<uint8_t> SerializeBinary(
     return {serialized.begin(), serialized.end()};
 }
 
-PublicCiphertextCodec::Ciphertext DeserializeBinary(
-    std::istream& stream) {
+PublicCiphertextCodec::Ciphertext DeserializeBinaryExact(
+    const std::vector<uint8_t>& bytes) {
+    if (bytes.empty()) {
+        throw std::invalid_argument("ciphertext bytes are empty");
+    }
+    const std::string input(bytes.begin(), bytes.end());
+    std::istringstream stream(input, std::ios::in | std::ios::binary);
     PublicCiphertextCodec::Ciphertext ciphertext;
-    lbcrypto::Serial::Deserialize(ciphertext, stream, lbcrypto::SerType::BINARY);
+    try {
+        lbcrypto::Serial::Deserialize(
+            ciphertext, stream, lbcrypto::SerType::BINARY);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("ciphertext bytes are corrupt");
+    }
+    if (stream.peek() != std::char_traits<char>::eof()) {
+        throw std::invalid_argument("ciphertext bytes contain trailing data");
+    }
     return ciphertext;
+}
+
+void RequireLiveBinding(
+    const PublicCiphertextCodec::Ciphertext& ciphertext,
+    const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& context,
+    const std::string& ciphertext_key_tag,
+    const char* error) {
+    if (!ciphertext || ciphertext->GetCryptoContext() != context ||
+        ciphertext->GetKeyTag() != ciphertext_key_tag) {
+        throw std::invalid_argument(error);
+    }
 }
 
 }  // namespace
@@ -59,51 +83,29 @@ std::vector<uint8_t> PublicCiphertextCodec::Serialize(
     if (!ciphertext) {
         throw std::invalid_argument("ciphertext is null");
     }
-    if (ciphertext->GetCryptoContext() != context_ ||
-        ciphertext->GetKeyTag() != ciphertext_key_tag_) {
-        throw std::invalid_argument(
-            "ciphertext does not match the live context and public key");
+    RequireLiveBinding(ciphertext, context_, ciphertext_key_tag_,
+                       "ciphertext does not match the live context and public key");
+    const auto direct = SerializeBinary(ciphertext);
+    const auto normalized = DeserializeBinaryExact(direct);
+    RequireLiveBinding(normalized, context_, ciphertext_key_tag_,
+                       "ciphertext does not match the live context and public key");
+    const auto canonical = SerializeBinary(normalized);
+    const auto fixed_point = DeserializeBinaryExact(canonical);
+    RequireLiveBinding(fixed_point, context_, ciphertext_key_tag_,
+                       "ciphertext does not match the live context and public key");
+    if (SerializeBinary(fixed_point) != canonical) {
+        throw std::logic_error(
+            "one-pass ciphertext normalization is not a fixed point");
     }
-
-    // OpenFHE canonicalizes a DCRTPoly while loading it. Normalize before
-    // emission so a freshly serialized ciphertext is accepted by Deserialize.
-    const auto intermediate = SerializeBinary(ciphertext);
-    const std::string intermediate_string(
-        intermediate.begin(), intermediate.end());
-    std::istringstream intermediate_stream(
-        intermediate_string, std::ios::in | std::ios::binary);
-    const auto decoded = DeserializeBinary(intermediate_stream);
-    if (!decoded || decoded->GetCryptoContext() != context_ ||
-        decoded->GetKeyTag() != ciphertext_key_tag_) {
-        throw std::invalid_argument(
-            "ciphertext does not match the live context and public key");
-    }
-    return SerializeBinary(decoded);
+    return canonical;
 }
 
 PublicCiphertextCodec::Ciphertext PublicCiphertextCodec::Deserialize(
     const std::vector<uint8_t>& bytes) const {
-    if (bytes.empty()) {
-        throw std::invalid_argument("ciphertext bytes are empty");
-    }
-
-    const std::string input(bytes.begin(), bytes.end());
-    std::istringstream stream(input, std::ios::in | std::ios::binary);
-    Ciphertext ciphertext;
-    try {
-        ciphertext = DeserializeBinary(stream);
-    } catch (const std::exception&) {
-        throw std::invalid_argument("ciphertext bytes are corrupt");
-    }
-    if (stream.peek() != std::char_traits<char>::eof()) {
-        throw std::invalid_argument("ciphertext bytes contain trailing data");
-    }
-    if (!ciphertext || ciphertext->GetCryptoContext() != context_ ||
-        ciphertext->GetKeyTag() != ciphertext_key_tag_) {
-        throw std::invalid_argument(
-            "decoded ciphertext does not match the live context and public key");
-    }
-    RequireCanonicalSerialization(bytes, Serialize(ciphertext));
+    const auto ciphertext = DeserializeBinaryExact(bytes);
+    RequireLiveBinding(ciphertext, context_, ciphertext_key_tag_,
+                       "decoded ciphertext does not match the live context and public key");
+    RequireCanonicalSerialization(bytes, SerializeBinary(ciphertext));
     return ciphertext;
 }
 
