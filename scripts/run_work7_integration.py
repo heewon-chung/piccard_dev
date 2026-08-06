@@ -188,6 +188,62 @@ def validate_claim_report(path: Path, commit: str, mode: str) -> None:
         raise Failure("foreign source commit or invalid claim verifier report")
 
 
+def load_json(path: Path, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure(f"malformed {label}") from error
+    if not isinstance(value, dict): raise Failure(f"malformed {label}")
+    return value
+
+
+def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> Path:
+    path = root / "manifest.json"; value = load_json(path, "pre-threshold manifest")
+    if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1:
+        raise Failure("invalid pre-threshold manifest identity")
+    if value.get("source", {}).get("commit") != commit or value.get("source", {}).get("dirty") is not False or value.get("thread_policy") != {"OMP_DYNAMIC":"FALSE", "OMP_NUM_THREADS":"2"}:
+        raise Failure("invalid pre-threshold provenance")
+    cells = value.get("cells")
+    if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
+        raise Failure("invalid pre-threshold cells")
+    for row in cells:
+        if row.get("status") != "MEASURED" or not isinstance(row.get("argv"), list) or "--seed=7" not in row["argv"] or any(str(x) not in ("--trials=1", "--refresh_updates=1") for x in row["argv"] if str(x).startswith("--trials=") or str(x).startswith("--refresh_updates=")):
+            raise Failure("pre-threshold row/argv mismatch")
+    if not isinstance(value.get("terminal_cells"), dict): raise Failure("missing pre-threshold terminal cells")
+    return path
+
+
+def read_tsv(path: Path) -> dict[str, str]:
+    try:
+        rows = list(csv.reader(path.open(newline="", encoding="utf-8"), delimiter="\t", strict=True))
+    except (OSError, UnicodeError, csv.Error) as error: raise Failure("malformed real-data TSV") from error
+    if not rows or rows[0] != ["key", "value"] or any(len(row) != 2 for row in rows[1:]) or len(rows) < 2: raise Failure("malformed real-data TSV")
+    value = dict(rows[1:])
+    if len(value) != len(rows)-1: raise Failure("duplicate real-data TSV key")
+    return value
+
+
+def validate_real(root: Path, commit: str, build: Path) -> Path:
+    metadata = root / "run_metadata.tsv"; value = read_tsv(metadata)
+    if value.get("schema_version") != "piccard-real-run-v1" or value.get("evidence_mode") != "quick" or value.get("source_commit") != commit or value.get("git_dirty") != "false" or value.get("build_type") != "Release" or value.get("cell_count") != "3":
+        raise Failure("invalid real-data metadata")
+    for number in range(3):
+        prefix=f"cell.{number:03d}."
+        if value.get(prefix+"status") != "complete" or value.get(prefix+"argv_count") in (None,"0") or value.get(prefix+"argv.000") is None: raise Failure("invalid real-data cell")
+        args=[item for key,item in value.items() if key.startswith(prefix+"argv.")]
+        if not any(item in ("--timing-trials=1", "--accuracy-trials=1", "--trials=1") for item in args): raise Failure("real-data argv/count mismatch")
+    status = read_tsv(root / "verification_status.tsv")
+    if status != {"schema_version":"piccard-real-verification-v1", "run_metadata_sha256":sha256_file(metadata), "status":"VERIFIED"}: raise Failure("stale real-data verification status")
+    return metadata
+
+
+def validate_deletion(path: Path) -> None:
+    header=("model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed".split(","))
+    try: rows=list(csv.reader(path.open(newline="",encoding="utf-8"), strict=True))
+    except (OSError, UnicodeError, csv.Error) as error: raise Failure("malformed deletion CSV") from error
+    if len(rows)!=4 or rows[0]!=header or [row[5] for row in rows[1:]] != ["1","4","8"] or any(len(row)!=17 or row[0]!="ideal-independent-random-ranking-v1" or row[1:4]!=["64","3","8"] or row[15:]!=["1","7"] for row in rows[1:]): raise Failure("invalid deletion CSV")
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
@@ -237,9 +293,14 @@ def main(argv: list[str] | None = None) -> int:
         runtime = phase2 / "runtime"
         pre = runtime / "pre-threshold"
         real = runtime / "real-datasets"
-        checked_command((str(source / "scripts" / "run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(pre)), source, commands, "pre-threshold")
+        pre_command=(str(source / "scripts" / "run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(pre))
+        checked_command(pre_command, source, commands, "pre-threshold")
+        pre_manifest=validate_prethreshold(pre, commit, pre_command)
         checked_command((str(source / "scripts" / "run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(real)), source, commands, "real-datasets")
+        checked_command((sys.executable, str(source / "scripts" / "verify_real_dataset_outputs.py"), str(real)), source, commands, "verify-real-datasets")
         deletion = checked_command((str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"), source, commands, "deletion-survival")
+        validate_real(real, commit, build)
+        validate_deletion(deletion)
         validate_records(runtime)
         index = runtime / "evidence-index.json"
         static_runtime = runtime / "static-report.json"
@@ -248,8 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             "W7-G1-ESTIMATOR": {"estimator-functional": artifact(ctest_log, runtime, "ctest-log")},
             "W7-G2-SANITIZER": {"sanitizer-profile": artifact(inventory, runtime, "ctest-log")},
             "W7-G3-CALIBRATION": {"calibration-selection": artifact(static_runtime, runtime, "probe-output")},
-            "W7-G4-COMPARISON": {"comparison-toy": artifact(pre / "run-manifest.json", runtime, "csv-artifact")},
-            "W7-G5-REAL-DATA": {"synthetic-real-data": artifact(real / "run-metadata.tsv", runtime, "csv-artifact")},
+            "W7-G4-COMPARISON": {"comparison-toy": artifact(pre_manifest, runtime, "csv-artifact")},
+            "W7-G5-REAL-DATA": {"synthetic-real-data": artifact(real / "run_metadata.tsv", runtime, "csv-artifact")},
             "W7-G6-DYNAMIC": {"dynamic-deletion-toy": artifact(deletion, runtime, "probe-output")},
         }}))
         runtime_seal = phase2 / "runtime-seal.json"
@@ -265,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         verify_tree_seal(runtime_seal, sha256_file(phase0_seal))
         validate_claim_report(evidence, commit, "evidence-bound")
         closure_seal = phase2 / "closure-seal.json"
-        create_tree_seal(closure, closure_seal, sha256_file(runtime_seal), "phase2-closure-artifacts")
+        create_tree_seal(closure, closure_seal, sha256_file(runtime_seal), "phase2-closure")
         verify_tree_seal(closure_seal, sha256_file(runtime_seal))
         initial = json.loads(state.read_text())
         for name, root in (("paper", paper), ("threshold", threshold)):

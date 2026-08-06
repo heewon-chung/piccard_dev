@@ -106,15 +106,25 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             elif os.environ.get('FAKE_FAULT') == 'unlabelled': (root/'timing.csv').write_text('warmup,trials\\nmaybe,1\\n')
             elif os.environ.get('FAKE_FAULT') == 'actual': (root/'actual-data.csv').write_text('trials\\n1\\n')
             else: (root/'timing.csv').write_text('trials,warmup\\n1,discarded\\n')
-            (root/'run-manifest.json').write_text(json.dumps({'trials':1,'refresh_updates':1}))
+            cells=[{'producer':'bench_review_comparison','status':'MEASURED','argv':['bench_review_comparison','--trials=1','--seed=7']},{'producer':'bench_piccard','status':'MEASURED','argv':['bench_piccard','--trials=1','--seed=7']},{'producer':'bench_dynamic','status':'MEASURED','argv':['bench_dynamic','--trials=1','--refresh_updates=1','--seed=7']}]
+            (root/'manifest.json').write_text(json.dumps({'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False},'thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'cells':cells,'terminal_cells':{}}))
         """)
         self.write(scripts / "run_real_datasets.sh", """
             #!/usr/bin/env python3
             import os, pathlib, sys
             root=pathlib.Path(next(x.split('=',1)[1] for x in sys.argv if x.startswith('--results-root='))); root.mkdir(parents=True)
-            root.joinpath('run-metadata.tsv').write_text('key\\tvalue\\n')
+            rows=[('schema_version','piccard-real-run-v1'),('evidence_mode','quick'),('source_commit',os.environ['FAKE_COMMIT']),('git_dirty','false'),('build_type','Release'),('cell_count','3')]
+            for i in range(3): rows += [(f'cell.{i:03d}.status','complete'),(f'cell.{i:03d}.argv_count','2'),(f'cell.{i:03d}.argv.000','bench_real_datasets'),(f'cell.{i:03d}.argv.001','--trials=1')]
+            root.joinpath('run_metadata.tsv').write_text('key\\tvalue\\n' + ''.join(k+'\\t'+v+'\\n' for k,v in rows))
             if os.environ.get('FAKE_FAULT') == 'drift': pathlib.Path(os.environ['FAKE_PAPER']).joinpath('tracked').write_text('changed\\n')
             if os.environ.get('FAKE_FAULT') == 'threshold-drift': pathlib.Path(os.environ['FAKE_THRESHOLD']).joinpath('tracked').write_text('changed\\n')
+        """)
+        self.write(scripts / "verify_real_dataset_outputs.py", """
+            #!/usr/bin/env python3
+            import hashlib, pathlib, sys
+            root=pathlib.Path(sys.argv[1]); raw=(root/'run_metadata.tsv').read_bytes()
+            if __import__('os').environ.get('FAKE_FAULT') == 'stale-verification': raw=b'bad'
+            (root/'verification_status.tsv').write_text('key\\tvalue\\nschema_version\\tpiccard-real-verification-v1\\nrun_metadata_sha256\\t'+hashlib.sha256(raw).hexdigest()+'\\nstatus\\tVERIFIED\\n')
         """)
         (scripts / "work7_claims.json").write_text("{}", encoding="utf-8")
         fakebin = temporary / "bin"; fakebin.mkdir()
@@ -124,7 +134,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             a=sys.argv
             if '-B' in a:
                 b=pathlib.Path(a[a.index('-B')+1]); b.mkdir(parents=True,exist_ok=True)
-                p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho trials,status\\necho 1,MEASURED\\n'); p.chmod(0o755)
+                p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\\nfor r in 1 4 8; do echo ideal-independent-random-ranking-v1,64,3,8,0.99,$r,1,1,1,0,1,1,1,1,1,1,7; done\\n'); p.chmod(0o755)
                 print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
         """)
         self.write(fakebin / "ctest", """
@@ -138,7 +148,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         """)
         env = {**os.environ, "PATH": str(fakebin) + os.pathsep + os.environ["PATH"], "FAKE_STATE": json.dumps(state),
                "FAKE_TESTS": ",".join(name for name in FROZEN_CTESTS if not (fault == "missing" and name == "MinHash")),
-               "FAKE_FAULT": fault or "", "FAKE_PAPER": str(paper), "FAKE_THRESHOLD": str(threshold)}
+               "FAKE_FAULT": fault or "", "FAKE_PAPER": str(paper), "FAKE_THRESHOLD": str(threshold), "FAKE_COMMIT": commit}
         if fault == "existing-build": (temporary / "builds" / ("build-" + commit)).mkdir(parents=True)
         if fault == "existing-session": (temporary / "sessions" / ("session-" + commit)).mkdir(parents=True)
         (temporary / "builds").mkdir(exist_ok=True); (temporary / "sessions").mkdir(exist_ok=True)
@@ -153,20 +163,21 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         session = root / "sessions" / ("session-" + commit)
         commands = session / "phase2" / "runtime" / "commands"
-        labels = ["phase0-guard", "configure", "build", "ctest-inventory", "static", "ctest-focused", "pre-threshold", "real-datasets", "deletion-survival"]
+        labels = ["phase0-guard", "configure", "build", "ctest-inventory", "static", "ctest-focused", "pre-threshold", "real-datasets", "verify-real-datasets", "deletion-survival"]
         root = root.resolve()
-        self.assertEqual([json.loads((commands / (label + ".json")).read_text())["argv"][0] for label in labels], [sys.executable, "cmake", "cmake", "ctest", sys.executable, "ctest", str(root / "source" / "scripts" / "run_pre_threshold_profiles.sh"), str(root / "source" / "scripts" / "run_real_datasets.sh"), str(root / "builds" / ("build-" + commit) / "bench_deletion_survival")])
+        self.assertEqual([json.loads((commands / (label + ".json")).read_text())["argv"][0] for label in labels], [sys.executable, "cmake", "cmake", "ctest", sys.executable, "ctest", str(root / "source" / "scripts" / "run_pre_threshold_profiles.sh"), str(root / "source" / "scripts" / "run_real_datasets.sh"), sys.executable, str(root / "builds" / ("build-" + commit) / "bench_deletion_survival")])
         self.assertEqual(json.loads((commands / "configure.json").read_text())["argv"], ["cmake", "-S", str(root / "source"), "-B", str(root / "builds" / ("build-" + commit)), "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON"])
         self.assertEqual(json.loads((commands / "pre-threshold.json").read_text())["argv"][1:4], ["--suite=smoke", "--seed=7", "--threads=2"])
         self.assertEqual(json.loads((commands / "real-datasets.json").read_text())["argv"][1:4], ["--quick", "--seed=7", "--threads=2"])
         self.assertEqual(json.loads((commands / "deletion-survival.json").read_text())["argv"][1:], ["--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"])
         self.assertTrue((session / "phase2" / "runtime-seal.json").is_file())
         closure = json.loads((session / "phase2" / "closure-seal.json").read_text())
+        self.assertEqual(closure["kind"], "phase2-closure")
         self.assertEqual(closure["previous_seal_sha256"], __import__("hashlib").sha256((session / "phase2" / "runtime-seal.json").read_bytes()).hexdigest())
         self.assertTrue((session / "phase2" / "closure-artifacts" / "evidence-bound-report.json").is_file())
 
     def test_fake_tool_hard_failures(self):
-        cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift")
+        cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification")
         for fault in cases:
             with self.subTest(fault=fault):
                 result, _, _ = self.invoke_fake_runner(fault)
