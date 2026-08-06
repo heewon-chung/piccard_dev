@@ -254,8 +254,17 @@ class CheckWork6Scope(unittest.TestCase):
                 with self.assertRaises(module.ScopeError): module._allowed_text(data)
         with mock.patch.object(module, "_git", return_value=b"not-a-commit\n"):
             with self.assertRaises(module.ScopeError): module._commit("bad")
+        with mock.patch.object(module.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=b"")):
+            with self.assertRaises(module.ScopeError): module._git("rev-parse", "bad")
         with mock.patch.object(module.re, "compile", side_effect=module.re.error("x")):
             with self.assertRaises(module.ScopeError): module._rx()
+
+    def test_similar_path_data_filename_is_scanned_normally(self):
+        path = "scripts/work6_allowed_paths_copy.txt"
+        base = self.repo.commit("base")
+        self.repo.write(path, "Apply" + "Delta\n")
+        self.repo.commit("candidate")
+        self.assert_fail(self.repo.check(base, path + "\n"))
 
     def test_unsorted_or_traversing_whitelist_fails(self):
         base = self.repo.commit("base")
