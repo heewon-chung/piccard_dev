@@ -188,7 +188,7 @@ def matrix(suite: str, seed: int) -> list[Cell]:
         review_args = (
             "--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16",
             "--set-size=10", "--universe=64", "--target-jaccard=0.5",
-            "--trials=1", "--accuracy-trials=2", f"--seed={seed}",
+            "--trials=1", "--accuracy-trials=1", f"--seed={seed}",
             "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16",
             "--sj16-key-bits=1024", "--allow-unmatched-security",
             "--manifest-out=<workload>", "--execution-trace-out=<trace>",
@@ -199,6 +199,12 @@ def matrix(suite: str, seed: int) -> list[Cell]:
                 "--profile=toy-smoke", "--security=TOY", "--mode=timing",
                 "--evidence_point", "--k=16", "--m=16", "--set_size=10",
                 "--target-jaccard=0.5", "--trials=1", f"--seed={seed}")),
+            Cell("toy-smoke", "bench_dynamic", (
+                "--scenario=refresh", "--refresh_updates=1",
+                "--profile=toy-smoke", "--security=TOY", "--mode=timing",
+                "--evidence_point", "--k=16", "--m=16", "--set_size=100",
+                "--target-jaccard=0.5", "--depth=5", "--trials=1",
+                f"--seed={seed}")),
         ))
     else:
         fail(f"unknown suite: {suite}")

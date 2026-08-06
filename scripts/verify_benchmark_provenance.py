@@ -85,6 +85,16 @@ DYNAMIC_REQUIRED_COLUMNS = (
                                    "time_ms_median", "encoding"})
     | {"total_ms", "total_ms_sd", "total_ms_median", "depth"}
 )
+REFRESH_ONLY_COLUMNS = (
+    "refresh_owner_set_id", "refresh_updates", "refresh_epoch_before",
+    "refresh_epoch_after", "refresh_status", "phase_refresh_update_ms",
+    "phase_refresh_signature_ms", "phase_refresh_encode_ms",
+    "phase_refresh_encrypt_ms", "phase_refresh_serialize_ms",
+    "phase_cloud_replace_ms", "refresh_total_ms", "refresh_upload_bytes",
+    "refresh_ciphertexts_uploaded", "refresh_context_fingerprint",
+    "refresh_public_key_fingerprint",
+)
+DYNAMIC_REQUIRED_COLUMNS |= {"dynamic_scenario", *REFRESH_ONLY_COLUMNS}
 FAMILY_SCHEMAS = {
     "benchmark": (BENCHMARK_REQUIRED_COLUMNS,
                   ("time_ms", "time_ms_median")),
@@ -156,6 +166,14 @@ def _finite(value: str, column: str, row_number: int) -> float:
     require(math.isfinite(parsed),
             f"row {row_number}: {column} must be a finite numeric value")
     return parsed
+
+
+def _require_close(row: dict[str, str], row_number: int, left_name: str,
+                   right_name: str, tolerance: float) -> None:
+    left = _finite(row.get(left_name, ""), left_name, row_number)
+    right = _finite(row.get(right_name, ""), right_name, row_number)
+    require(abs(left - right) <= tolerance,
+            f"row {row_number}: {left_name} must equal {right_name}")
 
 
 def _exact(row: dict[str, str], row_number: int, expected: dict[str, str]) -> None:
@@ -409,6 +427,93 @@ def validate_family_rows(rows: list[dict[str, str]], schema_name: str) -> None:
             require(value != "",
                     f"row {row_number}: measured {column} is required")
             _finite(value, column, row_number)
+        if schema_name == "dynamic":
+            _validate_dynamic_refresh(row, row_number)
+
+
+def _validate_dynamic_refresh(row: dict[str, str], row_number: int) -> None:
+    scenario = row["dynamic_scenario"]
+    if scenario == "legacy":
+        for column in REFRESH_ONLY_COLUMNS:
+            require(row[column] == "",
+                    f"row {row_number}: legacy row fabricates {column}")
+        return
+    require(scenario == "refresh", f"row {row_number}: invalid dynamic_scenario")
+    require(row["profile_id"] == "toy-smoke" and row["run_class"] == "smoke",
+            f"row {row_number}: refresh evidence must use toy-smoke")
+    require(row["target_security_bits"] == "0" and
+            row["comparison_eligible"] == "false" and
+            row["measurement_kind"] == "fhe-timing",
+            f"row {row_number}: refresh evidence provenance mismatch")
+    require(row["trials"] == "1" and row["accuracy_trials"] == "0",
+            f"row {row_number}: Work 6 refresh requires one timing trial")
+    _exact(row, row_number, {
+        "hash_randomness": "fixed", "hash_seed": "7", "hash_root_seed": "7",
+        "refresh_owner_set_id": "owner-a", "refresh_status": "applied",
+        "refresh_epoch_before": "0", "refresh_epoch_after": "1",
+        "transcript_stat_bits": "40", "max_queries": "1048576",
+        "query_stat_bits": "60", "coefficient_stat_bits": "70",
+        "flood_margin_bits": "8", "eval_noise_bits": "56",
+        "flood_noise_bits": "134", "scaling_mod_size": "40",
+        "sanitizer_model": "phase-smudging-enc0-poc-v1",
+        "sanitizer_assurance": "empirical-phase-statistical+ciphertext-computational",
+        "estimator_model": "sha256-random-ranking-poc-v1",
+        "actual_ring_dim": "1024", "log_q_bits": "159.999999723221",
+        "plaintext_modulus": "12289", "num_limbs": "4", "openfhe_version": "1.5.0",
+    })
+    _parse_int(row, "refresh_updates", row_number, positive=True)
+    phases = (
+        "phase_refresh_update_ms", "phase_refresh_signature_ms",
+        "phase_refresh_encode_ms", "phase_refresh_encrypt_ms",
+        "phase_refresh_serialize_ms", "phase_cloud_replace_ms",
+    )
+    values = [_finite(row[column], column, row_number) for column in phases]
+    require(all(value >= 0 for value in values),
+            f"row {row_number}: refresh phases must be nonnegative")
+    refresh_total = _finite(row["refresh_total_ms"], "refresh_total_ms", row_number)
+    require(refresh_total > 0 and abs(refresh_total - sum(values)) <= 0.01,
+            f"row {row_number}: refresh_total_ms does not match refresh phases")
+    _require_close(row, row_number, "refresh_total_ms", "total_ms", 0.0)
+    _require_close(row, row_number, "refresh_total_ms", "total_ms_median", 0.0)
+    require(_finite(row["total_ms_sd"], "total_ms_sd", row_number) == -1,
+            f"row {row_number}: total_ms_sd must be -1")
+    aliases = {
+        "phase_insert_ms": "phase_refresh_update_ms",
+        "phase_signature_ms": "phase_refresh_signature_ms",
+        "phase_encode_ms": "phase_refresh_encode_ms",
+        "phase_encrypt_ms": "phase_refresh_encrypt_ms",
+    }
+    for inherited, refresh in aliases.items():
+        _require_close(row, row_number, inherited, refresh, 0.0)
+        _require_close(row, row_number, f"{inherited}_median", refresh, 0.0)
+        require(_finite(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == -1,
+                f"row {row_number}: {inherited}_sd must be -1")
+    for inherited in ("phase_init_ms", "phase_delete_ms", "phase_compute_ms",
+                      "phase_decrypt_ms", "phase_flood_ms"):
+        require(_finite(row[inherited], inherited, row_number) == 0 and
+                _finite(row[f"{inherited}_median"], f"{inherited}_median", row_number) == 0 and
+                _finite(row[f"{inherited}_sd"], f"{inherited}_sd", row_number) == -1,
+                f"row {row_number}: {inherited} must be unused")
+    size = _parse_int(row, "ct_size_bytes", row_number, positive=True)
+    require(size == _parse_int(row, "refresh_upload_bytes", row_number, positive=True),
+            f"row {row_number}: ciphertext size does not match refresh upload")
+    require(_parse_int(row, "refresh_ciphertexts_uploaded", row_number) == 1,
+            f"row {row_number}: refresh must upload exactly one ciphertext")
+    for column in ("refresh_context_fingerprint", "refresh_public_key_fingerprint"):
+        require(HEX64.fullmatch(row[column]) is not None,
+                f"row {row_number}: {column} is not lowercase SHA-256")
+    computed = _finite(row["jaccard_computed"], "jaccard_computed", row_number)
+    expected = _finite(row["jaccard_expected"], "jaccard_expected", row_number)
+    error = _finite(row["jaccard_error"], "jaccard_error", row_number)
+    relative = _finite(row["jaccard_rel_error"], "jaccard_rel_error", row_number)
+    require(0 <= computed <= 1 and 0 < expected <= 1,
+            f"row {row_number}: refresh accuracy range is invalid")
+    require(abs(error - abs(computed - expected)) <= 0.000002,
+            f"row {row_number}: refresh jaccard_error is inconsistent")
+    require(abs(relative - error / expected) <= 0.000005,
+            f"row {row_number}: refresh jaccard_rel_error is inconsistent")
+    require(_parse_int(row, "rel_error_eligible_n", row_number) == 1,
+            f"row {row_number}: rel_error_eligible_n must be one")
 
 
 def resolve_manifest_csv(manifest_path: Path, cell_id: str) -> Path:

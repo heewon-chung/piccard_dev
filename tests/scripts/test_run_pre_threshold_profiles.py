@@ -160,8 +160,9 @@ class PreThresholdRunnerTest(unittest.TestCase):
         smoke_runs = [line for line in smoke.stdout.splitlines()
                       if line.startswith("RUN ")]
         self.assertEqual(smoke_runs, [
-            "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_review_comparison --suite=toy-smoke --profile=toy-smoke --k=16 --m=16 --set-size=10 --universe=64 --target-jaccard=0.5 --trials=1 --accuracy-trials=2 --seed=7 --methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16 --sj16-key-bits=1024 --allow-unmatched-security --manifest-out=<results-root>/workloads/<cell_id>.bin --execution-trace-out=<results-root>/traces/<cell_id>.bin",
+            "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_review_comparison --suite=toy-smoke --profile=toy-smoke --k=16 --m=16 --set-size=10 --universe=64 --target-jaccard=0.5 --trials=1 --accuracy-trials=1 --seed=7 --methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16 --sj16-key-bits=1024 --allow-unmatched-security --manifest-out=<results-root>/workloads/<cell_id>.bin --execution-trace-out=<results-root>/traces/<cell_id>.bin",
             "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_piccard --profile=toy-smoke --security=TOY --mode=timing --evidence_point --k=16 --m=16 --set_size=10 --target-jaccard=0.5 --trials=1 --seed=7",
+            "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_dynamic --scenario=refresh --refresh_updates=1 --profile=toy-smoke --security=TOY --mode=timing --evidence_point --k=16 --m=16 --set_size=100 --target-jaccard=0.5 --depth=5 --trials=1 --seed=7",
         ])
 
     def test_non_dry_run_rejects_relative_and_existing_roots(self):
@@ -266,7 +267,7 @@ class PreThresholdRunnerTest(unittest.TestCase):
                 fixture = "dynamic_toy_rows.csv" if name == "bench_dynamic" \\
                     else "benchmark_toy_rows.csv"
                 lines = (fixtures / fixture).read_text().splitlines(True)
-                timing_row, accuracy_row = (lines[1], lines[1]) if name == "bench_dynamic" \\
+                timing_row, accuracy_row = ((lines[2] if "--scenario=refresh" in args else lines[1]), lines[1]) if name == "bench_dynamic" \\
                     else (lines[1], lines[2])
                 mode = next(a.split("=", 1)[1] for a in args if a.startswith("--mode="))
                 if "--evidence_point" in args:
@@ -325,18 +326,18 @@ class PreThresholdRunnerTest(unittest.TestCase):
         self.assertEqual(manifest["source"]["commit"], env["FAKE_COMMIT"])
         self.assertFalse(manifest["source"]["dirty"])
         self.assertEqual(manifest["build"]["type"], "Release")
-        self.assertEqual(len(manifest["cells"]), 2)
+        self.assertEqual(len(manifest["cells"]), 3)
         self.assertTrue(all(cell["status"] == "MEASURED"
                             for cell in manifest["cells"]))
         self.assertTrue(all(cell["output"]["csv_sha256"]
                             for cell in manifest["cells"]))
         self.assertEqual(
             [cell["output"]["expected_csv_rows"] for cell in manifest["cells"]],
-            [10, 1],
+            [10, 1, 1],
         )
         self.assertEqual(
             [cell["output"]["csv_row_count"] for cell in manifest["cells"]],
-            [10, 1],
+            [10, 1, 1],
         )
         self.assertIn("cpu", manifest["machine"])
         self.assertIn("ram", manifest["machine"])
@@ -346,12 +347,12 @@ class PreThresholdRunnerTest(unittest.TestCase):
         terminal = (results / "terminal-cells.tsv").read_text()
         self.assertTrue(terminal.startswith(
             "schema_version\tcell_id\tprofile_id\tproducer\tparameter_sha256\tstatus\treason_code\trequired_bits\tavailable_bits\tshortfall_bits\tlog_sha256\n"))
-        self.assertEqual(len(terminal.splitlines()), 3)
+        self.assertEqual(len(terminal.splitlines()), 4)
         self.assertIn("verify_benchmark_provenance", result.stdout)
         self.assertIn("verify_review_comparison", result.stdout)
         invocations = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(invocations), 2)
-        self.assertTrue(all("--evidence_point" not in row or row[0] == "bench_piccard"
+        self.assertEqual(len(invocations), 3)
+        self.assertTrue(all("--evidence_point" not in row or row[0] in {"bench_piccard", "bench_dynamic"}
                             for row in invocations))
         for cell in manifest["cells"]:
             for field in ("csv", "log"):
@@ -544,7 +545,7 @@ class PreThresholdRunnerTest(unittest.TestCase):
         results = self.tmp / "results-schema"
         result = self.run_smoke(project, build, results, env)
         manifest = json.loads((results / "manifest.json").read_text())
-        self.assertEqual(len(manifest["cells"]), 2)
+        self.assertEqual(len(manifest["cells"]), 3)
         verify_lines = {
             line.split()[-1]: line
             for line in result.stdout.splitlines()

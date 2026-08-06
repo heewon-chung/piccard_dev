@@ -87,7 +87,14 @@ DYNAMIC_HEADER = (
     "flood_margin_bits,eval_noise_bits,flood_noise_bits,scaling_mod_size,"
     "sanitizer_model,sanitizer_assurance,estimator_model,profile_id,"
     "run_class,target_security_bits,comparison_eligible,measurement_kind,"
-    "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,openfhe_version"
+    "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,openfhe_version,"
+    "dynamic_scenario,refresh_owner_set_id,refresh_updates,"
+    "refresh_epoch_before,refresh_epoch_after,refresh_status,"
+    "phase_refresh_update_ms,phase_refresh_signature_ms,"
+    "phase_refresh_encode_ms,phase_refresh_encrypt_ms,"
+    "phase_refresh_serialize_ms,phase_cloud_replace_ms,refresh_total_ms,"
+    "refresh_upload_bytes,refresh_ciphertexts_uploaded,"
+    "refresh_context_fingerprint,refresh_public_key_fingerprint"
 )
 
 
@@ -114,6 +121,7 @@ def dynamic_row(**overrides):
         "measurement_kind": "fhe-timing", "actual_ring_dim": "1024",
         "log_q_bits": "159.999999723221", "plaintext_modulus": "12289",
         "num_limbs": "4", "openfhe_version": "1.5.0",
+        "dynamic_scenario": "legacy",
     }
     row.update(overrides)
     columns = DYNAMIC_HEADER.split(",")
@@ -123,6 +131,66 @@ def dynamic_row(**overrides):
 def write_dynamic_csv(path, rows):
     path.write_text(DYNAMIC_HEADER + "\n" + "\n".join(rows) + "\n",
                     encoding="utf-8")
+
+
+def refresh_row(**overrides):
+    values = {
+        "dynamic_scenario": "refresh",
+        "refresh_owner_set_id": "owner-a",
+        "refresh_updates": "1",
+        "refresh_epoch_before": "0",
+        "refresh_epoch_after": "1",
+        "refresh_status": "applied",
+        "phase_refresh_update_ms": "1.000",
+        "phase_refresh_signature_ms": "2.000",
+        "phase_refresh_encode_ms": "3.000",
+        "phase_refresh_encrypt_ms": "4.000",
+        "phase_refresh_serialize_ms": "5.000",
+        "phase_cloud_replace_ms": "6.000",
+        "refresh_total_ms": "21.000",
+        "total_ms": "21.000",
+        "total_ms_sd": "-1.000",
+        "total_ms_median": "21.000",
+        "ct_size_bytes": "4096",
+        "phase_init_ms": "0.000",
+        "phase_init_ms_sd": "-1.000",
+        "phase_init_ms_median": "0.000",
+        "phase_insert_ms": "1.000",
+        "phase_insert_ms_sd": "-1.000",
+        "phase_insert_ms_median": "1.000",
+        "phase_delete_ms": "0.000",
+        "phase_delete_ms_sd": "-1.000",
+        "phase_delete_ms_median": "0.000",
+        "phase_signature_ms": "2.000",
+        "phase_signature_ms_sd": "-1.000",
+        "phase_signature_ms_median": "2.000",
+        "phase_encode_ms": "3.000",
+        "phase_encode_ms_sd": "-1.000",
+        "phase_encode_ms_median": "3.000",
+        "phase_encrypt_ms": "4.000",
+        "phase_encrypt_ms_sd": "-1.000",
+        "phase_encrypt_ms_median": "4.000",
+        "phase_compute_ms": "0.000",
+        "phase_compute_ms_sd": "-1.000",
+        "phase_compute_ms_median": "0.000",
+        "phase_decrypt_ms": "0.000",
+        "phase_decrypt_ms_sd": "-1.000",
+        "phase_decrypt_ms_median": "0.000",
+        "phase_flood_ms": "0.000",
+        "phase_flood_ms_sd": "-1.000",
+        "phase_flood_ms_median": "0.000",
+        "jaccard_computed": "0.600000",
+        "jaccard_expected": "0.499250",
+        "jaccard_error": "0.100750",
+        "jaccard_rel_error": "0.201803",
+        "rel_error_eligible_n": "1",
+        "refresh_upload_bytes": "4096",
+        "refresh_ciphertexts_uploaded": "1",
+        "refresh_context_fingerprint": "1" * 64,
+        "refresh_public_key_fingerprint": "2" * 64,
+    }
+    values.update(overrides)
+    return dynamic_row(**values)
 
 
 class BenchmarkProvenanceVerifierTest(unittest.TestCase):
@@ -287,6 +355,70 @@ class PiccardFamilySchemaVerifierTest(unittest.TestCase):
         result = self.run_verifier("--schema=dynamic")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"schema": "dynamic"', result.stdout)
+
+    def test_dynamic_schema_accepts_complete_refresh_row(self):
+        write_dynamic_csv(self.csv_path, [refresh_row()])
+        result = self.run_verifier("--schema=dynamic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dynamic_refresh_rejects_each_false_evidence_binding(self):
+        mutations = {
+            "refresh_owner_set_id": "owner-b", "refresh_updates": "0",
+            "refresh_epoch_before": "1", "refresh_epoch_after": "2",
+            "refresh_status": "skipped", "phase_refresh_update_ms": "1.100",
+            "phase_refresh_signature_ms": "2.100", "phase_refresh_encode_ms": "3.100",
+            "phase_refresh_encrypt_ms": "4.100", "phase_refresh_serialize_ms": "5.100",
+            "phase_cloud_replace_ms": "6.100", "refresh_total_ms": "21.100",
+            "total_ms": "21.100", "total_ms_median": "21.100", "total_ms_sd": "0.000",
+            "phase_insert_ms": "1.100", "phase_signature_ms": "2.100",
+            "phase_encode_ms": "3.100", "phase_encrypt_ms": "4.100",
+            "phase_insert_ms_median": "1.100", "phase_signature_ms_median": "2.100",
+            "phase_encode_ms_median": "3.100", "phase_encrypt_ms_median": "4.100",
+            "phase_insert_ms_sd": "0.000", "phase_signature_ms_sd": "0.000",
+            "phase_encode_ms_sd": "0.000", "phase_encrypt_ms_sd": "0.000",
+            "ct_size_bytes": "4097", "refresh_upload_bytes": "0",
+            "refresh_ciphertexts_uploaded": "2",
+            "refresh_context_fingerprint": "A" * 64,
+            "refresh_public_key_fingerprint": "2" * 63,
+            "jaccard_computed": "1.100000", "jaccard_expected": "0.000000",
+            "jaccard_error": "0.100753", "jaccard_rel_error": "0.201809",
+            "rel_error_eligible_n": "0", "profile_id": "std128-t40-primary",
+            "run_class": "primary", "target_security_bits": "128",
+            "comparison_eligible": "true", "measurement_kind": "fhe-accuracy",
+            "trials": "2", "accuracy_trials": "1", "hash_randomness": "random",
+            "hash_seed": "8", "hash_root_seed": "8",
+            "transcript_stat_bits": "41", "max_queries": "2097152",
+            "query_stat_bits": "61", "coefficient_stat_bits": "71",
+            "flood_margin_bits": "9", "eval_noise_bits": "57",
+            "flood_noise_bits": "135", "scaling_mod_size": "41",
+            "sanitizer_model": "wrong", "sanitizer_assurance": "wrong",
+            "estimator_model": "wrong", "actual_ring_dim": "2048",
+            "log_q_bits": "160.0", "plaintext_modulus": "12290",
+            "num_limbs": "5", "openfhe_version": "1.5.1",
+        }
+        for unused in ("phase_init_ms", "phase_delete_ms", "phase_compute_ms",
+                       "phase_decrypt_ms", "phase_flood_ms"):
+            mutations[unused] = "0.100"
+            mutations[f"{unused}_median"] = "0.100"
+            mutations[f"{unused}_sd"] = "0.000"
+        for column, value in mutations.items():
+            with self.subTest(column=column):
+                write_dynamic_csv(self.csv_path, [refresh_row(**{column: value})])
+                result = self.run_verifier("--schema=dynamic")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_dynamic_refresh_rejects_phase_sum_legacy_cells_and_strict_numbers(self):
+        cases = (
+            ("phase sum", refresh_row(phase_cloud_replace_ms="6.020")),
+            ("legacy", dynamic_row(refresh_total_ms="21.000")),
+            ("empty", refresh_row(phase_refresh_update_ms="")),
+            ("nonfinite", refresh_row(phase_refresh_update_ms="NaN")),
+        )
+        for label, row in cases:
+            with self.subTest(label=label):
+                write_dynamic_csv(self.csv_path, [row])
+                result = self.run_verifier("--schema=dynamic")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
 
     def test_default_schema_still_rejects_piccard_family_csv(self):
         write_benchmark_csv(self.csv_path, [benchmark_row()])
