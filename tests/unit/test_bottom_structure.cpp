@@ -199,6 +199,28 @@ TEST_F(BottomStructureTest, EmptySetThrows) {
     EXPECT_THROW(bottom.Initialize({}), std::invalid_argument);
 }
 
+TEST_F(BottomStructureTest, RebuildStateIsStickyUntilFullInitialize) {
+    BottomStructure bottom(1, 1, hash_range, seed);
+    EXPECT_TRUE(bottom.RequiresRebuild());
+    EXPECT_THROW(bottom.Insert(9), std::logic_error);
+    EXPECT_THROW(bottom.Delete(9), std::logic_error);
+    EXPECT_THROW(bottom.GetSignature(), std::logic_error);
+
+    bottom.Initialize({9});
+    EXPECT_FALSE(bottom.RequiresRebuild());
+    bottom.Delete(9);
+    EXPECT_TRUE(bottom.RequiresRebuild());
+    EXPECT_THROW(bottom.Insert(10), std::logic_error);
+    EXPECT_THROW(bottom.Delete(10), std::logic_error);
+    EXPECT_THROW(bottom.GetSignature(), std::logic_error);
+
+    EXPECT_THROW(bottom.Initialize({}), std::invalid_argument);
+    EXPECT_TRUE(bottom.RequiresRebuild());
+    bottom.Initialize({10, 11});
+    EXPECT_FALSE(bottom.RequiresRebuild());
+    EXPECT_NO_THROW(bottom.GetSignature());
+}
+
 TEST_F(BottomStructureTest, InitPlusInsertMatchesFullInit) {
     // Initialize({1..50}) + Insert(51..100) should give the same signature
     // as Initialize({1..100})

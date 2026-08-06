@@ -11,6 +11,13 @@ BottomStructure::BottomStructure(uint32_t k, uint32_t d, uint64_t hash_range,
     if (d == 0) throw std::invalid_argument("depth d must be > 0");
 }
 
+void BottomStructure::RequireUsable() const {
+    if (requires_rebuild_) {
+        throw std::logic_error(
+            "BottomStructure requires full nonempty Initialize()");
+    }
+}
+
 // Algorithm 3: Initialize(x, H, k, d)
 void BottomStructure::Initialize(const std::vector<uint64_t>& set) {
     if (set.empty()) throw std::invalid_argument("Set must not be empty");
@@ -28,10 +35,12 @@ void BottomStructure::Initialize(const std::vector<uint64_t>& set) {
             InsertIntoSorted(i, hashes[i]);
         }
     }
+    requires_rebuild_ = false;
 }
 
 // Algorithm 4: Insert(x*, B_x, H, k, d)
 void BottomStructure::Insert(uint64_t elem) {
+    RequireUsable();
     auto hashes = hasher_.ComputeElementHashes(elem);
     for (uint32_t i = 0; i < k_; i++) {
         InsertIntoSorted(i, hashes[i]);
@@ -40,6 +49,7 @@ void BottomStructure::Insert(uint64_t elem) {
 
 // Algorithm 5: Delete(x, B_x, H, k)
 void BottomStructure::Delete(uint64_t elem) {
+    RequireUsable();
     auto hashes = hasher_.ComputeElementHashes(elem);
     for (uint32_t i = 0; i < k_; i++) {
         auto it = std::lower_bound(bottom_[i].begin(), bottom_[i].end(),
@@ -47,17 +57,14 @@ void BottomStructure::Delete(uint64_t elem) {
         if (it != bottom_[i].end() && *it == hashes[i]) {
             bottom_[i].erase(it);
         }
+        if (bottom_[i].empty()) requires_rebuild_ = true;
     }
 }
 
 std::vector<uint64_t> BottomStructure::GetSignature() const {
+    RequireUsable();
     std::vector<uint64_t> sig(k_);
     for (uint32_t i = 0; i < k_; i++) {
-        if (bottom_[i].empty()) {
-            throw std::runtime_error(
-                "Bottom structure empty for hash function " +
-                std::to_string(i) + "; re-initialization required");
-        }
         sig[i] = bottom_[i][0];
     }
     return sig;

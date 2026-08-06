@@ -146,32 +146,17 @@ TEST_F(DynamicEngineTest, InitPlusInsertMatchesFullInit) {
         << "Init+Insert should match full Init";
 }
 
-TEST_F(DynamicEngineTest, ManyMutationsStillProducesValidResult) {
-    // Stress test: many inserts and deletes, result should still be in [0, 1]
-    RecordProperty("input_initial", "{0..99}");
-    RecordProperty("input_mutations", "insert 100..299, delete 0..99");
+TEST_F(DynamicEngineTest, ExhaustedStructureRejectsEncryptionUntilReinitialized) {
+    auto bottom = engine->InitSet({7});
+    ASSERT_FALSE(bottom->RequiresRebuild());
+    bottom->Delete(7);
+    ASSERT_TRUE(bottom->RequiresRebuild());
+    EXPECT_THROW(engine->Encrypt(*bottom), std::logic_error);
+    EXPECT_THROW(bottom->Insert(8), std::logic_error);
 
-    std::vector<uint64_t> set_a, set_b;
-    for (uint64_t i = 0; i < 100; i++) set_a.push_back(i);
-    for (uint64_t i = 0; i < 100; i++) set_b.push_back(i);
-
-    auto bottom_a = engine->InitSet(set_a);
-    auto bottom_b = engine->InitSet(set_b);
-
-    // Mutate bottom_a: replace all elements with new ones
-    for (uint64_t i = 0; i < 100; i++) bottom_a->Delete(i);
-    for (uint64_t i = 100; i < 300; i++) bottom_a->Insert(i);
-
-    auto result = engine->Run(*bottom_a, *bottom_b);
-
-    RecordProperty("output_match_count", std::to_string(result.match_count));
-    RecordProperty("output_jaccard_estimate", std::to_string(result.jaccard_estimate));
-
-    EXPECT_GE(result.jaccard_estimate, 0.0);
-    EXPECT_LE(result.jaccard_estimate, 1.0);
-    // After replacing all elements in A, similarity with B should be low
-    EXPECT_LT(result.jaccard_estimate, 0.3)
-        << "Replacing all elements should yield low similarity";
+    bottom->Initialize({8, 9});
+    EXPECT_FALSE(bottom->RequiresRebuild());
+    EXPECT_NO_THROW(engine->Encrypt(*bottom));
 }
 
 // ── Public CRS propagation (§"실행 중 재추출") ────────────────────────────────

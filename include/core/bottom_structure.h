@@ -30,6 +30,7 @@ public:
 
     uint32_t GetK() const { return k_; }
     uint32_t GetD() const { return d_; }
+    bool RequiresRebuild() const noexcept { return requires_rebuild_; }
 
     // The public CRS seed serialized into this structure's hash-rank inputs.
     // Delegates to the hasher so there is a single source of truth.
@@ -39,6 +40,9 @@ public:
     }
 
 private:
+    bool requires_rebuild_ = true;
+    void RequireUsable() const;
+
     uint32_t k_;
     uint32_t d_;
     MinHasher hasher_;
