@@ -321,6 +321,7 @@ def validate_real(root: Path, commit: str, build: Path, source: Path) -> Path:
         (f"{variant}:accuracy-summary", ["summarize_real_datasets.py", f"--input={root / 'csv' / f'real_accuracy_{variant}.csv'}", f"--output={root / 'csv' / f'real_accuracy_summary_{variant}.csv'}"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"}, [("accuracy-csv", "results-root", root, f"csv/real_accuracy_{variant}.csv")], [f"csv/real_accuracy_summary_{variant}.csv"]),
         (f"{variant}:timing:toy-smoke", ["bench_real_datasets", f"--dataset-manifest={dataset}", "--mode=timing", "--profile=toy-smoke", "--k=128", "--m=64", "--trials=1", "--timing-pair=median", "--seed=7", f"--csv={root / 'csv' / f'real_timing_{variant}_toy-smoke.csv'}", f"--workload-manifest-out={root / 'workloads' / f'timing_{variant}_toy-smoke.manifest.tsv'}"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}, [("processed-manifest", f"processed-dataset-{variant}", fixture, "dataset.manifest.tsv")], [f"csv/real_timing_{variant}_toy-smoke.csv", f"workloads/timing_{variant}_toy-smoke.manifest.tsv"]),
     ]
+    expected["cell_count"] = str(len(cells))
     for number, (cell_id, argv, env, inputs, outputs) in enumerate(cells):
         prefix = f"cell.{number:03d}."
         expected.update({prefix + "id": cell_id, prefix + "argv_count": str(len(argv)),
