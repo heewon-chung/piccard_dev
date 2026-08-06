@@ -49,7 +49,7 @@ class ScopeFixture:
         return self.run("git", "rev-parse", "HEAD").stdout.strip()
 
     def check(self, base, allowed="", source=CHECKER):
-        allowed_file = self.root / "paths.txt"
+        allowed_file = self.root.parent / "paths.txt"
         allowed_file.write_text(allowed, encoding="utf-8")
         return self.run(sys.executable, str(source), f"--base={base}",
                         "--head=HEAD", f"--allowed-paths={allowed_file}",
@@ -68,12 +68,24 @@ class CheckWork6Scope(unittest.TestCase):
         self.assertEqual(result.stdout, "check_work6_scope: PASS\n")
         self.assertEqual(result.stderr, "")
 
-    def assert_fail(self, result, fragment=None):
+    def assert_fail(self, result, reason):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertTrue(result.stderr.startswith("check_work6_scope: FAIL: "))
-        if fragment:
-            self.assertIn(fragment, result.stderr)
+        self.assertEqual(result.stderr, "check_work6_scope: FAIL: " + reason + "\n")
+
+    def production_bfv_case(self, mutate):
+        header = "include/fhe/bfv_context.h"
+        source = "src/fhe/bfv_context.cpp"
+        base_header = subprocess.check_output(["git", "show", "b09d008:" + header], cwd=ROOT, text=True)
+        base_source = subprocess.check_output(["git", "show", "b09d008:" + source], cwd=ROOT, text=True)
+        candidate_header = subprocess.check_output(["git", "show", "HEAD:" + header], cwd=ROOT, text=True)
+        candidate_source = subprocess.check_output(["git", "show", "HEAD:" + source], cwd=ROOT, text=True)
+        self.repo.write(header, base_header); self.repo.write(source, base_source)
+        base = self.repo.commit("base")
+        candidate_header, candidate_source = mutate(candidate_header, candidate_source)
+        self.repo.write(header, candidate_header); self.repo.write(source, candidate_source)
+        self.repo.commit("candidate")
+        return self.repo.check(base, header + "\n" + source + "\n"), header, source
 
     def test_allowed_change_passes(self):
         self.repo.write("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\n")
@@ -86,7 +98,7 @@ class CheckWork6Scope(unittest.TestCase):
         base = self.repo.commit("base")
         self.repo.write("notes.txt", "x\n")
         self.repo.commit("candidate")
-        self.assert_fail(self.repo.check(base, "a\n"), "notes.txt")
+        self.assert_fail(self.repo.check(base, "a\n"), "path outside whitelist: notes.txt")
 
     def test_renames_check_both_paths(self):
         for old, new, allowed, good in [
@@ -101,7 +113,8 @@ class CheckWork6Scope(unittest.TestCase):
                 self.repo.run("git", "mv", old, new)
                 self.repo.commit("move")
                 result = self.repo.check(base, allowed)
-                (self.assert_pass if good else self.assert_fail)(result)
+                if good: self.assert_pass(result)
+                else: self.assert_fail(result, "path outside whitelist: " + (old if old.startswith("outside") else new))
                 self.repo.close()
                 self.repo = ScopeFixture()
 
@@ -113,13 +126,13 @@ class CheckWork6Scope(unittest.TestCase):
                 base = self.repo.commit("base")
                 self.repo.write(family, "neutral " + STATE + " " + RATE + "\n")
                 self.repo.commit("candidate")
-                self.assert_fail(self.repo.check(base, family + "\n"))
+                self.assert_fail(self.repo.check(base, family + "\n"), family + " contains excluded content")
                 self.repo.close(); self.repo = ScopeFixture()
         self.repo.write(bad_path, "neutral\n")
         base = self.repo.commit("base")
         self.repo.write(bad_path, "changed\n")
         self.repo.commit("candidate")
-        self.assert_fail(self.repo.check(base, bad_path + "\n"))
+        self.assert_fail(self.repo.check(base, bad_path + "\n"), "path has excluded name: " + bad_path)
 
     def test_forbidden_update_api_fails(self):
         for path in ("src/x.cpp", "tests/x.py"):
@@ -128,7 +141,7 @@ class CheckWork6Scope(unittest.TestCase):
                 base = self.repo.commit("base")
                 self.repo.write(path, UPDATE + "()\n")
                 self.repo.commit("candidate")
-                self.assert_fail(self.repo.check(base, path + "\n"))
+                self.assert_fail(self.repo.check(base, path + "\n"), path + " contains excluded content")
                 self.repo.close(); self.repo = ScopeFixture()
 
     def test_semantic_alternatives_cover_families_and_directions(self):
@@ -146,7 +159,7 @@ class CheckWork6Scope(unittest.TestCase):
                         base = self.repo.commit("base")
                         self.repo.write(family, new)
                         self.repo.commit("candidate")
-                        self.assert_fail(self.repo.check(base, family + "\n"))
+                        self.assert_fail(self.repo.check(base, family + "\n"), family + " contains excluded content")
                         self.repo.close(); self.repo = ScopeFixture()
 
     def test_nul_source_is_forced_through_text_scan(self):
@@ -158,7 +171,7 @@ class CheckWork6Scope(unittest.TestCase):
                 base = self.repo.commit("base")
                 self.repo.write(path, new, binary=True)
                 self.repo.commit("candidate")
-                self.assert_fail(self.repo.check(base, path + "\n"))
+                self.assert_fail(self.repo.check(base, path + "\n"), path + " contains excluded content")
                 self.repo.close(); self.repo = ScopeFixture()
 
     def test_patch_content_prefixes_are_not_headers(self):
@@ -171,7 +184,7 @@ class CheckWork6Scope(unittest.TestCase):
                 self.repo.write(path, second)
                 self.repo.commit("candidate")
                 result = self.repo.check(base, path + "\n")
-                self.assert_fail(result)
+                self.assert_fail(result, path + " contains excluded content")
                 self.repo.close(); self.repo = ScopeFixture()
 
     def test_patch_prefixes_in_added_and_deleted_files(self):
@@ -179,13 +192,14 @@ class CheckWork6Scope(unittest.TestCase):
         base = self.repo.commit("base")
         self.repo.write(path, "++" + STATE + "\n")
         self.repo.commit("added")
-        self.assert_fail(self.repo.check(base, path + "\n"))
+        self.assert_fail(self.repo.check(base, path + "\n"), path + " contains excluded content")
         self.repo.close(); self.repo = ScopeFixture()
+        self.repo.write("stable.txt", "stable\n")
         self.repo.write(path, "--" + STATE + "\n")
         base = self.repo.commit("base")
         (self.repo.root / path).unlink()
         self.repo.commit("deleted")
-        self.assert_fail(self.repo.check(base, path + "\n"))
+        self.assert_fail(self.repo.check(base, path + "\n"), path + " contains excluded content")
 
     def test_bfv_preexisting_body_is_frozen(self):
         header = "include/fhe/bfv_context.h"
@@ -195,7 +209,22 @@ class CheckWork6Scope(unittest.TestCase):
         base = self.repo.commit("base")
         self.repo.write(source, '#include "fhe/bfv_context.h"\nnamespace piccard { void BFVContext::Old() { int x = 2; } }\n')
         self.repo.commit("candidate")
-        self.assert_fail(self.repo.check(base, header + "\n" + source + "\n"))
+        self.assert_fail(self.repo.check(base, header + "\n" + source + "\n"), "missing unique anonymous namespace")
+
+    def test_bfv_production_shaped_mutations_fail_after_subtraction(self):
+        cases = [
+            ("condition", lambda h, s: (h, s.replace("requested N=", "changed N=", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("body", lambda h, s: (h, s.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const { int injected = 0;", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("header", lambda h, s: (h.replace("Decrypt(", "DecryptChanged(", 1), s), "include/fhe/bfv_context.h changes preexisting content"),
+            ("private", lambda h, s: (h.replace("public:\n    explicit BFVContext", "private:\n    explicit BFVContext", 1), s), "codec export is not public"),
+            ("comment", lambda h, s: (h, s.replace("void AppendBE32", "// void AppendBE32", 1)), "unbalanced braces"),
+            ("prefix", lambda h, s: (h, s.replace("void AppendBE32", "// prefix\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+        ]
+        for name, mutate, reason in cases:
+            with self.subTest(name=name):
+                result, _, _ = self.production_bfv_case(mutate)
+                self.assert_fail(result, reason)
+                self.repo.close(); self.repo = ScopeFixture()
 
     def test_exact_bfv_codec_insertions_pass(self):
         header = "include/fhe/bfv_context.h"
@@ -264,7 +293,7 @@ class CheckWork6Scope(unittest.TestCase):
         base = self.repo.commit("base")
         self.repo.write(path, "Apply" + "Delta\n")
         self.repo.commit("candidate")
-        self.assert_fail(self.repo.check(base, path + "\n"))
+        self.assert_fail(self.repo.check(base, path + "\n"), path + " contains excluded content")
 
     def test_unsorted_or_traversing_whitelist_fails(self):
         base = self.repo.commit("base")
@@ -272,7 +301,7 @@ class CheckWork6Scope(unittest.TestCase):
         self.repo.commit("candidate")
         for paths in ("b\na\n", "../escape\n"):
             with self.subTest(paths=paths):
-                self.assert_fail(self.repo.check(base, paths))
+                self.assert_fail(self.repo.check(base, paths), "allowed paths " + ("must be sorted and unique" if paths.startswith("b") else "contains a non-relative entry"))
 
     def test_path_data_uses_narrow_entry_validation(self):
         base = self.repo.commit("base")
@@ -284,7 +313,7 @@ class CheckWork6Scope(unittest.TestCase):
         lookalike = "scripts/run_pre_" + STATE + "_profiles.py"
         self.repo.write(data_path, lookalike + "\n")
         self.repo.commit("bad")
-        self.assert_fail(self.repo.check(base, data_path + "\n"))
+        self.assert_fail(self.repo.check(base, data_path + "\n"), "path data has excluded entry")
 
     def test_checker_and_tests_pass_their_own_candidate_diff(self):
         base = self.repo.commit("base")
