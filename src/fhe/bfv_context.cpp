@@ -58,26 +58,29 @@ std::string Sha256Hex(const std::vector<uint8_t>& bytes) {
     return hex;
 }
 
-uint32_t SecurityCode(SecurityLevel security) {
-    switch (security) {
-        case SecurityLevel::TOY:
-            return 0;
-        case SecurityLevel::STD128:
-            return 1;
-        case SecurityLevel::STD192:
-            return 2;
-        case SecurityLevel::STD256:
-            return 3;
-    }
-    throw std::logic_error("unknown BFV security level");
-}
-
 std::string ContextFingerprintHex(const BFVContext& context) {
     static constexpr char kDomain[] = "piccard-bfv-context-v1";
     std::vector<uint8_t> bytes(kDomain, kDomain + sizeof(kDomain));
     const auto crypto_params = context.GetCryptoContext()->GetCryptoParameters();
     const auto element_params = crypto_params->GetElementParams();
-    AppendBE32(bytes, SecurityCode(context.GetParams().security));
+    uint32_t security_code = 0;
+    switch (context.GetParams().security) {
+        case SecurityLevel::TOY:
+            security_code = 0;
+            break;
+        case SecurityLevel::STD128:
+            security_code = 1;
+            break;
+        case SecurityLevel::STD192:
+            security_code = 2;
+            break;
+        case SecurityLevel::STD256:
+            security_code = 3;
+            break;
+        default:
+            throw std::logic_error("unknown BFV security level");
+    }
+    AppendBE32(bytes, security_code);
     AppendBE64(bytes, crypto_params->GetPlaintextModulus());
     AppendBE32(bytes, context.GetSlotCount());
     AppendBE32(bytes, context.GetParams().mult_depth);
