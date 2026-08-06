@@ -279,7 +279,7 @@ def validate_deletion(path: Path) -> None:
     header=("model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed".split(","))
     try: rows=list(csv.reader(path.open(newline="",encoding="utf-8"), strict=True))
     except (OSError, UnicodeError, csv.Error) as error: raise Failure("malformed deletion CSV") from error
-    if len(rows)!=4 or rows[0]!=header or [row[5] for row in rows[1:]] != ["1","4","8"] or any(len(row)!=17 or row[0]!="ideal-independent-random-ranking-v1" or row[1:4]!=["64","3","8"] or row[15:]!=["1","7"] for row in rows[1:]): raise Failure("invalid deletion CSV")
+    if len(rows)!=4 or rows[0]!=header or [row[5] for row in rows[1:]] != ["1","4","8"] or any(len(row)!=17 or row[0]!="ideal-independent-random-ranking-v1" or row[1:4]!=["64","3","8"] or row[4]!="0.99" or row[15:]!=["1","7"] for row in rows[1:]): raise Failure("invalid deletion CSV")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -304,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                  "--output", str(state))
         checked_command(guard, source, commands, "phase0-guard")
         phase0_seal = session / "phase0" / "seal.json"
-        create_tree_seal(phase0_artifacts, phase0_seal, None, "phase0-artifacts")
+        create_tree_seal(phase0_artifacts, phase0_seal, None, "phase0")
         configure = ("cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
                      "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
         configure_log = checked_command(configure, source, commands, "configure")

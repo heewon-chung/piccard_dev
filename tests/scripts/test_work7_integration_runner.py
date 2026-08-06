@@ -178,6 +178,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertEqual(json.loads((commands / "real-datasets.json").read_text())["argv"][1:4], ["--quick", "--seed=7", "--threads=2"])
         self.assertEqual(json.loads((commands / "deletion-survival.json").read_text())["argv"][1:], ["--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"])
         self.assertTrue((session / "phase2" / "runtime-seal.json").is_file())
+        self.assertEqual(json.loads((session / "phase0" / "seal.json").read_text())["kind"], "phase0")
         closure = json.loads((session / "phase2" / "closure-seal.json").read_text())
         self.assertEqual(closure["kind"], "phase2-closure")
         self.assertEqual(closure["previous_seal_sha256"], __import__("hashlib").sha256((session / "phase2" / "runtime-seal.json").read_bytes()).hexdigest())
