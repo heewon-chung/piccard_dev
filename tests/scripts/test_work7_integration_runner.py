@@ -118,12 +118,17 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 if os.environ.get('FAKE_FAULT') == 'pre-output' and i==0: out['measurement_output']='bad'
                 if os.environ.get('FAKE_FAULT') == 'pre-digest' and i==0: out['csv_sha256']='0'*64
                 if os.environ.get('FAKE_FAULT') == 'pre-escape' and i==0: out['csv']='../escape.csv'
+                if os.environ.get('FAKE_FAULT') == 'pre-symlink' and i==0:
+                    outside=root.parent/'outside.csv'; outside.write_text('trials\\n1\\n'); link=root/'escape-link.csv'; link.symlink_to(outside); out['csv']='escape-link.csv'; out['csv_sha256']=hashlib.sha256(outside.read_bytes()).hexdigest()
                 argv=[name,*args]; d=hashlib.sha256(b'piccard-benchmark-cell-v1\\0')
                 for v in [name,'toy-smoke',*[x for x in argv[1:] if not x.startswith('--manifest-out=') and not x.startswith('--execution-trace-out=')],'OMP_DYNAMIC=FALSE','OMP_NUM_THREADS=2']:
                     b=v.encode(); d.update(len(b).to_bytes(4,'big')); d.update(b)
                 digest=d.hexdigest(); cid='toy-smoke/'+name+'/'+digest
                 cells.append({'cell_id':cid,'profile_id':'toy-smoke','parameter_sha256':digest,'producer':name,'environment':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'status':'MEASURED','reason_code':'NONE','required_bits':'','available_bits':'','shortfall_bits':'','argv':argv,'output':out})
-            terminal='schema_version\\tcell_id\\tprofile_id\\tproducer\\tparameter_sha256\\tstatus\\treason_code\\trequired_bits\\tavailable_bits\\tshortfall_bits\\tlog_sha256\\n' + ''.join('piccard-benchmark-terminal-cell-v1\\t'+c['cell_id']+'\\ttoy-smoke\\t'+c['producer']+'\\t'+c['parameter_sha256']+'\\tMEASURED\\tNONE\\t\\t\\t\\t'+c['output']['log_sha256']+'\\n' for c in sorted(cells,key=lambda c:c['cell_id'])) ; (root/'terminal-cells.tsv').write_text(terminal)
+            if os.environ.get('FAKE_FAULT') == 'pre-extra-key': cells[0]['unexpected']='tamper'
+            terminal='schema_version\\tcell_id\\tprofile_id\\tproducer\\tparameter_sha256\\tstatus\\treason_code\\trequired_bits\\tavailable_bits\\tshortfall_bits\\tlog_sha256\\n' + ''.join('piccard-benchmark-terminal-cell-v1\\t'+c['cell_id']+'\\ttoy-smoke\\t'+c['producer']+'\\t'+c['parameter_sha256']+'\\tMEASURED\\tNONE\\t\\t\\t\\t'+c['output']['log_sha256']+'\\n' for c in sorted(cells,key=lambda c:c['cell_id']))
+            if os.environ.get('FAKE_FAULT') == 'terminal-row': terminal=terminal.replace('\\tMEASURED\\tNONE', '\\tREJECTED\\tNONE', 1)
+            (root/'terminal-cells.tsv').write_text(terminal)
             (root/'manifest.json').write_text(json.dumps({'schema':'piccard-pre-threshold-run-v1','suite':'smoke','seed':7,'repetitions':1,'source':{'commit':os.environ['FAKE_COMMIT'],'dirty':False,'dir':os.getcwd()},'thread_policy':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'cells':cells,'terminal_cells':{'path':'terminal-cells.tsv','row_count':3,'sha256':hashlib.sha256(terminal.encode()).hexdigest()}}))
         """)
         self.write(scripts / "run_real_datasets.sh", """
@@ -152,6 +157,23 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 rows += [(p+'.status','complete')]
             if os.environ.get('FAKE_FAULT') == 'real-argv': rows[rows.index(('cell.000.argv.001',f'--dataset-manifest={dataset}'))]=('cell.000.argv.001','--dataset-manifest=bad')
             if os.environ.get('FAKE_FAULT') == 'real-root': rows=[x for x in rows if x[0] != 'root.004.path']
+            fault=os.environ.get('FAKE_FAULT')
+            def change(key, value):
+                rows[rows.index(next(item for item in rows if item[0] == key))]=(key,value)
+            if fault == 'real-artifact-digest': change('artifact.000.sha256','0'*64)
+            if fault == 'real-output-digest': change('cell.000.output.000.sha256','0'*64)
+            if fault == 'real-input-digest': change('cell.000.input.000.sha256','0'*64)
+            if fault == 'real-artifact-escape': change('artifact.000.path','nested/../escape.txt')
+            if fault == 'real-output-escape': change('cell.000.output.000.path','nested/../escape.csv')
+            if fault == 'real-symlink':
+                outside=root.parent/'outside.csv'; outside.write_text('trials\\n1\\n'); (root/'escape-link.csv').symlink_to(outside); change('cell.000.output.000.path','escape-link.csv'); change('cell.000.output.000.sha256',h(outside))
+            if fault == 'real-accuracy-token': change('cell.000.argv.006','--accuracy_trials=2')
+            if fault == 'real-accuracy-duplicate': change('cell.000.argv.007','--accuracy_trials=1')
+            if fault == 'real-timing-token': change('cell.002.argv.006','--trials=2')
+            if fault == 'real-timing-duplicate': change('cell.002.argv.007','--trials=1')
+            if fault == 'real-argv-gap': rows=[x for x in rows if x[0] != 'cell.000.argv.001']
+            if fault == 'real-input-gap': rows=[x for x in rows if x[0] != 'cell.000.input.000.path']
+            if fault == 'real-output-gap': rows=[x for x in rows if x[0] != 'cell.000.output.001.path']
             root.joinpath('run_metadata.tsv').write_text('key\\tvalue\\n' + ''.join(k+'\\t'+v+'\\n' for k,v in rows))
             if os.environ.get('FAKE_FAULT') == 'drift': pathlib.Path(os.environ['FAKE_PAPER']).joinpath('tracked').write_text('changed\\n')
             if os.environ.get('FAKE_FAULT') == 'threshold-drift': pathlib.Path(os.environ['FAKE_THRESHOLD']).joinpath('tracked').write_text('changed\\n')
@@ -176,7 +198,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             a=sys.argv
             if '-B' in a:
                 b=pathlib.Path(a[a.index('-B')+1]); b.mkdir(parents=True,exist_ok=True)
-                p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\\nfor r in 1 4 8; do echo ideal-independent-random-ranking-v1,64,3,8,0.99,$r,1,1,1,0,1,1,1,1,1,1,7; done\\n'); p.chmod(0o755)
+                p=b/'bench_deletion_survival'; p.write_text('#!/bin/sh\\necho model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\\nfor r in 1 4 8; do echo ideal-independent-random-ranking-v1,64,3,8,'+('0.98' if __import__('os').environ.get('FAKE_FAULT') == 'deletion-survival' else '0.99')+',$r,1,1,1,0,1,1,1,1,1,1,7; done\\n'); p.chmod(0o755)
                 q=b/'bench_real_datasets'; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
                 print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
         """)
@@ -226,6 +248,32 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 result, _, _ = self.invoke_fake_runner(fault)
                 self.assertEqual(result.returncode, 2, result.stderr.decode())
+
+    def test_producer_evidence_tampering_has_targeted_failure(self):
+        cases = {
+            "terminal-row": "pre-threshold terminal rows do not bind cells",
+            "pre-extra-key": "invalid pre-threshold cell schema",
+            "pre-symlink": "invalid pre-threshold artifact path",
+            "real-artifact-digest": "invalid real-data artifact digest",
+            "real-output-digest": "invalid real-data output digest",
+            "real-input-digest": "invalid real-data input digest",
+            "real-artifact-escape": "invalid real-data artifact path",
+            "real-output-escape": "invalid real-data output path",
+            "real-symlink": "invalid real-data output path",
+            "real-accuracy-token": "real-data metadata does not exactly bind quick provenance",
+            "real-accuracy-duplicate": "real-data metadata does not exactly bind quick provenance",
+            "real-timing-token": "real-data metadata does not exactly bind quick provenance",
+            "real-timing-duplicate": "real-data metadata does not exactly bind quick provenance",
+            "real-argv-gap": "real-data metadata does not exactly bind quick provenance",
+            "real-input-gap": "invalid real-data input path",
+            "real-output-gap": "invalid real-data output path",
+            "deletion-survival": "invalid deletion CSV",
+        }
+        for fault, expected in cases.items():
+            with self.subTest(fault=fault):
+                result, _, _ = self.invoke_fake_runner(fault)
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+                self.assertIn(expected, result.stderr.decode())
 
 
 if __name__ == "__main__":

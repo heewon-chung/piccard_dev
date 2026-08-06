@@ -223,6 +223,9 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], sou
     cells = value.get("cells")
     if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
         raise Failure("invalid pre-threshold cells")
+    cell_keys = {"cell_id", "profile_id", "producer", "parameter_sha256", "argv", "environment", "output", "status", "reason_code", "required_bits", "available_bits", "shortfall_bits"}
+    if any(not isinstance(row, dict) or set(row) != cell_keys for row in cells):
+        raise Failure("invalid pre-threshold cell schema")
     expected={"bench_review_comparison":["--suite=toy-smoke","--profile=toy-smoke","--k=16","--m=16","--set-size=10","--universe=64","--target-jaccard=0.5","--trials=1","--accuracy-trials=1","--seed=7","--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16","--sj16-key-bits=1024","--allow-unmatched-security"], "bench_piccard":["--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=10","--target-jaccard=0.5","--trials=1","--seed=7"], "bench_dynamic":["--scenario=refresh","--refresh_updates=1","--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=100","--target-jaccard=0.5","--depth=5","--trials=1","--seed=7"]}
     expected_rows={"bench_review_comparison":10,"bench_piccard":1,"bench_dynamic":1}
     for row in cells:
@@ -238,9 +241,15 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], sou
         raise Failure("missing pre-threshold terminal cells")
     terminal_path=root/terminal["path"]
     header="schema_version\tcell_id\tprofile_id\tproducer\tparameter_sha256\tstatus\treason_code\trequired_bits\tavailable_bits\tshortfall_bits\tlog_sha256"
-    lines=terminal_path.read_text(encoding="utf-8").splitlines() if terminal_path.is_file() else []
-    if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(lines)!=4 or lines[0]!=header:
+    try:
+        terminal_rows = list(csv.reader(terminal_path.open(newline="", encoding="utf-8"), delimiter="\t", strict=True))
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise Failure("invalid pre-threshold terminal cells") from error
+    if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(terminal_rows)!=4 or terminal_rows[0] != header.split("\t"):
         raise Failure("invalid pre-threshold terminal cells")
+    expected_terminal_rows = [["piccard-benchmark-terminal-cell-v1", row["cell_id"], "toy-smoke", row["producer"], row["parameter_sha256"], "MEASURED", "NONE", "", "", "", row["output"]["log_sha256"]] for row in sorted(cells, key=lambda item: item["cell_id"])]
+    if terminal_rows[1:] != expected_terminal_rows:
+        raise Failure("pre-threshold terminal rows do not bind cells")
     for row in cells:
         output=row.get("output")
         if not isinstance(output,dict) or set(output) != ({"csv","csv_sha256","log","log_sha256","workload","workload_sha256","trace","trace_sha256","expected_csv_rows","csv_row_count","measurement_output"} if row["producer"]=="bench_review_comparison" else {"csv","csv_sha256","log","log_sha256","expected_csv_rows","csv_row_count","measurement_output"}) or output.get("measurement_output")!="measured-csv" or output.get("expected_csv_rows") != expected_rows[row["producer"]] or output.get("csv_row_count") != expected_rows[row["producer"]]: raise Failure("invalid pre-threshold output schema")
@@ -311,7 +320,7 @@ def validate_real(root: Path, commit: str, build: Path, source: Path) -> Path:
     ]
     expected["artifact_count"] = str(len(artifacts))
     for number, (role, relative) in enumerate(artifacts):
-        path = sealed_file(root, relative, value.get(f"artifact.{number:03d}.sha256"), "real-data artifact")
+        path = sealed_file(root, value.get(f"artifact.{number:03d}.path"), value.get(f"artifact.{number:03d}.sha256"), "real-data artifact")
         expected.update({f"artifact.{number:03d}.role": role, f"artifact.{number:03d}.path": relative,
                          f"artifact.{number:03d}.sha256": sha256_file(path)})
 
@@ -332,11 +341,11 @@ def validate_real(root: Path, commit: str, build: Path, source: Path) -> Path:
         for index, (key, item) in enumerate(sorted(env.items())):
             expected[prefix + f"env.{index:03d}.key"] = key; expected[prefix + f"env.{index:03d}.value"] = item
         for index, (role, root_id, input_root, relative) in enumerate(inputs):
-            path = sealed_file(input_root, relative, value.get(prefix + f"input.{index:03d}.sha256"), "real-data input")
+            path = sealed_file(input_root, value.get(prefix + f"input.{index:03d}.path"), value.get(prefix + f"input.{index:03d}.sha256"), "real-data input")
             expected.update({prefix + f"input.{index:03d}.role": role, prefix + f"input.{index:03d}.root_id": root_id,
                              prefix + f"input.{index:03d}.path": relative, prefix + f"input.{index:03d}.sha256": sha256_file(path)})
         for index, relative in enumerate(outputs):
-            path = sealed_file(root, relative, value.get(prefix + f"output.{index:03d}.sha256"), "real-data output")
+            path = sealed_file(root, value.get(prefix + f"output.{index:03d}.path"), value.get(prefix + f"output.{index:03d}.sha256"), "real-data output")
             expected[prefix + f"output.{index:03d}.path"] = relative
             expected[prefix + f"output.{index:03d}.sha256"] = sha256_file(path)
     if value != expected:
