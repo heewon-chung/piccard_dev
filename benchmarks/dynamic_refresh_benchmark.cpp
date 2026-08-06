@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 
@@ -61,6 +62,19 @@ DynamicResult RunSingleOwnerRefresh(
     if (refresh_updates == 0) {
         throw std::invalid_argument("refresh_updates must be positive");
     }
+    const uint64_t max_value = *std::max_element(set_a.begin(), set_a.end());
+    if (max_value == std::numeric_limits<uint64_t>::max()) {
+        throw std::invalid_argument("refresh input value cannot be UINT64_MAX");
+    }
+    if (refresh_updates > std::numeric_limits<uint64_t>::max() - max_value) {
+        throw std::invalid_argument("refresh updates overflow input value space");
+    }
+    const size_t max_size = std::vector<uint64_t>().max_size();
+    if (set_a.size() > max_size ||
+        refresh_updates > static_cast<uint64_t>(max_size - set_a.size())) {
+        throw std::invalid_argument("refresh updates exceed vector capacity");
+    }
+    const uint64_t next_value = max_value + 1;
 
     DynamicResult row;
     row.label = "refresh_owner_a_0_to_1";
@@ -101,8 +115,6 @@ DynamicResult RunSingleOwnerRefresh(
 
     std::vector<uint64_t> refreshed_set_a = set_a;
     refreshed_set_a.reserve(set_a.size() + refresh_updates);
-    const uint64_t next_value = *std::max_element(set_a.begin(), set_a.end()) + 1;
-
     Timer timer;
     timer.Start();
     for (uint64_t offset = 0; offset < refresh_updates; ++offset) {

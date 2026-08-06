@@ -13,8 +13,10 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace piccard;
@@ -660,6 +662,27 @@ static double IntersectionFractionForJaccard(double target_jaccard) {
         : (2.0 * target_jaccard) / (1.0 + target_jaccard);
 }
 
+static uint64_t ParseUnsignedDecimal(std::string_view value,
+                                     const char* option) {
+    if (value.empty()) {
+        throw std::invalid_argument(std::string("Invalid ") + option + ": empty");
+    }
+    uint64_t parsed = 0;
+    for (const char character : value) {
+        if (character < '0' || character > '9') {
+            throw std::invalid_argument(
+                std::string("Invalid ") + option + ": " + std::string(value));
+        }
+        const uint64_t digit = static_cast<uint64_t>(character - '0');
+        if (parsed > (std::numeric_limits<uint64_t>::max() - digit) / 10) {
+            throw std::invalid_argument(
+                std::string("Invalid ") + option + ": " + std::string(value));
+        }
+        parsed = parsed * 10 + digit;
+    }
+    return parsed;
+}
+
 static void RunProfileGrid(const BenchmarkConfig& config,
                            uint32_t depth,
                            DynamicCSVWriter& csv) {
@@ -713,7 +736,11 @@ int main(int argc, char** argv) {
                   << "  --depth=D          BottomStructure depth (default: 5)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
                   << "  --mode=MODE        'accuracy' or 'timing' (default: timing)\n"
-                  << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
+                  << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n"
+                  << "  --scenario=MODE    'legacy' or 'refresh' (default: legacy)\n"
+                  << "  --refresh_updates=N  Positive owner-A updates for refresh\n"
+                  << "                     Refresh requires toy-smoke, TOY timing,\n"
+                  << "                     evidence_point, and exactly one trial.\n";
         return 0;
     }
 
@@ -738,7 +765,8 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("Duplicate --refresh_updates");
             }
             saw_refresh_updates = true;
-            refresh_updates = std::stoull(arg.substr(18));
+            refresh_updates = ParseUnsignedDecimal(
+                std::string_view(arg).substr(18), "--refresh_updates");
         }
     }
     RejectUnknownBenchmarkOptions(

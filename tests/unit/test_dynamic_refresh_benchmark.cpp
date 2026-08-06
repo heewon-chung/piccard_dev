@@ -4,7 +4,9 @@
 #include "util/params.h"
 
 #include <cmath>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -120,6 +122,23 @@ TEST(DynamicRefreshBenchmarkTest, MeasuresExactlyOneOwnerZeroToOne) {
     EXPECT_DOUBLE_EQ(row.jaccard_rel_error, row.jaccard_error / row.jaccard_expected);
     EXPECT_EQ(row.rel_error_eligible_n, 1u);
     EXPECT_EQ(row.trials, 1u);
+}
+
+TEST(DynamicRefreshBenchmarkTest, RejectsRefreshValueSpaceOverflowBeforeTiming) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 16;
+    params.bottom_depth = 5;
+    params.hash_seed = 7;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+    DynamicPiccard engine(params);
+    engine.KeyGen();
+
+    const std::vector<uint64_t> a{std::numeric_limits<uint64_t>::max()};
+    const std::vector<uint64_t> b{0};
+    EXPECT_THROW(RunSingleOwnerRefresh(engine, a, b, 5, 1),
+                 std::invalid_argument);
 }
 
 }  // namespace

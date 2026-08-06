@@ -1105,6 +1105,10 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_SOURCE_DIR}/tests/scripts/test_bench_dynamic_probe_isolation.py
                          $<TARGET_FILE:bench_dynamic>)
+        add_test(NAME BenchDynamicRefreshCli
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_SOURCE_DIR}/tests/scripts/test_bench_dynamic_refresh_cli.py
+                         $<TARGET_FILE:bench_dynamic>)
     endif()
 
     add_executable(bench_threshold benchmarks/bench_threshold.cpp)
