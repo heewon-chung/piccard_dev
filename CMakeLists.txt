@@ -221,7 +221,11 @@ target_link_libraries(
 # piccard_core: Pure math modules (no OpenFHE dependency)
 # =============================================================================
 
-add_library(piccard_dynamic_analysis src/analysis/deletion_survival.cpp)
+add_library(
+    piccard_dynamic_analysis
+    src/analysis/deletion_survival.cpp
+    src/analysis/deletion_monte_carlo.cpp
+)
 target_include_directories(
     piccard_dynamic_analysis
     PUBLIC ${CMAKE_SOURCE_DIR}/include
@@ -437,6 +441,21 @@ if(BUILD_TESTS)
             test_main
         )
         add_test(NAME DeletionSurvival COMMAND test_deletion_survival)
+
+        add_executable(
+            test_deletion_monte_carlo
+            tests/unit/test_deletion_monte_carlo.cpp
+        )
+        target_include_directories(
+            test_deletion_monte_carlo
+            PRIVATE ${CMAKE_SOURCE_DIR}/include
+        )
+        target_link_libraries(
+            test_deletion_monte_carlo
+            piccard_dynamic_analysis
+            test_main
+        )
+        add_test(NAME DeletionMonteCarlo COMMAND test_deletion_monte_carlo)
 
         # Core tests (no OpenFHE needed)
         add_executable(test_params tests/unit/test_params.cpp)
@@ -824,6 +843,16 @@ if(BUILD_TESTS)
         message(STATUS "GTest not found, skipping tests")
     endif()
 
+    add_executable(
+        bench_deletion_survival
+        benchmarks/bench_deletion_survival.cpp
+    )
+    target_include_directories(
+        bench_deletion_survival
+        PRIVATE ${CMAKE_SOURCE_DIR}/include
+    )
+    target_link_libraries(bench_deletion_survival piccard_dynamic_analysis)
+
     # Cross-work approval-record verifier: pure Python standard library, so it
     # is registered independently of GTest. The suite imports itself as
     # tests.scripts.test_verify_work_approval, hence the source-tree WORKING_DIRECTORY.
@@ -839,6 +868,12 @@ if(BUILD_TESTS)
                 "VerifyWorkApproval approval gate. Install Python 3 or configure "
                 "with -DBUILD_TESTS=OFF; the gate must not be silently skipped.")
     endif()
+    add_test(
+        NAME DeletionSurvivalCli
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/scripts/test_bench_deletion_survival.py
+                $<TARGET_FILE:bench_deletion_survival>
+    )
     add_test(NAME VerifyWorkApproval
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_work_approval
