@@ -16,10 +16,10 @@ from pathlib import Path
 
 try:  # Module execution and unittest package import use different sys.path roots.
     from work7_evidence import (canonical_json_bytes, create_tree_seal,
-                                sha256_file, snapshot_git_worktree)
+                                sha256_file, snapshot_git_worktree, verify_tree_seal)
 except ModuleNotFoundError:
     from scripts.work7_evidence import (canonical_json_bytes, create_tree_seal,
-                                        sha256_file, snapshot_git_worktree)
+                                        sha256_file, snapshot_git_worktree, verify_tree_seal)
 
 # This is deliberately a literal registry, rather than an inventory-derived set.
 FROZEN_CTESTS = (
@@ -153,11 +153,13 @@ def validate_records(root: Path) -> None:
             continue
         try:
             with path.open(newline="", encoding="utf-8") as handle:
+                strict_rows = list(csv.reader(handle, strict=True))
+            with path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
                 headers = set(rows[0]) if rows else set()
         except (OSError, UnicodeError, csv.Error) as error:
             raise Failure("malformed CSV artifact") from error
-        if not rows or not headers:
+        if len(strict_rows) < 2 or not rows or not headers:
             raise Failure("malformed CSV artifact")
         for row in rows:
             for key, raw in row.items():
@@ -174,6 +176,16 @@ def validate_records(root: Path) -> None:
 
 def artifact(path: Path, root: Path, kind: str) -> dict[str, str]:
     return {"path": path.relative_to(root).as_posix(), "sha256": sha256_file(path), "artifact_kind": kind}
+
+
+def validate_claim_report(path: Path, commit: str, mode: str) -> None:
+    """Do not trust a successful verifier executable with foreign output."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure("malformed claim verifier report") from error
+    if not isinstance(value, dict) or value.get("schema") != "piccard-work7-claim-report-v1" or value.get("source_commit") != commit or value.get("mode") != mode or value.get("status") != "PASS":
+        raise Failure("foreign source commit or invalid claim verifier report")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -216,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         checked_command((sys.executable, str(source / "scripts" / "verify_work7_claims.py"), "--mode", "static",
                          "--contract", str(source / "scripts" / "work7_claims.json"), "--source-root", str(source),
                          "--source-commit", commit, "--ctest-inventory", str(inventory), "--output", str(static)), source, commands, "static")
+        validate_claim_report(static, commit, "static")
         regex = "^(" + "|".join(FROZEN_CTESTS) + ")$"
         ctest_log = checked_command(("ctest", "--test-dir", str(build), "--output-on-failure", "-R", regex), source, commands, "ctest-focused")
         ctest_text = ctest_log.read_text(errors="replace")
@@ -241,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         }}))
         runtime_seal = phase2 / "runtime-seal.json"
         create_tree_seal(runtime, runtime_seal, sha256_file(phase0_seal), "phase2-runtime-artifacts")
+        verify_tree_seal(runtime_seal, sha256_file(phase0_seal))
         closure = phase2 / "closure-artifacts"
         closure.mkdir()
         evidence = closure / "evidence-bound-report.json"
@@ -248,8 +262,11 @@ def main(argv: list[str] | None = None) -> int:
                          "--contract", str(source / "scripts" / "work7_claims.json"), "--source-root", str(source),
                          "--source-commit", commit, "--ctest-inventory", str(inventory), "--runtime-seal", str(runtime_seal),
                          "--output", str(evidence)), source, closure / "commands", "evidence-bound")
+        verify_tree_seal(runtime_seal, sha256_file(phase0_seal))
+        validate_claim_report(evidence, commit, "evidence-bound")
         closure_seal = phase2 / "closure-seal.json"
         create_tree_seal(closure, closure_seal, sha256_file(runtime_seal), "phase2-closure-artifacts")
+        verify_tree_seal(closure_seal, sha256_file(runtime_seal))
         initial = json.loads(state.read_text())
         for name, root in (("paper", paper), ("threshold", threshold)):
             if snapshot_git_worktree(root)["snapshot_sha256"] != initial[name]["snapshot_sha256"]:
