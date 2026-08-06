@@ -214,6 +214,18 @@ class Work7ClaimContractTests(unittest.TestCase):
                     create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
                     self.assert_fail("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
 
+    def test_report_claims_rejects_changed_inherited_deferral_text(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_work7_claims import Failure, report_claims
+        contract = json.loads(self.contract.read_text())["claims"]
+        report = self.assert_pass("static")
+        for field in ("deferred_rationale", "prohibited_overclaim"):
+            with self.subTest(field=field):
+                hostile = copy.deepcopy(report)
+                hostile["claims"][0][field] = "different inherited wording"
+                with self.assertRaises(Failure):
+                    report_claims(hostile, "static", COMMIT, ["PENDING"] * 7, contract)
+
     def test_claim7_requires_phase_two_and_candidate_seals(self) -> None:
         runtime = self.runtime()
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -233,9 +245,9 @@ class Work7ClaimContractTests(unittest.TestCase):
         }) + "\n")
         candidate = self.root / "candidate.seal.json"
         create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
-        report = self.assert_pass("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
-        self.assertEqual(report["claims"][6]["toy_evidence_state"], "TOY_VERIFIED")
-        self.assertEqual(report["work_gate_state"], "PENDING")
+        # Phase A binds claim7 to a real Phase 0 state, guarded worktrees, and all
+        # four candidate artifacts; this deliberately minimal legacy fixture fails.
+        self.assert_fail("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
         self.assert_fail("claim7", phase2_closure_seal=phase2)
 
         base_report = json.loads(evidence.output_path.read_text())  # type: ignore[attr-defined]
@@ -277,10 +289,13 @@ class Work7ClaimContractTests(unittest.TestCase):
         candidate_root = self.root / "candidate-terminal"; candidate_root.mkdir()
         (candidate_root / "candidate-validation.json").write_text(json.dumps({"schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT, "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2)}) + "\n")
         candidate = self.root / "candidate-terminal.seal.json"; create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
-        claim7 = self.invoke("claim7", phase2_closure_seal=phase2, phase3_candidate_seal=candidate)
-        self.assertEqual(claim7.returncode, 0, claim7.stderr)
+        claim7_report = json.loads(evidence.output_path.read_text())  # type: ignore[attr-defined]
+        claim7_report["mode"] = "claim7"
+        claim7_report["claims"][6]["toy_evidence_state"] = "TOY_VERIFIED"
+        claim7_report["input_seals"] = {"phase2_closure_seal_sha256": sha256_file(phase2),
+                                         "phase3_candidate_seal_sha256": sha256_file(candidate)}
         phase3_root = self.root / "phase3"; phase3_root.mkdir()
-        (phase3_root / "claim7-report.json").write_bytes(claim7.output_path.read_bytes())  # type: ignore[attr-defined]
+        (phase3_root / "claim7-report.json").write_bytes(json.dumps(claim7_report, sort_keys=True, separators=(",", ":")).encode() + b"\n")
         phase3 = self.root / "phase3.seal.json"; create_tree_seal(phase3_root, phase3, sha256_file(candidate), "phase3-closure")
         packet = self.root / "packet.json"; packet.write_bytes(b"packet\n")
         digest = hashlib.sha256(packet.read_bytes()).hexdigest()

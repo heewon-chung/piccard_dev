@@ -2,8 +2,10 @@
 """Fail-closed verifier for the immutable Work 7 claim lifecycle."""
 
 import argparse
+import difflib
 import hashlib
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -203,12 +205,80 @@ def report_claims(report: object, mode: str, commit: str, states: list[str], con
             [row["toy_evidence_state"] for row in report["claims"]] != states or
             any(not reference_list(row[field]) for row in report["claims"] for field in ("source_paths", "required_ctest_names", "evidence_keys")) or
             any(any(not isinstance(row[field], str) or not row[field] for field in ("deferred_rationale", "prohibited_overclaim")) for row in report["claims"]) or
-            any(any(report_row[field] != contract_row[field] for field in ("source_paths", "required_ctest_names", "evidence_keys"))
+            any(any(report_row[field] != contract_row[field] for field in ("source_paths", "required_ctest_names", "evidence_keys", "deferred_rationale", "prohibited_overclaim"))
                 for report_row, contract_row in zip(report["claims"], contract_claims))):
         raise Failure("invalid sealed claim report")
 
 
-def candidate_evidence(phase2: Path, candidate: Path, commit: str, claims: list[dict]) -> None:
+def _canonical_object(path: Path, label: str) -> dict:
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise Failure(f"invalid {label}") from error
+    if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
+        raise Failure(f"non-canonical {label}")
+    return value
+
+
+def _safe_response_strategy(paper: Path) -> bytes:
+    path = paper / "Revision" / "ResponseStrategy.md"
+    _reject_symlink_components(path)
+    if path.is_symlink() or not path.exists() or not stat.S_ISREG(path.lstat().st_mode):
+        raise Failure("ResponseStrategy baseline is missing or unsafe")
+    try:
+        raw = path.read_bytes()
+        raw.decode("utf-8", "strict")
+    except (OSError, UnicodeDecodeError) as error:
+        raise Failure("ResponseStrategy baseline is not UTF-8") from error
+    return raw
+
+
+def _render_candidate(baseline: bytes) -> bytes:
+    text = baseline.decode("utf-8", "strict")
+    suffix = "" if not text or text.endswith("\n") else "\n"
+    rows = "\n".join(f"- `{claim}`: `IMPLEMENTED`; `TOY_VERIFIED`; `PERFORMANCE_PENDING`." for claim in IDS)
+    return (text + suffix + "\n<!-- WORK7_RESPONSE_CANDIDATE_BEGIN -->\n"
+            "### Work 7 PoC integration candidate — unapplied\n\n"
+            "This candidate records implementation and toy-evidence readiness only; it does not make a paper-grade completion or performance claim.\n\n"
+            + rows + "\n\n"
+            "All performance evaluation remains `PERFORMANCE_PENDING`; actual-data and repeated-measurement campaigns are deferred.\n\n"
+            "Threshold FP/FN work remains `DEFERRED_EXPECTED`. It is not authorized by this candidate and no threshold branch action is requested.\n"
+            "<!-- WORK7_RESPONSE_CANDIDATE_END -->\n").encode("utf-8")
+
+
+def _expected_diff(baseline: bytes, candidate: bytes) -> bytes:
+    return "".join(difflib.unified_diff(baseline.decode("utf-8").splitlines(keepends=True),
+                                          candidate.decode("utf-8").splitlines(keepends=True),
+                                          fromfile="a/Revision/ResponseStrategy.md",
+                                          tofile="b/Revision/ResponseStrategy.md", lineterm="\n")).encode("utf-8")
+
+
+def _phase0_state(path: Path, source: Path, paper: Path, threshold: Path, commit: str) -> dict:
+    value = seal(path, "phase0")
+    if value["previous_seal_sha256"] is not None:
+        raise Failure("Phase 0 seal is unexpectedly chained")
+    state_path = Path(value["artifact_root"]) / "state.json"
+    if "state.json" not in {entry["path"] for entry in value["entries"]}:
+        raise Failure("Phase 0 state is not sealed")
+    state = _canonical_object(state_path, "Phase 0 state")
+    if (set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(state.get("source"), dict) or
+            state["source"].get("head") != commit or state.get("session_id") != f"work7-{commit}"):
+        raise Failure("invalid Phase 0 source/session state")
+    if snapshot_git_worktree(source) != state["source"]:
+        raise Failure("source worktree snapshot changed")
+    if snapshot_git_worktree(paper) != state.get("paper") or snapshot_git_worktree(threshold) != state.get("threshold"):
+        raise Failure("external worktree snapshot changed")
+    return state
+
+
+def _mappings(claims: list[dict]) -> list[dict]:
+    return [{"id": row["id"], "implementation_state": "IMPLEMENTED", "toy_evidence_state": "TOY_VERIFIED",
+             "performance_state": "PERFORMANCE_PENDING"} for row in claims]
+
+
+def candidate_evidence(args: argparse.Namespace, phase2: Path, candidate: Path, commit: str, claims: list[dict]) -> None:
     phase2_value = seal(phase2, "phase2-closure")
     if phase2_value["previous_seal_sha256"] is None:
         raise Failure("phase2 closure is not chained")
@@ -216,26 +286,59 @@ def candidate_evidence(phase2: Path, candidate: Path, commit: str, claims: list[
     report_path = phase2_root / "evidence-bound-report.json"
     if "evidence-bound-report.json" not in {entry["path"] for entry in phase2_value["entries"]}:
         raise Failure("missing sealed evidence-bound report")
-    try:
-        evidence_report = json.loads(report_path.read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
-        raise Failure("invalid sealed evidence-bound report") from error
+    evidence_report = _canonical_object(report_path, "sealed evidence-bound report")
     report_claims(evidence_report, "evidence-bound", commit, ["TOY_VERIFIED"] * 6 + ["PENDING"], claims)
     if evidence_report.get("input_seals") != {"runtime_seal_sha256": phase2_value["previous_seal_sha256"]}:
         raise Failure("evidence-bound report has wrong runtime seal")
+    phase0 = require_absolute(args.phase0_seal, "phase0 seal")
+    paper = require_absolute(args.paper_root, "paper root")
+    threshold = require_absolute(args.threshold_root, "threshold root")
+    phase0_value = seal(phase0, "phase0")
+    phase0_root = Path(phase0_value["artifact_root"])
+    session = phase0_root.parent.parent
+    if phase0_root != session / "phase0" / "artifacts" or phase0 != session / "phase0" / "seal.json":
+        raise Failure("Phase 0 seal is outside its declared session")
+    if phase2 != session / "phase2" / "closure-seal.json" or phase2_root != session / "phase2" / "closure-artifacts":
+        raise Failure("Phase 2 closure is outside the Phase 0 session")
+    state = _phase0_state(phase0, require_absolute(args.source_root, "source root"), paper, threshold, commit)
     candidate_value = seal(candidate, "phase3-candidate-artifacts", sha256_file(phase2))
     root = Path(candidate_value["artifact_root"])
-    path = root / "candidate-validation.json"
-    if "candidate-validation.json" not in {entry["path"] for entry in candidate_value["entries"]}:
-        raise Failure("missing sealed claim 7 evidence")
-    try:
-        value = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
-        raise Failure("invalid claim 7 evidence") from error
-    if (not isinstance(value, dict) or set(value) != {"schema", "source_commit", "claim_id", "phase2_closure_seal_sha256"} or
-            value.get("schema") != "piccard-work7-candidate-validation-v1" or value.get("source_commit") != commit or
-            value.get("claim_id") != IDS[6] or value.get("phase2_closure_seal_sha256") != sha256_file(phase2)):
-        raise Failure("premature claim 7 verification")
+    if candidate != session / "phase3" / "candidate-seal.json" or root != session / "phase3" / "candidate-artifacts":
+        raise Failure("candidate seal is outside the Phase 0 session")
+    expected_files = {"ResponseStrategy.candidate.md", "ResponseStrategy.candidate.diff", "candidate-metadata.json", "candidate-validation.json"}
+    if {entry["path"] for entry in candidate_value["entries"]} != expected_files:
+        raise Failure("candidate seal contains missing or foreign artifacts")
+    candidate_path, diff_path = root / "ResponseStrategy.candidate.md", root / "ResponseStrategy.candidate.diff"
+    metadata_path, validation_path = root / "candidate-metadata.json", root / "candidate-validation.json"
+    metadata = _canonical_object(metadata_path, "candidate metadata")
+    validation = _canonical_object(validation_path, "candidate validation")
+    mappings = _mappings(claims)
+    metadata_keys = {"schema", "source_commit", "paper_head", "paper_snapshot_sha256", "threshold_snapshot_sha256",
+                     "phase0_seal_sha256", "phase2_closure_seal_sha256", "baseline_response_strategy_sha256",
+                     "candidate_filename", "candidate_sha256", "diff_filename", "diff_sha256", "claim_mappings",
+                     "dry_apply_status", "work_gate_state", "performance_state", "threshold_gate_state", "threshold_authorized"}
+    validation_keys = metadata_keys | {"metadata_filename", "metadata_sha256"}
+    if set(metadata) != metadata_keys or set(validation) != validation_keys:
+        raise Failure("candidate metadata or validation has unknown or missing fields")
+    baseline = _safe_response_strategy(paper)
+    expected = {"schema": "piccard-work7-candidate-metadata-v1", "source_commit": commit,
+                "paper_head": state["paper"]["head"], "paper_snapshot_sha256": state["paper"]["snapshot_sha256"],
+                "threshold_snapshot_sha256": state["threshold"]["snapshot_sha256"], "phase0_seal_sha256": sha256_file(phase0),
+                "phase2_closure_seal_sha256": sha256_file(phase2),
+                "baseline_response_strategy_sha256": hashlib.sha256(baseline).hexdigest(),
+                "candidate_filename": "ResponseStrategy.candidate.md", "candidate_sha256": sha256_file(candidate_path),
+                "diff_filename": "ResponseStrategy.candidate.diff", "diff_sha256": sha256_file(diff_path),
+                "claim_mappings": mappings, "dry_apply_status": "PASS", "work_gate_state": "PENDING",
+                "performance_state": "PERFORMANCE_PENDING", "threshold_gate_state": "DEFERRED_EXPECTED", "threshold_authorized": False}
+    if metadata != expected:
+        raise Failure("candidate metadata does not bind exact evidence")
+    expected_validation = {**expected, "schema": "piccard-work7-candidate-validation-v1",
+                           "metadata_filename": "candidate-metadata.json", "metadata_sha256": sha256_file(metadata_path)}
+    if validation != expected_validation:
+        raise Failure("candidate validation does not bind exact evidence")
+    candidate_bytes, diff_bytes = candidate_path.read_bytes(), diff_path.read_bytes()
+    if candidate_bytes != _render_candidate(baseline) or diff_bytes != _expected_diff(baseline, candidate_bytes):
+        raise Failure("candidate prose or diff is not the exact conservative rendering")
 
 
 def review(path: Path, commit: str, packet: str, provider: str, model: str) -> None:
@@ -325,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         if output.exists() or output.is_symlink():
             raise Failure("output already exists")
         guarded = [source]
-        if args.mode == "terminal":
+        if args.mode in ("claim7", "terminal"):
             guarded.extend([require_absolute(args.paper_root, "paper root"), require_absolute(args.threshold_root, "threshold root")])
         assert_output_roots_outside(guarded, [output])
         claims = load_contract(contract, source, inventory(ctest))
@@ -334,7 +437,10 @@ def main(argv: list[str] | None = None) -> int:
             runtime = require_absolute(args.runtime_seal, "runtime seal")
             for claim_id in runtime_evidence(runtime, args.source_commit, claims): toy[claim_id] = "TOY_VERIFIED"
         elif args.mode == "claim7":
-            candidate_evidence(require_absolute(args.phase2_closure_seal, "phase2 closure seal"),
+            for name in ("phase0_seal", "paper_root", "threshold_root"):
+                if getattr(args, name) is None:
+                    raise Failure(f"{name.replace('_', ' ')} is required for claim7")
+            candidate_evidence(args, require_absolute(args.phase2_closure_seal, "phase2 closure seal"),
                                require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"), args.source_commit, claims)
             toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         elif args.mode == "terminal":

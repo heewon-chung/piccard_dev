@@ -251,18 +251,34 @@ def write_artifacts(root: Path, baseline: bytes, candidate: bytes, diff: bytes, 
         "threshold_snapshot_sha256": state["threshold"]["snapshot_sha256"],
         "phase0_seal_sha256": sha256_file(phase0), "phase2_closure_seal_sha256": sha256_file(phase2),
         "baseline_response_strategy_sha256": hashlib.sha256(baseline).hexdigest(),
-        "candidate_sha256": hashlib.sha256(candidate).hexdigest(), "diff_sha256": hashlib.sha256(diff).hexdigest(),
-        "claim_ids": list(IDS), "claim_mappings": mappings,
+        "candidate_filename": "ResponseStrategy.candidate.md", "candidate_sha256": hashlib.sha256(candidate).hexdigest(),
+        "diff_filename": "ResponseStrategy.candidate.diff", "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "claim_mappings": mappings, "dry_apply_status": "PASS", "work_gate_state": "PENDING",
+        "performance_state": "PERFORMANCE_PENDING", "threshold_gate_state": "DEFERRED_EXPECTED",
+        "threshold_authorized": False,
     }
-    validation = {"schema": "piccard-work7-candidate-validation-v1", "source_commit": commit,
-                  "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2)}
+    metadata_bytes = canonical_json_bytes(metadata)
+    validation = {
+        "schema": "piccard-work7-candidate-validation-v1", "source_commit": commit,
+        "paper_head": state["paper"]["head"], "paper_snapshot_sha256": state["paper"]["snapshot_sha256"],
+        "threshold_snapshot_sha256": state["threshold"]["snapshot_sha256"],
+        "phase0_seal_sha256": sha256_file(phase0), "phase2_closure_seal_sha256": sha256_file(phase2),
+        "baseline_response_strategy_sha256": hashlib.sha256(baseline).hexdigest(),
+        "candidate_filename": "ResponseStrategy.candidate.md", "candidate_sha256": hashlib.sha256(candidate).hexdigest(),
+        "diff_filename": "ResponseStrategy.candidate.diff", "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "metadata_filename": "candidate-metadata.json", "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+        "claim_mappings": mappings, "dry_apply_status": "PASS", "work_gate_state": "PENDING",
+        "performance_state": "PERFORMANCE_PENDING", "threshold_gate_state": "DEFERRED_EXPECTED",
+        "threshold_authorized": False,
+    }
     for name, content in (("ResponseStrategy.candidate.md", candidate), ("ResponseStrategy.candidate.diff", diff),
-                          ("candidate-metadata.json", canonical_json_bytes(metadata)),
+                          ("candidate-metadata.json", metadata_bytes),
                           ("candidate-validation.json", canonical_json_bytes(validation))):
         _atomic_create(root / name, content)
 
 
-def run_claim7(source: Path, session: Path, commit: str, phase2: Path, candidate_seal: Path) -> None:
+def run_claim7(source: Path, paper: Path, threshold: Path, session: Path, commit: str, phase0: Path,
+               phase2: Path, candidate_seal: Path) -> None:
     closure = session / "phase3" / "closure-artifacts"
     if closure.exists() or closure.is_symlink():
         raise Failure("claim7 closure artifact collision")
@@ -272,6 +288,7 @@ def run_claim7(source: Path, session: Path, commit: str, phase2: Path, candidate
             "--contract", str(source / "scripts" / "work7_claims.json"), "--source-root", str(source),
             "--source-commit", commit, "--ctest-inventory", str(inventory),
             "--phase2-closure-seal", str(phase2), "--phase3-candidate-seal", str(candidate_seal),
+            "--phase0-seal", str(phase0), "--paper-root", str(paper), "--threshold-root", str(threshold),
             "--output", str(closure / "claim7-report.json"))
     result = subprocess.run(argv, cwd=source, check=False, capture_output=True)
     _atomic_create(closure / "claim7-command.json", canonical_json_bytes({"argv": list(argv), "returncode": result.returncode}))
@@ -288,8 +305,15 @@ def run_claim7(source: Path, session: Path, commit: str, phase2: Path, candidate
     except ModuleNotFoundError:
         from scripts.verify_work7_claims import inventory as ctest_inventory, load_contract, report_claims
     try:
+        raw = report_path.read_bytes()
+        report = json.loads(raw)
+        if canonical_json_bytes(report) != raw:
+            raise Failure("claim7 verifier report is non-canonical")
         contract = load_contract(source / "scripts" / "work7_claims.json", source, ctest_inventory(inventory))
-        report_claims(json.loads(report_path.read_bytes()), "claim7", commit, ["TOY_VERIFIED"] * 7, contract)
+        report_claims(report, "claim7", commit, ["TOY_VERIFIED"] * 7, contract)
+        if report["input_seals"] != {"phase2_closure_seal_sha256": sha256_file(phase2),
+                                      "phase3_candidate_seal_sha256": sha256_file(candidate_seal)}:
+            raise Failure("claim7 verifier report has wrong input seals")
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise Failure("claim7 verifier produced a malformed or foreign report") from error
 
@@ -323,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         candidate_seal = session / "phase3" / "candidate-seal.json"
         create_tree_seal(candidate_root, candidate_seal, sha256_file(phase2), "phase3-candidate-artifacts")
         verify_tree_seal(candidate_seal, sha256_file(phase2))
-        run_claim7(source, session, commit, phase2, candidate_seal)
+        run_claim7(source, paper, threshold, session, commit, phase0, phase2, candidate_seal)
         verify_tree_seal(candidate_seal, sha256_file(phase2))
         if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
             raise Failure("external worktree snapshot changed before Phase 3 closure")

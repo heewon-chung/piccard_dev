@@ -125,7 +125,7 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         self.assertEqual(metadata["source_commit"], commit)
         self.assertEqual(metadata["baseline_response_strategy_sha256"], hashlib.sha256(baseline).hexdigest())
         self.assertEqual(metadata["candidate_sha256"], sha256_file(candidate_root / "ResponseStrategy.candidate.md"))
-        self.assertEqual(metadata["claim_ids"], ["W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION", "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION"])
+        self.assertEqual([row["id"] for row in metadata["claim_mappings"]], ["W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION", "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION"])
         candidate_seal = session / "phase3" / "candidate-seal.json"
         closure_seal = session / "phase3" / "closure-seal.json"
         verify_tree_seal(candidate_seal, sha256_file(session / "phase2" / "closure-seal.json"))
@@ -164,6 +164,74 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"external worktree snapshot changed", result.stderr)
         self.assertFalse((session / "phase3").exists())
+
+    def test_claim7_rejects_every_candidate_artifact_binding_mutation(self):
+        """A freshly resealed hostile candidate still cannot reach claim7 closure."""
+        from scripts.work7_evidence import canonical_json_bytes, create_tree_seal, sha256_file
+
+        temporary = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temporary, True)
+        source, paper, threshold, session, commit, baseline = self.make_phase_inputs(temporary)
+        from scripts.generate_work7_response_candidate import make_diff, render_candidate, write_artifacts
+        phase2, phase0 = session / "phase2" / "closure-seal.json", session / "phase0" / "seal.json"
+
+        def fresh_candidate(name: str) -> tuple[Path, Path]:
+            root = session / "phase3" / "candidate-artifacts"
+            if root.parent.exists():
+                shutil.rmtree(root.parent)
+            candidate = render_candidate(baseline)
+            write_artifacts(root, baseline, candidate, make_diff(baseline, candidate),
+                            json.loads((session / "phase0" / "artifacts" / "state.json").read_bytes()), commit, phase0, phase2)
+            seal = session / "phase3" / "candidate-seal.json"
+            create_tree_seal(root, seal, sha256_file(phase2), "phase3-candidate-artifacts")
+            return root, seal
+
+        def claim7(candidate_seal: Path, output: Path) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.run((sys.executable, str(ROOT / "scripts" / "verify_work7_claims.py"), "--mode", "claim7",
+                                   "--contract", str(source / "scripts" / "work7_claims.json"), "--source-root", str(source),
+                                   "--source-commit", commit, "--ctest-inventory", str(session / "phase2" / "runtime" / "commands" / "ctest-inventory.stdout.txt"),
+                                   "--phase2-closure-seal", str(phase2), "--phase3-candidate-seal", str(candidate_seal),
+                                   "--phase0-seal", str(phase0), "--paper-root", str(paper), "--threshold-root", str(threshold),
+                                   "--output", str(output)), capture_output=True)
+
+        mutations = {
+            "candidate": lambda root: (root / "ResponseStrategy.candidate.md").write_bytes((root / "ResponseStrategy.candidate.md").read_bytes() + b"tamper\n"),
+            "diff": lambda root: (root / "ResponseStrategy.candidate.diff").write_bytes((root / "ResponseStrategy.candidate.diff").read_bytes() + b"tamper\n"),
+            "metadata-noncanonical": lambda root: (root / "candidate-metadata.json").write_bytes((root / "candidate-metadata.json").read_bytes()[:-1]),
+            "validation-mapping": lambda root: (lambda value: (value["claim_mappings"][0].__setitem__("toy_evidence_state", "PENDING"), (root / "candidate-validation.json").write_bytes(canonical_json_bytes(value))))(json.loads((root / "candidate-validation.json").read_bytes())),
+            "foreign-artifact": lambda root: (root / "foreign.txt").write_text("foreign\n", encoding="utf-8"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                root, seal = fresh_candidate(name)
+                mutate(root)
+                seal.unlink()
+                create_tree_seal(root, seal, sha256_file(phase2), "phase3-candidate-artifacts")
+                checked = claim7(seal, temporary / f"{name}-claim7.json")
+                self.assertEqual(checked.returncode, 2, checked.stderr.decode())
+                self.assertFalse((temporary / f"{name}-claim7.json").exists())
+
+        phase0_artifacts = temporary / "phase0-wrong-artifacts"
+        shutil.copytree(session / "phase0" / "artifacts", phase0_artifacts)
+        state = json.loads((phase0_artifacts / "state.json").read_bytes())
+        state["session_id"] = "work7-" + ("0" * 40)
+        (phase0_artifacts / "state.json").write_bytes(canonical_json_bytes(state))
+        wrong_phase0 = temporary / "phase0-wrong.seal.json"
+        create_tree_seal(phase0_artifacts, wrong_phase0, None, "phase0")
+        root, seal = fresh_candidate("wrong-phase0")
+        checked = subprocess.run((sys.executable, str(ROOT / "scripts" / "verify_work7_claims.py"), "--mode", "claim7",
+                                  "--contract", str(source / "scripts" / "work7_claims.json"), "--source-root", str(source),
+                                  "--source-commit", commit, "--ctest-inventory", str(session / "phase2" / "runtime" / "commands" / "ctest-inventory.stdout.txt"),
+                                  "--phase2-closure-seal", str(phase2), "--phase3-candidate-seal", str(seal),
+                                  "--phase0-seal", str(wrong_phase0), "--paper-root", str(paper), "--threshold-root", str(threshold),
+                                  "--output", str(temporary / "wrong-phase0-claim7.json")), capture_output=True)
+        self.assertEqual(checked.returncode, 2, checked.stderr.decode())
+
+        (threshold / "tracked").write_bytes(b"drift\n")
+        drift_root, drift_seal = fresh_candidate("drift")
+        checked = claim7(drift_seal, temporary / "drift-claim7.json")
+        self.assertEqual(checked.returncode, 2, checked.stderr.decode())
+        self.assertIn(b"external worktree snapshot changed", checked.stderr)
 
 
 if __name__ == "__main__":
