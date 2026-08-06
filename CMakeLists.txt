@@ -221,6 +221,12 @@ target_link_libraries(
 # piccard_core: Pure math modules (no OpenFHE dependency)
 # =============================================================================
 
+add_library(piccard_dynamic_analysis src/analysis/deletion_survival.cpp)
+target_include_directories(
+    piccard_dynamic_analysis
+    PUBLIC ${CMAKE_SOURCE_DIR}/include
+)
+
 add_library(piccard_security_profile src/util/security_profile.cpp)
 target_include_directories(
     piccard_security_profile
@@ -416,6 +422,21 @@ if(BUILD_TESTS)
         # Shared test main with custom property printer
         add_library(test_main STATIC tests/test_main.cpp)
         target_link_libraries(test_main PUBLIC GTest::gtest)
+
+        add_executable(
+            test_deletion_survival
+            tests/unit/test_deletion_survival.cpp
+        )
+        target_include_directories(
+            test_deletion_survival
+            PRIVATE ${CMAKE_SOURCE_DIR}/include
+        )
+        target_link_libraries(
+            test_deletion_survival
+            piccard_dynamic_analysis
+            test_main
+        )
+        add_test(NAME DeletionSurvival COMMAND test_deletion_survival)
 
         # Core tests (no OpenFHE needed)
         add_executable(test_params tests/unit/test_params.cpp)
