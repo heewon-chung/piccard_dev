@@ -201,7 +201,7 @@ class Cell:
     display_argv: list
     exec_argv: list
     env: dict
-    input_specs: list   # [(role, root_id, root_path, abs_path)]
+    input_specs: list   # [(role, root_id, root_path, rel_path_under_root)]
     output_paths: list  # [abs_path] (results-root relative derived later)
 
 
@@ -437,17 +437,24 @@ def validate_resume(existing: dict, results_root: pathlib.Path, evidence_mode: s
             if sha256_file(path) != declared_sha:
                 fail(f"resume output checksum mismatch for cell {cell_id!r}: {rel_path}")
         input_count = int(existing.get(f"{prefix}.input_count", "-1"))
+        if input_count != len(wanted.input_specs):
+            fail(f"resume input_count mismatch for cell {cell_id!r}")
         for i in range(input_count):
+            declared_role = existing.get(f"{prefix}.input.{i:03d}.role")
+            declared_root_id = existing.get(f"{prefix}.input.{i:03d}.root_id")
+            declared_path = existing.get(f"{prefix}.input.{i:03d}.path")
             declared_sha = existing.get(f"{prefix}.input.{i:03d}.sha256")
-            root_id = existing.get(f"{prefix}.input.{i:03d}.root_id")
-            rel_path = existing.get(f"{prefix}.input.{i:03d}.path")
-            _ = (root_id, rel_path)
-            if declared_sha != wanted.input_specs[i][3] and False:
-                # Placeholder guard kept explicit: full path recomputation is
-                # performed by the independent verifier; the runner's resume
-                # gate only needs the argv/status/output identity above to
-                # decide whether a cell may be skipped.
-                fail(f"resume input checksum mismatch for cell {cell_id!r}")
+            wanted_role, wanted_root_id, wanted_root_path, wanted_rel_path = \
+                wanted.input_specs[i]
+            if (declared_role, declared_root_id, declared_path) != \
+                    (wanted_role, wanted_root_id, wanted_rel_path):
+                fail(f"resume input identity mismatch for cell {cell_id!r}")
+            input_path = (wanted_root_path / wanted_rel_path).resolve(strict=True)
+            if not input_path.is_file():
+                fail(f"resume input is missing for cell {cell_id!r}: {wanted_rel_path}")
+            if sha256_file(input_path) != declared_sha:
+                fail(f"resume input checksum mismatch for cell {cell_id!r}: "
+                     f"{wanted_rel_path}")
         completed[cell_id] = True
     return completed
 

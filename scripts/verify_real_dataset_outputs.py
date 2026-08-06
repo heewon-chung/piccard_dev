@@ -343,6 +343,21 @@ _SUMMARY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy-summary$")
 _TIMING_ID_RE = re.compile(r"^([A-Za-z0-9_]+):timing:([A-Za-z0-9-]+)$")
 
 
+def _expected_input_root_id(role: str, cell_id: str) -> str:
+    """Role-scoped root-id allowlist for cell inputs (Phase 6: "no role may
+    borrow another role's allowlist"). A tampered run_metadata.tsv could
+    otherwise repoint an input's root_id at some other role's root and
+    still pass a pure checksum comparison, as long as identical bytes
+    happen to live at both locations (e.g. the committed source root
+    legitimately contains a byte-identical copy of a tracked fixture)."""
+    variant = _cell_variant(cell_id)
+    if role == "processed-manifest":
+        return f"processed-dataset-{variant}"
+    if role == "accuracy-csv":
+        return "results-root"
+    fail(f"cell {cell_id!r} has an unrecognized input role: {role!r}")
+
+
 def _parse_cells(values: dict, results_root: Path, roots: dict) -> list:
     cell_count = _indexed_count(values, "cell_count")
     _check_contiguous_zero_padded(values, "cell", cell_count)
@@ -387,6 +402,12 @@ def _parse_cells(values: dict, results_root: Path, roots: dict) -> list:
             if root_id not in roots:
                 fail(f"cell {cell_id!r} input {role!r} references unknown root "
                      f"{root_id!r}")
+            expected_root_id = _expected_input_root_id(role, cell_id)
+            if root_id != expected_root_id:
+                fail(f"cell {cell_id!r} input {role!r} declares root_id "
+                     f"{root_id!r}, but that role may only use "
+                     f"{expected_root_id!r} (no role may borrow another "
+                     "role's allowlist)")
             resolved = _resolve_under(roots[root_id], rel_path,
                                       f"cell {cell_id!r} input {role!r}")
             if not resolved.is_file():
@@ -600,6 +621,30 @@ def _validate_no_fixture_masquerade(processed_values: dict, source_manifest_valu
 # Top-level verify()
 # ---------------------------------------------------------------------------
 
+def _check_existing_status_not_stale(results_root: Path, run_metadata_sha256: str) -> None:
+    """A pre-existing verification_status.tsv is never silently overwritten.
+    If it exists, it must already agree with the current run_metadata.tsv
+    (same schema, same hash, status=VERIFIED); a rerun that reproduces
+    identical bytes is fine, but anything stale/mismatched fails outright --
+    the operator must delete it deliberately before re-verifying."""
+    status_path = results_root / "verification_status.tsv"
+    if not status_path.is_file():
+        return
+    try:
+        existing = _load_kv(status_path)
+    except (ManifestError, OSError) as exc:
+        fail(f"existing verification_status.tsv is unreadable/malformed: {exc}")
+    if existing.get("schema_version") != VERIFICATION_SCHEMA_VERSION:
+        fail("existing verification_status.tsv has a stale/unexpected "
+             "schema_version; delete it before re-verifying")
+    if existing.get("status") != "VERIFIED":
+        fail("existing verification_status.tsv does not read status=VERIFIED; "
+             "delete it before re-verifying")
+    if existing.get("run_metadata_sha256") != run_metadata_sha256:
+        fail("existing verification_status.tsv is stale (its run_metadata_sha256 "
+             "no longer matches run_metadata.tsv); delete it before re-verifying")
+
+
 def verify(results_root: Path) -> str:
     """Runs the full verification pipeline against `results_root` and
     returns the finalized `verification_status.tsv` bytes (also written
@@ -612,6 +657,8 @@ def verify(results_root: Path) -> str:
     run_metadata_path = results_root / "run_metadata.tsv"
     if not run_metadata_path.is_file():
         fail(f"run_metadata.tsv is missing under {results_root}")
+    run_metadata_sha256 = sha256_file(run_metadata_path)
+    _check_existing_status_not_stale(results_root, run_metadata_sha256)
     values = _load_kv(run_metadata_path)
 
     schema_version = _require(values, "schema_version")
@@ -709,7 +756,6 @@ def verify(results_root: Path) -> str:
                      f"{variant!r}: {exc}")
             _validate_no_fixture_masquerade(processed_values, source_values)
 
-    run_metadata_sha256 = sha256_file(run_metadata_path)
     status_pairs = [
         ("schema_version", VERIFICATION_SCHEMA_VERSION),
         ("run_metadata_sha256", run_metadata_sha256),

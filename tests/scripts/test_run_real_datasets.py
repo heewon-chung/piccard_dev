@@ -22,6 +22,7 @@ import hashlib
 import importlib.util
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -290,6 +291,38 @@ def read_kv_file(path: pathlib.Path) -> dict:
         assert key not in values, f"duplicate key {key!r}"
         values[key] = value
     return values
+
+
+def make_clean_scratch_repo(base_dir: pathlib.Path) -> pathlib.Path:
+    """Builds a self-contained git repo (git init + one commit) holding only
+    the files run_real_datasets.sh needs to execute: itself,
+    prepare_real_datasets.py (imported at module load time), and
+    summarize_real_datasets.py (resolved from the committed source root at
+    execution time). Used for paper-mode tests that need an actually clean
+    git tree, which this feature branch does not guarantee while under
+    active development -- no ambient dependence, no skip path."""
+    repo = base_dir / "scratch-repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    for name in ("run_real_datasets.sh", "prepare_real_datasets.py",
+                "summarize_real_datasets.py"):
+        shutil.copy2(ROOT / "scripts" / name, scripts_dir / name)
+    (scripts_dir / "run_real_datasets.sh").chmod(0o755)
+    # Mirrors the real repo's .gitignore: importing prepare_real_datasets
+    # writes a scripts/__pycache__/*.pyc as a side effect, which must not
+    # register as "dirty" (the real repo ignores it; a from-scratch repo
+    # without this would falsely trip the paper-mode clean-tree gate).
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    init_result = run_command(["git", "init", "-q"], cwd=repo)
+    assert init_result.returncode == 0, init_result.stderr
+    add_result = run_command(["git", "add", "-A"], cwd=repo)
+    assert add_result.returncode == 0, add_result.stderr
+    commit_result = run_command([
+        "git", "-c", "user.email=test@test.invalid", "-c", "user.name=test",
+        "commit", "-q", "-m", "scratch commit for hermetic paper-mode tests",
+    ], cwd=repo)
+    assert commit_result.returncode == 0, commit_result.stderr
+    return repo
 
 
 class QuickCliValidationTest(unittest.TestCase):
@@ -710,6 +743,41 @@ class QuickEndToEndTest(unittest.TestCase):
         result = self.run_quick(extra=("--resume",))
         self.assertNotEqual(result.returncode, 0)
 
+    def test_resume_rejects_tampered_input_checksum(self):
+        # Fable gate finding #1: the resume input-binding check was dead
+        # code (`and False`, plus comparing a sha256 against a relative
+        # path). Tamper the recorded input checksum for the accuracy cell's
+        # processed-manifest input and confirm --resume now rejects it,
+        # instead of silently trusting the tampered value.
+        self.run_quick()
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        metadata = read_kv_file(run_metadata_path)
+        original_sha = metadata["cell.000.input.000.sha256"]
+        tampered_sha = ("0" * 64) if original_sha != "0" * 64 else ("1" * 64)
+        text = run_metadata_path.read_text(encoding="utf-8")
+        text = text.replace(f"cell.000.input.000.sha256\t{original_sha}\n",
+                            f"cell.000.input.000.sha256\t{tampered_sha}\n")
+        self.assertNotIn(f"cell.000.input.000.sha256\t{original_sha}\n", text)
+        run_metadata_path.write_text(text, encoding="utf-8")
+        result = self.run_quick(extra=("--resume",))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("input", result.stderr)
+
+    def test_resume_rejects_path_escaping_output(self):
+        # Fable gate finding #4b: path-escape RED coverage for the runner's
+        # own ensure_contained() gate on resume-recorded output paths.
+        self.run_quick()
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        needle = "cell.000.output.000.path\tcsv/real_accuracy_dblp_acm_u65536.csv\n"
+        self.assertIn(needle, text)
+        text = text.replace(
+            needle, "cell.000.output.000.path\t../../../../etc/passwd\n")
+        run_metadata_path.write_text(text, encoding="utf-8")
+        result = self.run_quick(extra=("--resume",))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes", result.stderr)
+
     def test_resume_rejects_tampered_argv_in_run_metadata(self):
         self.run_quick()
         run_metadata_path = self.results_root / "run_metadata.tsv"
@@ -737,6 +805,54 @@ class QuickEndToEndTest(unittest.TestCase):
         verify_result = run_verifier(self.results_root)
         self.assertNotEqual(verify_result.returncode, 0)
         self.assertIn("comparison_eligible", verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_stale_verification_status_and_never_overwrites_it(self):
+        # Fable gate finding #2: verify() used to rewrite
+        # verification_status.tsv unconditionally. A stale status (its
+        # recorded run_metadata_sha256 no longer matching the actual file)
+        # must be rejected outright, and left untouched on disk -- an
+        # operator must delete it deliberately, not have it silently
+        # "fixed" by the next verifier invocation.
+        self.run_quick()
+        first = run_verifier(self.results_root)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        status_path = self.results_root / "verification_status.tsv"
+        status_values = read_kv_file(status_path)
+        original_sha = status_values["run_metadata_sha256"]
+        tampered_sha = ("0" * 64) if original_sha != "0" * 64 else ("1" * 64)
+        tampered_text = status_path.read_text(encoding="utf-8").replace(
+            original_sha, tampered_sha)
+        status_path.write_text(tampered_text, encoding="utf-8")
+
+        second = run_verifier(self.results_root)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("stale", second.stderr.lower())
+        self.assertEqual(status_path.read_text(encoding="utf-8"), tampered_text)
+
+    def test_verifier_rejects_role_root_borrowing(self):
+        # Fable gate finding #3: an input's declared root_id must match its
+        # role's own root, not merely resolve to bytes with a matching
+        # hash. Repoint the accuracy cell's processed-manifest input at
+        # "committed-source-root" using the identical, already-tracked
+        # fixture file (so the checksum still matches) instead of its
+        # proper "processed-dataset-<variant>" root.
+        self.run_quick()
+        run_metadata_path = self.results_root / "run_metadata.tsv"
+        text = run_metadata_path.read_text(encoding="utf-8")
+        root_id_needle = "cell.000.input.000.root_id\tprocessed-dataset-dblp_acm_u65536\n"
+        path_needle = "cell.000.input.000.path\tdataset.manifest.tsv\n"
+        self.assertIn(root_id_needle, text)
+        self.assertIn(path_needle, text)
+        relative_from_repo_root = QUICK_DATASET_MANIFEST.relative_to(ROOT).as_posix()
+        text = text.replace(
+            root_id_needle, "cell.000.input.000.root_id\tcommitted-source-root\n")
+        text = text.replace(
+            path_needle, f"cell.000.input.000.path\t{relative_from_repo_root}\n")
+        run_metadata_path.write_text(text, encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
         self.assertFalse((self.results_root / "verification_status.tsv").exists())
 
     def test_verifier_rejects_nan_in_timing_csv(self):
@@ -855,6 +971,18 @@ class VerifierUnitTest(unittest.TestCase):
         result = run_command([sys.executable, str(VERIFIER)])
         self.assertNotEqual(result.returncode, 0)
 
+    def test_resolve_under_rejects_path_escape(self):
+        # Fable gate finding #4b: direct RED coverage for the verifier's
+        # own path-containment primitive.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(self.module.VerificationError):
+                self.module._resolve_under(root, "../outside.txt", "label")
+            with self.assertRaises(self.module.VerificationError):
+                self.module._resolve_under(root, "/absolute/path", "label")
+            with self.assertRaises(self.module.VerificationError):
+                self.module._resolve_under(root, "", "label")
+
     @staticmethod
     def _parse_pairs(path: pathlib.Path):
         lines = path.read_text(encoding="utf-8").split("\n")
@@ -868,30 +996,115 @@ class VerifierUnitTest(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
 
-class PaperModeDirtyTreeTest(unittest.TestCase):
-    """The active feature branch this suite runs on is not guaranteed to be
-    clean, which is itself a legitimate fixture for pinning the "paper mode
-    requires a clean source tree" gate without any special setup."""
+class PaperModeScratchRepoTest(unittest.TestCase):
+    """Paper-mode checks that must actually execute (not just --dry-run)
+    and therefore need a clean git tree, which this feature branch does not
+    guarantee while under active development. Fable gate finding #4a: the
+    previous version of this test skipped whenever the ambient tree
+    happened to be clean and referenced a worktree-based class that was
+    never implemented (a `git worktree` only checks out committed content,
+    so it cannot see this phase's own not-yet-committed files). Builds a
+    minimal, self-contained scratch git repository instead."""
 
-    def test_paper_mode_against_a_dirty_tree_is_rejected(self):
-        status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-            cwd=ROOT, text=True, capture_output=True, check=False).stdout
-        if not status.strip():
-            self.skipTest("working tree happens to be clean; covered by "
-                          "PaperModeCleanWorktreeTest instead")
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = pathlib.Path(tmp)
-            build_dir = tmp_path / "build"
-            write_fake_bench_real_datasets(build_dir)
-            result = run_runner(
-                f"--source-manifest={QUICK_SOURCE_MANIFEST}",
-                f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
-                "--profile=std128-t40-primary", "--profile=std192-t40-primary",
-                "--seed=20260729", "--threads=2",
-                f"--build-dir={build_dir}", f"--results-root={tmp_path / 'results'}")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("clean", result.stderr)
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch_temp = tempfile.TemporaryDirectory()
+        cls.repo = make_clean_scratch_repo(pathlib.Path(cls.scratch_temp.name))
+        cls.runner = cls.repo / "scripts" / "run_real_datasets.sh"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch_temp.cleanup()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tmp = pathlib.Path(self.temp.name)
+        self.build_dir = self.tmp / "build"
+        write_fake_bench_real_datasets(self.build_dir)
+
+    def run_paper(self, results_root):
+        return run_command([
+            str(self.runner),
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.build_dir}", f"--results-root={results_root}",
+        ], cwd=self.repo)
+
+    def test_paper_mode_against_a_dirty_scratch_repo_is_rejected(self):
+        marker = self.repo / "scripts" / "__scratch_dirty_marker__.txt"
+        marker.write_text("dirty\n", encoding="utf-8")
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+        results_root = self.tmp / "results"
+        result = self.run_paper(results_root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("clean", result.stderr)
+        self.assertFalse(results_root.exists())
+
+    def test_paper_mode_structurally_succeeds_with_four_cells(self):
+        results_root = self.tmp / "results"
+        result = self.run_paper(results_root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = read_kv_file(results_root / "run_metadata.tsv")
+        self.assertEqual(metadata["evidence_mode"], "paper")
+        self.assertEqual(metadata["git_dirty"], "false")
+        self.assertEqual(metadata["cell_count"], "4")
+        ids = {metadata[f"cell.{i:03d}.id"] for i in range(4)}
+        self.assertEqual(ids, {
+            "dblp_acm_u65536:accuracy",
+            "dblp_acm_u65536:accuracy-summary",
+            "dblp_acm_u65536:timing:std128-t40-primary",
+            "dblp_acm_u65536:timing:std192-t40-primary",
+        })
+
+    def test_verifier_rejects_source_manifest_copy_mismatch(self):
+        # Fable gate finding #4c: the verifier's dedicated byte-match check
+        # (copied source manifest vs. the original at its source-root) must
+        # fire even when the copy's recorded artifact checksum in
+        # run_metadata.tsv has *also* been updated to match the tampered
+        # bytes -- proving this is not merely the generic artifact-checksum
+        # check catching drift.
+        results_root = self.tmp / "results"
+        run_result = self.run_paper(results_root)
+        self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+        copied_path = (results_root / "input_manifests" / QUICK_VARIANT
+                      / "source.manifest.tsv")
+        # Tamper a value in place (not append a malformed line): the
+        # generic artifact scan still parses this file with the strict
+        # two-column TSV grammar before the dedicated byte-match check
+        # below ever runs.
+        lines = copied_path.read_text(encoding="utf-8").split("\n")
+        for index, line in enumerate(lines):
+            if line.startswith("dataset_version\t"):
+                lines[index] = line + "-tampered"
+                break
+        else:
+            self.fail("dataset_version line not found in copied source manifest")
+        tampered_bytes = "\n".join(lines).encode("utf-8")
+        copied_path.write_bytes(tampered_bytes)
+        tampered_sha = hashlib.sha256(tampered_bytes).hexdigest()
+
+        run_metadata_path = results_root / "run_metadata.tsv"
+        metadata = read_kv_file(run_metadata_path)
+        role_key = f"copied-source-manifest-{QUICK_VARIANT}"
+        artifact_sha_key = next(
+            key for key in metadata
+            if key.endswith(".sha256")
+            and metadata.get(key[: -len(".sha256")] + ".role") == role_key)
+        original_sha = metadata[artifact_sha_key]
+        text = run_metadata_path.read_text(encoding="utf-8")
+        text = text.replace(f"{artifact_sha_key}\t{original_sha}\n",
+                            f"{artifact_sha_key}\t{tampered_sha}\n")
+        run_metadata_path.write_text(text, encoding="utf-8")
+
+        verify_result = run_command(
+            [sys.executable, str(VERIFIER), str(results_root)], cwd=self.repo)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("byte-match", verify_result.stderr)
+        self.assertFalse((results_root / "verification_status.tsv").exists())
 
 
 if __name__ == "__main__":
