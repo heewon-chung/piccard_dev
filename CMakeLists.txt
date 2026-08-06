@@ -926,6 +926,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_benchmark_provenance
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME CheckWork6Scope
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_check_work6_scope
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME VerifySJ16Extrapolation
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_sj16_extrapolation
