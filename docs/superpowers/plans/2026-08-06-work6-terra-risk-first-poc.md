@@ -14,6 +14,7 @@
 - The human explicitly approved Works 3, 4, and 5. Do not invoke `verify_work_approval.py`, request their approval artifacts, reconstruct their head chain, or treat their evidence state as a Work 6 blocker.
 - Execute Tasks 1–9 in the exact risk order shown. A task starts only after its focused tests pass and its task diff receives an independent spec-compliance and code-quality review.
 - Every production behavior begins with the focused failing test shown in its task. Capture the stated RED reason, implement the minimum GREEN behavior, run the focused regression command, and make the task commit before moving on.
+- Human-approved OpenFHE 1.5.0 amendment: ciphertext wire bytes are the one-pass canonical form `N(c)=S(D(S(c)))`, where `S`/`D` are direct OpenFHE binary serialization/deserialization. `Serialize` must verify `S(D(N(c)))=N(c)` and fail rather than iterate if one pass is not a fixed point. `Deserialize(b)` accepts only exactly consumed, correctly bound bytes satisfying `S(D(b))=b`; later store/evidence code binds these canonical wire bytes, not raw `S(c)`.
 - Work 6 implements a single owner's full signature re-encoding and fresh full ciphertext encryption. The cloud replaces that complete serialized ciphertext atomically; no ciphertext delta, additive update, patch, or in-place mutation API may be added.
 - A replacement binds the owner/set identifier, source and destination epochs, SHA-256 public CRS (`hash_seed`, estimator model, `k`, `m`, and `hash_range`), encoding model, realized BFV context, public key, OpenFHE key tag, and serialized ciphertext payload.
 - Stale and future source epochs are distinct results. Only `expected_epoch == current_epoch` with `replacement.epoch == expected_epoch + 1` applies.
@@ -154,12 +155,13 @@ not advance, even when another test happens to pass.
 #### Phase 2.2 — GREEN codec and canonical bindings
 
 - **Prerequisites:** Phase 2.1 PASS; follow Task 2 Steps 3–5.
-- **PASS:** canonical context/public-key fingerprints, key tag, strict
-  serialize/deserialize, wrong-key rejection, and public-only lifetime tests
-  pass; Task 2 review approves.
-- **FAIL/STOP:** trailing/corrupt bytes are accepted, fingerprints are not
-  stable lowercase hex, the codec exposes decryption/secret-key access, or an
-  existing BFV regression fails.
+- **PASS:** canonical context/public-key fingerprints, key tag, one-pass
+  canonical fixed-point serialization/deserialization, wrong-key rejection,
+  and public-only lifetime tests pass; Task 2 review approves.
+- **FAIL/STOP:** trailing/corrupt/non-fixed-point bytes are accepted,
+  canonical emission needs more than one normalization pass, fingerprints are
+  not stable lowercase hex, the codec exposes decryption/secret-key access, or
+  an existing BFV regression fails.
 - **Next entry:** Phase 2.3 starts after the Task 2 commit and review gate.
 
 #### Phase 2.3 — RED/GREEN atomic store state machine
@@ -515,11 +517,14 @@ BFVContext::ExportPublicCiphertextCodec() const;
 
 - Context fingerprint canonical bytes are: ASCII `piccard-bfv-context-v1`, one NUL byte, BE32 security code (`TOY=0`, `STD128=1`, `STD192=2`, `STD256=3`), BE64 plaintext modulus, BE32 realized ring dimension, BE32 multiplicative depth, BE32 scaling-modulus size, BE32 active tower count, then for each tower in OpenFHE order BE32 decimal-modulus-string length followed by `tower->GetModulus().ToString()` as ASCII decimal digits.
 - Public-key fingerprint is SHA-256 over ASCII `piccard-bfv-public-key-v1`, one NUL byte, and the exact OpenFHE binary public-key serialization. Both getters return 64 lowercase hex characters. Key tag is the generated public key's nonempty OpenFHE tag verbatim.
-- `Serialize` rejects a null ciphertext and a context/key-tag mismatch.
-  `Deserialize` rejects empty, corrupt, or trailing bytes, verifies the decoded
-  ciphertext uses the retained live context and key tag, reserializes it with
-  `Serialize`, and rejects unless the reserialized bytes equal the supplied
-  bytes exactly.
+- Let `S`/`D` denote direct OpenFHE binary serialization/deserialization.
+  `Serialize` rejects a null ciphertext and a context/key-tag mismatch, then
+  emits the one-pass canonical wire form `N(c)=S(D(S(c)))`. Before returning,
+  it requires `S(D(N(c)))=N(c)` and throws `std::logic_error` rather than
+  iterating if one pass is not a fixed point. `Deserialize` rejects empty,
+  corrupt, or trailing bytes, verifies the decoded ciphertext uses the
+  retained live context and key tag, directly reserializes that decoded object
+  with `S`, and rejects unless `S(D(b))` equals the supplied bytes exactly.
 
 - [ ] **Step 1: Write the failing codec tests**
 
@@ -586,7 +591,13 @@ TEST(PublicCiphertextCodecTest, RejectsUninitializedMalformedAndWrongKey) {
 ```
 
 Keep empty, corrupt, trailing, context, key-tag, and canonical mismatch as
-separate assertions. Define a test peer in the `piccard` namespace and use it
+separate assertions; also keep null-ciphertext, context-mismatch, and
+key-tag-mismatch behaviors in separate focused tests. Add a real OpenFHE
+canonical-emission test that independently computes `S(D(S(c)))`, compares it
+to `codec->Serialize(c)`, and verifies
+`S(D(codec->Serialize(c))) == codec->Serialize(c)`. Do not assert that raw
+`S(c)` must differ: only the one-pass/fixed-point relations are the contract.
+Define a test peer in the `piccard` namespace and use it
 to exercise the exact private mismatch branch without adding a public test
 seam:
 
@@ -675,7 +686,7 @@ BFVContext::ExportPublicCiphertextCodec() const {
 }
 ```
 
-In `src/fhe/public_ciphertext_codec.cpp`, include `ciphertext-ser.h`, `cryptocontext-ser.h`, `key/key-ser.h`, and `scheme/bfvrns/bfvrns-ser.h`. Implement binary streams with exact-consumption checking:
+In `src/fhe/public_ciphertext_codec.cpp`, include `ciphertext-ser.h`, `cryptocontext-ser.h`, `key/key-ser.h`, and `scheme/bfvrns/bfvrns-ser.h`. Add private translation-unit helpers `SerializeBinary` and `DeserializeBinaryExact`; the latter rejects empty/corrupt/trailing input and does not perform canonical recursion. Implement one-pass canonical emission and fixed-point checking:
 
 ```cpp
 std::vector<uint8_t> PublicCiphertextCodec::Serialize(
@@ -686,37 +697,33 @@ std::vector<uint8_t> PublicCiphertextCodec::Serialize(
         throw std::invalid_argument(
             "ciphertext does not match the live context and public key");
     }
-    std::ostringstream stream(std::ios::binary);
-    lbcrypto::Serial::Serialize(ciphertext, stream, lbcrypto::SerType::BINARY);
-    const std::string data = stream.str();
-    return std::vector<uint8_t>(data.begin(), data.end());
+    const auto direct = SerializeBinary(ciphertext);
+    const auto normalized = DeserializeBinaryExact(direct);
+    RequireLiveBinding(normalized);
+    const auto canonical = SerializeBinary(normalized);
+    const auto fixed_point = DeserializeBinaryExact(canonical);
+    RequireLiveBinding(fixed_point);
+    if (SerializeBinary(fixed_point) != canonical) {
+        throw std::logic_error(
+            "one-pass ciphertext normalization is not a fixed point");
+    }
+    return canonical;
 }
 
 PublicCiphertextCodec::Ciphertext PublicCiphertextCodec::Deserialize(
     const std::vector<uint8_t>& bytes) const {
-    if (bytes.empty()) throw std::invalid_argument("ciphertext bytes are empty");
-    const std::string data(bytes.begin(), bytes.end());
-    std::istringstream stream(data, std::ios::binary);
-    Ciphertext ciphertext;
-    try {
-        lbcrypto::Serial::Deserialize(
-            ciphertext, stream, lbcrypto::SerType::BINARY);
-    } catch (const std::exception& error) {
-        throw std::invalid_argument(
-            std::string("invalid ciphertext bytes: ") + error.what());
-    }
-    if (stream.peek() != std::char_traits<char>::eof()) {
-        throw std::invalid_argument("ciphertext bytes contain trailing data");
-    }
-    if (!ciphertext || ciphertext->GetCryptoContext() != context_ ||
-        ciphertext->GetKeyTag() != ciphertext_key_tag_) {
-        throw std::invalid_argument(
-            "decoded ciphertext does not match the live context and public key");
-    }
-    RequireCanonicalSerialization(bytes, Serialize(ciphertext));
+    const auto ciphertext = DeserializeBinaryExact(bytes);
+    RequireLiveBinding(ciphertext);
+    RequireCanonicalSerialization(bytes, SerializeBinary(ciphertext));
     return ciphertext;
 }
 ```
+
+`RequireLiveBinding` is a private method or equivalent private helper that
+applies the retained live-context and key-tag check. Public `Deserialize` must
+compare with direct `SerializeBinary(ciphertext)`, not call public `Serialize`
+and normalize a second time. Public `Serialize` performs exactly one
+normalization pass and one fixed-point verification; it never loops.
 
 `RequireCanonicalSerialization` throws
 `std::invalid_argument("ciphertext bytes are not canonical")` whenever the two
@@ -753,7 +760,10 @@ git add include/fhe/public_ciphertext_codec.h src/fhe/public_ciphertext_codec.cp
 git commit -m "feat(dynamic): add public ciphertext codec bindings"
 ```
 
-Completion gate: reviewer verifies the canonical byte order, exact binary stream consumption, no secret-key capability, and no store/epoch logic in this task.
+Completion gate: reviewer verifies the canonical byte order, exact binary
+stream consumption, one-pass fixed-point invariant, independent
+null/context/key-tag failure tests, no secret-key capability, and no
+store/epoch logic in this task.
 
 ### Task 3: B2 — Add the minimal versioned atomic two-owner store
 

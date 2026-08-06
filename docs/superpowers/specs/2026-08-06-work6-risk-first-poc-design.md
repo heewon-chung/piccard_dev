@@ -141,6 +141,21 @@ Implementation-time benchmark verification uses only profile `toy-smoke` and
 exactly one timing or accuracy repetition. Paper-scale performance collection
 is deferred.
 
+### 4.6 Canonical OpenFHE ciphertext wire bytes
+
+OpenFHE 1.5.0 binary ciphertext serialization is not idempotent for the live
+DCRTPoly representation: direct bytes `S(c)` change after one load/save. The
+human-approved implementation contract therefore canonicalizes once on
+emission. For direct OpenFHE binary serialize/deserialize operations `S` and
+`D`, the codec emits `N(c)=S(D(S(c)))` and verifies that this result is already
+a fixed point, `S(D(N(c)))=N(c)`. It never iterates until convergence.
+
+Deserialization accepts only nonempty, exactly consumed bytes whose decoded
+context and key tag match and whose direct reserialization is byte-identical:
+`S(D(b))=b`. Thus later store/evidence code binds a unique canonical wire
+payload, not the noncanonical direct serialization of the original in-memory
+ciphertext.
+
 ## 5. Failure model
 
 The PoC retains only failures that can invalidate its paper evidence:
