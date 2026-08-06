@@ -307,6 +307,8 @@ def run_claim7(source: Path, paper: Path, threshold: Path, session: Path, commit
     _atomic_create(closure / "claim7.stderr.txt", result.stderr)
     if result.returncode != 0:
         raise Failure("claim7 verifier failed")
+    if result.stdout != b"verify_work7_claims: PASS (claim7)\n" or result.stderr != b"":
+        raise Failure("claim7 verifier emitted unexpected output")
     report_path = closure / "claim7-report.json"
     if not report_path.exists():
         raise Failure("claim7 verifier omitted its report")

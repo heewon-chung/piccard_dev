@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -87,11 +88,21 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         create_tree_seal(closure, phase2, sha256_file(runtime_seal), "phase2-closure")
         return source, paper, threshold, session, commit, baseline
 
+    @staticmethod
+    def tree_bytes(root: Path) -> dict[str, bytes]:
+        return {path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*") if path.is_file() and ".git" not in path.parts}
+
     def invoke(self, *, invalid_utf8: bool = False, tamper_phase2: bool = False,
-               drift_external: bool = False, tamper_runtime: bool = False) -> tuple[subprocess.CompletedProcess[bytes], Path, Path, Path, Path, str, bytes]:
+               drift_external: bool = False, tamper_runtime: bool = False,
+               assert_outside_session: bool = False) -> tuple[subprocess.CompletedProcess[bytes], Path, Path, Path, Path, str, bytes]:
         temporary = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, temporary, True)
         source, paper, threshold, session, commit, baseline = self.make_phase_inputs(temporary, invalid_utf8=invalid_utf8)
+        from scripts.work7_evidence import snapshot_git_worktree
+        before_roots = {"source": snapshot_git_worktree(source), "paper": snapshot_git_worktree(paper),
+                        "threshold": snapshot_git_worktree(threshold)}
+        before_tree = self.tree_bytes(temporary)
         if tamper_phase2:
             phase2 = session / "phase2" / "closure-seal.json"
             phase2.write_bytes(phase2.read_bytes() + b"x")
@@ -104,13 +115,20 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                                  "--threshold-root", str(threshold), "--session-root", str(session),
                                  "--phase0-seal", str(session / "phase0" / "seal.json"),
                                  "--phase2-closure-seal", str(session / "phase2" / "closure-seal.json")), capture_output=True)
+        if assert_outside_session:
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual({"source": snapshot_git_worktree(source), "paper": snapshot_git_worktree(paper),
+                              "threshold": snapshot_git_worktree(threshold)}, before_roots)
+            created = set(self.tree_bytes(temporary)) - set(before_tree)
+            self.assertTrue(created)
+            self.assertTrue(all(path.startswith("session/phase3/") for path in created), created)
         return result, temporary, paper, threshold, session, commit, baseline
 
     def test_candidate_is_unapplied_deterministic_and_sealed(self):
         from scripts.work7_evidence import sha256_file, snapshot_git_worktree, verify_tree_seal
 
         # These before/after checks prove the generator's only persistent output is session-local.
-        result, _, paper, threshold, session, commit, baseline = self.invoke()
+        result, _, paper, threshold, session, commit, baseline = self.invoke(assert_outside_session=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual((paper / "Revision/ResponseStrategy.md").read_bytes(), baseline)
         candidate_root = session / "phase3" / "candidate-artifacts"
@@ -118,7 +136,11 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         diff = (candidate_root / "ResponseStrategy.candidate.diff").read_text(encoding="utf-8")
         self.assertTrue(candidate.startswith(baseline.decode("utf-8")))
         self.assertIn("WORK7_RESPONSE_CANDIDATE_BEGIN", candidate)
-        self.assertNotRegex(candidate.split("WORK7_RESPONSE_CANDIDATE_BEGIN", 1)[1], r"(?i)\\b(?:ms|seconds|speedup|accuracy|%)\\b")
+        forbidden_measurement = r"(?i)\b(?:ms|seconds|speedup|accuracy|%)\b"
+        self.assertNotRegex(candidate.split("WORK7_RESPONSE_CANDIDATE_BEGIN", 1)[1], forbidden_measurement)
+        for hostile in ("3 ms", "99% accuracy", "2x speedup"):
+            self.assertIsNotNone(re.search(forbidden_measurement, hostile))
+        self.assertIn("result", "result: 1")
         for claim in ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION", "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION"):
             self.assertIn(claim, candidate)
         self.assertIn("PERFORMANCE_PENDING", candidate)
@@ -193,6 +215,38 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         self.assertIn(b"escapes session root", result.stderr)
         self.assertFalse((session / "phase3").exists())
 
+    def test_validly_resealed_foreign_kinds_roots_and_predecessors_fail_closed(self):
+        """Changing a seal's valid syntax must not make it a valid Phase chain."""
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+        import scripts.generate_work7_response_candidate as generator
+
+        for fault in ("phase0-kind", "phase0-root", "phase2-kind", "runtime-kind", "runtime-predecessor"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary_name:
+                temporary = Path(temporary_name)
+                source, paper, threshold, session, _, _ = self.make_phase_inputs(temporary)
+                phase0, runtime, phase2 = (session / "phase0" / "seal.json", session / "phase2" / "runtime-seal.json",
+                                            session / "phase2" / "closure-seal.json")
+                phase0_root, runtime_root, closure_root = (session / "phase0" / "artifacts", session / "phase2" / "runtime",
+                                                            session / "phase2" / "closure-artifacts")
+                if fault == "phase0-kind":
+                    phase0.unlink(); create_tree_seal(phase0_root, phase0, None, "foreign-phase0")
+                elif fault == "phase0-root":
+                    foreign = temporary / "foreign-phase0-artifacts"; shutil.copytree(phase0_root, foreign)
+                    phase0.unlink(); create_tree_seal(foreign, phase0, None, "phase0")
+                elif fault == "phase2-kind":
+                    phase2.unlink(); create_tree_seal(closure_root, phase2, sha256_file(runtime), "foreign-phase2")
+                else:
+                    runtime.unlink()
+                    predecessor = "0" * 64 if fault == "runtime-predecessor" else sha256_file(phase0)
+                    create_tree_seal(runtime_root, runtime, predecessor,
+                                     "foreign-runtime" if fault == "runtime-kind" else "phase2-runtime-artifacts")
+                    phase2.unlink(); create_tree_seal(closure_root, phase2, sha256_file(runtime), "phase2-closure")
+                result = generator.main(["--source-root", str(source), "--paper-root", str(paper),
+                                         "--threshold-root", str(threshold), "--session-root", str(session),
+                                         "--phase0-seal", str(phase0), "--phase2-closure-seal", str(phase2)])
+                self.assertEqual(result, 2)
+                self.assertFalse((session / "phase3" / "closure-seal.json").exists())
+
     def test_drift_injected_during_claim7_never_creates_phase3_closure(self):
         import scripts.generate_work7_response_candidate as generator
 
@@ -227,7 +281,7 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         import scripts.generate_work7_response_candidate as generator
         from scripts.work7_evidence import create_tree_seal, sha256_file
 
-        for kind in ("noncanonical", "wrong-input-seals"):
+        for kind in ("noncanonical", "wrong-input-seals", "extra-stdout", "nonempty-stderr"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary_name:
                 temporary = Path(temporary_name)
                 source, paper, threshold, session, commit, baseline = self.make_phase_inputs(temporary)
@@ -247,15 +301,20 @@ class Work7ResponseCandidateTests(unittest.TestCase):
                 subprocess.run(command, check=True, capture_output=True)
                 report = (temporary / "valid-report.json").read_bytes()
                 if kind == "noncanonical":
-                    report = report[:-1]
-                else:
+                    # This remains valid JSON/report content but violates canonical bytes.
+                    report = json.dumps(json.loads(report), indent=2, sort_keys=False).encode() + b"\n"
+                elif kind == "wrong-input-seals":
                     value = json.loads(report); value["input_seals"] = {"phase2_closure_seal_sha256": "0" * 64,
                                                                          "phase3_candidate_seal_sha256": "0" * 64}
                     report = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
                 def fake_run(argv, **kwargs):
                     Path(argv[argv.index("--output") + 1]).write_bytes(report)
-                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                    stdout = b"verify_work7_claims: PASS (claim7)\n"
+                    stderr = b""
+                    if kind == "extra-stdout": stdout += b"extra\n"
+                    if kind == "nonempty-stderr": stderr = b"warning\n"
+                    return subprocess.CompletedProcess(argv, 0, stdout, stderr)
 
                 with mock.patch.object(generator.subprocess, "run", side_effect=fake_run):
                     with self.assertRaises(generator.Failure):
