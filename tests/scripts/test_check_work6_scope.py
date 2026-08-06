@@ -1,4 +1,5 @@
 import os
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -135,6 +136,19 @@ class CheckWork6Scope(unittest.TestCase):
         self.repo.commit("candidate")
         self.assert_fail(self.repo.check(base, path + "\n"))
 
+    def test_patch_content_prefixes_are_not_headers(self):
+        path = "src/x.cpp"
+        for sign, first, second in (("plus", "plain\n", "++" + STATE + "\n"),
+                                    ("minus", "--" + STATE + "\n", "plain\n")):
+            with self.subTest(sign=sign):
+                self.repo.write(path, first)
+                base = self.repo.commit("base")
+                self.repo.write(path, second)
+                self.repo.commit("candidate")
+                result = self.repo.check(base, path + "\n")
+                self.assert_fail(result)
+                self.repo.close(); self.repo = ScopeFixture()
+
     def test_bfv_preexisting_body_is_frozen(self):
         header = "include/fhe/bfv_context.h"
         source = "src/fhe/bfv_context.cpp"
@@ -149,14 +163,29 @@ class CheckWork6Scope(unittest.TestCase):
         header = "include/fhe/bfv_context.h"
         source = "src/fhe/bfv_context.cpp"
         self.repo.write(header, "#pragma once\n#include <vector>\nnamespace piccard {\nclass BFVContext { public: void Old();\n};\n}\n")
-        self.repo.write(source, '#include "fhe/bfv_context.h"\n\n#include "build_info.h"\n#include "math/distributiongenerator.h"\n\nnamespace piccard {\n\nvoid BFVContext::Old() {}\n}\n')
+        self.repo.write(source, '#include "fhe/bfv_context.h"\n\n#include "build_info.h"\n#include "math/distributiongenerator.h"\n\nnamespace piccard {\n\nnamespace {\n\nvoid Keep() {}\n\n} // namespace\n\nvoid BFVContext::Old() {}\n}\n')
         base = self.repo.commit("base")
         self.repo.write(header, "#pragma once\n#include <memory>\n#include <vector>\nnamespace piccard {\nclass PublicCiphertextCodec;\n\nclass BFVContext { public: void Old();\n    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n\n};\n}\n")
-        names = ["AppendBE32", "AppendBE64", "Sha256Hex", "SecurityCode", "ContextFingerprintHex", "PublicKeyFingerprintHex"]
+        names = ["AppendBE32", "AppendBE64", "Sha256Hex", "ContextFingerprintHex", "PublicKeyFingerprintHex"]
         defs = "\n\n".join("void " + name + "() {}" for name in names)
-        self.repo.write(source, '#include "fhe/bfv_context.h"\n\n#include "fhe/public_ciphertext_codec.h"\n\n#include "build_info.h"\n#include "key/key-ser.h"\n#include "math/distributiongenerator.h"\n\n#include <openssl/evp.h>\n\nnamespace piccard {\n\n' + defs + '\n\nvoid BFVContext::ExportPublicCiphertextCodec() {}\n\nvoid BFVContext::Old() {}\n}\n')
+        self.repo.write(source, '#include "fhe/bfv_context.h"\n\n#include "fhe/public_ciphertext_codec.h"\n\n#include "build_info.h"\n#include "key/key-ser.h"\n#include "math/distributiongenerator.h"\n\n#include <openssl/evp.h>\n\nnamespace piccard {\n\nnamespace {\n\n' + defs + '\n\nvoid Keep() {}\n\n} // namespace\n\nvoid BFVContext::ExportPublicCiphertextCodec() {}\n\nvoid BFVContext::Old() {}\n}\n')
         self.repo.commit("candidate")
         self.assert_pass(self.repo.check(base, header + "\n" + source + "\n"))
+
+    def test_bfv_lexical_scope_rejects_decoys_and_prefixes(self):
+        spec = importlib.util.spec_from_file_location("scope_checker", CHECKER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        header = "#pragma once\n#include <memory>\nnamespace piccard {\nclass PublicCiphertextCodec;\n\nclass BFVContext { public:\n    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n\n};\n}\n"
+        with self.assertRaises(module.ScopeError):
+            module.subtract_header(header.replace("class PublicCiphertextCodec;", "// class PublicCiphertextCodec;"))
+        with self.assertRaises(module.ScopeError):
+            module.subtract_header(header.replace("public:", "private:"))
+        source = '#include "fhe/public_ciphertext_codec.h"\n\n#include "key/key-ser.h"\n#include <openssl/evp.h>\n\nnamespace piccard { namespace {\n\nvoid AppendBE32() {}\n\nvoid AppendBE64() {}\n\nvoid Sha256Hex() {}\n\nvoid ContextFingerprintHex() {}\n\nvoid PublicKeyFingerprintHex() {}\n\n} // namespace\n\nvoid BFVContext::ExportPublicCiphertextCodec() {}\n}\n'
+        with self.assertRaises(module.ScopeError):
+            module.subtract_source(source.replace("void AppendBE32", "int prefix;\nvoid AppendBE32"))
+        with self.assertRaises(module.ScopeError):
+            module.subtract_source(source.replace("void AppendBE32", '"void AppendBE32";\nvoid AppendBE32', 1))
 
     def test_unsorted_or_traversing_whitelist_fails(self):
         base = self.repo.commit("base")
