@@ -8,7 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from scripts import work7_evidence
 from scripts.work7_evidence import (
     assert_output_roots_outside,
     canonical_json_bytes,
@@ -81,6 +83,14 @@ class Work7StateGuardTest(unittest.TestCase):
         self.assertNotEqual(state["paper"]["snapshot_sha256"], "")
         self.assertFalse((self.paper / ".git" / "index.lock").exists())
 
+    def test_snapshot_does_not_change_git_index_metadata(self) -> None:
+        index = self.paper / ".git" / "index"
+        before = index.stat()
+        snapshot_git_worktree(self.paper)
+        after = index.stat()
+        self.assertEqual((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+                         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns))
+
     def test_changed_dirty_bytes_change_snapshot_digest_without_status_shape_change(self) -> None:
         tracked = self.paper / "tracked.txt"
         tracked.write_text("one\n", encoding="utf-8")
@@ -146,6 +156,58 @@ class Work7StateGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_output_roots_outside([self.source, self.paper, self.threshold], [alias / "evidence"])
 
+    def test_roots_must_be_distinct_and_output_roots_must_not_overlap(self) -> None:
+        with self.assertRaises(ValueError):
+            assert_output_roots_outside([self.source, self.source, self.threshold], [self.build, self.session])
+        with self.assertRaises(ValueError):
+            assert_output_roots_outside([self.source, self.paper, self.threshold], [self.build, self.build / "nested"])
+
+    def test_symlink_artifact_root_seal_path_and_output_path_fail_closed(self) -> None:
+        artifact = self.root / "artifact"
+        artifact.mkdir()
+        (artifact / "proof.txt").write_text("proof", encoding="utf-8")
+        artifact_alias = self.root / "artifact-alias"
+        artifact_alias.symlink_to(artifact, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            create_tree_seal(artifact_alias, self.root / "seal.json", None, "phase0")
+        seal_alias = self.root / "seal-alias.json"
+        seal_alias.symlink_to(self.root / "missing-seal.json")
+        with self.assertRaises(ValueError):
+            create_tree_seal(artifact, seal_alias, None, "phase0")
+        output_alias = self.session / "phase0" / "state.json"
+        output_alias.parent.mkdir()
+        output_alias.symlink_to(self.root / "missing-state.json")
+        result = self.guard(output_alias)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(result.stderr.startswith("work7_state_guard: FAIL:"))
+
+    def test_cli_rejects_relative_and_missing_arguments_with_one_failure_line(self) -> None:
+        relative = subprocess.run([sys.executable, str(GUARD), "--source-root", "relative"],
+                                  cwd=self.root, capture_output=True, text=True)
+        missing = subprocess.run([sys.executable, str(GUARD)], cwd=self.root,
+                                 capture_output=True, text=True)
+        for result in (relative, missing):
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertRegex(result.stderr, r"^work7_state_guard: FAIL: .+\n$")
+
+    def test_sha256_file_rejects_replacement_by_symlink_during_open(self) -> None:
+        path = self.root / "race.txt"
+        replacement = self.root / "replacement.txt"
+        path.write_text("original", encoding="utf-8")
+        replacement.write_text("replacement", encoding="utf-8")
+        actual_open = os.open
+
+        def replace_then_open(name: os.PathLike[str] | str, flags: int, *args: object) -> int:
+            if Path(name) == path:
+                path.unlink()
+                path.symlink_to(replacement)
+            return actual_open(name, flags, *args)
+
+        with mock.patch.object(work7_evidence.os, "open", side_effect=replace_then_open):
+            with self.assertRaises(ValueError):
+                work7_evidence.sha256_file(path)
+
     def test_existing_output_collision_is_rejected_without_overwrite(self) -> None:
         output = self.session / "phase0" / "state.json"
         output.parent.mkdir()
@@ -170,6 +232,19 @@ class Work7StateGuardTest(unittest.TestCase):
         (artifact / "link").symlink_to("proof.txt")
         with self.assertRaises(ValueError):
             create_tree_seal(artifact, self.root / "other-seal.json", None, "phase1")
+
+    def test_verify_tree_seal_rejects_malformed_structure_and_digest(self) -> None:
+        malformed = self.root / "malformed-seal.json"
+        malformed.write_bytes(canonical_json_bytes({"schema": "piccard-work7-tree-seal-v1"}))
+        with self.assertRaises(ValueError):
+            verify_tree_seal(malformed)
+        artifact = self.root / "artifact"
+        artifact.mkdir()
+        (artifact / "proof.txt").write_text("proof", encoding="utf-8")
+        seal = self.root / "seal.json"
+        create_tree_seal(artifact, seal, None, "phase0")
+        with self.assertRaises(ValueError):
+            verify_tree_seal(seal, "not-a-digest")
 
 
 if __name__ == "__main__":
