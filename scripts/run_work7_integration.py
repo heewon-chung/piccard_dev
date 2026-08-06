@@ -206,20 +206,22 @@ def sealed_file(root: Path, relative: object, digest: object, label: str) -> Pat
     return candidate
 
 
-def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> Path:
+def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], source: Path) -> Path:
     path = root / "manifest.json"; value = load_json(path, "pre-threshold manifest")
     if value.get("schema") != "piccard-pre-threshold-run-v1" or value.get("suite") != "smoke" or value.get("seed") != 7 or value.get("repetitions") != 1:
         raise Failure("invalid pre-threshold manifest identity")
-    if value.get("source", {}).get("commit") != commit or value.get("source", {}).get("dirty") is not False or value.get("thread_policy") != {"OMP_DYNAMIC":"FALSE", "OMP_NUM_THREADS":"2"}:
+    if value.get("source", {}).get("commit") != commit or value.get("source", {}).get("dirty") is not False or value.get("source", {}).get("dir") != str(source) or value.get("thread_policy") != {"OMP_DYNAMIC":"FALSE", "OMP_NUM_THREADS":"2"}:
         raise Failure("invalid pre-threshold provenance")
     cells = value.get("cells")
     if not isinstance(cells, list) or len(cells) != 3 or {row.get("producer") for row in cells if isinstance(row, dict)} != {"bench_review_comparison", "bench_piccard", "bench_dynamic"}:
         raise Failure("invalid pre-threshold cells")
-    expected={"bench_review_comparison": {"--trials=1","--accuracy-trials=1","--seed=7"}, "bench_piccard":{"--trials=1","--seed=7"}, "bench_dynamic":{"--scenario=refresh","--refresh_updates=1","--trials=1","--seed=7"}}
+    expected={"bench_review_comparison":["--suite=toy-smoke","--profile=toy-smoke","--k=16","--m=16","--set-size=10","--universe=64","--target-jaccard=0.5","--trials=1","--accuracy-trials=1","--seed=7","--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16","--sj16-key-bits=1024","--allow-unmatched-security"], "bench_piccard":["--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=10","--target-jaccard=0.5","--trials=1","--seed=7"], "bench_dynamic":["--scenario=refresh","--refresh_updates=1","--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=100","--target-jaccard=0.5","--depth=5","--trials=1","--seed=7"]}
     for row in cells:
         argv=row.get("argv")
         sampling=[x for x in argv if isinstance(x,str) and (x.startswith("--trials=") or x.startswith("--accuracy-trials=") or x.startswith("--refresh_updates="))] if isinstance(argv,list) else []
-        if row.get("status") != "MEASURED" or not isinstance(argv,list) or set(argv[1:]) != expected[row["producer"]] or len(sampling) != len(set(sampling)):
+        output=row.get("output", {})
+        dynamic=([f"--manifest-out={root/output.get('workload')}",f"--execution-trace-out={root/output.get('trace')}"] if row["producer"]=="bench_review_comparison" else [])
+        if row.get("status") != "MEASURED" or row.get("profile_id")!="toy-smoke" or row.get("environment")!={"OMP_DYNAMIC":"FALSE","OMP_NUM_THREADS":"2"} or not isinstance(argv,list) or argv != [row["producer"],*expected[row["producer"]],*dynamic] or len(sampling) != len(set(sampling)):
             raise Failure("pre-threshold row/argv mismatch")
     terminal=value.get("terminal_cells")
     if not isinstance(terminal,dict) or set(terminal)!={"path","row_count","sha256"} or terminal["path"]!="terminal-cells.tsv" or terminal["row_count"]!=3:
@@ -228,7 +230,7 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...]) -> 
     if not terminal_path.is_file() or sha256_file(terminal_path)!=terminal["sha256"] or len(terminal_path.read_text(encoding="utf-8").splitlines())!=4:
         raise Failure("invalid pre-threshold terminal cells")
     for row in cells:
-        output=row.get("output", {})
+        if set(output) != ({"csv","csv_sha256","log","log_sha256","workload","workload_sha256","trace","trace_sha256","expected_csv_rows","csv_row_count","measurement_output"} if row["producer"]=="bench_review_comparison" else {"csv","csv_sha256","log","log_sha256","expected_csv_rows","csv_row_count","measurement_output"}) or output.get("measurement_output")!="measured-csv": raise Failure("invalid pre-threshold output schema")
         if not isinstance(output,dict): raise Failure("missing pre-threshold output")
         for key, relative in output.items():
             if key.endswith("_sha256") or key in {"expected_csv_rows","csv_row_count","measurement_output"}: continue
@@ -333,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         real = runtime / "real-datasets"
         pre_command=(str(source / "scripts" / "run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(pre))
         checked_command(pre_command, source, commands, "pre-threshold")
-        pre_manifest=validate_prethreshold(pre, commit, pre_command)
+        pre_manifest=validate_prethreshold(pre, commit, pre_command, source)
         checked_command((str(source / "scripts" / "run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2", "--build-dir=" + str(build), "--results-root=" + str(real)), source, commands, "real-datasets")
         checked_command((sys.executable, str(source / "scripts" / "verify_real_dataset_outputs.py"), str(real)), source, commands, "verify-real-datasets")
         deletion = checked_command((str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8", "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"), source, commands, "deletion-survival")
