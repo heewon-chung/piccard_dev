@@ -41,6 +41,7 @@ import hashlib
 import math
 import os
 import re
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -637,6 +638,311 @@ def _output_path_for(cell: dict, suffix: str) -> Path:
     fail(f"cell {cell['id']!r} has no output ending in {suffix!r}")
 
 
+_ACCURACY_WORKLOAD_KEY_ORDER = (
+    "schema_version", "dataset_manifest_sha256", "rows_sha256", "k", "m",
+    "root_seed", "max_pairs", "accuracy_trials", "hash_randomness",
+    "pair_selection")
+_TIMING_WORKLOAD_KEY_PREFIX = (
+    "schema_version", "dataset_manifest_sha256", "pair_id", "k", "m",
+    "profile_id", "root_seed", "hash_seed", "trials", "input_pair_count")
+_ACCURACY_ROWS_HEADER = "pair_id\ttrial_index\thash_seed\trecord_a\trecord_b"
+
+
+def _argv_value(cell: dict, flag: str) -> str:
+    prefix = f"--{flag}="
+    for argument in cell["argv"]:
+        if argument.startswith(prefix):
+            return argument[len(prefix):]
+    fail(f"cell {cell['id']!r} argv is missing the {prefix!r} option")
+
+
+def _cell_processed_sha(cell: dict) -> str:
+    for entry in cell["inputs"]:
+        if entry["role"] == "processed-manifest":
+            return entry["sha256"]
+    fail(f"cell {cell['id']!r} has no processed-manifest input")
+
+
+def _cell_processed_dir(cell: dict) -> Path:
+    for entry in cell["inputs"]:
+        if entry["role"] == "processed-manifest":
+            return entry["resolved"].parent
+    fail(f"cell {cell['id']!r} has no processed-manifest input")
+
+
+def _read_processed_pairs(processed_dir: Path, processed_values: dict) -> list:
+    """Returns [(pair_id, record_a, record_b)] in file (manifest) order."""
+    pairs_path = processed_dir / processed_values["pairs_file"]
+    lines = pairs_path.read_text(encoding="utf-8").split("\n")
+    out = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        fields = line.split("\t")
+        out.append((fields[0], fields[1], fields[2]))
+    return out
+
+
+def _median_pair_id(processed_dir: Path, processed_values: dict) -> str:
+    """Recomputes the timing pair selection: the pair minimizing distance
+    from the median combined bucketed set size (mean-of-two-centers median),
+    tie-broken by lexical pair_id."""
+    records_path = processed_dir / processed_values["records_file"]
+    sizes = {}
+    for line in records_path.read_text(encoding="utf-8").split("\n")[1:]:
+        if not line:
+            continue
+        fields = line.split("\t")
+        sizes[fields[0]] = int(fields[3])
+    combined = []
+    for pair_id, record_a, record_b in _read_processed_pairs(processed_dir,
+                                                             processed_values):
+        if record_a not in sizes or record_b not in sizes:
+            fail(f"pair {pair_id!r} references a record missing from "
+                 "records.tsv")
+        combined.append((pair_id, sizes[record_a] + sizes[record_b]))
+    values = sorted(c for _, c in combined)
+    n = len(values)
+    if n == 0:
+        fail("processed dataset has zero pairs; timing pair selection is "
+             "undefined")
+    if n % 2 == 1:
+        median = float(values[n // 2])
+    else:
+        median = (values[n // 2 - 1] + values[n // 2]) / 2.0
+    return min(combined, key=lambda e: (abs(e[1] - median), e[0]))[0]
+
+
+def _derive_accuracy_hash_seed(root_seed: int, pair_id: str, trial_index: int) -> int:
+    pair_bytes = pair_id.encode("utf-8")
+    payload = (b"piccard-real-crs-v1\x00" + struct.pack(">Q", root_seed)
+               + struct.pack(">I", len(pair_bytes)) + pair_bytes
+               + struct.pack(">Q", trial_index))
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _derive_timing_hash_seed(root_seed: int, dataset_sha_raw: bytes, k: int,
+                             m: int, profile_id: str) -> int:
+    profile_bytes = profile_id.encode("utf-8")
+    payload = (b"piccard-real-timing-crs-v1\x00" + struct.pack(">Q", root_seed)
+               + dataset_sha_raw + struct.pack(">I", k) + struct.pack(">I", m)
+               + struct.pack(">I", len(profile_bytes)) + profile_bytes)
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _validate_accuracy_workload(cell: dict, variant: str, csv_rows: list,
+                                processed_values: dict) -> None:
+    """Codex stop-gate round 5: the workload manifest/rows are OUTPUTS whose
+    file hashes were already bound, but their CONTENT is a semantic
+    invariant — schema literal, argv bindings, rows binding, seed
+    derivations, and row-count coupling to the accuracy CSV must all
+    recompute, or a header-only/fabricated artifact set could be
+    certified."""
+    cell_id = cell["id"]
+    manifest_path = _output_path_for(cell, f"accuracy_{variant}.manifest.tsv")
+    rows_path = _output_path_for(cell, f"accuracy_{variant}.rows.tsv")
+    pairs = parse_two_column_tsv(manifest_path)
+    if tuple(key for key, _ in pairs) != _ACCURACY_WORKLOAD_KEY_ORDER:
+        fail(f"cell {cell_id!r} accuracy workload manifest key order/set "
+             "does not match piccard-real-accuracy-workload-v1")
+    wl = dict(pairs)
+    if wl["schema_version"] != "piccard-real-accuracy-workload-v1":
+        fail(f"cell {cell_id!r} accuracy workload schema_version mismatch: "
+             f"{wl['schema_version']!r}")
+    if wl["pair_selection"] != "manifest-order-prefix":
+        fail(f"cell {cell_id!r} accuracy workload pair_selection mismatch")
+    for key, flag in (("k", "k"), ("m", "m"), ("root_seed", "seed"),
+                      ("max_pairs", "max-pairs"),
+                      ("accuracy_trials", "accuracy_trials"),
+                      ("hash_randomness", "hash_randomness")):
+        if wl[key] != _argv_value(cell, flag):
+            fail(f"cell {cell_id!r} accuracy workload {key!r} does not match "
+                 f"the cell argv --{flag}")
+    if wl["dataset_manifest_sha256"] != _cell_processed_sha(cell):
+        fail(f"cell {cell_id!r} accuracy workload dataset_manifest_sha256 does "
+             "not match the processed-manifest input")
+    if wl["rows_sha256"] != sha256_file(rows_path):
+        fail(f"cell {cell_id!r} accuracy workload rows_sha256 does not match "
+             "the rows file")
+
+    lines = rows_path.read_text(encoding="utf-8").split("\n")
+    if not lines or lines[0] != _ACCURACY_ROWS_HEADER or lines[-1] != "":
+        fail(f"cell {cell_id!r} accuracy workload rows header/termination "
+             "mismatch")
+    root_seed = int(wl["root_seed"])
+    trials_n = int(wl["accuracy_trials"])
+    expected_pairs = min(int(processed_values["pair_count"]),
+                         int(wl["max_pairs"]))
+    # Codex stop-gate round 6: bind to the EXACT manifest-order-prefix
+    # pair list, not just counts/membership -- duplicated (pair, trial)
+    # rows hiding an omitted pair must fail.
+    processed_dir = _cell_processed_dir(cell)
+    all_pairs = _read_processed_pairs(processed_dir, processed_values)
+    selected_pairs = all_pairs[:expected_pairs]
+    records_by_pair = {p: (a, b) for p, a, b in selected_pairs}
+    expected_entries = sorted(
+        (pair_id, trial) for pair_id, _, _ in selected_pairs
+        for trial in range(trials_n))
+    entries = []
+    for line in lines[1:-1]:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            fail(f"cell {cell_id!r} accuracy workload rows line has "
+                 f"{len(fields)} fields, expected 5")
+        pair_id, trial_raw, seed_raw, record_a, record_b = fields
+        trial_index = int(trial_raw)
+        derived = _derive_accuracy_hash_seed(root_seed, pair_id, trial_index)
+        if seed_raw != str(derived):
+            fail(f"cell {cell_id!r} accuracy workload hash_seed for "
+                 f"({pair_id!r}, trial {trial_index}) does not recompute")
+        if records_by_pair.get(pair_id) != (record_a, record_b):
+            fail(f"cell {cell_id!r} accuracy workload rows carry wrong "
+                 f"endpoints for pair {pair_id!r}")
+        entries.append((pair_id, trial_index))
+    if entries != expected_entries:
+        fail(f"cell {cell_id!r} accuracy workload rows do not equal the "
+             "exact manifest-order-prefix (pair, trial) list")
+
+    manifest_sha = sha256_file(manifest_path)
+    csv_keys = sorted((str(row.get("pair_id")),
+                       int(row.get("accuracy_trial_index")))
+                      for row in csv_rows)
+    if csv_keys != expected_entries:
+        fail(f"cell {cell_id!r} accuracy CSV rows are not in one-to-one "
+             "correspondence with the workload (pair, trial) list")
+    for row in csv_rows:
+        for column in ("workload_manifest_sha256", "accuracy_workload_sha256"):
+            if str(row.get(column)) != manifest_sha:
+                fail(f"cell {cell_id!r} accuracy CSV column {column!r} does "
+                     "not equal the workload manifest SHA-256")
+        pair_id = str(row.get("pair_id"))
+        trial_index = int(row.get("accuracy_trial_index"))
+        derived = _derive_accuracy_hash_seed(root_seed, pair_id, trial_index)
+        if str(row.get("hash_seed")) != str(derived):
+            fail(f"cell {cell_id!r} accuracy CSV hash_seed for "
+                 f"({pair_id!r}, {trial_index}) does not recompute")
+        expected_records = records_by_pair.get(pair_id)
+        if expected_records != (str(row.get("record_a")),
+                                str(row.get("record_b"))):
+            fail(f"cell {cell_id!r} accuracy CSV endpoints for {pair_id!r} do "
+                 "not match pairs.tsv")
+
+
+def _validate_timing_workload(cell: dict, variant: str, profile: str,
+                              csv_rows: list) -> None:
+    cell_id = cell["id"]
+    manifest_path = _output_path_for(
+        cell, f"timing_{variant}_{profile}.manifest.tsv")
+    pairs = parse_two_column_tsv(manifest_path)
+    keys = tuple(key for key, _ in pairs)
+    if keys[:len(_TIMING_WORKLOAD_KEY_PREFIX)] != _TIMING_WORKLOAD_KEY_PREFIX:
+        fail(f"cell {cell_id!r} timing workload manifest key prefix does not "
+             "match piccard-real-timing-workload-v1")
+    wl = dict(pairs)
+    if wl["schema_version"] != "piccard-real-timing-workload-v1":
+        fail(f"cell {cell_id!r} timing workload schema_version mismatch")
+    for key, flag in (("k", "k"), ("m", "m"), ("root_seed", "seed"),
+                      ("trials", "trials"), ("profile_id", "profile")):
+        if wl[key] != _argv_value(cell, flag):
+            fail(f"cell {cell_id!r} timing workload {key!r} does not match "
+                 f"the cell argv --{flag}")
+    processed_sha = _cell_processed_sha(cell)
+    if wl["dataset_manifest_sha256"] != processed_sha:
+        fail(f"cell {cell_id!r} timing workload dataset_manifest_sha256 does "
+             "not match the processed-manifest input")
+    root_seed = int(wl["root_seed"])
+    k = int(wl["k"])
+    m = int(wl["m"])
+    derived = _derive_timing_hash_seed(root_seed, bytes.fromhex(processed_sha),
+                                       k, m, wl["profile_id"])
+    if wl["hash_seed"] != str(derived):
+        fail(f"cell {cell_id!r} timing workload hash_seed does not recompute")
+    trials_n = int(wl["trials"])
+    if int(wl["input_pair_count"]) != trials_n + 1:
+        fail(f"cell {cell_id!r} timing workload input_pair_count != trials+1")
+    seen_shas = []
+    for index in range(trials_n + 1):
+        prefix = f"input.{index:03d}"
+        role = wl.get(f"{prefix}.role")
+        trial_raw = wl.get(f"{prefix}.trial_index")
+        a_sha = wl.get(f"{prefix}.a_sha256", "")
+        b_sha = wl.get(f"{prefix}.b_sha256", "")
+        if index == 0:
+            if role != "warmup" or trial_raw != "":
+                fail(f"cell {cell_id!r} timing workload input.000 must be the "
+                     "warmup with an empty trial_index")
+        else:
+            if role != "measured" or trial_raw != str(index - 1):
+                fail(f"cell {cell_id!r} timing workload {prefix} must be "
+                     f"measured trial {index - 1}")
+        for sha in (a_sha, b_sha):
+            if not _SHA256_RE.match(sha or ""):
+                fail(f"cell {cell_id!r} timing workload {prefix} carries a "
+                     "malformed input sha256")
+            seen_shas.append(sha)
+    if len(set(seen_shas)) != len(seen_shas):
+        fail(f"cell {cell_id!r} timing workload input hashes are not pairwise "
+             "distinct (fresh per-trial encryption is required)")
+    if wl.get(f"input.{trials_n + 1:03d}.role") is not None:
+        fail(f"cell {cell_id!r} timing workload has more input entries than "
+             "input_pair_count")
+
+    # Codex stop-gate round 6: the timing pair is not a free choice -- it
+    # must be the median-combined-bucketed-size pair recomputed from the
+    # anchored records/pairs files, and every CSV row must carry it.
+    processed_values = _validate_processed_manifest(
+        next(i for i in cell["inputs"]
+             if i["role"] == "processed-manifest")["resolved"], "dblp_acm")
+    processed_dir = _cell_processed_dir(cell)
+    expected_pair = _median_pair_id(processed_dir, processed_values)
+    if wl["pair_id"] != expected_pair:
+        fail(f"cell {cell_id!r} timing workload pair_id {wl['pair_id']!r} is "
+             f"not the recomputed median pair {expected_pair!r}")
+    records_by_pair = {p: (a, b) for p, a, b in
+                       _read_processed_pairs(processed_dir, processed_values)}
+    expected_records = records_by_pair[expected_pair]
+
+    manifest_sha = sha256_file(manifest_path)
+    if len(csv_rows) != trials_n:
+        fail(f"cell {cell_id!r} timing CSV data-row count {len(csv_rows)} != "
+             f"trials {trials_n}")
+    for offset, row in enumerate(csv_rows):
+        if int(row.get("trial_index")) != offset:
+            fail(f"cell {cell_id!r} timing CSV trial_index sequence mismatch "
+                 f"at data row {offset}")
+        if str(row.get("hash_seed")) != str(derived):
+            fail(f"cell {cell_id!r} timing CSV hash_seed does not recompute")
+        if str(row.get("workload_manifest_sha256")) != manifest_sha:
+            fail(f"cell {cell_id!r} timing CSV workload_manifest_sha256 does "
+                 "not equal the workload manifest SHA-256")
+        if str(row.get("pair_id")) != expected_pair:
+            fail(f"cell {cell_id!r} timing CSV pair_id does not equal the "
+                 "recomputed median pair")
+        if (str(row.get("record_a")), str(row.get("record_b"))) != expected_records:
+            fail(f"cell {cell_id!r} timing CSV endpoints do not match "
+                 "pairs.tsv for the median pair")
+
+
+def _validate_summary_recomputation(cell: dict, summary_path: Path) -> None:
+    """The summary is a pure function of the accuracy CSV; regenerate it
+    with the real summarizer and demand byte identity."""
+    accuracy_input = next(
+        (i for i in cell["inputs"] if i["role"] == "accuracy-csv"), None)
+    if accuracy_input is None:
+        fail(f"cell {cell['id']!r} has no accuracy-csv input to recompute "
+             "the summary from")
+    import summarize_real_datasets as _summarizer
+    with tempfile.TemporaryDirectory() as tmp:
+        regenerated = Path(tmp) / "regenerated.csv"
+        try:
+            _summarizer.run(accuracy_input["resolved"], regenerated)
+        except Exception as exc:  # noqa: BLE001 - any summarizer failure is a verdict
+            fail(f"cell {cell['id']!r} summary recomputation failed: {exc}")
+        if regenerated.read_bytes() != summary_path.read_bytes():
+            fail(f"cell {cell['id']!r} summary CSV does not byte-match the "
+                 "recomputation from its accuracy CSV")
+
+
 def _validate_eligibility_integrity(rows: list, cell_id: str, evidence_mode: str) -> None:
     if evidence_mode == "paper":
         return
@@ -818,11 +1124,14 @@ def verify(results_root: Path) -> str:
             csv_path = _output_path_for(cell, f"real_accuracy_{variant}.csv")
             rows = _read_rows(csv_path, ACCURACY_HEADER_FIELDS, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
+            _validate_accuracy_workload(cell, variant, rows,
+                                        processed_manifest_cache[variant])
         elif ":timing:" in cell["id"]:
             profile = cell["id"].split(":timing:", 1)[1]
             csv_path = _output_path_for(cell, f"real_timing_{variant}_{profile}.csv")
             rows = _read_rows(csv_path, TIMING_HEADER_FIELDS, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
+            _validate_timing_workload(cell, variant, profile, rows)
         elif cell["id"].endswith(":accuracy-summary"):
             csv_path = _output_path_for(cell, f"real_accuracy_summary_{variant}.csv")
             with csv_path.open(newline="", encoding="utf-8") as handle:
@@ -830,6 +1139,7 @@ def verify(results_root: Path) -> str:
                 header = next(reader)
                 if header != list(SUMMARY_HEADER_FIELDS):
                     fail(f"cell {cell['id']!r} summary CSV header mismatch")
+            _validate_summary_recomputation(cell, csv_path)
         else:
             fail(f"unrecognized cell id shape: {cell['id']!r}")
 

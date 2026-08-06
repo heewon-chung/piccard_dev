@@ -222,28 +222,156 @@ def main():
             base[bad_field] = bad_value
         return base
 
+    # Codex stop-gate round 5: the verifier now recomputes workload
+    # semantics (schema literals, argv bindings, rows binding, CRS seed
+    # derivations, CSV-to-manifest coupling), so this fake must emit
+    # semantically valid workload artifacts, not header-only stubs.
+    import hashlib
+    import struct
+
+    def derive_accuracy_seed(root_seed, pair_id, trial_index):
+        pair_bytes = pair_id.encode("utf-8")
+        payload = (b"piccard-real-crs-v1\x00" + struct.pack(">Q", root_seed)
+                   + struct.pack(">I", len(pair_bytes)) + pair_bytes
+                   + struct.pack(">Q", trial_index))
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+    def derive_timing_seed(root_seed, dataset_sha_raw, k, m, profile_id):
+        profile_bytes = profile_id.encode("utf-8")
+        payload = (b"piccard-real-timing-crs-v1\x00"
+                   + struct.pack(">Q", root_seed) + dataset_sha_raw
+                   + struct.pack(">I", k) + struct.pack(">I", m)
+                   + struct.pack(">I", len(profile_bytes)) + profile_bytes)
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+    def write_kv_file(path, pairs):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("key\tvalue\n")
+            for key, value in pairs:
+                handle.write(key + "\t" + str(value) + "\n")
+
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    pairs_lines = open(os.path.join(manifest_dir, manifest["pairs_file"]),
+                       encoding="utf-8").read().split("\n")
+    real_pairs = []
+    for line in pairs_lines[1:]:
+        if not line:
+            continue
+        fields = line.split("\t")
+        real_pairs.append({"pair_id": fields[0], "record_a": fields[1],
+                           "record_b": fields[2]})
+
     header = ACCURACY_HEADER if mode == "accuracy" else TIMING_HEADER
+    root_seed = int(opts["seed"])
+    csv_path = opts["csv"]
+
     if mode == "accuracy":
         max_pairs = int(opts["max-pairs"])
         accuracy_trials = int(opts["accuracy_trials"])
-        row_count = max_pairs * accuracy_trials
-    else:
-        row_count = int(opts["trials"])
+        selected = real_pairs[:min(len(real_pairs), max_pairs)]
+        entries = []
+        for pair in selected:
+            for trial in range(accuracy_trials):
+                entries.append((pair, trial,
+                                derive_accuracy_seed(root_seed,
+                                                     pair["pair_id"], trial)))
+        entries.sort(key=lambda e: (e[0]["pair_id"], e[1]))
 
-    csv_path = opts["csv"]
-    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
-        import csv as csv_module
-        writer = csv_module.writer(handle, lineterminator="\n")
-        writer.writerow(header)
-        for i in range(row_count):
-            row = row_dict()
-            writer.writerow([row[name] for name in header])
-
-    with open(opts["workload-manifest-out"], "w", encoding="utf-8") as handle:
-        handle.write("key\tvalue\nschema_version\tfake-workload-v1\n")
-    if mode == "accuracy":
-        with open(opts["workload-rows-out"], "w", encoding="utf-8") as handle:
+        rows_path = opts["workload-rows-out"]
+        with open(rows_path, "w", encoding="utf-8") as handle:
             handle.write("pair_id\ttrial_index\thash_seed\trecord_a\trecord_b\n")
+            for pair, trial, seed in entries:
+                handle.write("\t".join((pair["pair_id"], str(trial), str(seed),
+                                        pair["record_a"], pair["record_b"]))
+                             + "\n")
+        write_kv_file(opts["workload-manifest-out"], (
+            ("schema_version", "piccard-real-accuracy-workload-v1"),
+            ("dataset_manifest_sha256", manifest_sha),
+            ("rows_sha256", sha256_file(rows_path)),
+            ("k", opts["k"]), ("m", opts["m"]),
+            ("root_seed", opts["seed"]), ("max_pairs", opts["max-pairs"]),
+            ("accuracy_trials", opts["accuracy_trials"]),
+            ("hash_randomness", opts["hash_randomness"]),
+            ("pair_selection", "manifest-order-prefix"),
+        ))
+        workload_sha = sha256_file(opts["workload-manifest-out"])
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            import csv as csv_module
+            writer = csv_module.writer(handle, lineterminator="\n")
+            writer.writerow(header)
+            for pair, trial, seed in entries:
+                row = row_dict(pair_id=pair["pair_id"],
+                               record_a=pair["record_a"],
+                               record_b=pair["record_b"],
+                               accuracy_trial_index=str(trial),
+                               hash_seed=str(seed),
+                               workload_manifest_sha256=workload_sha,
+                               accuracy_workload_sha256=workload_sha)
+                writer.writerow([row[name] for name in header])
+    else:
+        trials = int(opts["trials"])
+        # Median-combined-bucketed-size pair selection, mirroring the real
+        # binary (and the verifier's recomputation): mean-of-two-centers
+        # median over all pairs' combined sizes, argmin distance, lexical
+        # pair_id tie-break.
+        records_lines = open(os.path.join(manifest_dir,
+                                          manifest["records_file"]),
+                             encoding="utf-8").read().split("\n")
+        sizes = {}
+        for line in records_lines[1:]:
+            if not line:
+                continue
+            fields = line.split("\t")
+            sizes[fields[0]] = int(fields[3])
+        combined = [(p["pair_id"], sizes[p["record_a"]] + sizes[p["record_b"]],
+                     p) for p in real_pairs]
+        values = sorted(c for _, c, _ in combined)
+        n = len(values)
+        if n & 1:  # bitwise odd-check: the modulo operator's character
+            median = float(values[n // 2])  # would break this template
+        else:
+            median = (values[n // 2 - 1] + values[n // 2]) / 2.0
+        selected_pair = min(combined,
+                            key=lambda e: (abs(e[1] - median), e[0]))[2]
+        seed = derive_timing_seed(root_seed, bytes.fromhex(manifest_sha),
+                                  int(opts["k"]), int(opts["m"]),
+                                  opts["profile"])
+        manifest_pairs = [
+            ("schema_version", "piccard-real-timing-workload-v1"),
+            ("dataset_manifest_sha256", manifest_sha),
+            ("pair_id", selected_pair["pair_id"]),
+            ("k", opts["k"]), ("m", opts["m"]),
+            ("profile_id", opts["profile"]),
+            ("root_seed", opts["seed"]), ("hash_seed", str(seed)),
+            ("trials", opts["trials"]),
+            ("input_pair_count", str(trials + 1)),
+        ]
+        for index in range(trials + 1):
+            prefix = "input." + format(index, "03d")
+            role = "warmup" if index == 0 else "measured"
+            trial_value = "" if index == 0 else str(index - 1)
+            a_sha = hashlib.sha256(
+                ("fake-input-" + str(index) + "-a").encode()).hexdigest()
+            b_sha = hashlib.sha256(
+                ("fake-input-" + str(index) + "-b").encode()).hexdigest()
+            manifest_pairs.extend(((prefix + ".role", role),
+                                   (prefix + ".trial_index", trial_value),
+                                   (prefix + ".a_sha256", a_sha),
+                                   (prefix + ".b_sha256", b_sha)))
+        write_kv_file(opts["workload-manifest-out"], manifest_pairs)
+        workload_sha = sha256_file(opts["workload-manifest-out"])
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            import csv as csv_module
+            writer = csv_module.writer(handle, lineterminator="\n")
+            writer.writerow(header)
+            for trial in range(trials):
+                row = row_dict(pair_id=selected_pair["pair_id"],
+                               record_a=selected_pair["record_a"],
+                               record_b=selected_pair["record_b"],
+                               trial_index=str(trial),
+                               hash_seed=str(seed),
+                               workload_manifest_sha256=workload_sha)
+                writer.writerow([row[name] for name in header])
     return 0
 
 
@@ -279,6 +407,30 @@ def run_runner(*args, env=None):
 
 def run_verifier(results_root, env=None):
     return run_command([sys.executable, str(VERIFIER), str(results_root)], env=env)
+
+
+def rebind_file_hash(results_root: pathlib.Path, rel_path: str) -> None:
+    """After tampering a results file, update EVERY run_metadata.tsv
+    reference to it (cell inputs/outputs, artifacts) to the tampered
+    file's real hash, and drop the stale status file — so only the
+    verifier's SEMANTIC checks can catch the tamper, never the generic
+    checksum comparison."""
+    new_sha = hashlib.sha256(
+        (results_root / rel_path).read_bytes()).hexdigest()
+    meta_path = results_root / "run_metadata.tsv"
+    lines = meta_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    prefixes = []
+    for line in lines:
+        key, _, value = line.rstrip("\n").partition("\t")
+        if key.endswith(".path") and value == rel_path:
+            prefixes.append(key[:-len(".path")])
+    assert prefixes, f"no run_metadata reference to {rel_path!r}"
+    for i, line in enumerate(lines):
+        for prefix in prefixes:
+            if line.startswith(f"{prefix}.sha256\t"):
+                lines[i] = f"{prefix}.sha256\t{new_sha}\n"
+    meta_path.write_text("".join(lines), encoding="utf-8")
+    (results_root / "verification_status.tsv").unlink(missing_ok=True)
 
 
 def read_kv_file(path: pathlib.Path) -> dict:
@@ -1071,6 +1223,135 @@ class QuickEndToEndTest(unittest.TestCase):
         self.assertNotEqual(verify_result.returncode, 0)
         self.assertIn("source-root-dblp_acm_u65536", verify_result.stderr)
         self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_header_only_accuracy_csv_with_rebound_hashes(self):
+        # Codex stop-gate round 5: a header-only accuracy CSV whose
+        # run_metadata hashes were consistently rebound must fail on the
+        # SEMANTIC row-count-vs-workload coupling, not on checksums.
+        self.run_quick()
+        csv_rel = "csv/real_accuracy_dblp_acm_u65536.csv"
+        csv_path = self.results_root / csv_rel
+        header_line = csv_path.read_text(encoding="utf-8").splitlines()[0]
+        csv_path.write_text(header_line + "\n", encoding="utf-8")
+        rebind_file_hash(self.results_root, csv_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("one-to-one", verify_result.stderr)
+        self.assertFalse((self.results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_tampered_hash_seed_with_rebound_hashes(self):
+        # Codex stop-gate round 5: the per-(pair, trial) CRS seed must
+        # recompute; a tampered seed with rebound file hashes fails.
+        self.run_quick()
+        csv_rel = "csv/real_accuracy_dblp_acm_u65536.csv"
+        csv_path = self.results_root / csv_rel
+        lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        header_fields = lines[0].rstrip("\n").split(",")
+        seed_col = header_fields.index("hash_seed")
+        data = lines[1].rstrip("\n").split(",")
+        data[seed_col] = "1" if data[seed_col] != "1" else "2"
+        lines[1] = ",".join(data) + "\n"
+        csv_path.write_text("".join(lines), encoding="utf-8")
+        rebind_file_hash(self.results_root, csv_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("does not recompute", verify_result.stderr)
+
+    def test_verifier_rejects_tampered_workload_schema_with_rebound_hashes(self):
+        # Codex stop-gate round 5: the workload manifest schema literal is
+        # a semantic invariant, not just a hashed byte blob.
+        self.run_quick()
+        wl_rel = "workloads/accuracy_dblp_acm_u65536.manifest.tsv"
+        wl_path = self.results_root / wl_rel
+        wl_path.write_text(wl_path.read_text(encoding="utf-8").replace(
+            "piccard-real-accuracy-workload-v1", "fake-workload-v1"),
+            encoding="utf-8")
+        rebind_file_hash(self.results_root, wl_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("workload", verify_result.stderr)
+
+    def test_verifier_rejects_tampered_summary_with_rebound_hashes(self):
+        # Codex stop-gate round 5: the summary is recomputed from the
+        # accuracy CSV and must byte-match; a tampered statistic with a
+        # rebound hash fails.
+        self.run_quick()
+        summary_rel = "csv/real_accuracy_summary_dblp_acm_u65536.csv"
+        summary_path = self.results_root / summary_rel
+        lines = summary_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        assert len(lines) >= 2
+        data = lines[1].rstrip("\n").split(",")
+        n_col = 3  # dataset,variant,jaccard_bucket,n,...
+        data[n_col] = str(int(data[n_col] or 0) + 1) if data[n_col] else "1"
+        lines[1] = ",".join(data) + "\n"
+        summary_path.write_text("".join(lines), encoding="utf-8")
+        rebind_file_hash(self.results_root, summary_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("byte-match the recomputation", verify_result.stderr)
+
+    def test_verifier_rejects_duplicated_pair_row_hiding_an_omission(self):
+        # Codex stop-gate round 6: duplicating one (pair, trial) row to
+        # hide an omitted pair must fail the exact one-to-one binding,
+        # even with all file hashes consistently rebound.
+        self.run_quick()
+        csv_rel = "csv/real_accuracy_dblp_acm_u65536.csv"
+        csv_path = self.results_root / csv_rel
+        lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        assert len(lines) >= 3, "expected two data rows in the quick CSV"
+        lines[2] = lines[1]
+        csv_path.write_text("".join(lines), encoding="utf-8")
+        rebind_file_hash(self.results_root, csv_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("one-to-one", verify_result.stderr)
+
+    def test_verifier_rejects_non_median_timing_pair_with_rebound_hashes(self):
+        # Codex stop-gate round 6: the timing pair must be the recomputed
+        # median pair; swapping workload manifest AND CSV to another real
+        # pair (hashes rebound) must fail.
+        self.run_quick()
+        wl_rel = "workloads/timing_dblp_acm_u65536_toy-smoke.manifest.tsv"
+        csv_rel = "csv/real_timing_dblp_acm_u65536_toy-smoke.csv"
+        wl_path = self.results_root / wl_rel
+        wl_values = read_kv_file(wl_path)
+        current_pair = wl_values["pair_id"]
+
+        pairs_lines = (QUICK_DATASET_MANIFEST.parent / "pairs.tsv").read_text(
+            encoding="utf-8").splitlines()
+        other = None
+        for line in pairs_lines[1:]:
+            fields = line.split("\t")
+            if fields and fields[0] != current_pair:
+                other = (fields[0], fields[1], fields[2])
+                break
+        self.assertIsNotNone(other, "no alternative pair found in pairs.tsv")
+
+        wl_path.write_text(wl_path.read_text(encoding="utf-8").replace(
+            f"pair_id\t{current_pair}", f"pair_id\t{other[0]}"),
+            encoding="utf-8")
+        csv_path = self.results_root / csv_rel
+        csv_lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        header_fields = csv_lines[0].rstrip("\n").split(",")
+        pair_col = header_fields.index("pair_id")
+        a_col = header_fields.index("record_a")
+        b_col = header_fields.index("record_b")
+        for i in range(1, len(csv_lines)):
+            data = csv_lines[i].rstrip("\n").split(",")
+            data[pair_col], data[a_col], data[b_col] = other
+            csv_lines[i] = ",".join(data) + "\n"
+        csv_path.write_text("".join(csv_lines), encoding="utf-8")
+        rebind_file_hash(self.results_root, wl_rel)
+        rebind_file_hash(self.results_root, csv_rel)
+
+        verify_result = run_verifier(self.results_root)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("median pair", verify_result.stderr)
 
     def test_verifier_rejects_nan_in_timing_csv(self):
         result = self.run_quick(env={
