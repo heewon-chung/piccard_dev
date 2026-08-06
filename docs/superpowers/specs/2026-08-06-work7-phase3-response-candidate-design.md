@@ -22,7 +22,8 @@ The Work 7 session contains:
 3. a metadata record with the Paper commit/status digest and candidate digest;
    and
 4. a validation report linking every inserted implementation claim to the claim
-   matrix and evidence manifest.
+   matrix and Phase 2 seal; and
+5. an immutable Phase 3 seal chaining candidate artifacts to the Phase 2 seal.
 
 ## Success conditions
 
@@ -32,7 +33,9 @@ The Work 7 session contains:
 3. Every inserted measured value is either a non-performance diagnostic from
    the current toy session or omitted.
 4. The unified diff applies to the recorded baseline bytes in a dry-run check.
-5. The Paper HEAD, status fingerprint, and files remain unchanged.
+5. Claim 7 is toy-verified for structural readiness, while the Work 7 and
+   threshold gates remain `PENDING` and `DEFERRED_EXPECTED` respectively.
+6. The Paper byte-level snapshot remains unchanged.
 
 ## Failure conditions
 
@@ -51,6 +54,7 @@ The Work 7 session contains:
 
 ## Verification
 
-The phase hashes Paper state before and after generation, validates candidate
-claims against the matrix, dry-runs the diff against a temporary copy, and
-fails if either external worktree fingerprint changes.
+The phase snapshots Paper before and after generation, validates candidate
+claims against the matrix, dry-runs the diff against a temporary copy, seals
+all generated artifacts, and fails if either external-worktree snapshot
+changes.

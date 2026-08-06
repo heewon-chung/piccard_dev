@@ -35,8 +35,13 @@ POC_APPROVED_PERFORMANCE_PENDING
 ```
 
 That status means the implementation and one-run toy integration path are
-approved. It does not mean that paper numbers are approved, that real-data
-results have been produced, or that threshold FP/FN work is authorized.
+approved. It also records structural readiness for a later threshold branch:
+the seven pre-threshold units compose and the remaining blocker is the
+separately scheduled performance campaign. It does not mean that paper
+numbers are approved, that real-data results have been produced, or that
+creating, modifying, or merging threshold FP/FN work is authorized. This is
+the user-approved PoC scope amendment to the original goal's stronger
+operational branch-readiness wording.
 
 ## 2. Scope
 
@@ -67,20 +72,37 @@ Work 7 shall add:
 - Do not broaden Work 7 into production hardening or exhaustive edge-case
   coverage.
 
-## 4. Frozen state vocabulary
+## 4. Frozen state axes
 
-Every claim row uses exactly one of these implementation states:
+State values are field-specific. A value is invalid outside its declared
+field; no free-form synonym is accepted.
 
-| State | Meaning |
-|---|---|
-| `IMPLEMENTED` | The required implementation exists and has an automated test reference. |
-| `TOY_VERIFIED` | The implementation was exercised by this Work 7 toy session. |
-| `PERFORMANCE_PENDING` | Actual data, repeated measurement, or paper-grade performance evidence is intentionally deferred. |
-| `DEFERRED_EXPECTED` | The item belongs to later threshold FP/FN work and must not be implemented here. |
+| Field | Allowed value | Meaning |
+|---|---|---|
+| `implementation_state` | `IMPLEMENTED` | Required code exists and has a test reference. |
+| `toy_evidence_state` | `PENDING`, `TOY_VERIFIED` | Current-session integration evidence is absent or verified. |
+| `performance_state` | `PERFORMANCE_PENDING` | Actual data, repeated measurement, and paper-grade performance evidence are deferred. |
+| top-level `threshold_gate_state` | `DEFERRED_EXPECTED` | Threshold FP/FN work is intentionally outside Work 7 and is not authorized. |
+| top-level `work_gate_state` | `PENDING`, `POC_APPROVED_PERFORMANCE_PENDING` | Final dual-review gate has not or has passed. |
 
-`TOY_VERIFIED` is not stronger than `IMPLEMENTED`; it records an integration
-observation. A goal may therefore expose separate implementation and evidence
-state fields. No other spelling or free-form state is accepted.
+The allowed combinations are also frozen:
+
+- static preflight, claims 1–6: `IMPLEMENTED/PENDING/PERFORMANCE_PENDING`;
+- evidence-bound validation, claims 1–6:
+  `IMPLEMENTED/TOY_VERIFIED/PERFORMANCE_PENDING`;
+- claim 7 before final review:
+  `IMPLEMENTED/TOY_VERIFIED/PERFORMANCE_PENDING` with
+  `work_gate_state=PENDING`; and
+- terminal validation, all claims:
+  `IMPLEMENTED/TOY_VERIFIED/PERFORMANCE_PENDING` with
+  `threshold_gate_state=DEFERRED_EXPECTED` and
+  `work_gate_state=POC_APPROVED_PERFORMANCE_PENDING`.
+
+The static verifier checks code and test references but prohibits toy evidence
+before a session exists. The evidence-bound verifier checks current-session
+artifacts for claims 1–6. Claim 7 becomes toy-verified after the runtime seal
+and response-candidate seal exist, but the work gate remains pending until both
+final reviews approve.
 
 ## 5. Claim contract
 
@@ -98,46 +120,50 @@ Each row contains:
 
 - stable claim identifier;
 - original-intent text;
-- implementation state;
-- evidence state;
+- `implementation_state`;
+- `toy_evidence_state`;
+- `performance_state`;
 - source paths;
 - automated test names or paths;
 - toy artifact paths when exercised;
 - deferred-work rationale when applicable; and
 - explicit prohibited overclaim text.
 
-Paths are repository-relative and must resolve. Test references must be
-discoverable in the fresh Release build. Toy artifacts must belong to the
-current session and appear in its manifest.
+The document also contains the two top-level gate states. Paths are
+repository-relative and must resolve. Test references must be discoverable in
+the fresh Release build. Toy artifacts must belong to the current session and
+appear in its current phase seal.
 
 ## 6. Architecture
 
 ```text
-state fingerprint
+byte-level state snapshot
       |
       v
-fresh Release build -----> claim contract verifier
+fresh Release build -----> static claim verifier
       |                              |
       v                              v
 Work 1–6 tests              contract validation
       |
       v
-one-run toy probes -----> provenance validation
+one-run toy probes -----> evidence-bound claim validation
       |                              |
       +--------------+---------------+
                      v
-             hashed session manifest
+          immutable runtime-evidence seal
                      |
           +----------+-----------+
           v                      v
-ResponseStrategy candidate   model review inputs
+ResponseStrategy candidate   canonical review packet
    (outside Paper)                 |
                                  v
              POC_APPROVED_PERFORMANCE_PENDING
 ```
 
-The implementation consists of six ordered phases. A later phase may start
-only after the preceding phase's success criteria pass.
+The implementation consists of six ordered phases. Phase 1 has a static pass
+before Phase 2 and a mandatory evidence-bound pass after Phase 2. Claim 7 is
+terminalized only in Phase 5. Except for those explicit closure checks, a later
+phase may start only after the preceding phase's success criteria pass.
 
 | Phase | Unit | Detailed design |
 |---|---|---|
@@ -151,16 +177,31 @@ only after the preceding phase's success criteria pass.
 ## 7. Evidence session
 
 Each run creates a new session keyed by the source commit. The runner refuses
-to overwrite an existing session. The session records:
+to overwrite an existing session. Within it, each phase writes a new immutable
+subdirectory and a canonical phase seal. Every seal includes the preceding
+seal's digest, forming this chain:
+
+```text
+phase0 state seal
+  -> phase2 runtime + evidence-bound-claims seal
+  -> phase3 response-candidate seal
+  -> phase4 work-review seal
+  -> phase5 dual-review terminal seal
+```
+
+No file covered by a seal may be changed. Later artifacts are appended under a
+new phase directory; the so-called runtime manifest is final only for Phase 2,
+not for the whole session. The terminal seal digest is the authoritative
+session digest. Across its layered records, the session records:
 
 - source commit and clean/dirty status;
-- Paper repository commit and complete status fingerprint;
-- threshold worktree branch, commit, and complete status fingerprint;
+- Paper repository commit and canonical byte-level snapshot digest;
+- threshold worktree branch, commit, and canonical byte-level snapshot digest;
 - compiler, CMake, OpenFHE, and build configuration identifiers;
 - exact argv and exit status for every command;
 - start/end timestamps and durations;
 - per-artifact SHA-256 digests; and
-- a final manifest digest.
+- a digest for every immutable phase seal and one terminal digest.
 
 Generated runtime evidence remains outside tracked source paths by default.
 Small schemas, claim contracts, verifier fixtures, and tests are tracked.
@@ -170,12 +211,18 @@ by the handoff summary.
 ## 8. External repository guard
 
 The Paper and threshold worktrees are read-only inputs. Before any generated
-candidate or model review, Work 7 records their full fingerprints. After each
-phase that reads them, it recomputes the fingerprint.
+candidate or model review, Work 7 records a canonical byte-level snapshot.
+The snapshot covers HEAD, branch/detached state, index entries and blobs,
+tracked worktree bytes, untracked file bytes, file modes, symlink targets, and
+submodule commit/status records. Paths and lengths are framed before hashing,
+so concatenation is unambiguous. After every phase that reads an external
+worktree and before terminalization, Work 7 recomputes the snapshot.
 
-Success requires byte-for-byte identical status output and the same HEAD for
+Success requires identical canonical snapshot digests and the same HEAD for
 both external worktrees. The Paper worktree may already be dirty; its dirty
-baseline is evidence to preserve, not a failure to clean up.
+baseline is evidence to preserve, not a failure to clean up. Evidence and
+build roots must resolve outside all three guarded worktrees, and their real
+paths may not alias a guarded path through a symlink.
 
 Any Work 7 process that changes either external worktree fails the phase. The
 implementation must never discard, stage, format, or otherwise normalize the
@@ -184,7 +231,7 @@ user's existing Paper changes.
 ## 9. Test and benchmark policy
 
 - Build from a newly created Release build directory.
-- Run focused Work 1–6 tests plus Work 7 contract/provenance tests.
+- Run the exact focused registry below plus Work 7 contract/provenance tests.
 - Use synthetic fixtures for real-dataset parsers.
 - Use toy parameter sizes for executable probes.
 - Set every repeat/trial/iteration count controlling performance sampling to
@@ -193,6 +240,38 @@ user's existing Paper changes.
 - Treat missing tools, stale binaries, skipped required tests, malformed rows,
   provenance mismatch, or a count greater than one as hard failures.
 
+The fresh configure command fixes
+`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON`.
+Configuration must report OpenFHE, GMP, GTest, and Python 3 as available. The
+required target/test registry is:
+
+| Goal | Required CTest names |
+|---|---|
+| estimator | `MinHash`, `EstimatorDiagnostic`, `EstimatorProvenanceSerializers` |
+| sanitizer/calibration | `SecurityProfile`, `Params`, `NoiseCalibrationCutoverProbeV2`, `NoisePreThresholdCoverage` |
+| comparisons | `BenchmarkProfile`, `BaselineProfile`, `ComparisonWorkload`, `ReviewComparisonCli`, `VerifyReviewComparison`, `VerifySJ16Extrapolation` |
+| real-data pipeline | `RealDataset`, `RealDatasetMetrics`, `RealDatasetTiming`, `RealDatasetPreprocess`, `RunRealDatasets` |
+| dynamic/deletion | `DynamicCiphertextStore`, `DynamicRefreshE2E`, `DynamicRefreshBenchmark`, `DeletionSurvival`, `DeletionMonteCarlo`, `DeletionSurvivalCli` |
+| Work 7 | `Work7StateGuard`, `Work7ClaimContract`, `Work7IntegrationRunner`, `Work7ResponseCandidate` |
+
+The runner must fail if any registry name is missing from `ctest -N`; it runs
+each selected test once with no repeat option and treats `Not Run` or `Skipped`
+as failure. This curated registry is the PoC scope amendment to the original
+all-unit/all-integration terminal campaign; that full campaign belongs to the
+later performance pass.
+
+The executable probe registry is also fixed:
+
+| Probe | Command/policy | Output contract |
+|---|---|---|
+| estimator functional | execute `EstimatorDiagnostic` once and retain its CTest log; never call `bench_estimator_bias` | passing test log bound to build/source provenance |
+| comparison + refresh | `run_pre_threshold_profiles.sh --suite=smoke --seed=7 --threads=2` | existing benchmark/review/dynamic schemas; every trials/accuracy-trials/refresh-updates field is `1` |
+| synthetic real-data | `run_real_datasets.sh --quick --seed=7 --threads=2` | quick DBLP-ACM tracked fixture only; accuracy and timing trials are `1`; no warmup |
+| deletion survival | `bench_deletion_survival --n=64 --d=3 --k=8 --required_survival=0.99 --r_values=1,4,8 --trials=1 --seed=7` | existing 17-column CSV, three rows, `trials=1` |
+
+All fixture inputs must resolve below `tests/fixtures/real_datasets/quick` or
+`tests/fixtures/runner`. Warmup count is zero; retry count is zero.
+
 ## 10. Review policy
 
 The Work 7 diff and toy evidence receive a `gpt-5.6-sol` high work-level review.
@@ -200,14 +279,18 @@ After any required fix, the full focused verification is rerun against a new
 commit-scoped session.
 
 The final whole-pre-threshold review is performed independently and
-concurrently by Claude Fable high and `gpt-5.6-sol` high. Both reviewers receive
-the same source commit, approved design, claim matrix, session manifest,
-candidate response diff, and verification summary.
+concurrently by Claude Fable high and `gpt-5.6-sol` high. A canonical review
+packet manifest hashes the source commit, approved designs and plan, claim
+matrix/report, every prior phase seal, candidate/diff, external snapshots,
+and verification summary. Both reviewers receive the same packet digest.
 
-Both reviewers must return an unqualified `APPROVED` verdict for the exact same
-source commit. `APPROVED_WITH_COMMENTS`, a request for changes, an inability to
-inspect evidence, or approval of different commits is not approval. At most two
-remediation cycles are allowed before the Work 7 gate stops as failed.
+Both reviewers must return a mechanically parsed record containing the
+provider/model identifier, exact source commit, exact packet digest, terminal
+status, and an unqualified `APPROVED` verdict. Their unedited raw outputs are
+hashed into the Phase 5 seal. `APPROVED_WITH_COMMENTS`, a request for changes,
+an inability to inspect evidence, a digest omission, or approval of different
+commits/packets is not approval. At most two remediation cycles are allowed
+before the Work 7 gate stops as failed.
 
 ## 11. Completion criteria
 

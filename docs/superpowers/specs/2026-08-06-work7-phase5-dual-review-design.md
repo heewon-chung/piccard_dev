@@ -25,6 +25,10 @@ packet. Neither reviewer receives or reacts to the other's verdict.
 - external-worktree before/after fingerprints; and
 - Work 7 work-level approval.
 
+Every item, including the Work 7 raw approval and Phase 4 seal, is hashed into
+one canonical final-review packet manifest. Both reviewers receive and must
+echo its single digest.
+
 ## Required review questions
 
 1. Does each of the seven original goals map to the implementation as intended?
@@ -37,23 +41,29 @@ packet. Neither reviewer receives or reacts to the other's verdict.
 
 ## Success conditions
 
-1. Both reviewers inspect the same commit, manifest digest, and review packet.
+1. Both reviewers inspect and echo the same commit and final-review packet
+   digest together with their provider/model identifiers.
 2. Both independently return exactly `APPROVED` with no required changes.
 3. Both explicitly approve the terminal status
    `POC_APPROVED_PERFORMANCE_PENDING`.
-4. Final external-worktree fingerprints equal the Phase 0 baseline.
+4. Both raw responses are preserved unedited and mechanically parsed; their
+   hashes, the packet digest, and the Phase 4 seal chain into a terminal Phase
+   5 seal.
+5. Final external-worktree byte-level snapshots equal the Phase 0 baseline.
 
 ## Failure conditions
 
 - Either verdict is conditional, requests a change, or is not `APPROVED`.
-- Reviewers inspect different source commits or artifact digests.
+- Reviewers inspect different source commits or packet digests, omit required
+  metadata, or return a non-exact verdict token.
 - Either reviewer identifies an original-intent mismatch or overclaim.
 - Paper or threshold state differs from baseline.
 - The maximum of two remediation cycles is exhausted.
 
 ## Terminal record
 
-The final record contains both unedited verdicts, reviewer/model identifiers,
-the exact source commit, the manifest digest, the external-state digests, and
-the single terminal status. Approval records must never be retroactively
-rewritten to cover Works 1–6 individually.
+The final record contains both unedited verdicts and their hashes,
+provider/model identifiers, the exact source commit, the canonical review
+packet and terminal-seal digests, the external-state digests, and the single
+terminal status. Approval records must never be retroactively rewritten to
+cover Works 1–6 individually.

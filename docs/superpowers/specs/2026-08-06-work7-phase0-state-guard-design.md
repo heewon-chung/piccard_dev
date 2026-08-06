@@ -20,11 +20,16 @@ The phase emits a canonical JSON state record containing, for each worktree:
 - absolute resolved path;
 - current branch or detached-HEAD marker;
 - full commit SHA;
-- porcelain-v1 status including untracked files; and
-- SHA-256 digest of the canonical state fields.
+- index entry modes/object IDs/stages;
+- framed path, mode, type, byte digest, and symlink target for every tracked
+  and untracked worktree entry;
+- submodule commit and recursively reported status; and
+- SHA-256 digest of the canonical byte-level snapshot.
 
 It also emits a session identifier derived from the pre-threshold source
-commit. An existing destination with the same identifier is never overwritten.
+commit and seals the Phase 0 record. An existing destination with the same
+identifier is never overwritten. Evidence and build roots must resolve outside
+all guarded worktrees and must not alias one through a symlink.
 
 ## Success conditions
 
@@ -33,8 +38,11 @@ commit. An existing destination with the same identifier is never overwritten.
 2. All three worktrees are readable Git worktrees.
 3. Paper and threshold status, including existing dirt, is recorded without
    modification.
-4. Recomputing the state record produces the same canonical digest.
-5. The selected session destination does not already exist.
+4. Recomputing every byte-level snapshot produces the same canonical digest.
+5. Changing bytes in an already-dirty tracked or untracked file changes the
+   digest even when porcelain status text does not change.
+6. The selected session destination does not already exist and neither output
+   root is contained in or aliases a guarded worktree.
 
 ## Failure conditions
 
@@ -42,6 +50,7 @@ commit. An existing destination with the same identifier is never overwritten.
 - The source tree is dirty at the start of an authoritative run.
 - A branch or commit differs from the configured expectation.
 - A session path collision occurs.
+- An evidence/build path is within or aliases a guarded worktree.
 - Canonicalization is nondeterministic.
 - Paper or threshold state changes between the initial and final guard check.
 
@@ -49,11 +58,14 @@ commit. An existing destination with the same identifier is never overwritten.
 
 - No checkout, reset, clean, stash, add, commit, format, or file write may be
   performed in Paper or threshold.
-- The implementation may not exclude untracked Paper files from the fingerprint.
+- The implementation may not exclude untracked Paper files, modes, symlinks,
+  index state, or submodules from the snapshot.
 - The implementation may not delete an old session to make a rerun pass.
 
 ## Verification
 
-Unit fixtures cover clean, dirty, malformed, and collision states. An
-integration test records the real three-worktree baseline, reruns the guard,
-and proves that the two external fingerprints did not change.
+Unit fixtures cover clean, dirty, byte mutation with unchanged status shape,
+untracked files, executable modes, symlinks, submodules, containment/aliasing,
+malformed input, and collision states. An integration test records the real
+three-worktree baseline, reruns the guard after every external read, and proves
+that the two external snapshots did not change.
