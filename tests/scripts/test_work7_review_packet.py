@@ -2,31 +2,31 @@
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).parents[2]
+REVIEW_FIXTURES = ROOT / "tests/fixtures/work7/reviews"
 
 
 class Work7ReviewPacketTests(unittest.TestCase):
     """The packet is a real session-local snapshot, never a source-text check."""
 
     def setUp(self):
-        from tests.scripts.test_work7_response_candidate import Work7ResponseCandidateTests
+        from tests.scripts.test_work7_integration_runner import Work7IntegrationRunnerTests
 
-        self.temporary = Path(tempfile.mkdtemp())
+        helper = Work7IntegrationRunnerTests()
+        produced, self.temporary, self.commit = helper.invoke_fake_runner(source_snapshot=ROOT, terminal_wrapper=True)
         self.addCleanup(shutil.rmtree, self.temporary, True)
-        helper = Work7ResponseCandidateTests()
-        self.source, self.paper, self.threshold, self.session, self.commit, _ = helper.make_phase_inputs(self.temporary)
-        static = subprocess.run((sys.executable, str(ROOT / "scripts/verify_work7_claims.py"), "--mode", "static",
-                                 "--contract", str(self.source / "scripts/work7_claims.json"), "--source-root", str(self.source),
-                                 "--source-commit", self.commit, "--ctest-inventory", str(self.session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
-                                 "--output", str(self.session / "phase2/static-report.json")), capture_output=True)
-        self.assertEqual(static.returncode, 0, static.stderr.decode())
+        self.assertEqual(produced.returncode, 0, produced.stderr.decode())
+        self.source, self.paper, self.threshold = (self.temporary / name for name in ("source", "paper", "threshold"))
+        self.session = self.temporary / "sessions" / ("session-" + self.commit)
         generated = subprocess.run((sys.executable, str(ROOT / "scripts/generate_work7_response_candidate.py"),
                                    "--source-root", str(self.source), "--paper-root", str(self.paper),
                                    "--threshold-root", str(self.threshold), "--session-root", str(self.session),
@@ -47,13 +47,81 @@ class Work7ReviewPacketTests(unittest.TestCase):
 
     def work_review(self, packet: Path, *, checks: bool = True) -> Path:
         review = self.temporary / "work-review.txt"
-        lines = ["VERDICT: APPROVED", "PROVIDER: openai", "MODEL: gpt-5.6-sol", "EFFORT: high",
-                 f"SOURCE_COMMIT: {self.commit}", f"PACKET_SHA256: {hashlib.sha256(packet.read_bytes()).hexdigest()}",
-                 "STATUS: WORK7_APPROVED"]
-        if checks:
-            lines.extend(f"CHECK {name}: CONFIRMED" for name in ("POC_SCOPE", "ONE_RUN_POLICY", "PROVENANCE", "FAIL_CLOSED", "EXTERNAL_IMMUTABILITY", "NO_OVERCLAIM"))
-        review.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        text = REVIEW_FIXTURES.joinpath("work-approved.template.txt").read_text(encoding="utf-8").format(
+            SOURCE_COMMIT=self.commit, PACKET_SHA256=hashlib.sha256(packet.read_bytes()).hexdigest())
+        if not checks:
+            text = "\n".join(text.splitlines()[:7]) + "\n"
+        review.write_text(text, encoding="utf-8")
         return review
+
+    def final_review(self, packet: Path, provider: str) -> Path:
+        filename = {"anthropic": "final-claude-approved.template.txt", "openai": "final-sol-approved.template.txt"}[provider]
+        review = self.temporary / f"{provider}-final.txt"
+        review.write_text(REVIEW_FIXTURES.joinpath(filename).read_text(encoding="utf-8").format(
+            SOURCE_COMMIT=self.commit, PACKET_SHA256=hashlib.sha256(packet.read_bytes()).hexdigest()), encoding="utf-8")
+        return review
+
+    def prepare_final_packet(self) -> Path:
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        final_packet = self.session / "phase5/final-packet.json"
+        prepared = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                                "--work-review-seal", str(work_seal), "--output", str(final_packet))
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        return final_packet
+
+    def close_final(self, packet: Path, claude: Path, sol: Path, terminal: Path, seal: Path) -> subprocess.CompletedProcess[bytes]:
+        return self.command("close-final", "--packet", str(packet), "--claude-review", str(claude), "--sol-review", str(sol),
+                            "--terminal-report", str(terminal), "--session-root", str(self.session),
+                            "--phase0-seal", str(self.session / "phase0/seal.json"), "--paper-root", str(self.paper),
+                            "--threshold-root", str(self.threshold), "--output-seal", str(seal))
+
+    def reseal_hostile_runtime(self, mutate) -> None:
+        """Make a self-consistent hostile Phase 2 graph that Phase 3 can still consume."""
+        from scripts.run_work7_integration import checked_command
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        runtime, phase2, phase3 = self.session / "phase2/runtime", self.session / "phase2", self.session / "phase3"
+        mutate(runtime)
+        # A hostile reseal can rewrite the evidence index as well as the changed
+        # producer artifact; Phase 3's normal index checker must still accept it
+        # so prepare-final is the gate under test.
+        index_path = runtime / "evidence-index.json"; index = json.loads(index_path.read_bytes())
+        for records in index["claims"].values():
+            for record in records.values():
+                record["sha256"] = hashlib.sha256((runtime / record["path"]).read_bytes()).hexdigest()
+        index_path.write_bytes((json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        runtime_seal = phase2 / "runtime-seal.json"; runtime_seal.unlink()
+        create_tree_seal(runtime, runtime_seal, sha256_file(self.session / "phase0/seal.json"), "phase2-runtime-artifacts")
+        closure = phase2 / "closure-artifacts"; shutil.rmtree(closure); closure.mkdir()
+        evidence = closure / "evidence-bound-report.json"
+        command = (sys.executable, str(self.source / "scripts/verify_work7_claims.py"), "--mode", "evidence-bound",
+                   "--contract", str(self.source / "scripts/work7_claims.json"), "--source-root", str(self.source),
+                   "--source-commit", self.commit, "--ctest-inventory", str(runtime / "commands/ctest-inventory.stdout.txt"),
+                   "--runtime-seal", str(runtime_seal), "--output", str(evidence))
+        checked_command(command, self.source, closure / "commands", "evidence-bound")
+        closure_seal = phase2 / "closure-seal.json"; closure_seal.unlink()
+        create_tree_seal(closure, closure_seal, sha256_file(runtime_seal), "phase2-closure")
+        shutil.rmtree(phase3)
+        generated = subprocess.run((sys.executable, str(ROOT / "scripts/generate_work7_response_candidate.py"),
+                                   "--source-root", str(self.source), "--paper-root", str(self.paper), "--threshold-root", str(self.threshold),
+                                   "--session-root", str(self.session), "--phase0-seal", str(self.session / "phase0/seal.json"),
+                                   "--phase2-closure-seal", str(closure_seal)), capture_output=True)
+        self.assertEqual(generated.returncode, 0, generated.stderr.decode())
+
+    def assert_hostile_runtime_blocks_prepare_final(self, mutate) -> None:
+        self.reseal_hostile_runtime(mutate)
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                              "--work-review-seal", str(work_seal), "--output", str(output))
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(output.exists())
+        self.assertFalse((self.session / "phase5/members").exists())
 
     def test_prepare_work_creates_deterministic_sealed_session_relative_packet(self):
         """Removing a required member or allowing absolute paths must break this behavior."""
@@ -115,32 +183,410 @@ class Work7ReviewPacketTests(unittest.TestCase):
                 self.assertFalse((self.session / "phase4/work-review-seal.json").exists())
                 packet.write_bytes((json.dumps(original, sort_keys=True, separators=(",", ":")) + "\n").encode())
 
+    def test_close_work_rejects_packet_seal_member_that_disagrees_with_prerequisite_digest(self):
+        """A copied seal must be the exact seal named by the packet prerequisite chain."""
+        packet = self.prepare_work()
+        value = json.loads(packet.read_bytes())
+        member = next(item for item in value["members"]
+                      if item["path"] == "phase4/members/session/phase2/runtime-seal.json")
+        hostile = b"hostile seal snapshot\n"
+        copied = self.session / member["path"]
+        copied.write_bytes(hostile)
+        member["size"] = len(hostile)
+        member["sha256"] = hashlib.sha256(hostile).hexdigest()
+        packet.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+        seal = self.session / "phase4/work-review-seal.json"
+        result = self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                              "--session-root", str(self.session), "--output-seal", str(seal))
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(seal.exists())
+
     def test_final_close_binds_two_distinct_final_approvals_and_terminal_seal(self):
         """A duplicate provider or a final packet not bound to Phase 4 must fail closure."""
         from scripts.work7_evidence import sha256_file, verify_tree_seal
 
-        packet = self.prepare_work()
-        work = self.work_review(packet)
-        work_seal = self.session / "phase4/work-review-seal.json"
-        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(work),
-                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
-        final_packet = self.session / "phase5/final-packet.json"
-        prepared = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
-                                "--work-review-seal", str(work_seal), "--output", str(final_packet))
-        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
-        digest = hashlib.sha256(final_packet.read_bytes()).hexdigest()
-        def final_review(provider: str, model: str) -> Path:
-            path = self.temporary / f"{provider}-final.txt"
-            path.write_text("\n".join(["VERDICT: APPROVED", f"PROVIDER: {provider}", f"MODEL: {model}", "EFFORT: high",
-                f"SOURCE_COMMIT: {self.commit}", f"PACKET_SHA256: {digest}", "STATUS: POC_APPROVED_PERFORMANCE_PENDING",
-                *[f"CHECK {check}: CONFIRMED" for check in ("G1_G7_INTENT", "EVIDENCE_FRESHNESS", "PERFORMANCE_PENDING", "THRESHOLD_DEFERRED", "EXTERNAL_IMMUTABILITY", "TERMINAL_STATUS_MAXIMAL")]]) + "\n", encoding="utf-8")
-            return path
-        claude, sol = final_review("anthropic", "claude-fable"), final_review("openai", "gpt-5.6-sol")
+        final_packet = self.prepare_final_packet()
+        summary = json.loads((self.session / "phase5/members/generated/final-verification-summary.json").read_bytes())
+        from scripts.run_work7_integration import FROZEN_CTESTS
+
+        source = self.source.resolve()
+        build = (self.temporary / "builds" / ("build-" + self.commit)).resolve()
+        runtime = (self.session / "phase2/runtime").resolve()
+        regex = "^(" + "|".join(FROZEN_CTESTS) + ")$"
+        argv = {
+            "ctest_focused": ["ctest", "--test-dir", str(build), "--output-on-failure", "-R", regex],
+            "pre_threshold": [str(source / "scripts/run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2",
+                              "--build-dir=" + str(build), "--results-root=" + str(runtime / "pre-threshold")],
+            "real_datasets": [str(source / "scripts/run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2",
+                              "--build-dir=" + str(build), "--results-root=" + str(runtime / "real-datasets")],
+            "deletion_survival": [str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8",
+                                   "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"],
+        }
+        expected_digests = {
+            name: hashlib.sha256((json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()).hexdigest()
+            for name, value in argv.items()
+        }
+        self.assertEqual(summary["source_commit"], self.commit)
+        self.assertEqual(summary["registry_test_count"], len(FROZEN_CTESTS))
+        self.assertEqual(summary["registry_pass_count"], len(FROZEN_CTESTS))
+        self.assertEqual(summary["registry_skip_count"], 0)
+        self.assertEqual(summary["toy_argv_sha256"], expected_digests)
+        self.assertEqual(summary["measured_count_policy"], "PASS")
+        self.assertTrue(summary["external_snapshot_equality"])
+        claude, sol = self.final_review(final_packet, "anthropic"), self.final_review(final_packet, "openai")
         terminal, seal = self.session / "phase5/terminal-report.json", self.session / "phase5/terminal-seal.json"
-        closed = self.command("close-final", "--packet", str(final_packet), "--claude-review", str(claude), "--sol-review", str(sol),
-                              "--terminal-report", str(terminal), "--session-root", str(self.session), "--phase0-seal", str(self.session / "phase0/seal.json"),
-                              "--paper-root", str(self.paper), "--threshold-root", str(self.threshold), "--output-seal", str(seal))
+        closed = self.close_final(final_packet, claude, sol, terminal, seal)
         self.assertEqual(closed.returncode, 0, closed.stderr.decode())
         self.assertEqual(closed.stdout.decode(), f"WORK7_TERMINAL_SEAL_SHA256={sha256_file(seal)}\n")
         self.assertEqual((self.session / "phase5/terminal-seal.sha256").read_text(), sha256_file(seal) + "\n")
-        self.assertEqual(verify_tree_seal(seal, sha256_file(work_seal))["kind"], "phase5-terminal")
+        self.assertEqual(verify_tree_seal(seal, sha256_file(self.session / "phase4/work-review-seal.json"))["kind"], "phase5-terminal")
+
+    def test_close_final_rejects_recanonicalized_generated_summary(self):
+        """A self-consistent final packet cannot replace the verified generated summary."""
+        packet = self.prepare_final_packet()
+        summary = self.session / "phase5/members/generated/final-verification-summary.json"
+        value = json.loads(summary.read_bytes())
+        value["registry_pass_count"] = 0
+        summary_raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        summary.write_bytes(summary_raw)
+        packet_value = json.loads(packet.read_bytes())
+        member = next(item for item in packet_value["members"]
+                      if item["path"] == "phase5/members/generated/final-verification-summary.json")
+        member["size"] = len(summary_raw)
+        member["sha256"] = hashlib.sha256(summary_raw).hexdigest()
+        packet.write_bytes((json.dumps(packet_value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/forged-summary-report.json", self.session / "phase5/forged-summary-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_rejects_recanonicalized_generated_source_test_map(self):
+        """A self-consistent final packet cannot replace the verified source/test map."""
+        packet = self.prepare_final_packet()
+        mapping = self.session / "phase5/members/generated/works1-6-source-test-map.json"
+        value = json.loads(mapping.read_bytes())
+        value["claims"][0]["required_ctest_names"] = []
+        mapping_raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        mapping.write_bytes(mapping_raw)
+        packet_value = json.loads(packet.read_bytes())
+        member = next(item for item in packet_value["members"]
+                      if item["path"] == "phase5/members/generated/works1-6-source-test-map.json")
+        member["size"] = len(mapping_raw)
+        member["sha256"] = hashlib.sha256(mapping_raw).hexdigest()
+        packet.write_bytes((json.dumps(packet_value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/forged-map-report.json", self.session / "phase5/forged-map-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_revalidates_phase4_after_runtime_validation(self):
+        """A Phase 4 reseal during final runtime validation cannot reach terminal closure."""
+        from scripts import work7_review_packet
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        work_seal = self.session / "phase4/work-review-seal.json"
+        terminal, seal = self.session / "phase5/raced-report.json", self.session / "phase5/raced-seal.json"
+        original_validate_runtime = work7_review_packet.validate_phase2_runtime
+
+        def replace_phase4_after_runtime(*arguments):
+            summary = original_validate_runtime(*arguments)
+            artifacts = self.session / "phase4/work-review-artifacts"
+            (artifacts / "foreign.txt").write_text("hostile\n", encoding="utf-8")
+            work_seal.unlink()
+            create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
+                             "phase4-work-review")
+            return summary
+
+        args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json",
+                         paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
+        with mock.patch.object(work7_review_packet, "validate_phase2_runtime", side_effect=replace_phase4_after_runtime):
+            with self.assertRaises(work7_review_packet.Failure):
+                work7_review_packet.close_final(args)
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_work_review_rejects_every_header_identity_and_check_mutation(self):
+        """A parser that accepts one mutated Work approval would create a Phase 4 seal."""
+        packet = self.prepare_work()
+        original = self.work_review(packet).read_text(encoding="utf-8")
+        mutations = {
+            "verdict": lambda value: value.replace("VERDICT: APPROVED", "VERDICT: APPROVED_WITH_COMMENTS"),
+            "provider": lambda value: value.replace("PROVIDER: openai", "PROVIDER: anthropic"),
+            "model": lambda value: value.replace("MODEL: gpt-5.6-sol", "MODEL: gpt-5.5"),
+            "effort": lambda value: value.replace("EFFORT: high", "EFFORT: medium"),
+            "commit": lambda value: value.replace(self.commit, "0" * 40),
+            "packet": lambda value: value.replace(hashlib.sha256(packet.read_bytes()).hexdigest(), "0" * 64),
+            "status": lambda value: value.replace("STATUS: WORK7_APPROVED", "STATUS: PENDING"),
+            "duplicate-header": lambda value: value + "PROVIDER: openai\n",
+            "missing-check": lambda value: value.replace("CHECK NO_OVERCLAIM: CONFIRMED\n", ""),
+            "duplicate-check": lambda value: value + "CHECK NO_OVERCLAIM: CONFIRMED\n",
+        }
+        for check in ("POC_SCOPE", "ONE_RUN_POLICY", "PROVENANCE", "FAIL_CLOSED", "EXTERNAL_IMMUTABILITY", "NO_OVERCLAIM"):
+            mutations[f"missing-{check}"] = lambda value, check=check: value.replace(f"CHECK {check}: CONFIRMED\n", "")
+            mutations[f"duplicate-{check}"] = lambda value, check=check: value + f"CHECK {check}: CONFIRMED\n"
+        seal = self.session / "phase4/work-review-seal.json"
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                review = self.temporary / f"work-{name}.txt"
+                review.write_text(mutate(original), encoding="utf-8")
+                result = self.command("close-work", "--packet", str(packet), "--raw-review", str(review),
+                                      "--session-root", str(self.session), "--output-seal", str(seal))
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+                self.assertFalse(seal.exists())
+
+    def test_final_review_matrix_rejects_header_identity_checks_and_duplicate_provider(self):
+        """Any final approval mutation, including two Sol reviews, must prevent Phase 5."""
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        original = claude.read_text(encoding="utf-8")
+        mutations = {
+            "verdict": lambda value: value.replace("VERDICT: APPROVED", "VERDICT: APPROVED_WITH_COMMENTS"),
+            "provider": lambda value: value.replace("PROVIDER: anthropic", "PROVIDER: foreign"),
+            "model": lambda value: value.replace("MODEL: claude-fable", "MODEL: claude-other"),
+            "effort": lambda value: value.replace("EFFORT: high", "EFFORT: low"),
+            "commit": lambda value: value.replace(self.commit, "0" * 40),
+            "packet": lambda value: value.replace(hashlib.sha256(packet.read_bytes()).hexdigest(), "0" * 64),
+            "status": lambda value: value.replace("STATUS: POC_APPROVED_PERFORMANCE_PENDING", "STATUS: PENDING"),
+            "duplicate-header": lambda value: value + "MODEL: claude-fable\n",
+            "missing-check": lambda value: value.replace("CHECK G1_G7_INTENT: CONFIRMED\n", ""),
+            "duplicate-check": lambda value: value + "CHECK G1_G7_INTENT: CONFIRMED\n",
+        }
+        for check in ("G1_G7_INTENT", "EVIDENCE_FRESHNESS", "PERFORMANCE_PENDING", "THRESHOLD_DEFERRED",
+                      "EXTERNAL_IMMUTABILITY", "TERMINAL_STATUS_MAXIMAL"):
+            mutations[f"missing-{check}"] = lambda value, check=check: value.replace(f"CHECK {check}: CONFIRMED\n", "")
+            mutations[f"duplicate-{check}"] = lambda value, check=check: value + f"CHECK {check}: CONFIRMED\n"
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                bad = self.temporary / f"claude-{name}.txt"; bad.write_text(mutate(original), encoding="utf-8")
+                terminal, seal = self.session / f"phase5/{name}-report.json", self.session / f"phase5/{name}-seal.json"
+                result = self.close_final(packet, bad, sol, terminal, seal)
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+                self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+        duplicate = self.temporary / "duplicate-sol.txt"; duplicate.write_bytes(sol.read_bytes())
+        terminal, seal = self.session / "phase5/duplicate-report.json", self.session / "phase5/duplicate-seal.json"
+        rejected = self.close_final(packet, duplicate, sol, terminal, seal)
+        self.assertEqual(rejected.returncode, 2, rejected.stderr.decode())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+        terminal, seal = self.session / "phase5/reversed-report.json", self.session / "phase5/reversed-seal.json"
+        reversed_result = self.close_final(packet, sol, claude, terminal, seal)
+        self.assertEqual(reversed_result.returncode, 0, reversed_result.stderr.decode())
+
+    def test_prepare_final_rejects_resealed_phase4_member_mutation(self):
+        """A self-consistent replacement Phase 4 seal cannot introduce an extra member."""
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        root = self.session / "phase4/work-review-artifacts"; (root / "foreign.txt").write_text("hostile\n", encoding="utf-8")
+        work_seal.unlink()
+        create_tree_seal(root, work_seal, sha256_file(self.session / "phase3/closure-seal.json"), "phase4-work-review")
+        output = self.session / "phase5/final-packet.json"
+        result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                              "--work-review-seal", str(work_seal), "--output", str(output))
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(output.exists())
+
+    def test_prepare_final_revalidates_phase4_after_runtime_validation(self):
+        """A Phase 4 replacement after its first validation cannot enter the final packet."""
+        from scripts import work7_review_packet
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        original_validate_runtime = work7_review_packet.validate_phase2_runtime
+
+        def replace_phase4_after_runtime(*arguments):
+            summary = original_validate_runtime(*arguments)
+            artifacts = self.session / "phase4/work-review-artifacts"
+            (artifacts / "foreign.txt").write_text("hostile\n", encoding="utf-8")
+            work_seal.unlink()
+            create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
+                             "phase4-work-review")
+            return summary
+
+        args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
+                         output=output)
+        with mock.patch.object(work7_review_packet, "validate_phase2_runtime", side_effect=replace_phase4_after_runtime):
+            with self.assertRaises(work7_review_packet.Failure):
+                work7_review_packet.prepare_final(args)
+        self.assertFalse(output.exists())
+        self.assertFalse((self.session / "phase5/members").exists())
+
+    def test_prepare_final_rejects_phase4_replacement_during_member_snapshot(self):
+        """A Phase 4 seal swapped just before copying cannot become a final packet prerequisite."""
+        from scripts import work7_review_packet
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        original_copy_raw_member = work7_review_packet.copy_raw_member
+
+        def replace_phase4_before_copy(raw, session, member_root, label, members):
+            if label == "session/phase4/work-review-seal.json":
+                artifacts = self.session / "phase4/work-review-artifacts"
+                (artifacts / "foreign.txt").write_text("hostile\n", encoding="utf-8")
+                work_seal.unlink()
+                create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
+                                 "phase4-work-review")
+            return original_copy_raw_member(raw, session, member_root, label, members)
+
+        args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
+                         output=output)
+        with mock.patch.object(work7_review_packet, "copy_raw_member", side_effect=replace_phase4_before_copy):
+            with self.assertRaises(work7_review_packet.Failure):
+                work7_review_packet.prepare_final(args)
+        self.assertFalse(output.exists())
+
+    def test_prepare_final_seals_validated_phase4_bytes_despite_transient_replacement(self):
+        """A replaced-and-restored Phase 4 path cannot substitute the copied validated seal bytes."""
+        from scripts import work7_review_packet
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        original_seal = work_seal.read_bytes()
+        output = self.session / "phase5/final-packet.json"
+        original_copy_raw_member = work7_review_packet.copy_raw_member
+        original_snapshot = work7_review_packet.snapshot_git_worktree
+        replaced = False
+
+        def replace_before_phase4_seal_copy(raw, session, member_root, label, members):
+            nonlocal replaced
+            if label == "session/phase4/work-review-artifacts/work-packet.json":
+                artifacts = self.session / "phase4/work-review-artifacts"
+                (artifacts / "foreign.txt").write_text("hostile\n", encoding="utf-8")
+                work_seal.unlink()
+                create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
+                                 "phase4-work-review")
+                replaced = True
+            return original_copy_raw_member(raw, session, member_root, label, members)
+
+        def restore_before_external_snapshot(root):
+            nonlocal replaced
+            if replaced and Path(root).resolve() == self.paper.resolve():
+                artifacts = self.session / "phase4/work-review-artifacts"
+                (artifacts / "foreign.txt").unlink()
+                work_seal.unlink()
+                create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
+                                 "phase4-work-review")
+                replaced = False
+            return original_snapshot(root)
+
+        args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
+                         output=output)
+        with mock.patch.object(work7_review_packet, "copy_raw_member", side_effect=replace_before_phase4_seal_copy), \
+             mock.patch.object(work7_review_packet, "snapshot_git_worktree", side_effect=restore_before_external_snapshot):
+            work7_review_packet.prepare_final(args)
+        self.assertFalse(replaced)
+        value = json.loads(output.read_bytes())
+        member = next(item for item in value["members"]
+                      if item["path"] == "phase5/members/session/phase4/work-review-seal.json")
+        self.assertEqual((self.session / member["path"]).read_bytes(), original_seal)
+        self.assertEqual(member["sha256"], hashlib.sha256(original_seal).hexdigest())
+
+    def test_prepare_final_rejects_resealed_hostile_command_record(self):
+        """Changing a frozen producer argv and resealing cannot produce a final summary."""
+        def mutate(runtime: Path) -> None:
+            record = runtime / "commands/pre-threshold.json"; value = json.loads(record.read_bytes())
+            value["argv"][1] = "--suite=hostile"
+            record.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        self.assert_hostile_runtime_blocks_prepare_final(mutate)
+
+    def test_prepare_final_rejects_resealed_hostile_focused_ctest_output(self):
+        """A resealed focused CTest Not Run result cannot be summarized as a pass."""
+        def mutate(runtime: Path) -> None:
+            (runtime / "commands/ctest-focused.stdout.txt").write_text(
+                "1/28 Test #1: MinHash ... Not Run\n\n0% tests passed, 1 tests failed out of 28\n", encoding="utf-8")
+        self.assert_hostile_runtime_blocks_prepare_final(mutate)
+
+    def test_prepare_final_rejects_resealed_hostile_producer_count(self):
+        """A resealed measured-count mutation cannot be converted into a PASS summary."""
+        def mutate(runtime: Path) -> None:
+            manifest = runtime / "pre-threshold/manifest.json"; value = json.loads(manifest.read_bytes())
+            value["repetitions"] = 2
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+        self.assert_hostile_runtime_blocks_prepare_final(mutate)
+
+    def test_close_final_uses_private_stable_review_copies_and_rejects_bad_terminal_report_or_drift(self):
+        """Replacing a raw file after parsing cannot alter a seal; bad reports and drift cannot create one."""
+        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        original_sol = sol.read_bytes()
+        original_packet = packet.read_bytes()
+        os.environ.update({"WORK7_TEST_TERMINAL_ACTION": "replace-inputs", "WORK7_TEST_REVIEW_PATH": str(sol),
+                           "WORK7_TEST_PACKET_PATH": str(packet)})
+        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None); self.addCleanup(os.environ.pop, "WORK7_TEST_REVIEW_PATH", None)
+        self.addCleanup(os.environ.pop, "WORK7_TEST_PACKET_PATH", None)
+        terminal, seal = self.session / "phase5/stable-report.json", self.session / "phase5/stable-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual((self.session / "phase5/terminal-artifacts/sol-review.txt").read_bytes(), original_sol)
+        self.assertEqual((self.session / "phase5/terminal-artifacts/final-packet.json").read_bytes(), original_packet)
+        self.assertNotEqual(sol.read_bytes(), original_sol)
+        self.assertNotEqual(packet.read_bytes(), original_packet)
+
+    def test_close_final_invalid_terminal_report_leaves_no_phase5_seal_or_pointer(self):
+        """A verifier success exit with a malformed report cannot create a terminal seal."""
+        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/invalid-report.json", self.session / "phase5/invalid-seal.json"
+        os.environ["WORK7_TEST_TERMINAL_ACTION"] = "invalid-report"
+        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None)
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_missing_terminal_report_leaves_no_phase5_seal_or_pointer(self):
+        """A verifier success exit without a report cannot create a terminal seal."""
+        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/missing-report.json", self.session / "phase5/missing-seal.json"
+        os.environ["WORK7_TEST_TERMINAL_ACTION"] = "missing-report"
+        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None)
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_external_drift_after_packet_preparation_leaves_no_phase5_seal_or_pointer(self):
+        """External drift before terminal verification must fail before any terminal artifacts exist."""
+        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        (self.paper / "tracked").write_text("changed\n", encoding="utf-8")
+        terminal, seal = self.session / "phase5/pre-drift-report.json", self.session / "phase5/pre-drift-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_external_drift_after_terminal_verification_leaves_no_phase5_seal_or_pointer(self):
+        """A worktree change after the verifier writes its report still fails closure."""
+        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/drift-report.json", self.session / "phase5/drift-seal.json"
+        os.environ.update({"WORK7_TEST_TERMINAL_ACTION": "external-drift", "WORK7_TEST_PAPER_PATH": str(self.paper)})
+        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None); self.addCleanup(os.environ.pop, "WORK7_TEST_PAPER_PATH", None)
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())

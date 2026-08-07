@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -50,6 +52,17 @@ WORK_SESSION_MEMBERS = (
 
 class Failure(ValueError):
     pass
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def canonical_argv_sha256(argv: list[str]) -> str:
+    """Bind an argv vector as canonical JSON, never as an ambiguous join."""
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv):
+        raise Failure("invalid command argv")
+    return _sha256_bytes(canonical_json_bytes(argv))
 
 
 class Parser(argparse.ArgumentParser):
@@ -104,14 +117,19 @@ def session_path(session: Path, path: Path, label: str, *, exists: bool = True) 
     return result
 
 
-def canonical_object(path: Path, label: str) -> dict:
+def stable_canonical_object(path: Path, label: str) -> tuple[dict, bytes, str]:
     try:
-        raw = path.read_bytes(); value = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as error:
+        digest, _, raw = _stable_regular_file(path)
+        value = json.loads(raw)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
         raise Failure(f"invalid {label}") from error
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise Failure(f"non-canonical {label}")
-    return value
+    return value, raw, digest
+
+
+def canonical_object(path: Path, label: str) -> dict:
+    return stable_canonical_object(path, label)[0]
 
 
 def phase0(session: Path, path: Path) -> tuple[dict, str]:
@@ -167,6 +185,16 @@ def copy_member(source: Path, session: Path, member_root: Path, label: str, memb
                     "size": info.st_size, "sha256": digest})
 
 
+def copy_raw_member(raw: bytes, session: Path, member_root: Path, label: str, members: list[dict]) -> None:
+    """Snapshot already-stable bytes without reopening the reviewed input."""
+    target = member_root / label
+    if target.exists() or target.is_symlink():
+        raise Failure("packet member collision")
+    _atomic_create(target, raw)
+    members.append({"label": label.replace("/", ":"), "path": target.relative_to(session).as_posix(),
+                    "size": len(raw), "sha256": _sha256_bytes(raw)})
+
+
 def packet_bytes(phase: str, commit: str, seals: dict[str, str], members: list[dict]) -> bytes:
     if len({member["path"] for member in members}) != len(members):
         raise Failure("duplicate packet member")
@@ -203,14 +231,228 @@ def expected_member_tuples(phase: str) -> list[tuple[str, str]]:
     return result
 
 
-def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: dict[str, str]) -> dict:
-    value = canonical_object(path, f"{phase} packet")
+def _command_record(commands: Path, label: str, argv: tuple[str, ...] | None, cwd: Path) -> tuple[dict, bytes]:
+    """Load a runner command once and bind its exact executable invocation."""
+    record, _, _ = stable_canonical_object(commands / f"{label}.json", f"{label} command record")
+    expected = {"argv", "cwd", "started_at", "ended_at", "returncode", "stdout", "stderr", "executable_sha256"}
+    if (set(record) != expected or (argv is not None and record.get("argv") != list(argv)) or record.get("cwd") != str(cwd) or
+            record.get("returncode") != 0 or record.get("stdout") != f"{label}.stdout.txt" or
+            record.get("stderr") != f"{label}.stderr.txt" or not isinstance(record.get("started_at"), str) or
+            not isinstance(record.get("ended_at"), str) or not isinstance(record.get("executable_sha256"), str) or
+            not re.fullmatch(r"[0-9a-f]{64}|unresolved|unreadable", record["executable_sha256"])):
+        raise Failure(f"{label} command record is not exact")
+    try:
+        _, _, stdout = _stable_regular_file(commands / record["stdout"])
+        _stable_regular_file(commands / record["stderr"])
+    except ValueError as error:
+        raise Failure(f"{label} command output is unsafe") from error
+    return record, stdout
+
+
+def _ctest_inventory(stdout: bytes) -> tuple[str, ...]:
+    try:
+        text = stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise Failure("CTest inventory is not UTF-8") from error
+    names = tuple(re.findall(r"^\s*Test\s+#\d+:\s+([A-Za-z0-9_]+)\s*$", text, re.MULTILINE))
+    total = re.findall(r"^Total Tests:\s*(\d+)\s*$", text, re.MULTILINE)
+    if len(names) != len(set(names)) or set(names) != set(_frozen_ctests()) or total != [str(len(_frozen_ctests()))]:
+        raise Failure("CTest registry is not the exact frozen registry")
+    return names
+
+
+def _validate_focused_ctest(stdout: bytes) -> int:
+    try:
+        text = stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise Failure("focused CTest output is not UTF-8") from error
+    if any(token in text for token in ("Not Run", "Skipped", "Failed", "***")):
+        raise Failure("focused CTest has failed, skipped, or not-run tests")
+    passed = tuple(re.findall(r"^\s*\d+/\d+\s+Test\s+#\d+:\s+([A-Za-z0-9_]+)\s+.*\bPassed\b", text, re.MULTILINE))
+    count = len(_frozen_ctests())
+    summary = rf"100% tests passed, 0 tests failed out of {count}"
+    if len(passed) != count or len(set(passed)) != count or set(passed) != set(_frozen_ctests()) or summary not in text:
+        raise Failure("focused CTest result is not the exact frozen pass set")
+    return count
+
+
+def _frozen_ctests() -> tuple[str, ...]:
+    try:
+        from run_work7_integration import FROZEN_CTESTS
+    except ModuleNotFoundError:
+        from scripts.run_work7_integration import FROZEN_CTESTS
+    return FROZEN_CTESTS
+
+
+def _runtime_validators():
+    try:
+        from run_work7_integration import validate_deletion, validate_prethreshold, validate_real, validate_records
+        from verify_work7_claims import inventory, load_contract, report_claims, runtime_evidence
+    except ModuleNotFoundError:
+        from scripts.run_work7_integration import validate_deletion, validate_prethreshold, validate_real, validate_records
+        from scripts.verify_work7_claims import inventory, load_contract, report_claims, runtime_evidence
+    return validate_deletion, validate_prethreshold, validate_real, validate_records, inventory, load_contract, report_claims, runtime_evidence
+
+
+def validate_phase2_runtime(session: Path, source: Path, state: dict, commit: str) -> dict[str, str | int]:
+    """Re-run every producer validator over the sealed Phase 2 execution graph."""
+    if state.get("source") != snapshot_git_worktree(source):
+        raise Failure("Phase 0 snapshot changed: source")
+    try:
+        head = subprocess.run(("git", "rev-parse", "HEAD"), cwd=source, capture_output=True, check=False,
+                              env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except OSError as error:
+        raise Failure("cannot determine current source commit") from error
+    if head.returncode != 0 or head.stdout.decode("ascii", "replace").strip() != commit:
+        raise Failure("current source commit differs from Phase 0")
+    phase0_digest = sha256_file(session / "phase0/seal.json")
+    runtime_seal, closure_seal = session / "phase2/runtime-seal.json", session / "phase2/closure-seal.json"
+    try:
+        runtime_value = verify_tree_seal(runtime_seal, phase0_digest)
+        closure_value = verify_tree_seal(closure_seal, sha256_file(runtime_seal))
+    except (OSError, ValueError) as error:
+        raise Failure("invalid or tampered sealed Phase 2 runtime") from error
+    runtime, closure = session / "phase2/runtime", session / "phase2/closure-artifacts"
+    if (runtime_value["kind"] != "phase2-runtime-artifacts" or Path(runtime_value["artifact_root"]) != runtime or
+            closure_value["kind"] != "phase2-closure" or Path(closure_value["artifact_root"]) != closure or
+            {entry["path"] for entry in closure_value["entries"]} != {
+                "evidence-bound-report.json", "commands/evidence-bound.json", "commands/evidence-bound.stderr.txt", "commands/evidence-bound.stdout.txt"}):
+        raise Failure("sealed Phase 2 closure manifest is not exact")
+    commands = runtime / "commands"
+    configure = _command_record(commands, "configure", None, source)
+    configure_argv = configure[0]["argv"]
+    if not isinstance(configure_argv, list) or len(configure_argv) != 8 or not isinstance(configure_argv[4], str):
+        raise Failure("configure command record is not exact")
+    build = Path(configure_argv[4])
+    expected_configure = ("cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                          "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
+    _command_record(commands, "configure", expected_configure, source)
+    _command_record(commands, "build", ("cmake", "--build", str(build), "--parallel", "2"), source)
+    _, inventory_stdout = _command_record(commands, "ctest-inventory", ("ctest", "--test-dir", str(build), "-N"), source)
+    _ctest_inventory(inventory_stdout)
+    regex = "^(" + "|".join(_frozen_ctests()) + ")$"
+    _, focused_stdout = _command_record(commands, "ctest-focused", ("ctest", "--test-dir", str(build), "--output-on-failure", "-R", regex), source)
+    pass_count = _validate_focused_ctest(focused_stdout)
+    pre = runtime / "pre-threshold"
+    pre_argv = (str(source / "scripts/run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2",
+                "--build-dir=" + str(build), "--results-root=" + str(pre))
+    _command_record(commands, "pre-threshold", pre_argv, source)
+    real = runtime / "real-datasets"
+    real_argv = (str(source / "scripts/run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2",
+                 "--build-dir=" + str(build), "--results-root=" + str(real))
+    _command_record(commands, "real-datasets", real_argv, source)
+    verify_real_argv = (sys.executable, str(source / "scripts/verify_real_dataset_outputs.py"), str(real))
+    _command_record(commands, "verify-real-datasets", verify_real_argv, source)
+    deletion_argv = (str(build / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8", "--required_survival=0.99",
+                     "--r_values=1,4,8", "--trials=1", "--seed=7")
+    _, deletion_stdout = _command_record(commands, "deletion-survival", deletion_argv, source)
+    validate_deletion, validate_prethreshold, validate_real, validate_records, inventory, load_contract, report_claims, runtime_evidence = _runtime_validators()
+    try:
+        validate_prethreshold(pre, commit, pre_argv, source, build)
+        validate_real(real, commit, build, source)
+        deletion_output = commands / "deletion-survival.stdout.txt"
+        if deletion_output.read_bytes() != deletion_stdout:
+            raise Failure("deletion command output changed while validating")
+        validate_deletion(deletion_output)
+        # The runner applies this generic count/path screen before it writes its
+        # own report/index JSON.  Reapply it only to producer-owned trees so
+        # claim prose cannot be misclassified as a benchmark artifact.
+        validate_records(pre)
+        validate_records(real)
+        claims = load_contract(source / "scripts/work7_claims.json", source, inventory(commands / "ctest-inventory.stdout.txt"))
+        if len(claims) != 7:
+            raise Failure("invalid immutable lifecycle contract")
+        report_claims(canonical_object(runtime / "static-report.json", "sealed static report"), "static", commit,
+                      ["PENDING"] * 7, claims)
+        report_claims(canonical_object(session / "phase2/static-report.json", "Phase 2 static report"), "static", commit,
+                      ["PENDING"] * 7, claims)
+        if sha256_file(runtime / "static-report.json") != sha256_file(session / "phase2/static-report.json"):
+            raise Failure("Phase 2 static report is not the sealed runtime copy")
+        report_claims(canonical_object(closure / "evidence-bound-report.json", "sealed evidence-bound report"),
+                      "evidence-bound", commit, ["TOY_VERIFIED"] * 6 + ["PENDING"], claims)
+        evidence = canonical_object(closure / "evidence-bound-report.json", "sealed evidence-bound report")
+        if evidence.get("input_seals") != {"runtime_seal_sha256": sha256_file(runtime_seal)}:
+            raise Failure("evidence-bound report has wrong runtime seal")
+        if runtime_evidence(runtime_seal, commit, claims) != {claim["id"] for claim in claims[:6]}:
+            raise Failure("sealed runtime evidence is incomplete")
+    except Failure:
+        raise
+    except (OSError, ValueError, TypeError) as error:
+        raise Failure("sealed Phase 2 runtime evidence is invalid") from error
+    return {"ctest_focused": canonical_argv_sha256(list(("ctest", "--test-dir", str(build), "--output-on-failure", "-R", regex))),
+            "pre_threshold": canonical_argv_sha256(list(pre_argv)),
+            "real_datasets": canonical_argv_sha256(list(real_argv)),
+            "deletion_survival": canonical_argv_sha256(list(deletion_argv)),
+            "registry_test_count": len(_frozen_ctests()), "registry_pass_count": pass_count}
+
+
+def final_generated_member_bytes(session: Path, source: Path, state: dict, commit: str,
+                                 runtime_summary: dict[str, str | int]) -> tuple[bytes, bytes]:
+    """Derive the two Phase 5 generated members from freshly verified inputs."""
+    try:
+        _, _, _, _, inventory, load_contract, _, _ = _runtime_validators()
+        claims = load_contract(source / "scripts/work7_claims.json", source,
+                               inventory(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"))
+    except Exception as error:
+        raise Failure("invalid immutable lifecycle contract") from error
+    if len(claims) != 7:
+        raise Failure("invalid immutable lifecycle contract")
+    mappings = [{"id": row["id"], "source_paths": row["source_paths"],
+                 "required_ctest_names": row["required_ctest_names"]} for row in claims]
+    if any(snapshot_git_worktree(Path(state[name]["root"])) != state[name]
+           for name in ("paper", "threshold")):
+        raise Failure("external worktree snapshot changed")
+    mapping_raw = canonical_json_bytes({"schema": "piccard-work7-source-test-map-v1", "claims": mappings[:6]})
+    summary_raw = canonical_json_bytes({"schema": "piccard-work7-final-verification-v1", "source_commit": commit,
+        "registry_test_count": runtime_summary["registry_test_count"], "registry_pass_count": runtime_summary["registry_pass_count"],
+        "registry_skip_count": 0, "toy_argv_sha256": {name: runtime_summary[name] for name in
+        ("ctest_focused", "pre_threshold", "real_datasets", "deletion_survival")}, "measured_count_policy": "PASS",
+        "external_snapshot_equality": True, "performance_state": "PERFORMANCE_PENDING"})
+    return mapping_raw, summary_raw
+
+
+def validate_final_generated_members(session: Path, packet: dict, mapping_raw: bytes, summary_raw: bytes) -> None:
+    """Require both packet digests and current members to match the re-derived bytes."""
+    members = {member["path"]: member for member in packet["members"]}
+    generated = session / "phase5/members/generated"
+    expected = (("works1-6-source-test-map.json", mapping_raw),
+                ("final-verification-summary.json", summary_raw))
+    for name, raw in expected:
+        relative = f"phase5/members/generated/{name}"
+        member = members[relative]
+        if member["size"] != len(raw) or member["sha256"] != _sha256_bytes(raw):
+            raise Failure("review packet generated member differs from verified Phase 2 execution")
+        try:
+            _, _, actual = _stable_regular_file(generated / name)
+        except (OSError, ValueError) as error:
+            raise Failure("review packet generated member is missing or unsafe") from error
+        if actual != raw:
+            raise Failure("review packet generated member differs from verified Phase 2 execution")
+
+
+def validate_final_closure_prerequisites(session: Path, source: Path, paper: Path, threshold: Path,
+                                         state: dict, commit: str, seals: dict[str, str]) -> None:
+    """Bracket terminal closure with the exact chain used by the final packet."""
+    if state["source"] != snapshot_git_worktree(source):
+        raise Failure("Phase 0 snapshot changed: source")
+    if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]:
+        raise Failure("external worktree snapshot changed")
+    current = {relative: sha256_file(session / relative) for relative in seals}
+    if current != seals:
+        raise Failure("prerequisite seal changed during final closure")
+    chain(session)
+    validate_phase4(session, commit)
+
+
+def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: dict[str, str]) -> tuple[dict, bytes, str]:
+    value, raw, digest = stable_canonical_object(path, f"{phase} packet")
     if (set(value) != {"schema", "phase", "source_commit", "prerequisite_seals", "members"} or
             value.get("schema") != "piccard-work7-review-packet-v1" or value.get("phase") != phase or
             value.get("source_commit") != commit or value.get("prerequisite_seals") != seals or
             not isinstance(value.get("members"), list) or not value["members"]):
         raise Failure("foreign or invalid review packet")
     paths: set[str] = set()
+    members_by_path: dict[str, dict] = {}
     for member in value["members"]:
         if (not isinstance(member, dict) or set(member) != {"label", "path", "size", "sha256"} or
                 not isinstance(member["label"], str) or not member["label"] or not isinstance(member["path"], str) or
@@ -221,6 +463,7 @@ def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: d
         if relative.is_absolute() or ".." in relative.parts or member["path"] in paths:
             raise Failure("invalid review packet member")
         paths.add(member["path"])
+        members_by_path[member["path"]] = member
         candidate = session / relative
         if not candidate.is_file() or candidate.is_symlink() or candidate.stat().st_size != member["size"] or sha256_file(candidate) != member["sha256"]:
             raise Failure("review packet member changed or missing")
@@ -230,7 +473,10 @@ def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: d
         raise Failure("review packet member order is not canonical")
     if [(member["label"], member["path"]) for member in value["members"]] != expected_member_tuples(phase):
         raise Failure("review packet member labels are not exact")
-    return value
+    member_prefix = f"phase{4 if phase == 'work' else 5}/members/session/"
+    if any(members_by_path[member_prefix + relative]["sha256"] != digest for relative, digest in seals.items()):
+        raise Failure("review packet seal members differ from prerequisite seals")
+    return value, raw, digest
 
 
 def git_diff(source: Path, baseline: str) -> bytes:
@@ -271,9 +517,12 @@ def prepare_work(args: argparse.Namespace) -> None:
     _atomic_create(output, packet_bytes("work", commit, seals, members))
 
 
-def parse_review(path: Path, commit: str, digest: str, provider: str, model: str, status: str, checks: tuple[str, ...]) -> None:
-    try: lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as error: raise Failure("cannot read raw review") from error
+def parse_review_bytes(raw: bytes, commit: str, digest: str, provider: str, model: str, status: str,
+                       checks: tuple[str, ...]) -> None:
+    try:
+        lines = raw.decode("utf-8", "strict").splitlines()
+    except UnicodeDecodeError as error:
+        raise Failure("cannot read raw review") from error
     fields = ("VERDICT", "PROVIDER", "MODEL", "EFFORT", "SOURCE_COMMIT", "PACKET_SHA256", "STATUS")
     if len(lines) < 7: raise Failure("review header is incomplete")
     parsed: dict[str, str] = {}
@@ -290,20 +539,51 @@ def parse_review(path: Path, commit: str, digest: str, provider: str, model: str
         if sum(line == f"CHECK {check}: CONFIRMED" for line in lines[7:]) != 1: raise Failure("review substantive confirmation is missing")
 
 
-def validate_phase4(session: Path, commit: str) -> dict:
+def parse_review(path: Path, commit: str, digest: str, provider: str, model: str, status: str,
+                 checks: tuple[str, ...]) -> tuple[bytes, str]:
+    try:
+        raw_digest, _, raw = _stable_regular_file(path)
+    except ValueError as error:
+        raise Failure("cannot read raw review") from error
+    parse_review_bytes(raw, commit, digest, provider, model, status, checks)
+    return raw, raw_digest
+
+
+def parse_final_review(path: Path, commit: str, digest: str) -> tuple[str, bytes]:
+    """Accept the two frozen final identities in either CLI argument order."""
+    try:
+        _, _, raw = _stable_regular_file(path)
+    except ValueError as error:
+        raise Failure("cannot read raw review") from error
+    for name, provider, model in (("claude", "anthropic", "claude-fable"), ("sol", "openai", "gpt-5.6-sol")):
+        try:
+            parse_review_bytes(raw, commit, digest, provider, model, "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
+        except Failure:
+            continue
+        return name, raw
+    raise Failure("final review identity, verdict, commit, packet, or status is invalid")
+
+
+def validate_phase4(session: Path, commit: str) -> tuple[dict, bytes, str, bytes, bytes]:
     work = session / "phase4/work-review-seal.json"
     try:
+        seal_digest, _, seal_raw = _stable_regular_file(work)
         value = verify_tree_seal(work, sha256_file(session / "phase3/closure-seal.json"))
     except (OSError, ValueError) as error:
         raise Failure("invalid work review seal") from error
+    if canonical_json_bytes(value) != seal_raw:
+        raise Failure("work review seal changed while validating")
     root = session / "phase4/work-review-artifacts"
     if (value["kind"] != "phase4-work-review" or Path(value["artifact_root"]) != root or
             {entry["path"] for entry in value["entries"]} != {"work-packet.json", "raw-review.txt"}):
         raise Failure("foreign work review seal")
     seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json")}
-    validate_packet(root / "work-packet.json", session, "work", commit, seals)
-    parse_review(root / "raw-review.txt", commit, sha256_file(root / "work-packet.json"), "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
-    return value
+    _, packet_raw, packet_digest = validate_packet(root / "work-packet.json", session, "work", commit, seals)
+    review_raw, review_digest = parse_review(root / "raw-review.txt", commit, packet_digest, "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
+    sealed = {entry["path"]: entry["sha256"] for entry in value["entries"]}
+    if sealed != {"work-packet.json": packet_digest, "raw-review.txt": review_digest}:
+        raise Failure("work review inputs differ from the Phase 4 seal")
+    return value, seal_raw, seal_digest, packet_raw, review_raw
 
 
 def close_work(args: argparse.Namespace) -> None:
@@ -313,13 +593,13 @@ def close_work(args: argparse.Namespace) -> None:
     if output != session / "phase4/work-review-seal.json": raise Failure("foreign work review seal path")
     state, commit = chain(session)
     seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json")}
-    validate_packet(packet, session, "work", commit, seals)
-    parse_review(raw, commit, sha256_file(packet), "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
+    _, packet_raw, packet_digest = validate_packet(packet, session, "work", commit, seals)
+    raw_review, _ = parse_review(raw, commit, packet_digest, "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
     root = session / "phase4/work-review-artifacts"
     if root.exists() or output.exists(): raise Failure("work review output collision")
     root.mkdir(parents=True, mode=0o700)
-    for path, label in ((packet, "work-packet.json"), (raw, "raw-review.txt")):
-        _, _, data = _stable_regular_file(path); _atomic_create(root / label, data)
+    for data, label in ((packet_raw, "work-packet.json"), (raw_review, "raw-review.txt")):
+        _atomic_create(root / label, data)
     create_tree_seal(root, output, sha256_file(session / "phase3/closure-seal.json"), "phase4-work-review")
 
 
@@ -329,7 +609,14 @@ def prepare_final(args: argparse.Namespace) -> None:
     state, commit = chain(session)
     if state["source"] != snapshot_git_worktree(source): raise Failure("Phase 0 snapshot changed: source")
     if work != session / "phase4/work-review-seal.json": raise Failure("foreign work review seal path")
-    validate_phase4(session, commit)
+    runtime_summary = validate_phase2_runtime(session, source, state, commit)
+    # Runtime validation is intentionally substantial.  Validate and retain
+    # Phase 4 only after it, then snapshot those exact verified bytes below.
+    _, phase4_seal_raw, phase4_seal_digest, phase4_packet_raw, phase4_review_raw = validate_phase4(session, commit)
+    seals = {relative: sha256_file(session / relative) for relative in
+             ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json",
+              "phase3/candidate-seal.json", "phase3/closure-seal.json")}
+    seals["phase4/work-review-seal.json"] = phase4_seal_digest
     root = session / "phase5/members"
     if root.exists() or output.exists(): raise Failure("final packet output collision")
     root.mkdir(parents=True, mode=0o700); members: list[dict] = []
@@ -338,42 +625,60 @@ def prepare_final(args: argparse.Namespace) -> None:
     diff = root / "source/git-diff-b907fae-to-head.patch"
     _atomic_create(diff, git_diff(source, "b907fae"))
     members.append({"label": "git-diff-b907fae-to-head.patch", "path": diff.relative_to(session).as_posix(), "size": diff.stat().st_size, "sha256": sha256_file(diff)})
-    for relative in WORK_SESSION_MEMBERS + ("phase4/work-review-artifacts/work-packet.json",
-                     "phase4/work-review-artifacts/raw-review.txt", "phase4/work-review-seal.json"):
+    for relative in WORK_SESSION_MEMBERS:
         copy_member(session / relative, session, root, "session/" + relative, members)
+    copy_raw_member(phase4_packet_raw, session, root, "session/phase4/work-review-artifacts/work-packet.json", members)
+    copy_raw_member(phase4_review_raw, session, root, "session/phase4/work-review-artifacts/raw-review.txt", members)
+    copy_raw_member(phase4_seal_raw, session, root, "session/phase4/work-review-seal.json", members)
     for name in ("paper", "threshold"):
         current = snapshot_git_worktree(Path(state[name]["root"]))
         if current != state[name]: raise Failure(f"Phase 0 snapshot changed: {name}")
         target = root / f"external/current-{name}-state.json"
         _atomic_create(target, canonical_json_bytes(current))
         members.append({"label": f"current-{name}-state", "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
-    try:
-        try:
-            from verify_work7_claims import inventory, load_contract
-        except ModuleNotFoundError:
-            from scripts.verify_work7_claims import inventory, load_contract
-        claims = load_contract(source / "scripts/work7_claims.json", source,
-                               inventory(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"))
-    except Exception as error:
-        raise Failure("invalid immutable lifecycle contract") from error
-    if len(claims) != 7:
-        raise Failure("invalid immutable lifecycle contract")
-    mappings = [{"id": row["id"], "source_paths": row["source_paths"], "required_ctest_names": row["required_ctest_names"]} for row in claims]
+    mapping_raw, summary_raw = final_generated_member_bytes(session, source, state, commit, runtime_summary)
     mapping = root / "generated/works1-6-source-test-map.json"
-    _atomic_create(mapping, canonical_json_bytes({"schema": "piccard-work7-source-test-map-v1", "claims": mappings[:6]}))
-    inventory = session / "phase2/runtime/commands/ctest-inventory.stdout.txt"
-    names = [line.split(": ", 1)[1] for line in inventory.read_text().splitlines() if line.startswith("  Test #")]
+    _atomic_create(mapping, mapping_raw)
     summary = root / "generated/final-verification-summary.json"
-    external_equal = all(snapshot_git_worktree(Path(state[name]["root"])) == state[name] for name in ("paper", "threshold"))
-    if not external_equal: raise Failure("external worktree snapshot changed")
-    _atomic_create(summary, canonical_json_bytes({"schema": "piccard-work7-final-verification-v1", "source_commit": commit,
-        "registry_test_count": len(names), "registry_pass_count": len(names), "registry_skip_count": 0,
-        "toy_argv_sha256": {"runtime_seal": sha256_file(session / "phase2/runtime-seal.json")}, "measured_count_policy": "PASS",
-        "external_snapshot_equality": True, "performance_state": "PERFORMANCE_PENDING"}))
+    _atomic_create(summary, summary_raw)
     for target, label in ((mapping, "generated/works1-6-source-test-map.json"), (summary, "generated/final-verification-summary.json")):
         members.append({"label": label.replace("/", ":"), "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
-    seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json", "phase4/work-review-seal.json")}
+    if state["source"] != snapshot_git_worktree(source):
+        raise Failure("Phase 0 snapshot changed: source")
+    if any(snapshot_git_worktree(Path(state[name]["root"])) != state[name] for name in ("paper", "threshold")):
+        raise Failure("external worktree snapshot changed")
+    current_seals = {relative: sha256_file(session / relative) for relative in seals}
+    if current_seals != seals:
+        raise Failure("prerequisite seal changed during final packet preparation")
+    chain(session)
+    try:
+        phase4_value = verify_tree_seal(session / "phase4/work-review-seal.json",
+                                        sha256_file(session / "phase3/closure-seal.json"))
+    except (OSError, ValueError) as error:
+        raise Failure("invalid work review seal") from error
+    if (phase4_value["kind"] != "phase4-work-review" or
+            Path(phase4_value["artifact_root"]) != session / "phase4/work-review-artifacts" or
+            {entry["path"] for entry in phase4_value["entries"]} != {"work-packet.json", "raw-review.txt"}):
+        raise Failure("foreign work review seal")
     _atomic_create(output, packet_bytes("final", commit, seals, members))
+
+
+def validate_terminal_report(path: Path, source: Path, ctest_inventory: Path, commit: str) -> tuple[dict, bytes, str]:
+    """Reject a verifier that exits successfully but writes a foreign report."""
+    value, raw, digest = stable_canonical_object(path, "terminal report")
+    try:
+        _, _, _, _, inventory, load_contract, report_claims, _ = _runtime_validators()
+        claims = load_contract(source / "scripts/work7_claims.json", source, inventory(ctest_inventory))
+        if len(claims) != 7:
+            raise Failure("invalid immutable lifecycle contract")
+        report_claims(value, "terminal", commit, ["TOY_VERIFIED"] * 7, claims)
+    except Failure:
+        raise
+    except (OSError, ValueError, TypeError) as error:
+        raise Failure("terminal report is invalid") from error
+    if value.get("input_seals") != {}:
+        raise Failure("terminal report has foreign input seals")
+    return value, raw, digest
 
 
 def close_final(args: argparse.Namespace) -> None:
@@ -387,26 +692,44 @@ def close_final(args: argparse.Namespace) -> None:
     work_seal = session / "phase4/work-review-seal.json"
     validate_phase4(session, commit)
     seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json", "phase4/work-review-seal.json")}
-    validate_packet(packet, session, "final", commit, seals)
-    digest = sha256_file(packet)
-    parse_review(claude, commit, digest, "anthropic", "claude-fable", "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
-    parse_review(sol, commit, digest, "openai", "gpt-5.6-sol", "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
+    final_packet, packet_raw, packet_digest = validate_packet(packet, session, "final", commit, seals)
     source = required(Path(state["source"]["root"]), "sealed source root", directory=True)
-    command = (sys.executable, str(source / "scripts/verify_work7_claims.py"), "--mode", "terminal", "--contract", str(source / "scripts/work7_claims.json"),
-               "--source-root", str(source), "--source-commit", commit, "--ctest-inventory", str(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
-               "--output", str(terminal_report), "--phase3-closure-seal", str(session / "phase3/closure-seal.json"), "--work-review-seal", str(session / "phase4/work-review-seal.json"),
-               "--review-packet", str(packet), "--claude-review", str(claude), "--sol-review", str(sol), "--phase0-seal", str(session / "phase0/seal.json"), "--paper-root", str(paper), "--threshold-root", str(threshold))
-    result = subprocess.run(command, capture_output=True)
-    if result.returncode != 0: raise Failure("terminal verifier rejected final review")
-    if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]: raise Failure("external worktree snapshot changed")
+    if state["source"] != snapshot_git_worktree(source): raise Failure("Phase 0 snapshot changed: source")
+    runtime_summary = validate_phase2_runtime(session, source, state, commit)
+    mapping_raw, summary_raw = final_generated_member_bytes(session, source, state, commit, runtime_summary)
+    validate_final_generated_members(session, final_packet, mapping_raw, summary_raw)
+    validate_final_closure_prerequisites(session, source, paper, threshold, state, commit, seals)
+    first_name, first_raw = parse_final_review(claude, commit, packet_digest)
+    second_name, second_raw = parse_final_review(sol, commit, packet_digest)
+    if first_name == second_name:
+        raise Failure("final reviews duplicate one provider")
+    reviews = {first_name: first_raw, second_name: second_raw}
+    claude_raw, sol_raw = reviews["claude"], reviews["sol"]
+    phase5 = session / "phase5"
+    with tempfile.TemporaryDirectory(prefix=".close-final-inputs-", dir=phase5) as temporary:
+        private = Path(temporary)
+        private_packet, private_claude, private_sol = (private / "final-packet.json", private / "claude-review.txt", private / "sol-review.txt")
+        _atomic_create(private_packet, packet_raw)
+        _atomic_create(private_claude, claude_raw)
+        _atomic_create(private_sol, sol_raw)
+        command = (sys.executable, str(source / "scripts/verify_work7_claims.py"), "--mode", "terminal", "--contract", str(source / "scripts/work7_claims.json"),
+                   "--source-root", str(source), "--source-commit", commit, "--ctest-inventory", str(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
+                   "--output", str(terminal_report), "--phase3-closure-seal", str(session / "phase3/closure-seal.json"), "--work-review-seal", str(session / "phase4/work-review-seal.json"),
+                   "--review-packet", str(private_packet), "--claude-review", str(private_claude), "--sol-review", str(private_sol), "--phase0-seal", str(session / "phase0/seal.json"), "--paper-root", str(paper), "--threshold-root", str(threshold))
+        result = subprocess.run(command, capture_output=True)
+        if result.returncode != 0: raise Failure("terminal verifier rejected final review")
+        _, terminal_raw, _ = validate_terminal_report(terminal_report, source,
+                                                        session / "phase2/runtime/commands/ctest-inventory.stdout.txt", commit)
+    validate_final_closure_prerequisites(session, source, paper, threshold, state, commit, seals)
     root = session / "phase5/terminal-artifacts"
     if root.exists(): raise Failure("terminal artifacts collision")
     root.mkdir(parents=True, mode=0o700)
-    for path, label in ((packet, "final-packet.json"), (claude, "claude-review.txt"), (sol, "sol-review.txt"), (terminal_report, "terminal-report.json")):
-        _, _, data = _stable_regular_file(path); _atomic_create(root / label, data)
-    create_tree_seal(root, output, sha256_file(session / "phase4/work-review-seal.json"), "phase5-terminal")
+    for data, label in ((packet_raw, "final-packet.json"), (claude_raw, "claude-review.txt"),
+                        (sol_raw, "sol-review.txt"), (terminal_raw, "terminal-report.json")):
+        _atomic_create(root / label, data)
+    create_tree_seal(root, output, seals["phase4/work-review-seal.json"], "phase5-terminal")
     try:
-        final_seal = verify_tree_seal(output, sha256_file(session / "phase4/work-review-seal.json"))
+        final_seal = verify_tree_seal(output, seals["phase4/work-review-seal.json"])
     except (OSError, ValueError) as error:
         raise Failure("new terminal seal did not verify") from error
     if final_seal["kind"] != "phase5-terminal" or Path(final_seal["artifact_root"]) != root:

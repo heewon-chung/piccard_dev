@@ -63,7 +63,8 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
         path.chmod(0o755)
 
-    def invoke_fake_runner(self, fault: str | None = None) -> tuple[subprocess.CompletedProcess[bytes], Path, str]:
+    def invoke_fake_runner(self, fault: str | None = None, *, source_snapshot: Path | None = None,
+                           terminal_wrapper: bool = False) -> tuple[subprocess.CompletedProcess[bytes], Path, str]:
         """Drive the actual runner process with executable fake dependencies."""
         from scripts.run_work7_integration import FROZEN_CTESTS
         from scripts.work7_evidence import snapshot_git_worktree
@@ -71,31 +72,45 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         temporary = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, temporary, True)
         source, paper, threshold = (temporary / name for name in ("source", "paper", "threshold"))
-        for root in (source, paper, threshold):
+        if source_snapshot is None:
+            source.mkdir()
+        else:
+            subprocess.run(("git", "clone", "--quiet", "--local", str(source_snapshot), str(source)), check=True)
+            subprocess.run(("git", "-C", str(source), "config", "user.email", "runner@example.test"), check=True)
+            subprocess.run(("git", "-C", str(source), "config", "user.name", "Runner"), check=True)
+        for root in (paper, threshold):
             root.mkdir()
-        self.make_git(source, "tkde-major/pre-threshold-poc")
+        if source_snapshot is None:
+            self.make_git(source, "tkde-major/pre-threshold-poc")
         self.make_git(paper)
         self.make_git(threshold)
+        if source_snapshot is not None:
+            response = paper / "Revision" / "ResponseStrategy.md"
+            response.parent.mkdir(parents=True, exist_ok=True)
+            response.write_text("# Baseline response\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(paper), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(paper), "commit", "-qm", "response baseline"), check=True)
         commit = subprocess.check_output(("git", "-C", str(source), "rev-parse", "HEAD"), text=True).strip()
         state = {"schema": "piccard-work7-phase0-state-v1", "source": {"head": commit},
                  "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold),
                  "session_id": "work7-" + commit}
         scripts = source / "scripts"
-        self.write(scripts / "work7_state_guard.py", """
-            import json, os, pathlib, sys
-            p=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.parent.mkdir(parents=True,exist_ok=True)
-            if os.environ.get('FAKE_FAULT') == 'dirty': raise SystemExit(2)
-            p.write_text(os.environ['FAKE_STATE']); print('work7_state_guard: PASS')
-        """)
-        self.write(scripts / "verify_work7_claims.py", """
-            import json, os, pathlib, sys
-            a=sys.argv; mode=a[a.index('--mode')+1]; output=pathlib.Path(a[a.index('--output')+1]); commit=a[a.index('--source-commit')+1]
-            if os.environ.get('FAKE_FAULT') == 'tamper' and mode == 'evidence-bound':
-                p=pathlib.Path(a[a.index('--runtime-seal')+1]); p.write_text(p.read_text()+'x')
-            if os.environ.get('FAKE_FAULT') == 'foreign' and mode == 'static': commit='0'*40
-            output.parent.mkdir(parents=True,exist_ok=True)
-            output.write_text(json.dumps({'schema':'piccard-work7-claim-report-v1','source_commit':commit,'mode':mode,'status':'PASS'}))
-        """)
+        if source_snapshot is None:
+            self.write(scripts / "work7_state_guard.py", """
+                import json, os, pathlib, sys
+                p=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.parent.mkdir(parents=True,exist_ok=True)
+                if os.environ.get('FAKE_FAULT') == 'dirty': raise SystemExit(2)
+                p.write_text(os.environ['FAKE_STATE']); print('work7_state_guard: PASS')
+            """)
+            self.write(scripts / "verify_work7_claims.py", """
+                import json, os, pathlib, sys
+                a=sys.argv; mode=a[a.index('--mode')+1]; output=pathlib.Path(a[a.index('--output')+1]); commit=a[a.index('--source-commit')+1]
+                if os.environ.get('FAKE_FAULT') == 'tamper' and mode == 'evidence-bound':
+                    p=pathlib.Path(a[a.index('--runtime-seal')+1]); p.write_text(p.read_text()+'x')
+                if os.environ.get('FAKE_FAULT') == 'foreign' and mode == 'static': commit='0'*40
+                output.parent.mkdir(parents=True,exist_ok=True)
+                output.write_text(json.dumps({'schema':'piccard-work7-claim-report-v1','source_commit':commit,'mode':mode,'status':'PASS'}))
+            """)
         self.write(scripts / "run_pre_threshold_profiles.sh", """
             #!/usr/bin/env python3
             import json, os, pathlib, sys
@@ -191,7 +206,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             if os.environ.get('FAKE_FAULT') == 'threshold-drift': pathlib.Path(os.environ['FAKE_THRESHOLD']).joinpath('tracked').write_text('changed\\n')
         """)
         fixture = source / "tests" / "fixtures" / "real_datasets" / "quick" / "dblp_acm_u65536"
-        fixture.mkdir(parents=True)
+        fixture.mkdir(parents=True, exist_ok=True)
         (fixture / "source.manifest.tsv").write_text("source\n", encoding="utf-8")
         (fixture / "dataset.manifest.tsv").write_text("dataset\n", encoding="utf-8")
         (scripts / "summarize_real_datasets.py").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -202,7 +217,34 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             if __import__('os').environ.get('FAKE_FAULT') == 'stale-verification': raw=b'bad'
             (root/'verification_status.tsv').write_text('key\\tvalue\\nschema_version\\tpiccard-real-verification-v1\\nrun_metadata_sha256\\t'+hashlib.sha256(raw).hexdigest()+'\\nstatus\\tVERIFIED\\n')
         """)
-        (scripts / "work7_claims.json").write_text("{}", encoding="utf-8")
+        if source_snapshot is not None and terminal_wrapper:
+            verifier = scripts / "verify_work7_claims.py"
+            verifier.rename(scripts / "verify_work7_claims_real.py")
+            self.write(verifier, """
+                #!/usr/bin/env python3
+                import os, pathlib, runpy, sys
+                action=os.environ.get('WORK7_TEST_TERMINAL_ACTION', '')
+                mode=sys.argv[sys.argv.index('--mode')+1]
+                if mode == 'terminal' and action == 'invalid-report':
+                    pathlib.Path(sys.argv[sys.argv.index('--output')+1]).write_text('{}\\n')
+                    raise SystemExit(0)
+                if mode == 'terminal' and action == 'missing-report':
+                    raise SystemExit(0)
+                try:
+                    runpy.run_path(str(pathlib.Path(__file__).with_name('verify_work7_claims_real.py')), run_name='__main__')
+                except SystemExit as error:
+                    code=error.code if isinstance(error.code, int) else 1
+                else:
+                    code=0
+                if mode == 'terminal' and action == 'replace-inputs':
+                    pathlib.Path(os.environ['WORK7_TEST_REVIEW_PATH']).write_text('tampered after private copy\\n')
+                    pathlib.Path(os.environ['WORK7_TEST_PACKET_PATH']).write_text('{}\\n')
+                if mode == 'terminal' and action == 'external-drift':
+                    pathlib.Path(os.environ['WORK7_TEST_PAPER_PATH']).joinpath('tracked').write_text('changed\\n')
+                raise SystemExit(code)
+            """)
+        if source_snapshot is None:
+            (scripts / "work7_claims.json").write_text("{}", encoding="utf-8")
         fakebin = temporary / "bin"; fakebin.mkdir()
         self.write(fakebin / "cmake", """
             #!/usr/bin/env python3
@@ -220,11 +262,22 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             #!/usr/bin/env python3
             import os, sys
             if '-N' in sys.argv:
+                print('Test project fake')
                 for i,n in enumerate(os.environ['FAKE_TESTS'].split(','),1): print(f'  Test #{i}: {n}')
                 print(); print('Total Tests: '+str(len(os.environ['FAKE_TESTS'].split(','))))
             elif os.environ.get('FAKE_FAULT') == 'skip': print('1/1 Test #1: MinHash ... Not Run')
-            else: print('100% tests passed')
+            else:
+                names=os.environ['FAKE_TESTS'].split(',')
+                for i,n in enumerate(names,1): print(f'{i}/{len(names)} Test #{i}: {n} ... Passed 0.00 sec')
+                print(); print(f'100% tests passed, 0 tests failed out of {len(names)}')
         """)
+        if source_snapshot is not None:
+            subprocess.run(("git", "-C", str(source), "add", "."), check=True)
+            subprocess.run(("git", "-C", str(source), "commit", "-qm", "fake producer dependencies"), check=True)
+            commit = subprocess.check_output(("git", "-C", str(source), "rev-parse", "HEAD"), text=True).strip()
+            state = {"schema": "piccard-work7-phase0-state-v1", "source": snapshot_git_worktree(source),
+                     "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold),
+                     "session_id": "work7-" + commit}
         env = {**os.environ, "PATH": str(fakebin) + os.pathsep + os.environ["PATH"], "FAKE_STATE": json.dumps(state),
                "FAKE_TESTS": ",".join(name for name in FROZEN_CTESTS if not (fault == "missing" and name == "MinHash")),
                "FAKE_FAULT": fault or "", "FAKE_PAPER": str(paper), "FAKE_THRESHOLD": str(threshold), "FAKE_COMMIT": commit}

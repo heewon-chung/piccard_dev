@@ -134,3 +134,271 @@ python3 -m unittest -q tests.scripts.test_work7_review_packet
 Ran 4 tests in 23.741s
 OK
 ```
+
+## Fix round 3/5 — transfer blocker
+
+The label-only manifest RED was reproduced and corrected before this round.
+The remaining requested change is not a local parser hardening: it requires
+replacing the Task 5 minimal synthetic Phase 2 fixture with a complete,
+seal-consistent execution-artifact graph accepted by the production Phase 2
+validators.  Those validators bind fresh-build binaries, release provenance,
+machine metadata, complete pre-threshold manifests/cells/logs, real-data
+metadata, and deletion outputs.  Constructing it safely requires a dedicated
+fixture builder or a preexisting sealed Phase 2 runtime artifact set; neither
+is within the current Task 5 fixture and producing it ad hoc risks fabricating
+execution evidence that this task is expressly required to reject.
+
+No Task 6 run was started and no further source changes were made in this
+round.  Transfer the remaining execution-derived summary, stable-private-copy
+closure, and full hostile evidence matrix to the fresh implementer requested
+by the review.
+
+## Fix round 4/5 — verified runtime summaries and stable terminal bytes
+
+### RED
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_close_binds_two_distinct_final_approvals_and_terminal_seal
+FAIL: toy_argv_sha256 contained only runtime_seal
+```
+
+The initial final-packet regression expected four canonical exact-argv digests
+(`ctest_focused`, `pre_threshold`, `real_datasets`, and `deletion_survival`).
+The previous summary reported a runtime-seal digest instead, proving it could
+state pass/skip/count conclusions without validating the sealed producer
+runtime.
+
+### GREEN / hardening
+
+`prepare-final` now validates the current Phase 0 source snapshot and exact
+commit, both Phase 2 seals and the exact closure manifest, CTest inventory and
+focused result (the whole frozen registry, one pass each, zero failure/skip/Not
+Run), exact runner command records and frozen argv, pre-threshold/real/deletion
+outputs, measured-count policy, static/evidence-bound reports, and the sealed
+evidence index.  It derives each argv digest from canonical JSON bytes.  These
+checks run before Phase 5 members or the output packet are created.
+
+The review parser now reads packet and raw-review bytes through
+`_stable_regular_file` once, parses those bytes, and seals those same bytes.
+Final review identities are provider-neutral at the CLI boundary (the two
+accepted identities may be supplied in either order, but duplicates fail).
+`close-final` calls the terminal verifier with private immutable input copies,
+validates the canonical terminal report before creating Phase 5 artifacts, and
+only seals the original stable bytes.  The external worktree check remains
+both before and after terminal verification.
+
+The focused review suite uses the existing executable fake-tool harness with a
+temporary local clone of the tracked source history (preserving `b907fae`) and
+fake external build/probe tools.  It produces a full production-validator
+accepted Phase 2 graph before generating Phase 3.  Review templates under
+`tests/fixtures/work7/reviews/` are synthetic input templates only; they are
+not authoritative evidence.
+
+Added behavioral tables cover Work and final header/identity/check mutations,
+duplicate provider and reverse-order identities, exact packet/Phase 4 seal
+membership, self-consistently resealed hostile argv/CTest/count evidence,
+private-byte replacement injection, malformed terminal report, and external
+drift after terminal verification.  Every failure case asserts no Phase 5 seal
+or pointer (and hostile Phase 2 cases assert no final members/output).
+
+Focused GREEN batches:
+
+```text
+python3 -m unittest -q \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_header_only_approval_then_seals_raw_review \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_missing_extra_or_recanonicalized_manifest_members \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_work_review_rejects_every_header_identity_and_check_mutation
+Ran 3 tests in 27.240s
+OK
+
+python3 -m unittest -q \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_close_binds_two_distinct_final_approvals_and_terminal_seal \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_review_matrix_rejects_header_identity_checks_and_duplicate_provider
+Ran 2 tests in 23.809s
+OK
+
+python3 -m unittest -q \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rejects_resealed_hostile_focused_ctest_output \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rejects_resealed_hostile_producer_count
+Ran 2 tests in 25.537s
+OK
+```
+
+## Fix round 5/5 — verified chain snapshots and complete failure matrix
+
+### RED
+
+The following direct regressions exercised the real `prepare-final` boundary
+with a complete production-validator-accepted Phase 2 graph:
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_revalidates_phase4_after_runtime_validation
+FAIL: AssertionError: Failure not raised
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rejects_phase4_replacement_during_member_snapshot
+FAIL: AssertionError: Failure not raised
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_packet_seal_member_that_disagrees_with_prerequisite_digest
+FAIL: 0 != 2
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_seals_validated_phase4_bytes_despite_transient_replacement
+FAIL: copied Phase 4 seal bytes contained the injected foreign member
+```
+
+The first two failures showed separate replacement windows: a self-consistent
+Phase 4 reseal after the initial gate, and a reseal while members were being
+copied.  The third proved that a packet could self-consistently hash a copied
+seal which differed from the prerequisite digest it claimed.  The fourth
+proved a path could be replaced for the snapshot and restored before a late
+digest check, leaving the final packet with bytes that had never been
+validated.
+
+### GREEN
+
+`prepare-final` now runs the production Phase 2 validator before it validates
+and captures the Phase 4 gate.  `validate_phase4` stable-reads the Phase 4
+seal, confirms the verified tree corresponds to those exact bytes, then
+stable-reads the approved Work packet and raw review.  Final preparation
+copies all three captured byte strings rather than reopening them.  A final
+digest bracket rechecks source and external snapshots, every prerequisite seal
+digest, the Phase 0–3 tree chain, and the Phase 4 artifact tree before the
+final packet is created.
+
+Packet validation now cross-links every copied session seal member to its
+named prerequisite digest; a packet cannot show a different Phase 0–4 seal
+snapshot than the chain it asserts.  The final-summary test independently
+canonicalizes each frozen CTest, pre-threshold, real-data, and deletion argv
+and compares its SHA-256 to the generated summary rather than only checking
+that a hexadecimal value exists.
+
+The Work and final matrices now mutate every required substantive check in
+both missing and duplicate forms, in addition to all header/identity fields,
+duplicate provider, reversed final identities, manifest and Phase 4 seal
+mutations, hostile resealed runtime argv/CTest/count evidence, malformed and
+missing terminal reports, and external drift both before and after terminal
+verification.  All terminal failure cases assert that neither a Phase 5 seal
+nor its pointer exists.  Fixtures under `tests/fixtures/work7/reviews/` are
+review-shaped templates containing the full required identities and
+confirmations.
+
+Focused GREEN evidence:
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_revalidates_phase4_after_runtime_validation
+OK
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rejects_phase4_replacement_during_member_snapshot
+OK
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_packet_seal_member_that_disagrees_with_prerequisite_digest
+OK
+
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_seals_validated_phase4_bytes_despite_transient_replacement
+OK
+
+python3 -W ignore::ResourceWarning -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_close_binds_two_distinct_final_approvals_and_terminal_seal
+Ran 1 test
+OK
+```
+
+The focused Task 5 plus claim-contract run and one complete five-suite Work 7
+run completed successfully after these changes:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q \
+  tests.scripts.test_work7_review_packet tests.scripts.test_work7_claim_contract
+
+python3 -W ignore::ResourceWarning -m unittest -q \
+  tests.scripts.test_work7_state_guard tests.scripts.test_work7_claim_contract \
+  tests.scripts.test_work7_integration_runner tests.scripts.test_work7_response_candidate \
+  tests.scripts.test_work7_review_packet
+```
+
+`ResourceWarning` suppression applies only to pre-existing unclosed handles
+inside the fake integration-runner fixture; production integration-runner
+behavior was not changed.  `py_compile` and `git diff --check` also completed
+successfully.  Task 6 remains unstarted.
+
+### Final generated-member closure supplement
+
+#### RED
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_rejects_recanonicalized_generated_summary
+FAIL: AssertionError: 0 != 2
+```
+
+The test rewrote only the canonical generated final summary, updated its
+packet member length and digest, regenerated both raw approvals for that new
+packet digest, and invoked `close-final`.  The prior implementation accepted
+this self-consistent forgery because it verified packet/member consistency but
+did not independently re-derive the generated bytes from the sealed Phase 2
+execution before terminal closure.
+
+#### GREEN
+
+`final_generated_member_bytes` now derives the exact source/test map and
+final-verification summary from a fresh `validate_phase2_runtime` result, the
+immutable claims contract, frozen CTest inventory, and unchanged external
+snapshots.  `prepare-final` writes those exact derived byte strings.
+`close-final` repeats the Phase 2 validation and derivation, then requires
+both the final packet member metadata and current generated member bytes to
+equal the re-derived canonical values before it parses approvals or invokes
+the terminal verifier.  Thus a self-consistent packet/review rewrite cannot
+turn a generated assertion into a terminal artifact.
+
+The revalidation makes the runtime check intentionally long, so final closure
+now also brackets its terminal invocation with the exact captured Phase 0–4
+seal map, Phase 0 source/Paper/threshold snapshots, full Phase 0–3 chain, and
+exact Phase 4 tree validation.  It uses the captured Phase 4 digest as the
+terminal seal predecessor after the post-verifier bracket rather than
+reopening that path.
+
+#### Chain-race RED/GREEN
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_revalidates_phase4_after_runtime_validation
+FAIL: AssertionError: Failure not raised
+
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_revalidates_phase4_after_runtime_validation
+Ran 1 test in 10.078s
+OK
+```
+
+The RED resealed a Phase 4 artifact root with a foreign member immediately
+after fresh runtime validation.  The old close path accepted it and produced
+a terminal seal.  The GREEN now fails before terminal-report creation and
+asserts no terminal artifacts, seal, or pointer.
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_rejects_recanonicalized_generated_summary
+Ran 1 test in 9.785s
+OK
+
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_rejects_recanonicalized_generated_source_test_map
+Ran 1 test in 10.541s
+OK
+
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_close_binds_two_distinct_final_approvals_and_terminal_seal
+Ran 1 test in 10.318s
+OK
+
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_close_binds_two_distinct_final_approvals_and_terminal_seal
+Ran 1 test in 10.787s
+OK
+
+python3 -m py_compile scripts/work7_review_packet.py scripts/verify_work7_claims.py
+git diff --check
+```
+
+The earlier focused Task 5/claim and complete five-suite Work 7 runs above
+remain successful completed output.  They were not started again after this
+supplement because duplicate broad verification was explicitly stopped; the
+newly changed closure paths have their targeted GREEN evidence above.
