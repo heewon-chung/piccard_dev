@@ -105,3 +105,34 @@ contract/inventory binding fixture `ok`; final-review matrix `ok` (`Ran 1 test
 in 21.173s`); standalone CLI/core equivalence plus both generated-forgery tests
 all `ok` (`Ran 3 tests in 26.259s`).  No actual-data or performance command was
 run.
+
+## Review fix round 2
+
+The standalone wrapper now uses the same byte-only
+`normalize_final_review_blobs` helper as `close-final`.  It stable-captures
+both raw reviews, validates exact identity/checks against the captured final
+packet digest, rejects a duplicate provider identity, and only then assigns
+canonical Claude and sol slots to `TerminalInputs`.
+
+RED:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_claim_contract.Work7ClaimContractTests.test_terminal_accepts_only_exact_dual_reviews_and_immutable_external_state
+```
+
+Observed: reversed exact standalone reviews returned exit `2` with `review
+identity, verdict, commit, packet, or status is invalid`; `Ran 1 test in
+11.329s`; `FAILED (failures=1)`.
+
+GREEN:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_claim_contract.Work7ClaimContractTests.test_terminal_accepts_only_exact_dual_reviews_and_immutable_external_state \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_review_matrix_rejects_header_identity_checks_and_duplicate_provider
+```
+
+Observed standalone reversed-order PASS and duplicate-identity FAIL behavior
+green; the close-final final-review matrix was also green (`Ran 1 test in
+23.837s`).

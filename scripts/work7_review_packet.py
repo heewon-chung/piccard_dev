@@ -1194,6 +1194,29 @@ def parse_final_review(path: Path, commit: str, digest: str) -> tuple[str, bytes
     raise Failure("final review identity, verdict, commit, packet, or status is invalid")
 
 
+def normalize_final_review_blobs(first: CapturedBlob, second: CapturedBlob,
+                                 commit: str, packet_sha256: str) -> tuple[CapturedBlob, CapturedBlob]:
+    """Return canonical Claude/sol slots from two already-captured review bytes."""
+    identities: dict[str, CapturedBlob] = {}
+    for blob in (first, second):
+        identity = None
+        for name, provider, model in (("claude", "anthropic", "claude-fable"),
+                                      ("sol", "openai", "gpt-5.6-sol")):
+            try:
+                parse_review_bytes(blob.raw, commit, packet_sha256, provider, model,
+                                   "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
+            except Failure:
+                continue
+            identity = name
+            break
+        if identity is None or identity in identities:
+            raise Failure("final review identity, verdict, commit, packet, or status is invalid")
+        identities[identity] = blob
+    if set(identities) != {"claude", "sol"}:
+        raise Failure("final reviews duplicate one provider")
+    return identities["claude"], identities["sol"]
+
+
 def validate_phase4(session: Path, commit: str) -> tuple[dict, bytes, str, bytes, bytes]:
     work = session / "phase4/work-review-seal.json"
     try:
@@ -1370,24 +1393,10 @@ def _terminal_inputs_capture(session: Path, packet: Path, claude: Path, sol: Pat
         if relative.is_absolute() or ".." in relative.parts:
             raise Failure("final packet member escapes session root")
         members.append((record["path"], _captured_file(session / relative, "final packet member")))
-    reviews: dict[str, CapturedBlob] = {}
-    for raw in (_captured_file(claude, "final review"), _captured_file(sol, "final review")):
-        identity = None
-        for name, provider, model in (("claude", "anthropic", "claude-fable"),
-                                      ("sol", "openai", "gpt-5.6-sol")):
-            try:
-                parse_review_bytes(raw.raw, capture.commit, final_packet.sha256, provider, model,
-                                   "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
-            except Failure:
-                continue
-            identity = name
-            break
-        if identity is None or identity in reviews:
-            raise Failure("final review identity, verdict, commit, packet, or status is invalid")
-        reviews[identity] = raw
-    if set(reviews) != {"claude", "sol"}:
-        raise Failure("final reviews duplicate one provider")
-    return TerminalInputs(capture, final_packet, tuple(members), reviews["claude"], reviews["sol"])
+    normalized_claude, normalized_sol = normalize_final_review_blobs(
+        _captured_file(claude, "final review"), _captured_file(sol, "final review"),
+        capture.commit, final_packet.sha256)
+    return TerminalInputs(capture, final_packet, tuple(members), normalized_claude, normalized_sol)
 
 
 def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | None = None) -> None:

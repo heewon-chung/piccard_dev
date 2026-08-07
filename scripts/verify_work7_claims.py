@@ -691,9 +691,9 @@ def _terminal_inputs_from_paths(args: argparse.Namespace, source: Path) -> Termi
         if value != session / relative:
             raise Failure(f"foreign {label} path")
     try:
-        from work7_review_packet import capture_phase04
+        from work7_review_packet import capture_phase04, normalize_final_review_blobs
     except ModuleNotFoundError:
-        from scripts.work7_review_packet import capture_phase04
+        from scripts.work7_review_packet import capture_phase04, normalize_final_review_blobs
     paper = require_absolute(args.paper_root, "paper root")
     threshold = require_absolute(args.threshold_root, "threshold root")
     capture = capture_phase04(session, source, paper, threshold)
@@ -724,9 +724,11 @@ def _terminal_inputs_from_paths(args: argparse.Namespace, source: Path) -> Termi
         if relative.is_absolute() or ".." in relative.parts:
             raise Failure("final packet member escapes session")
         members.append((record["path"], _capture_blob(session / relative, "final packet member")))
-    return TerminalInputs(capture, packet, tuple(members),
-                          _capture_blob(require_absolute(args.claude_review, "claude review"), "Claude review"),
-                          _capture_blob(require_absolute(args.sol_review, "sol review"), "sol review"))
+    claude_review, sol_review = normalize_final_review_blobs(
+        _capture_blob(require_absolute(args.claude_review, "final review"), "final review"),
+        _capture_blob(require_absolute(args.sol_review, "final review"), "final review"),
+        capture.commit, packet.sha256)
+    return TerminalInputs(capture, packet, tuple(members), claude_review, sol_review)
 
 
 def main(argv: list[str] | None = None) -> int:

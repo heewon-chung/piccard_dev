@@ -291,6 +291,18 @@ class Work7ClaimContractTests(unittest.TestCase):
         result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_bytes())["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
+        output.unlink()
+        reversed_command = command.copy()
+        claude_index, sol_index = reversed_command.index("--claude-review") + 1, reversed_command.index("--sol-review") + 1
+        reversed_command[claude_index], reversed_command[sol_index] = reversed_command[sol_index], reversed_command[claude_index]
+        reversed_result = subprocess.run(reversed_command, cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(reversed_result.returncode, 0, reversed_result.stderr)
+        output.unlink()
+        duplicate_command = command.copy()
+        duplicate_command[duplicate_command.index("--claude-review") + 1] = str(sol)
+        duplicate_result = subprocess.run(duplicate_command, cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(duplicate_result.returncode, 2, duplicate_result.stderr)
+        self.assertFalse(output.exists())
         for flag, expected in (("--contract", fixture.source / "scripts/work7_claims.json"),
                                ("--ctest-inventory", fixture.session / "phase2/runtime/commands/ctest-inventory.stdout.txt")):
             foreign = fixture.temporary / ("foreign-" + flag.removeprefix("--") + ".txt")
