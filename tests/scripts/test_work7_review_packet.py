@@ -856,7 +856,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(verify_tree_seal(seal, sha256_file(self.session / "phase4/work-review-seal.json"))["kind"], "phase5-terminal")
 
     def test_terminal_core_matches_cli_report_from_identical_captured_bytes(self):
-        """The CLI is only a capture/publish wrapper around the byte-only core."""
+        """The standalone terminal CLI is only a capture/publish wrapper around the core."""
         from scripts.verify_work7_claims import TerminalInputs, terminal_report_bytes
         from scripts.work7_evidence import CapturedBlob
         from scripts.work7_review_packet import capture_phase04
@@ -875,10 +875,55 @@ class Work7ReviewPacketTests(unittest.TestCase):
             claude_review=CapturedBlob(claude.read_bytes(), hashlib.sha256(claude.read_bytes()).hexdigest(), claude.stat().st_size, "0600"),
             sol_review=CapturedBlob(sol.read_bytes(), hashlib.sha256(sol.read_bytes()).hexdigest(), sol.stat().st_size, "0600"),
         ))
-        terminal, seal = self.session / "phase5/core-cli-report.json", self.session / "phase5/core-cli-seal.json"
-        result = self.close_final(packet, claude, sol, terminal, seal)
+        terminal = self.session / "phase5/core-cli-report.json"
+        result = subprocess.run((sys.executable, str(ROOT / "scripts/verify_work7_claims.py"), "--mode", "terminal",
+                                 "--contract", str(self.source / "scripts/work7_claims.json"), "--source-root", str(self.source),
+                                 "--source-commit", self.commit, "--ctest-inventory", str(self.session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
+                                 "--output", str(terminal), "--phase3-closure-seal", str(self.session / "phase3/closure-seal.json"),
+                                 "--work-review-seal", str(self.session / "phase4/work-review-seal.json"), "--review-packet", str(packet),
+                                 "--claude-review", str(claude), "--sol-review", str(sol), "--phase0-seal", str(self.session / "phase0/seal.json"),
+                                 "--paper-root", str(self.paper), "--threshold-root", str(self.threshold)), capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual(terminal.read_bytes(), core)
+
+    def test_terminal_core_rejects_self_consistent_unsealed_minimal_work_packet(self):
+        """A Work packet must equal the Phase 4 seal-owned packet bytes, not just parse."""
+        from scripts.verify_work7_claims import Failure, TerminalInputs, terminal_report_bytes
+        from scripts.work7_evidence import CapturedBlob, canonical_json_bytes
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_final_packet()
+        capture = capture_phase04(self.session, self.source, self.paper, self.threshold)
+        seals = {name: seal.blob.sha256 for name, seal in capture.seals}
+        forged_work = canonical_json_bytes({"schema": "piccard-work7-review-packet-v1", "phase": "work",
+                                             "source_commit": self.commit,
+                                             "prerequisite_seals": {name: seals[name] for name in tuple(seals)[:-1]},
+                                             "members": []})
+        forged_work_blob = CapturedBlob(forged_work, hashlib.sha256(forged_work).hexdigest(), len(forged_work), "0600")
+        work_review = REVIEW_FIXTURES.joinpath("work-approved.template.txt").read_text(encoding="utf-8").format(
+            SOURCE_COMMIT=self.commit, PACKET_SHA256=forged_work_blob.sha256).encode()
+        forged_capture = replace(capture, phase4_packet=forged_work_blob,
+                                 phase4_review=CapturedBlob(work_review, hashlib.sha256(work_review).hexdigest(), len(work_review), "0600"))
+        packet_value = json.loads(packet.read_bytes())
+        members = {entry["path"]: CapturedBlob((self.session / entry["path"]).read_bytes(), entry["sha256"], entry["size"], "0600")
+                   for entry in packet_value["members"]}
+        path = "phase5/members/session/phase4/work-review-artifacts/work-packet.json"
+        members[path] = forged_work_blob
+        entry = next(item for item in packet_value["members"] if item["path"] == path)
+        entry.update(size=forged_work_blob.size, sha256=forged_work_blob.sha256)
+        review_path = "phase5/members/session/phase4/work-review-artifacts/raw-review.txt"
+        forged_review_blob = CapturedBlob(work_review, hashlib.sha256(work_review).hexdigest(), len(work_review), "0600")
+        members[review_path] = forged_review_blob
+        review_entry = next(item for item in packet_value["members"] if item["path"] == review_path)
+        review_entry.update(size=forged_review_blob.size, sha256=forged_review_blob.sha256)
+        packet_raw = canonical_json_bytes(packet_value)
+        packet_blob = CapturedBlob(packet_raw, hashlib.sha256(packet_raw).hexdigest(), len(packet_raw), "0600")
+        claude = self.final_review(packet, "anthropic").read_bytes().replace(hashlib.sha256(packet.read_bytes()).hexdigest().encode(), packet_blob.sha256.encode())
+        sol = self.final_review(packet, "openai").read_bytes().replace(hashlib.sha256(packet.read_bytes()).hexdigest().encode(), packet_blob.sha256.encode())
+        with self.assertRaises(Failure):
+            terminal_report_bytes(TerminalInputs(forged_capture, packet_blob, tuple(members.items()),
+                                                  CapturedBlob(claude, hashlib.sha256(claude).hexdigest(), len(claude), "0600"),
+                                                  CapturedBlob(sol, hashlib.sha256(sol).hexdigest(), len(sol), "0600")))
 
     def test_close_final_revalidates_packet_members_before_publication(self):
         """A packet manifest that names a missing member cannot create terminal output."""

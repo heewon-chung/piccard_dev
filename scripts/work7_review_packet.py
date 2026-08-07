@@ -1370,8 +1370,24 @@ def _terminal_inputs_capture(session: Path, packet: Path, claude: Path, sol: Pat
         if relative.is_absolute() or ".." in relative.parts:
             raise Failure("final packet member escapes session root")
         members.append((record["path"], _captured_file(session / relative, "final packet member")))
-    return TerminalInputs(capture, final_packet, tuple(members),
-                          _captured_file(claude, "Claude review"), _captured_file(sol, "sol review"))
+    reviews: dict[str, CapturedBlob] = {}
+    for raw in (_captured_file(claude, "final review"), _captured_file(sol, "final review")):
+        identity = None
+        for name, provider, model in (("claude", "anthropic", "claude-fable"),
+                                      ("sol", "openai", "gpt-5.6-sol")):
+            try:
+                parse_review_bytes(raw.raw, capture.commit, final_packet.sha256, provider, model,
+                                   "POC_APPROVED_PERFORMANCE_PENDING", CHECKS_FINAL)
+            except Failure:
+                continue
+            identity = name
+            break
+        if identity is None or identity in reviews:
+            raise Failure("final review identity, verdict, commit, packet, or status is invalid")
+        reviews[identity] = raw
+    if set(reviews) != {"claude", "sol"}:
+        raise Failure("final reviews duplicate one provider")
+    return TerminalInputs(capture, final_packet, tuple(members), reviews["claude"], reviews["sol"])
 
 
 def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | None = None) -> None:

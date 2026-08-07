@@ -291,6 +291,16 @@ class Work7ClaimContractTests(unittest.TestCase):
         result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_bytes())["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
+        for flag, expected in (("--contract", fixture.source / "scripts/work7_claims.json"),
+                               ("--ctest-inventory", fixture.session / "phase2/runtime/commands/ctest-inventory.stdout.txt")):
+            foreign = fixture.temporary / ("foreign-" + flag.removeprefix("--") + ".txt")
+            foreign.write_bytes(expected.read_bytes())
+            if output.exists(): output.unlink()
+            hostile = command.copy()
+            hostile[hostile.index(flag) + 1] = str(foreign)
+            rejected = subprocess.run(hostile, cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(rejected.returncode, 2, rejected.stderr)
+            self.assertFalse(output.exists())
         for name, mutate in {
             "wrong-provider": lambda: claude.write_text(claude.read_text().replace("PROVIDER: anthropic", "PROVIDER: openai")),
             "mismatched-packet": lambda: packet.write_bytes(b"changed packet\n"),

@@ -264,17 +264,31 @@ def _terminal_imports():
                                          _final_member_sources, _validate_captured_contract_sources,
                                          captured_generated_member_bytes, expected_member_paths,
                                          expected_member_tuples, parse_review_bytes,
-                                         validate_phase2_runtime_capture)
+                                         validate_phase2_runtime_capture, DESIGNS, PLAN,
+                                         PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
+                                         PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
+                                         PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
+                                         SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
+                                         _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
     except ModuleNotFoundError:
         from scripts.work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
                                                  _final_member_sources, _validate_captured_contract_sources,
                                                  captured_generated_member_bytes, expected_member_paths,
                                                  expected_member_tuples, parse_review_bytes,
-                                                 validate_phase2_runtime_capture)
+                                                 validate_phase2_runtime_capture, DESIGNS, PLAN,
+                                                 PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
+                                                 PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
+                                                 PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
+                                                 SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
+                                                 _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
     return (CHECKS_FINAL, CHECKS_WORK, _canonical_blob, _final_member_sources,
             _validate_captured_contract_sources, captured_generated_member_bytes,
             expected_member_paths, expected_member_tuples, parse_review_bytes,
-            validate_phase2_runtime_capture)
+            validate_phase2_runtime_capture, DESIGNS, PLAN, PHASE0_SEAL_MEMBERS,
+            PHASE2_RUNTIME_SEAL_MEMBERS, PHASE2_CLOSURE_SEAL_MEMBERS,
+            PHASE3_CANDIDATE_SEAL_MEMBERS, PHASE3_CLOSURE_SEAL_MEMBERS,
+            PHASE4_SEAL_MEMBERS, SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
+            _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
 
 
 def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
@@ -286,7 +300,10 @@ def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
     """
     (checks_final, checks_work, captured_object, final_sources,
      validate_contract_sources, generated_bytes, expected_paths, expected_tuples,
-     parse_review, validate_runtime) = _terminal_imports()
+     parse_review, validate_runtime, designs, plan, phase0_members,
+     runtime_members_expected, closure_members, candidate_members, claim7_members,
+     phase4_members_expected, source_packet_members, work_session_members,
+     public_source_prefix, public_diff_member) = _terminal_imports()
     capture = inputs.phase04
     state = captured_object(capture.state_raw, "Phase 0 state")
     if (set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
@@ -318,12 +335,21 @@ def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
     previous = None
     expected_kinds = ("phase0", "phase2-runtime-artifacts", "phase2-closure", "phase3-candidate-artifacts",
                       "phase3-closure", "phase4-work-review")
-    for relative, kind in zip(required_seals, expected_kinds):
+    expected_seal_members = (phase0_members, runtime_members_expected, closure_members,
+                             candidate_members, claim7_members, phase4_members_expected)
+    phase0_root = Path(seals["phase0/seal.json"].artifact_root)
+    session_root = phase0_root.parent.parent
+    expected_roots = tuple(session_root / relative for relative in (
+        "phase0/artifacts", "phase2/runtime", "phase2/closure-artifacts",
+        "phase3/candidate-artifacts", "phase3/closure-artifacts", "phase4/work-review-artifacts"))
+    for relative, kind, expected_root, expected_manifest in zip(required_seals, expected_kinds,
+                                                                 expected_roots, expected_seal_members):
         seal = seals[relative]
         value = _canonical_bytes_object(_checked_blob(seal.blob, "seal"), "captured seal")
         if (set(value) != {"schema", "kind", "artifact_root", "previous_seal_sha256", "entries"} or
                 value.get("schema") != "piccard-work7-tree-seal-v1" or value.get("kind") != kind or
-                value.get("previous_seal_sha256") != previous or not isinstance(value.get("entries"), list)):
+                value.get("previous_seal_sha256") != previous or value.get("artifact_root") != str(expected_root) or
+                not isinstance(value.get("entries"), list)):
             raise Failure("captured seal chain is invalid")
         members = dict(seal.members)
         if len(members) != len(seal.members):
@@ -337,7 +363,7 @@ def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
             _checked_blob(member, "seal member")
             if entry["mode"] != member.mode or entry["size"] != member.size or entry["sha256"] != member.sha256:
                 raise Failure("captured seal member differs from manifest")
-        if len(value["entries"]) != len(members):
+        if len(value["entries"]) != len(members) or set(members) != expected_manifest:
             raise Failure("captured seal manifest is incomplete")
         previous = seal.blob.sha256
     runtime = validate_runtime(capture)
@@ -349,11 +375,36 @@ def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
     if claim7_value.get("input_seals") != {"phase2_closure_seal_sha256": seals["phase2/closure-seal.json"].blob.sha256,
                                              "phase3_candidate_seal_sha256": seals["phase3/candidate-seal.json"].blob.sha256}:
         raise Failure("claim7 report has wrong captured predecessors")
+    phase4_owned = dict(seals["phase4/work-review-seal.json"].members)
+    if (capture.phase4_packet != phase4_owned.get("work-packet.json") or
+            capture.phase4_review != phase4_owned.get("raw-review.txt")):
+        raise Failure("captured Work inputs differ from Phase 4 seal")
     work_packet_raw = _checked_blob(capture.phase4_packet, "Work packet")
     work_packet = _canonical_bytes_object(work_packet_raw, "Work packet")
-    if (work_packet.get("phase") != "work" or work_packet.get("source_commit") != capture.commit or
-            work_packet.get("prerequisite_seals") != {key: seals[key].blob.sha256 for key in required_seals[:-1]}):
+    if (set(work_packet) != {"schema", "phase", "source_commit", "prerequisite_seals", "members"} or
+            work_packet.get("schema") != "piccard-work7-review-packet-v1" or
+            work_packet.get("phase") != "work" or work_packet.get("source_commit") != capture.commit or
+            work_packet.get("prerequisite_seals") != {key: seals[key].blob.sha256 for key in required_seals[:-1]} or
+            not isinstance(work_packet.get("members"), list) or
+            {entry.get("path") for entry in work_packet["members"] if isinstance(entry, dict)} != expected_paths("work") or
+            [(entry.get("label"), entry.get("path")) for entry in work_packet["members"] if isinstance(entry, dict)] != expected_tuples("work")):
         raise Failure("captured Work packet is invalid")
+    captured_members = dict(capture.packet_members)
+    work_sources: dict[str, bytes] = {}
+    for relative in source_packet_members:
+        work_sources["phase4/members/source/" + relative] = captured_members[public_source_prefix + relative].raw
+    work_sources["phase4/members/source/git-diff-b907fae-to-head.patch"] = captured_members[public_diff_member].raw
+    for relative in work_session_members:
+        source = seals[relative].blob if relative in seals else captured_members[relative]
+        work_sources["phase4/members/session/" + relative] = source.raw
+    work_sources["phase4/members/external/current-paper-state.json"] = capture.paper_snapshot_raw
+    work_sources["phase4/members/external/current-threshold-state.json"] = capture.threshold_snapshot_raw
+    for entry in work_packet["members"]:
+        if not isinstance(entry, dict) or set(entry) != {"label", "path", "size", "sha256"}:
+            raise Failure("captured Work packet member is invalid")
+        raw = work_sources.get(entry["path"])
+        if raw is None or entry["size"] != len(raw) or entry["sha256"] != hashlib.sha256(raw).hexdigest():
+            raise Failure("captured Work packet member differs from Phase 0--4 evidence")
     parse_review(_checked_blob(capture.phase4_review, "Work review"), capture.commit,
                  capture.phase4_packet.sha256, "openai", "gpt-5.6-sol", "WORK7_APPROVED", checks_work)
     packet_raw = _checked_blob(inputs.final_packet, "final packet")
@@ -648,6 +699,13 @@ def _terminal_inputs_from_paths(args: argparse.Namespace, source: Path) -> Termi
     capture = capture_phase04(session, source, paper, threshold)
     if args.source_commit != capture.commit:
         raise Failure("source commit differs from captured Phase 0")
+    contract = require_absolute(args.contract, "contract")
+    inventory_path = require_absolute(args.ctest_inventory, "ctest inventory")
+    if contract != source / "scripts/work7_claims.json" or inventory_path != session / "phase2/runtime/commands/ctest-inventory.stdout.txt":
+        raise Failure("terminal contract or CTest inventory is not the captured canonical input")
+    if (_capture_blob(contract, "contract") != capture.contract_raw or
+            _capture_blob(inventory_path, "ctest inventory") != capture.ctest_inventory_raw):
+        raise Failure("terminal contract or CTest inventory differs from captured evidence")
     packet_path = require_absolute(args.review_packet, "review packet")
     try:
         packet_path.relative_to(session)
