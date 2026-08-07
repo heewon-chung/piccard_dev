@@ -91,6 +91,9 @@ PHASE4_SEAL_MEMBERS = frozenset({"work-packet.json", "raw-review.txt"})
 SOURCE_PACKET_MEMBERS = DESIGNS + (
     PLAN, "scripts/work7_claims.json", "docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md",
 )
+_PUBLIC_SOURCE_PREFIX = "@public/source/"
+_PUBLIC_DIFF_MEMBER = "@public/git-diff-b907fae-to-head.patch"
+_PRIVATE_SOURCE_PREFIX = "@source/"
 
 
 class Failure(ValueError):
@@ -173,8 +176,6 @@ class Phase04Capture:
     commit: str
     state_raw: CapturedBlob
     contract_raw: CapturedBlob
-    source_packet_members: tuple[tuple[str, CapturedBlob], ...]
-    baseline_diff_raw: CapturedBlob
     ctest_inventory_raw: CapturedBlob
     seals: tuple[tuple[str, CapturedTreeSeal], ...]
     packet_members: tuple[tuple[str, CapturedBlob], ...]
@@ -349,7 +350,51 @@ def _json_blob(blob: CapturedBlob, label: str) -> dict:
 
 
 def _captured_member_map(capture: Phase04Capture) -> dict[str, CapturedBlob]:
-    return dict(capture.packet_members)
+    members = dict(capture.packet_members)
+    if len(members) != len(capture.packet_members):
+        raise Failure("duplicate captured packet member")
+    return members
+
+
+def _canonical_contract_source_path(raw: object) -> str:
+    """Return one contract source path only in its canonical captured form."""
+    if not isinstance(raw, str) or not raw:
+        raise Failure("invalid contract source path")
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != raw or raw == ".":
+        raise Failure("invalid contract source path")
+    return raw
+
+
+def _contract_source_paths(contract_raw: CapturedBlob) -> tuple[str, ...]:
+    contract = _json_blob(contract_raw, "claim contract")
+    claims = contract.get("claims")
+    if not isinstance(claims, list):
+        raise Failure("invalid immutable lifecycle contract")
+    paths: list[str] = []
+    for claim in claims:
+        source_paths = claim.get("source_paths") if isinstance(claim, dict) else None
+        if not isinstance(source_paths, list) or not source_paths:
+            raise Failure("invalid contract source path")
+        canonical = tuple(_canonical_contract_source_path(value) for value in source_paths)
+        if len(set(canonical)) != len(canonical):
+            raise Failure("duplicate contract source path")
+        paths.extend(canonical)
+    return tuple(dict.fromkeys(paths))
+
+
+def _validate_captured_contract_sources(contract_raw: CapturedBlob,
+                                        members: dict[str, CapturedBlob]) -> None:
+    """Require every lifecycle source reference to be an already captured file.
+
+    This intentionally has no source-root parameter: final validation must
+    never reopen a live source path after the Phase 0--4 capture boundary.
+    """
+    for relative in _contract_source_paths(contract_raw):
+        blob = members.get(_PRIVATE_SOURCE_PREFIX + relative)
+        if (blob is None or blob.size != len(blob.raw) or blob.sha256 != _sha256_bytes(blob.raw) or
+                not re.fullmatch(r"[0-7]{4}", blob.mode)):
+            raise Failure("referenced source path is not a captured regular file")
 
 
 def _canonical_external_root(raw: object, label: str, guarded: tuple[Path, ...]) -> Path:
@@ -472,13 +517,20 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     static = all_members.get("phase2/static-report.json")
     if runtime_static is None or static is None or runtime_static.raw != static.raw:
         raise Failure("Phase 2 static report is not the sealed runtime copy")
-    source_packet_members = tuple(sorted(
-        ((relative, _captured_file(source / relative, "source packet member")) for relative in SOURCE_PACKET_MEMBERS),
-        key=lambda item: item[0],
-    ))
-    source_member_map = dict(source_packet_members)
-    contract_raw = source_member_map["scripts/work7_claims.json"]
-    baseline_diff_raw = _captured_bytes(git_diff(source, "b907fae"))
+    # Public source and diff bytes are still captured once, but live only in
+    # the opaque packet-members namespace.  The fixed Phase04Capture interface
+    # deliberately exposes no second mutable-looking source collection.
+    for relative in SOURCE_PACKET_MEMBERS:
+        all_members[_PUBLIC_SOURCE_PREFIX + relative] = _captured_file(
+            source / relative, "source packet member")
+    contract_raw = all_members[_PUBLIC_SOURCE_PREFIX + "scripts/work7_claims.json"]
+    all_members[_PUBLIC_DIFF_MEMBER] = _captured_bytes(git_diff(source, "b907fae"))
+    # Contract references are captured here as private regular-file blobs.
+    # Later byte validators use these entries exclusively and never reopen the
+    # referenced live source paths.
+    for relative in _contract_source_paths(contract_raw):
+        all_members[_PRIVATE_SOURCE_PREFIX + relative] = _captured_file(
+            source / relative, "contract referenced source")
     # The real-data metadata binds the summarizer digest.  Retain its exact
     # source bytes in the capture graph; this private namespace is consumed
     # only by byte validators and is never a Phase 5 packet member.
@@ -506,7 +558,6 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
             threshold_snapshot_raw != canonical_json_bytes(state["threshold"])):
         raise Failure("Phase 0 snapshot changed")
     return Phase04Capture(commit=commit, state_raw=state_raw, contract_raw=contract_raw,
-                          source_packet_members=source_packet_members, baseline_diff_raw=baseline_diff_raw,
                           ctest_inventory_raw=inventory_raw, seals=tuple(seals),
                           packet_members=tuple(sorted(all_members.items())), build_binaries=tuple(binaries),
                           phase4_packet=phase4_packet, phase4_review=phase4_review,
@@ -811,21 +862,16 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
     focused_argv = ("ctest", "--test-dir", build, "--output-on-failure", "-R", regex)
     focused = _captured_command(members, "ctest-focused", focused_argv, source)
     pass_count = _validate_focused_ctest(focused)
+    runtime_root = dict(capture.seals)["phase2/runtime-seal.json"].artifact_root
+    pre_root = runtime_root + "/pre-threshold"
+    real_root = runtime_root + "/real-datasets"
     pre_argv = (source + "/scripts/run_pre_threshold_profiles.sh", "--suite=smoke", "--seed=7", "--threads=2",
-                "--build-dir=" + build, "--results-root=" + str(Path(build).parent.parent / "unused"))
-    # Results roots are session-local, so preserve the exact captured value from
-    # the command record while constraining all other immutable arguments.
-    pre_record = _canonical_blob(members["phase2/runtime/commands/pre-threshold.json"], "pre-threshold command record")
-    real_record = _canonical_blob(members["phase2/runtime/commands/real-datasets.json"], "real-datasets command record")
-    for record, label, prefix in ((pre_record, "pre-threshold", [source + "/scripts/run_pre_threshold_profiles.sh", "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + build]),
-                                  (real_record, "real-datasets", [source + "/scripts/run_real_datasets.sh", "--quick", "--seed=7", "--threads=2", "--build-dir=" + build])):
-        argv = record.get("argv")
-        if not isinstance(argv, list) or argv[:5] != prefix or len(argv) != 6 or not isinstance(argv[-1], str) or not argv[-1].startswith("--results-root="):
-            raise Failure(f"{label} command record is not exact")
-        _captured_command(members, label, tuple(argv), source)
-    pre_argv = tuple(pre_record["argv"])
-    real_argv = tuple(real_record["argv"])
-    verify_argv = (sys.executable, source + "/scripts/verify_real_dataset_outputs.py", real_argv[-1].split("=", 1)[1])
+                "--build-dir=" + build, "--results-root=" + pre_root)
+    real_argv = (source + "/scripts/run_real_datasets.sh", "--quick", "--seed=7", "--threads=2",
+                 "--build-dir=" + build, "--results-root=" + real_root)
+    _captured_command(members, "pre-threshold", pre_argv, source)
+    _captured_command(members, "real-datasets", real_argv, source)
+    verify_argv = (sys.executable, source + "/scripts/verify_real_dataset_outputs.py", real_root)
     _captured_command(members, "verify-real-datasets", verify_argv, source)
     deletion_argv = (build + "/bench_deletion_survival", "--n=64", "--d=3", "--k=8", "--required_survival=0.99",
                      "--r_values=1,4,8", "--trials=1", "--seed=7")
@@ -856,7 +902,7 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
         if (key.startswith("artifact.") or ".output." in key) and key.endswith(".path"):
             real_paths.add("phase2/runtime/real-datasets/" + value)
     real_blobs = tuple((path, members[path]) for path in sorted(real_paths) if path in members)
-    if real_argv[-1] != "--results-root=" + real_metadata.get("root.000.path", ""):
+    if real_metadata.get("root.000.path") != real_root:
         raise Failure("real-data command results root is not exact")
     validate_prethreshold_capture(pre_blobs, capture.commit, pre_argv, source, build)
     validate_real_capture(real_blobs, capture.commit, source, build)
@@ -889,6 +935,7 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
                 any(not isinstance(claim.get(field), str) or not claim[field]
                     for field in ("deferred_rationale", "prohibited_overclaim"))):
             raise Failure("invalid immutable lifecycle contract")
+    _validate_captured_contract_sources(capture.contract_raw, members)
     claim_ids = list(IDS)
     runtime_seal = dict(capture.seals)["phase2/runtime-seal.json"].blob.sha256
     for relative, mode in (("phase2/runtime/static-report.json", "static"),
@@ -952,11 +999,17 @@ def _final_member_sources(capture: Phase04Capture, runtime: RuntimeSummary) -> l
     """Return the exact public final-member bytes from one captured graph."""
     mapping_raw, summary_raw = captured_generated_member_bytes(capture, runtime)
     sources: list[tuple[str, bytes]] = []
-    source_members = dict(capture.source_packet_members)
+    source_members = _captured_member_map(capture)
     for relative in SOURCE_PACKET_MEMBERS:
-        sources.append(("source/" + relative, source_members[relative].raw))
-    sources.append(("source/git-diff-b907fae-to-head.patch", capture.baseline_diff_raw.raw))
-    member_map = _captured_member_map(capture)
+        try:
+            sources.append(("source/" + relative, source_members[_PUBLIC_SOURCE_PREFIX + relative].raw))
+        except KeyError as error:
+            raise Failure("public source capture is incomplete") from error
+    try:
+        sources.append(("source/git-diff-b907fae-to-head.patch", source_members[_PUBLIC_DIFF_MEMBER].raw))
+    except KeyError as error:
+        raise Failure("public diff capture is incomplete") from error
+    member_map = source_members
     seal_map = dict(capture.seals)
     for relative in WORK_SESSION_MEMBERS:
         raw = seal_map[relative].blob.raw if relative in seal_map else member_map[relative].raw

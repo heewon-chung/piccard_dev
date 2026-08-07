@@ -602,3 +602,65 @@ Focused GREEN outputs observed directly after the refactor:
 The later aggregate `-k close_final` run was duplicated by the controller and
 interrupted; it is intentionally not claimed as verification evidence.  The
 authoritative post-commit focused closure run remains pending.
+
+## R1 fix round 3 — sol-high Important remediation
+
+### Finding 1 — fixed `Phase04Capture` surface and private publication boundary
+
+**RED.** The new fixed-interface regression failed while the capture still
+required `source_packet_members` and `baseline_diff_raw`; the phase object had
+two fields beyond the plan's exact interface.
+
+**GREEN.** `Phase04Capture` now contains only the twelve fixed fields. Public
+source blobs and the baseline diff are captured exactly once under reserved
+`@public/...` entries in `packet_members`; contract, summarizer, fixture, and
+contract-referenced source blobs remain reserved `@source/...` entries. Final
+publication reads an explicit `SOURCE_PACKET_MEMBERS` allowlist plus the one
+reserved public diff entry, so no `@...` entry can become a Phase 5 member.
+The regression constructs/replaces the fixed dataclass without extra arguments
+and verifies that the generated packet contains no `@` path.
+
+### Finding 2 — producer roots bind exactly to the captured runtime seal
+
+**RED.** A self-consistently resealed pre-threshold or real-data graph using a
+foreign `.../phase2/runtime/<producer>` root passed the prior suffix checks and
+could reach final-packet preparation.
+
+**GREEN.** `validate_phase2_runtime_capture` derives exactly
+`<runtime-seal.artifact_root>/pre-threshold` and
+`<runtime-seal.artifact_root>/real-datasets`, then uses those strings in the
+pre, real, and verify-real command records and in the real-data metadata
+binding. The pre-threshold producer receives the same exact argv root for all
+dynamic cell arguments; the real validator reconstructs every metadata argv
+from the exact metadata root. The dummy `pre_argv` was removed. The hostile
+tests rewrite every relevant producer command/metadata/argv/status digest
+against a foreign root, reseal the full graph, and require `prepare-final` to
+fail without Phase 5 output for each producer.
+
+### Finding 3 — captured-only contract `source_paths`
+
+**RED.** There was no captured-byte contract-source validator: finalization
+could rely on legacy live-path semantics and did not prove that every contract
+reference had been captured as a regular file.
+
+**GREEN.** Capture now parses every lifecycle `source_paths` value before
+finalization and stores each referenced regular source file under a reserved
+`@source/<relative>` entry. The byte-only validator rejects absolute,
+escaping, noncanonical, duplicate, missing, and directory/non-file references,
+and never accepts a live source root. The regression mutates captured contract
+bytes for each of those cases and verifies rejection.
+
+Focused RED/GREEN command (toy fake-run fixtures only):
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_phase04_capture_preserves_the_fixed_public_interface_and_never_publishes_private_members \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rejects_self_consistent_foreign_producer_roots \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_contract_source_paths_reject_unsafe_or_uncaptured_references
+```
+
+Observed RED: the fixed-interface assertion failed and both self-consistent
+foreign-root subtests failed before the exact binding implementation. Observed
+GREEN: the fixed-interface test and both producer-root subtests reported `ok`;
+the contract-source test reported `ok` independently (`Ran 1 test in 8.269s;
+OK`). No actual-data, performance, or broad test suite was run.

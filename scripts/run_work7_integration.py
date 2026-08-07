@@ -519,7 +519,7 @@ def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], c
             not isinstance(expected_argv[-1], str) or not expected_argv[-1].startswith("--results-root=")):
         raise Failure("pre-threshold command record is not exact")
     results_root = expected_argv[-1].split("=", 1)[1]
-    if not Path(results_root).is_absolute() or not results_root.endswith("/phase2/runtime/pre-threshold"):
+    if not Path(results_root).is_absolute():
         raise Failure("pre-threshold command results root is not exact")
     if not isinstance(manifest.get("cells"), list) or len(manifest["cells"]) != 3 or {row.get("producer") for row in manifest["cells"] if isinstance(row, dict)} != set(expected_binary_names):
         raise Failure("invalid pre-threshold cells")
@@ -587,7 +587,7 @@ def validate_real_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: s
     variant = "dblp_acm_u65536"
     results_root = metadata.get("root.000.path")
     if (not isinstance(results_root, str) or not Path(results_root).is_absolute() or
-            ".." in Path(results_root).parts or not results_root.endswith("/phase2/runtime/real-datasets")):
+            ".." in Path(results_root).parts):
         raise Failure("invalid real-data authoritative root")
     root = results_root
     fixture = source + "/tests/fixtures/real_datasets/quick/" + variant

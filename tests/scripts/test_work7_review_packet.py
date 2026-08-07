@@ -1133,7 +1133,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
     def test_prepare_final_never_publishes_transient_source_packet_bytes(self):
         """A restored source file cannot replace the first captured source packet bytes."""
         from scripts import work7_review_packet
-        from scripts.work7_review_packet import capture_phase04
+        from scripts.work7_review_packet import SOURCE_PACKET_MEMBERS, capture_phase04
 
         packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
         self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
@@ -1175,15 +1175,113 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(member["sha256"], hashlib.sha256(original).hexdigest())
         self.assertEqual(published.stat().st_mode & 0o777, 0o600)
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
-        for relative, blob in expected_capture.source_packet_members:
+        public = dict(expected_capture.packet_members)
+        for relative in SOURCE_PACKET_MEMBERS:
+            blob = public["@public/source/" + relative]
             path = self.session / "phase5/members/source" / relative
             self.assertEqual(path.read_bytes(), blob.raw)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         diff = self.session / "phase5/members/source/git-diff-b907fae-to-head.patch"
-        self.assertEqual(diff.read_bytes(), expected_capture.baseline_diff_raw.raw)
+        self.assertEqual(diff.read_bytes(), public["@public/git-diff-b907fae-to-head.patch"].raw)
         self.assertEqual(diff.stat().st_mode & 0o777, 0o600)
         self.assertTrue(any(name.startswith("@source/") for name, _ in expected_capture.packet_members))
-        self.assertFalse(any("@source/" in item["path"] for item in value["members"]))
+        self.assertFalse(any("@" in item["path"] for item in value["members"]))
+
+    def test_phase04_capture_preserves_the_fixed_public_interface_and_never_publishes_private_members(self):
+        """Private capture entries stay inside packet_members, not the Phase04 API or packet."""
+        from dataclasses import fields, replace
+        from scripts.work7_review_packet import SOURCE_PACKET_MEMBERS, capture_phase04
+
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        self.assertEqual(tuple(field.name for field in fields(capture)), (
+            "commit", "state_raw", "contract_raw", "ctest_inventory_raw", "seals", "packet_members",
+            "build_binaries", "phase4_packet", "phase4_review", "source_snapshot_raw", "paper_snapshot_raw",
+            "threshold_snapshot_raw"))
+        self.assertEqual(replace(capture), capture)
+        private = dict(capture.packet_members)
+        self.assertTrue(all("@public/source/" + path in private for path in SOURCE_PACKET_MEMBERS))
+        self.assertIn("@public/git-diff-b907fae-to-head.patch", private)
+        self.assertTrue(any(name.startswith("@source/") for name in private))
+        output = self.session / "phase5/final-packet.json"
+        prepared = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                                "--work-review-seal", str(work_seal), "--output", str(output))
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        self.assertFalse(any("@" in member["path"] for member in json.loads(output.read_bytes())["members"]))
+
+    def test_prepare_final_rejects_self_consistent_foreign_producer_roots(self):
+        """The runtime seal's artifact root, not a suffix, authorizes producer outputs."""
+        from scripts.run_work7_integration import real_argv_sha256
+
+        def replace_path(value: object, actual: str, foreign: str) -> object:
+            if isinstance(value, str):
+                return value.replace(actual, foreign)
+            if isinstance(value, list):
+                return [replace_path(item, actual, foreign) for item in value]
+            if isinstance(value, dict):
+                return {key: replace_path(item, actual, foreign) for key, item in value.items()}
+            return value
+
+        for producer in ("pre-threshold", "real-datasets"):
+            with self.subTest(producer=producer):
+                # Each hostile graph gets a fresh Phase 4/5 publication area;
+                # the prior subtest intentionally left its rejected work gate.
+                shutil.rmtree(self.session / "phase4", ignore_errors=True)
+                shutil.rmtree(self.session / "phase5", ignore_errors=True)
+                def mutate(runtime: Path, producer: str = producer) -> None:
+                    actual = str(runtime / producer)
+                    foreign = str(self.temporary / "foreign" / "phase2" / "runtime" / producer)
+                    command = runtime / "commands" / (producer + ".json")
+                    command_value = replace_path(json.loads(command.read_bytes()), actual, foreign)
+                    command.write_bytes((json.dumps(command_value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+                    if producer == "pre-threshold":
+                        manifest = runtime / "pre-threshold/manifest.json"
+                        value = replace_path(json.loads(manifest.read_bytes()), actual, foreign)
+                        manifest.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+                    else:
+                        metadata = runtime / "real-datasets/run_metadata.tsv"
+                        rows = [line.split("\t", 1) for line in metadata.read_text(encoding="utf-8").splitlines()]
+                        values = {key: value.replace(actual, foreign) for key, value in rows[1:]}
+                        for number in range(3):
+                            prefix = f"cell.{number:03d}."
+                            count = int(values[prefix + "argv_count"])
+                            argv = [values[prefix + f"argv.{index:03d}"] for index in range(count)]
+                            values[prefix + "argv_sha256"] = real_argv_sha256(argv)
+                        metadata.write_text("key\tvalue\n" + "".join(key + "\t" + values[key] + "\n" for key, _ in rows[1:]), encoding="utf-8")
+                        status = runtime / "real-datasets/verification_status.tsv"
+                        status_values = dict(line.split("\t", 1) for line in status.read_text(encoding="utf-8").splitlines()[1:])
+                        status_values["run_metadata_sha256"] = hashlib.sha256(metadata.read_bytes()).hexdigest()
+                        status.write_text("key\tvalue\n" + "".join(key + "\t" + status_values[key] + "\n" for key in ("schema_version", "run_metadata_sha256", "status")), encoding="utf-8")
+                        verify = runtime / "commands/verify-real-datasets.json"
+                        verify_value = replace_path(json.loads(verify.read_bytes()), actual, foreign)
+                        verify.write_bytes((json.dumps(verify_value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+                self.assert_hostile_runtime_blocks_prepare_final(mutate)
+
+    def test_captured_contract_source_paths_reject_unsafe_or_uncaptured_references(self):
+        """Final validation accepts only canonical captured regular-file source references."""
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import Failure, _validate_captured_contract_sources, capture_phase04
+
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        for source_path in ("/absolute.py", "../escape.py", "src/core/../core/minhash.cpp", "missing.py", "src"):
+            with self.subTest(source_path=source_path):
+                contract = json.loads(capture.contract_raw.raw)
+                contract["claims"][0]["source_paths"] = [source_path]
+                raw = (json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                altered = replace(capture, contract_raw=CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0600"))
+                with self.assertRaises(Failure):
+                    _validate_captured_contract_sources(altered.contract_raw, dict(altered.packet_members))
+        contract = json.loads(capture.contract_raw.raw)
+        contract["claims"][0]["source_paths"] = ["src/core/minhash.cpp", "src/core/minhash.cpp"]
+        raw = (json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        altered = replace(capture, contract_raw=CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0600"))
+        with self.assertRaises(Failure):
+            _validate_captured_contract_sources(altered.contract_raw, dict(altered.packet_members))
 
     def test_prepare_final_revalidates_phase4_after_runtime_validation(self):
         """A Phase 4 replacement after its first validation cannot enter the final packet."""
