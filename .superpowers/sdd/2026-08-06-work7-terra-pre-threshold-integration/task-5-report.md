@@ -110,3 +110,27 @@ OK
 
 git diff --check
 ```
+
+## Fix round 2/5 — manifest label identity
+
+### RED
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_missing_extra_or_recanonicalized_manifest_members
+FAIL (label mutation): close-work returned 0
+```
+
+The mutation altered only the canonical member label; its path, byte length,
+and digest were unchanged.
+
+### GREEN
+
+Packets now require the exact sorted phase-specific `(label, path)` manifest,
+including frozen provider-neutral labels.  The focused real CLI test now
+rejects missing, extra, reordered, and label-only canonical manifests.
+
+```text
+python3 -m unittest -q tests.scripts.test_work7_review_packet
+Ran 4 tests in 23.741s
+OK
+```

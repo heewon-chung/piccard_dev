@@ -191,6 +191,18 @@ def expected_member_paths(phase: str) -> set[str]:
     return final
 
 
+def expected_member_tuples(phase: str) -> list[tuple[str, str]]:
+    prefix = f"phase{4 if phase == 'work' else 5}/members/"
+    result: list[tuple[str, str]] = []
+    for path in sorted(expected_member_paths(phase)):
+        remainder = path.removeprefix(prefix)
+        labels = {"external/current-paper-state.json": "current-paper-state",
+                  "external/current-threshold-state.json": "current-threshold-state",
+                  "source/git-diff-b907fae-to-head.patch": "git-diff-b907fae-to-head.patch"}
+        result.append((labels.get(remainder, remainder.replace("/", ":")), path))
+    return result
+
+
 def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: dict[str, str]) -> dict:
     value = canonical_object(path, f"{phase} packet")
     if (set(value) != {"schema", "phase", "source_commit", "prerequisite_seals", "members"} or
@@ -216,6 +228,8 @@ def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: d
         raise Failure("review packet member manifest is not exact")
     if value["members"] != sorted(value["members"], key=lambda item: item["path"]):
         raise Failure("review packet member order is not canonical")
+    if [(member["label"], member["path"]) for member in value["members"]] != expected_member_tuples(phase):
+        raise Failure("review packet member labels are not exact")
     return value
 
 

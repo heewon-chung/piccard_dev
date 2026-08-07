@@ -92,7 +92,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         """A self-consistent but non-exact packet manifest is not reviewable evidence."""
         packet = self.prepare_work()
         original = json.loads(packet.read_bytes())
-        for mutation in ("missing", "extra", "reordered"):
+        for mutation in ("missing", "extra", "reordered", "label"):
             with self.subTest(mutation=mutation):
                 value = json.loads(packet.read_bytes())
                 if mutation == "missing":
@@ -104,7 +104,10 @@ class Work7ReviewPacketTests(unittest.TestCase):
                     value["members"][-1]["size"] = 6
                     value["members"][-1]["sha256"] = hashlib.sha256(b"extra\n").hexdigest()
                 else:
-                    value["members"].reverse()
+                    if mutation == "reordered":
+                        value["members"].reverse()
+                    else:
+                        value["members"][0]["label"] = "different-provider-neutral-label"
                 packet.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
                 result = self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
                                       "--session-root", str(self.session), "--output-seal", str(self.session / "phase4/work-review-seal.json"))
