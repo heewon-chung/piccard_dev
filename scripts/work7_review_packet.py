@@ -15,6 +15,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 try:
     from work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
@@ -944,7 +945,7 @@ def close_work(args: argparse.Namespace) -> None:
     create_tree_seal(root, output, sha256_file(session / "phase3/closure-seal.json"), "phase4-work-review")
 
 
-def prepare_final(args: argparse.Namespace) -> None:
+def prepare_final(args: argparse.Namespace, synchronize: Callable[[str], None] | None = None) -> None:
     source = required(args.source_root, "source root", directory=True)
     session = required(args.session_root, "session root", directory=True)
     output = session_path(session, args.output, "output", exists=False)
@@ -993,7 +994,13 @@ def prepare_final(args: argparse.Namespace) -> None:
                     ("generated/final-verification-summary.json", summary_raw)))
     # A complete second capture is the post-validation race detector.  Only
     # immutable in-memory bytes above survive to publication.
-    if capture_phase04(session, source) != capture:
+    if synchronize is not None:
+        synchronize("before_second_capture")
+    try:
+        second_capture = capture_phase04(session, source)
+    except Failure as error:
+        raise Failure("Phase 0--4 evidence changed during final packet preparation") from error
+    if second_capture != capture:
         raise Failure("Phase 0--4 evidence changed during final packet preparation")
     members: list[dict] = []
     created_root = False
@@ -1009,6 +1016,8 @@ def prepare_final(args: argparse.Namespace) -> None:
                 members[-1]["label"] = "current-paper-state"
             elif label == "external/current-threshold-state.json":
                 members[-1]["label"] = "current-threshold-state"
+        if synchronize is not None:
+            synchronize("before_packet_create")
         _atomic_create(output, packet_bytes("final", capture.commit, seals, members))
         created_output = True
     except Exception:
@@ -1097,10 +1106,13 @@ def close_final(args: argparse.Namespace) -> None:
     print(f"WORK7_TERMINAL_SEAL_SHA256={digest}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, synchronize: Callable[[str], None] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        {"prepare-work": prepare_work, "close-work": close_work, "prepare-final": prepare_final, "close-final": close_final}[args.command](args)
+        if args.command == "prepare-final":
+            prepare_final(args, synchronize)
+        else:
+            {"prepare-work": prepare_work, "close-work": close_work, "close-final": close_final}[args.command](args)
         return 0
     except (Failure, OSError, ValueError, FileExistsError) as error:
         print(f"work7_review_packet: FAIL: {error}", file=sys.stderr)

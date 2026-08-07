@@ -166,3 +166,47 @@ mismatch after all prospective bytes are assembled.  The production path has
 the second-capture compare and exclusive creation ledger, but those two
 specific real-filesystem fault injections need a non-mock synchronization
 point to be fully observable.
+
+## Unit C — deterministic late-capture and packet-create faults
+
+`prepare_final` and `main` now accept an optional `synchronize(point)` callback
+(default `None`).  It has no production effect and exposes only two named
+filesystem boundaries: `before_second_capture`, after all prospective bytes
+are assembled, and `before_packet_create`, after member publication.
+
+RED before adding the optional boundary:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_second_capture_boundary_rejects_real_seal_replacement_without_output \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_packet_creation_boundary_rolls_back_members_and_preserves_sentinel -v
+```
+
+Observed: both error with `TypeError: main() got an unexpected keyword argument
+'synchronize'` (`Ran 2 tests`; `FAILED (errors=2)`).
+
+GREEN after the minimal boundary implementation:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_second_capture_boundary_rejects_real_seal_replacement_without_output \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_packet_creation_boundary_rolls_back_members_and_preserves_sentinel -v
+```
+
+Observed: two `ok`; `Ran 2 tests in 15.787s`; `OK`.
+
+The first test atomically installs foreign `phase2/runtime-seal.json` bytes at
+the second-capture boundary, calls real `main`, receives exit 2 and the
+targeted `Phase 0--4 evidence changed during final packet preparation` line,
+then restores the seal and requires the exact pre-call Phase 5 snapshot.  The
+second creates a real output collision sentinel immediately before exclusive
+packet creation; it requires exit 2, exact sentinel bytes/mode, and no
+published `phase5/members` directory.
+
+Both passing tests were mutation-proven in disposable detached worktrees at
+`0f5edd6`, without committing the mutants:
+
+* deleting the second-capture comparison made the first test fail because
+  `main` returned `0` rather than `2`;
+* restoring the old broad cleanup (`unlink` any existing output on failure)
+  made the packet-collision test error because its sentinel was deleted.

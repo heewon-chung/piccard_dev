@@ -1,6 +1,7 @@
 """CLI behavior coverage for Work 7 review packets and terminal closure."""
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from contextlib import redirect_stderr
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
@@ -262,6 +264,73 @@ class Work7ReviewPacketTests(unittest.TestCase):
                               "--work-review-seal", str(seal), "--output", str(output))
         self.assertEqual(result.returncode, 2, result.stderr.decode())
         self.assertEqual(self._phase5_snapshot(), before)
+
+    def test_prepare_final_second_capture_boundary_rejects_real_seal_replacement_without_output(self):
+        """A seal changed after prospective bytes exist must make capture two fail closed."""
+        from scripts import work7_review_packet
+
+        packet = self.prepare_work()
+        seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        before = self._phase5_snapshot()
+        runtime_seal = self.session / "phase2/runtime-seal.json"
+        original, mode = runtime_seal.read_bytes(), runtime_seal.stat().st_mode & 0o777
+        reached = []
+
+        def synchronize(point: str) -> None:
+            if point == "before_second_capture":
+                replacement = runtime_seal.with_name("runtime-seal.boundary")
+                replacement.write_bytes(b'{"foreign":true}\n')
+                os.chmod(replacement, mode)
+                os.replace(replacement, runtime_seal)
+                reached.append(point)
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = work7_review_packet.main(["prepare-final", "--source-root", str(self.source),
+                                                "--session-root", str(self.session), "--work-review-seal", str(seal),
+                                                "--output", str(output)], synchronize=synchronize)
+        restore = runtime_seal.with_name("runtime-seal.restore")
+        restore.write_bytes(original)
+        os.chmod(restore, mode)
+        os.replace(restore, runtime_seal)
+        self.assertEqual(reached, ["before_second_capture"])
+        self.assertEqual(status, 2)
+        self.assertIn("Phase 0--4 evidence changed during final packet preparation", stderr.getvalue())
+        self.assertFalse(output.exists())
+        self.assertEqual(self._phase5_snapshot(), before)
+
+    def test_prepare_final_packet_creation_boundary_rolls_back_members_and_preserves_sentinel(self):
+        """A late packet collision preserves its sentinel and removes every published member."""
+        from scripts import work7_review_packet
+
+        packet = self.prepare_work()
+        seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        sentinel = b"late output collision sentinel\n"
+        reached = []
+
+        def synchronize(point: str) -> None:
+            if point == "before_packet_create":
+                output.write_bytes(sentinel)
+                os.chmod(output, 0o640)
+                reached.append(point)
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = work7_review_packet.main(["prepare-final", "--source-root", str(self.source),
+                                                "--session-root", str(self.session), "--work-review-seal", str(seal),
+                                                "--output", str(output)], synchronize=synchronize)
+        self.assertEqual(reached, ["before_packet_create"])
+        self.assertEqual(status, 2)
+        self.assertIn("output already exists", stderr.getvalue())
+        self.assertEqual(output.read_bytes(), sentinel)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o640)
+        self.assertFalse((self.session / "phase5/members").exists())
 
     def test_runtime_semantics_use_captured_producer_bytes_while_live_member_is_foreign(self):
         """A live producer replacement must not affect byte-only semantic validation."""
