@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
                      "mc_mean_safe_deletions,trials,seed\n";
         for (uint64_t r : r_values) {
             std::cout << "ideal-independent-random-ranking-v1," << n << ',' << d << ',' << k
-                      << ',' << required_survival << ',' << r << ','
+                      << ',' << options.at("required_survival") << ',' << r << ','
                       << piccard::ExactDeletionSurvival(config, r) << ','
                       << piccard::UnionBoundDeletionSurvival(config, r) << ','
                       << simulation.SurvivalAt(r) << ','

@@ -30,6 +30,7 @@ class BenchDeletionSurvivalTest(unittest.TestCase):
         summaries = set()
         for row in rows:
             self.assertEqual(row["model"], "ideal-independent-random-ranking-v1")
+            self.assertEqual(row["required_survival"], "0.99")
             self.assertEqual(row["trials"], "1")
             self.assertEqual(row["seed"], "7")
             self.assertIn(row["mc_survival"], {"0", "1"})
