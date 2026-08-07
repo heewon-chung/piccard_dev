@@ -108,6 +108,7 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
     logical_dynamic_paths: list[str] = []
     for label in _RUNTIME_COMMANDS:
         expected.update({f"commands/{label}.json", f"commands/{label}.stdout.txt", f"commands/{label}.stderr.txt"})
+    frozen_member_count = len(expected)
     try:
         manifest_blob = values["pre-threshold/manifest.json"]
         manifest = json.loads(manifest_blob.raw)
@@ -129,6 +130,8 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
             if not isinstance(relative, str) or not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
                 raise ValueError("pre-threshold manifest has noncanonical producer output")
             member = "pre-threshold/" + relative
+            if member in expected:
+                raise ValueError("runtime producer role aliases a fixed or prior member")
             logical_dynamic_paths.append(member)
             expected.add(member)
     try:
@@ -151,9 +154,12 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
         if not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
             raise ValueError("real-data metadata has noncanonical artifact path")
         member = "real-datasets/" + relative
+        if member in expected:
+            raise ValueError("runtime producer role aliases a fixed or prior member")
         logical_dynamic_paths.append(member)
         expected.add(member)
-    if len(logical_dynamic_paths) != len(set(logical_dynamic_paths)):
+    if (len(logical_dynamic_paths) != len(set(logical_dynamic_paths)) or
+            len(expected) != frozen_member_count + len(logical_dynamic_paths)):
         raise ValueError("runtime producer roles alias one sealed member")
     return frozenset(expected)
 
