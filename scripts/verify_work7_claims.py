@@ -400,9 +400,10 @@ def terminal(args: argparse.Namespace, commit: str, claims: list[dict]) -> dict:
     packet = hashlib.sha256(packet_path.read_bytes()).hexdigest()
     review(require_absolute(args.claude_review, "claude review"), commit, packet, "anthropic", "claude-fable")
     review(require_absolute(args.sol_review, "sol review"), commit, packet, "openai", "gpt-5.6-sol")
-    sealed_work = {entry["sha256"] for entry in work_value["entries"]}
-    if {sha256_file(packet_path), sha256_file(args.claude_review), sha256_file(args.sol_review)} - sealed_work:
-        raise Failure("work review seal is missing packet or raw review")
+    # Phase 4 is append-only and closes before the final packet and the two
+    # independent final responses exist.  Their exact digests are instead
+    # bound by the terminal report and Phase 5 seal after this parser has
+    # validated each raw response against the same packet digest.
     phase0 = seal(require_absolute(args.phase0_seal, "phase0 seal"), "phase0")
     state_path = Path(phase0["artifact_root"]) / "state.json"
     try:

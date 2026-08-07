@@ -305,8 +305,11 @@ class Work7ClaimContractTests(unittest.TestCase):
             return path
         claude_review, sol_review = review("anthropic", "claude-fable"), review("openai", "gpt-5.6-sol")
         work_root = self.root / "work"; work_root.mkdir()
-        for path in (packet, claude_review, sol_review):
-            (work_root / path.name).write_bytes(path.read_bytes())
+        # Phase 4 is closed before the distinct final packet and independent
+        # final reviews exist.  Its append-only seal therefore contains only
+        # the Work 7 packet and Sol work-level approval, never future inputs.
+        (work_root / "work-packet.json").write_bytes(b"work packet\n")
+        (work_root / "work-review.txt").write_text("VERDICT: APPROVED\nPROVIDER: openai\nMODEL: gpt-5.6-sol\nEFFORT: high\n")
         work = self.root / "work.seal.json"; create_tree_seal(work_root, work, sha256_file(phase3), "phase4-work-review")
         report = self.assert_pass("terminal", phase3_closure_seal=phase3, work_review_seal=work, review_packet=packet, claude_review=claude_review, sol_review=sol_review, phase0_seal=phase0, paper_root=paper, threshold_root=threshold)
         self.assertEqual(report["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
