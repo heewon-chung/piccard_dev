@@ -113,6 +113,39 @@ The configure record's `-B` value must:
 A validly resealed runtime graph pointing to any other build root fails before
 `prepare-final` creates Phase 5 members or a packet.
 
+### 2.5 Failure lifecycle and rerun policy
+
+Function-level rollback and authoritative-run disposal are separate safety
+boundaries:
+
+- A publishing function removes only paths that the failing invocation created.
+  It never removes a pre-existing path or an enclosing run directory.
+- The Task 6 orchestrator owns the exact generated
+  `build-<source-commit>` and `session-<source-commit>` directories.  After it
+  captures a minimal diagnostic record outside the guarded source, Paper,
+  threshold, build, and session roots, it removes both directories when an
+  execution-invalidating failure occurs.
+
+Execution-invalidating failures are build, test, verifier, seal, schema, argv,
+count, provenance, external-drift, caught publication, terminal-verification,
+or technical-review failures.  A technical review fails when a required
+reviewer returns `REJECTED`, `NEEDS_FIXES`, or any Critical or Important
+finding.  The implementation or design is diagnosed and fixed before exactly
+one new authoritative toy run starts from Phase 0; the orchestrator never
+retries until a run happens to pass.
+
+A reviewer transport timeout, provider error, or syntactically unusable reply
+that makes no technical judgment does not invalidate frozen evidence.  The
+session remains unchanged and only that reviewer is called again against the
+same packet.  User cancellation disposes the generated build and session.
+
+Disposal accepts only two already validated, fully resolved targets beneath
+their configured temporary parents: the canonical `build-<source-commit>` and
+`session-<source-commit>` directories.  It rejects symlinks, mismatched
+basenames, unresolved paths, protected roots, ancestors of protected roots,
+and broad targets.  Diagnostic output must not contain a publishable review,
+seal, or terminal pointer and is cleared before the fresh run.
+
 ## 3. Alternatives rejected
 
 ### Preserve failed terminal reports in the authoritative session
@@ -181,6 +214,9 @@ pointer contain the exact prevalidated bytes.
   commit.
 - `gpt-5.6-sol` high returns no Critical or Important finding and approves the
   remediation task.
+- Every execution-invalidating Task 6 failure disposes the exact generated
+  build and session before a new Phase 0 run; reviewer-only delivery failures
+  retry only the failed reviewer against unchanged evidence.
 - No actual-data or repeated-performance campaign runs.
 - Paper and threshold byte-level snapshots are unchanged.
 - Task 6 starts only after this remediation approval.
@@ -193,6 +229,10 @@ pointer contain the exact prevalidated bytes.
 - A caught failure leaves a new terminal report, Phase 5 member, seal, or
   pointer.
 - A foreign or noncanonical build root reaches producer validation.
+- An execution-invalidating failure leaves its generated build or session, or
+  a retry begins before the failure is diagnosed and corrected.
+- A reviewer-only transport/format failure mutates or regenerates the frozen
+  packet or authoritative execution evidence.
 - Tests assert source text or mocks instead of observable CLI/filesystem
   behavior.
 - The remediation changes performance status, measured counts, Paper, or the
