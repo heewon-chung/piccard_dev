@@ -11,20 +11,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    from work7_evidence import (CapturedBlob, assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
-                                canonical_json_bytes, sha256_file, snapshot_git_worktree,
-                                verify_tree_seal)
-except ModuleNotFoundError:
+if __package__:
     from scripts.work7_evidence import (CapturedBlob, assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
                                         canonical_json_bytes, sha256_file, snapshot_git_worktree,
                                         verify_tree_seal)
+else:
+    from work7_evidence import (CapturedBlob, assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
+                                canonical_json_bytes, sha256_file, snapshot_git_worktree,
+                                verify_tree_seal)
 
 if TYPE_CHECKING:
-    try:
-        from work7_review_packet import Phase04Capture
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.work7_review_packet import Phase04Capture
+    else:
+        from work7_review_packet import Phase04Capture
 
 IDS = ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION",
        "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION")
@@ -259,18 +259,7 @@ def _canonical_bytes_object(raw: bytes, label: str) -> dict:
 
 def _terminal_imports():
     """Late import avoids a module cycle while keeping the core path-free."""
-    try:
-        from work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
-                                         _final_member_sources, _validate_captured_contract_sources,
-                                         captured_generated_member_bytes, expected_member_paths,
-                                         expected_member_tuples, parse_review_bytes,
-                                         validate_phase2_runtime_capture, DESIGNS, PLAN,
-                                         PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
-                                         PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
-                                         PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
-                                         SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
-                                         _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
                                                  _final_member_sources, _validate_captured_contract_sources,
                                                  captured_generated_member_bytes, expected_member_paths,
@@ -281,6 +270,17 @@ def _terminal_imports():
                                                  PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
                                                  SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
                                                  _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
+    else:
+        from work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
+                                         _final_member_sources, _validate_captured_contract_sources,
+                                         captured_generated_member_bytes, expected_member_paths,
+                                         expected_member_tuples, parse_review_bytes,
+                                         validate_phase2_runtime_capture, DESIGNS, PLAN,
+                                         PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
+                                         PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
+                                         PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
+                                         SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
+                                         _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
     return (CHECKS_FINAL, CHECKS_WORK, _canonical_blob, _final_member_sources,
             _validate_captured_contract_sources, captured_generated_member_bytes,
             expected_member_paths, expected_member_tuples, parse_review_bytes,
@@ -690,10 +690,10 @@ def _terminal_inputs_from_paths(args: argparse.Namespace, source: Path) -> Termi
         value = require_absolute(getattr(args, attribute), label)
         if value != session / relative:
             raise Failure(f"foreign {label} path")
-    try:
-        from work7_review_packet import capture_phase04, normalize_final_review_blobs
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.work7_review_packet import capture_phase04, normalize_final_review_blobs
+    else:
+        from work7_review_packet import capture_phase04, normalize_final_review_blobs
     paper = require_absolute(args.paper_root, "paper root")
     threshold = require_absolute(args.threshold_root, "threshold root")
     capture = capture_phase04(session, source, paper, threshold)

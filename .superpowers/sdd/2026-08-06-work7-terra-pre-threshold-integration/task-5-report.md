@@ -402,3 +402,50 @@ The earlier focused Task 5/claim and complete five-suite Work 7 runs above
 remain successful completed output.  They were not started again after this
 supplement because duplicate broad verification was explicitly stopped; the
 newly changed closure paths have their targeted GREEN evidence above.
+
+### R4 gate import-identity remediation
+
+#### RED
+
+An authoritative ordered five-suite gate failed two captured-byte tests after
+the claim-contract suite had inserted `scripts/` at the front of `sys.path`:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_claim_contract \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_final_scope_audit_accepts_only_toy_count_one_and_deferred_status
+ERROR: scripts.verify_work7_claims.Failure: invalid captured final packet
+```
+
+The preceding suite had loaded `work7_evidence` as a top-level module.  A
+later package import then let `scripts.verify_work7_claims` resolve that alias
+first, while package-owned captures retained `scripts.work7_evidence`.
+Python consequently created two distinct `CapturedBlob` classes, so the
+fail-closed `isinstance` check rejected a valid frozen capture.  A new
+process-isolated behavioral regression reproduces this import ordering; it
+failed before the production change without inspecting source text.
+
+#### GREEN
+
+Both Work 7 terminal modules now select their collaborators from
+`scripts.*` whenever package-imported and select top-level sibling modules
+only when executed directly as CLI scripts.  The same deterministic rule
+covers late/cyclic imports for `Phase04Capture`, terminal input construction,
+the terminal core, and runtime validators.  Structural capture validation was
+not weakened.
+
+Focused ordered regression (the terminal-core case also executes the
+standalone verifier CLI):
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q \
+  tests.scripts.test_work7_claim_contract \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_final_scope_audit_accepts_only_toy_count_one_and_deferred_status \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_terminal_core_matches_cli_report_from_identical_captured_bytes \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_package_imports_keep_captured_blob_identity_after_legacy_alias
+Ran 16 tests
+OK
+```
+
+The complete five-suite gate was deliberately not restarted here; it is left
+to the controller after this focused repair.

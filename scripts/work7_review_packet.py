@@ -16,16 +16,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-try:
-    from work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
-                                _reject_symlink_components, _stable_regular_file,
-                                canonical_json_bytes, capture_tree_seal, create_tree_seal, sha256_file,
-                                snapshot_git_worktree, verify_tree_seal)
-except ModuleNotFoundError:
+if __package__:
     from scripts.work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
                                          _reject_symlink_components, _stable_regular_file,
                                          canonical_json_bytes, capture_tree_seal, create_tree_seal, sha256_file,
                                          snapshot_git_worktree, verify_tree_seal)
+else:
+    from work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
+                                _reject_symlink_components, _stable_regular_file,
+                                canonical_json_bytes, capture_tree_seal, create_tree_seal, sha256_file,
+                                snapshot_git_worktree, verify_tree_seal)
 
 
 DESIGNS = (
@@ -716,20 +716,20 @@ def _validate_focused_ctest(stdout: bytes) -> int:
 
 
 def _frozen_ctests() -> tuple[str, ...]:
-    try:
-        from run_work7_integration import FROZEN_CTESTS
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.run_work7_integration import FROZEN_CTESTS
+    else:
+        from run_work7_integration import FROZEN_CTESTS
     return FROZEN_CTESTS
 
 
 def _runtime_validators():
-    try:
-        from run_work7_integration import validate_deletion, validate_prethreshold, validate_real, validate_records
-        from verify_work7_claims import inventory, load_contract, report_claims, runtime_evidence
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.run_work7_integration import validate_deletion, validate_prethreshold, validate_real, validate_records
         from scripts.verify_work7_claims import inventory, load_contract, report_claims, runtime_evidence
+    else:
+        from run_work7_integration import validate_deletion, validate_prethreshold, validate_real, validate_records
+        from verify_work7_claims import inventory, load_contract, report_claims, runtime_evidence
     return validate_deletion, validate_prethreshold, validate_real, validate_records, inventory, load_contract, report_claims, runtime_evidence
 
 
@@ -879,12 +879,12 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
     deletion_record = _canonical_blob(members["phase2/runtime/commands/deletion-survival.json"], "deletion command record")
     if deletion_record["executable_sha256"] != members["@build/bench_deletion_survival"].sha256:
         raise Failure("deletion command binary differs from captured build binary")
-    try:
-        from run_work7_integration import (_capture_tsv, validate_deletion_bytes, validate_prethreshold_capture,
-                                           validate_real_capture, validate_record_counts_capture)
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.run_work7_integration import (_capture_tsv, validate_deletion_bytes, validate_prethreshold_capture,
                                                    validate_real_capture, validate_record_counts_capture)
+    else:
+        from run_work7_integration import (_capture_tsv, validate_deletion_bytes, validate_prethreshold_capture,
+                                           validate_real_capture, validate_record_counts_capture)
     pre_manifest = _json_blob(members["phase2/runtime/pre-threshold/manifest.json"], "pre-threshold manifest")
     pre_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv",
                  "@build/bench_review_comparison", "@build/bench_piccard", "@build/bench_dynamic"}
@@ -909,10 +909,10 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
     validate_deletion_bytes(deletion)
     validate_record_counts_capture(pre_blobs)
     validate_record_counts_capture(real_blobs)
-    try:
-        from verify_work7_claims import IDS, ROW_KEYS, STATES, TOP_KEYS, report_claims
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.verify_work7_claims import IDS, ROW_KEYS, STATES, TOP_KEYS, report_claims
+    else:
+        from verify_work7_claims import IDS, ROW_KEYS, STATES, TOP_KEYS, report_claims
     # The immutable tracked contract is sealed as exact bytes but is not a
     # canonical-JSON producer format; retain its established parser semantics.
     contract = _json_blob(capture.contract_raw, "claim contract")
@@ -1342,10 +1342,10 @@ def validate_terminal_report_capture(path: Path, capture: Phase04Capture) -> tup
     if not isinstance(claims, list) or len(claims) != 7 or any(not isinstance(claim, dict) for claim in claims):
         raise Failure("invalid immutable lifecycle contract")
     try:
-        try:
-            from verify_work7_claims import report_claims
-        except ModuleNotFoundError:
+        if __package__:
             from scripts.verify_work7_claims import report_claims
+        else:
+            from verify_work7_claims import report_claims
         report_claims(value, "terminal", capture.commit, ["TOY_VERIFIED"] * 7, claims)
     except ValueError as error:
         raise Failure("terminal report is invalid") from error
@@ -1376,10 +1376,10 @@ def _revalidate_captured_seals(session: Path, capture: Phase04Capture) -> None:
 def _terminal_inputs_capture(session: Path, packet: Path, claude: Path, sol: Path,
                              capture: Phase04Capture):
     """Stable-capture all final inputs before entering the R2 terminal core."""
-    try:
-        from verify_work7_claims import TerminalInputs
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.verify_work7_claims import TerminalInputs
+    else:
+        from verify_work7_claims import TerminalInputs
     final_packet = _captured_file(packet, "final packet")
     value = _canonical_blob(final_packet, "final packet")
     records = value.get("members")
@@ -1486,10 +1486,10 @@ def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | N
     inputs = _terminal_inputs_capture(session, packet, claude, sol, capture)
     if synchronize is not None:
         synchronize("after_terminal_capture")
-    try:
-        from verify_work7_claims import terminal_report_bytes
-    except ModuleNotFoundError:
+    if __package__:
         from scripts.verify_work7_claims import terminal_report_bytes
+    else:
+        from verify_work7_claims import terminal_report_bytes
     # The terminal core is the complete semantic boundary.  In particular it
     # receives no Phase 3/4 path and cannot reopen the session after capture.
     terminal_raw = terminal_report_bytes(inputs)

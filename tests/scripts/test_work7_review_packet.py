@@ -22,6 +22,22 @@ REVIEW_FIXTURES = ROOT / "tests/fixtures/work7/reviews"
 class Work7ReviewPacketTests(unittest.TestCase):
     """The packet is a real session-local snapshot, never a source-text check."""
 
+    def test_package_imports_keep_captured_blob_identity_after_legacy_alias(self):
+        """Package callers retain one evidence type even after a CLI-style import."""
+        code = """\
+import sys
+from pathlib import Path
+root = Path.cwd()
+from scripts import work7_review_packet
+package_blob = work7_review_packet.CapturedBlob
+sys.path.insert(0, str(root / 'scripts'))
+import work7_evidence
+from scripts import verify_work7_claims
+assert verify_work7_claims.CapturedBlob is package_blob
+"""
+        result = subprocess.run((sys.executable, "-c", code), cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         from tests.scripts.test_work7_integration_runner import Work7IntegrationRunnerTests
 
