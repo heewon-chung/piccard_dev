@@ -267,8 +267,10 @@ def _phase0_state(path: Path, source: Path, paper: Path, threshold: Path, commit
     if "state.json" not in {entry["path"] for entry in value["entries"]}:
         raise Failure("Phase 0 state is not sealed")
     state = _canonical_object(state_path, "Phase 0 state")
-    if (set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
-            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(state.get("source"), dict) or
+    build = state.get("build")
+    if (set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or not isinstance(state.get("source"), dict) or
+            not isinstance(build, dict) or set(build) != {"root"} or not isinstance(build.get("root"), str) or
             state["source"].get("head") != commit or state.get("session_id") != f"work7-{commit}"):
         raise Failure("invalid Phase 0 source/session state")
     if snapshot_git_worktree(source) != state["source"]:
@@ -410,8 +412,10 @@ def terminal(args: argparse.Namespace, commit: str, claims: list[dict]) -> dict:
         state = json.loads(state_path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid phase0 state") from error
-    if (not isinstance(state, dict) or set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
-            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(state.get("source"), dict) or
+    build = state.get("build") if isinstance(state, dict) else None
+    if (not isinstance(state, dict) or set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or not isinstance(state.get("source"), dict) or
+            not isinstance(build, dict) or set(build) != {"root"} or not isinstance(build.get("root"), str) or
             state["source"].get("head") != commit or state.get("session_id") != f"work7-{commit}"):
         raise Failure("invalid phase0 state")
     paper = require_absolute(args.paper_root, "paper root")

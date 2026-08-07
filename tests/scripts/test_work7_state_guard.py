@@ -80,6 +80,8 @@ class Work7StateGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "work7_state_guard: PASS\n")
         state = __import__("json").loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(state["schema"], "piccard-work7-phase0-state-v2")
+        self.assertEqual(state["build"], {"root": str(self.build.resolve())})
         self.assertEqual(state["source"]["head"], self.source_head)
         self.assertNotEqual(state["paper"]["snapshot_sha256"], "")
         self.assertFalse((self.paper / ".git" / "index.lock").exists())

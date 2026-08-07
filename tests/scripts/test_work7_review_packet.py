@@ -22,7 +22,8 @@ class Work7ReviewPacketTests(unittest.TestCase):
         from tests.scripts.test_work7_integration_runner import Work7IntegrationRunnerTests
 
         helper = Work7IntegrationRunnerTests()
-        produced, self.temporary, self.commit = helper.invoke_fake_runner(source_snapshot=ROOT, terminal_wrapper=True)
+        produced, temporary, self.commit = helper.invoke_fake_runner(source_snapshot=ROOT, terminal_wrapper=True)
+        self.temporary = temporary.resolve()
         self.addCleanup(shutil.rmtree, self.temporary, True)
         self.assertEqual(produced.returncode, 0, produced.stderr.decode())
         self.source, self.paper, self.threshold = (self.temporary / name for name in ("source", "paper", "threshold"))
@@ -135,7 +136,9 @@ class Work7ReviewPacketTests(unittest.TestCase):
 
         def relocate_complete_runtime(runtime: Path, raw: str) -> None:
             """Reseal a complete fake producer graph bound to a foreign build."""
-            original = self.temporary / "builds" / ("build-" + self.commit)
+            from scripts.run_work7_integration import FROZEN_CTESTS
+
+            original = (self.temporary / "builds" / ("build-" + self.commit)).resolve()
             foreign = Path(raw)
             foreign.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(original, foreign)
@@ -155,7 +158,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
                 "build": ["cmake", "--build", raw, "--parallel", "2"],
                 "ctest-inventory": ["ctest", "--test-dir", raw, "-N"],
                 "ctest-focused": ["ctest", "--test-dir", raw, "--output-on-failure", "-R",
-                                  "^(MinHash|Hash|Encoding|Encryption|Decryption|Jaccard|Binning|FHE|OpenFHE|BigInteger|Ciphertext|Serialization|KeyGeneration|Multiplication|Rotation|Noise|Parameters|SecretKey|PublicKey|EvaluationKey|Plaintext|Decryptor|Encryptor|Scheme|Context|Utilities|Integration)$"],
+                                  "^(" + "|".join(FROZEN_CTESTS) + ")$"],
                 "pre-threshold": [str(self.source / "scripts/run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2",
                                   "--build-dir=" + raw, "--results-root=" + str(pre)],
                 "real-datasets": [str(self.source / "scripts/run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2",
@@ -169,10 +172,19 @@ class Work7ReviewPacketTests(unittest.TestCase):
                 value["argv"] = argv
                 record.write_bytes(canonical_json_bytes(value))
 
+        baseline = self.temporary / "r0-phase-baseline"
+        for phase in ("phase2", "phase3"):
+            shutil.copytree(self.session / phase, baseline / phase)
+
+        def reset_session_graph() -> None:
+            for phase in ("phase2", "phase3", "phase4", "phase5"):
+                shutil.rmtree(self.session / phase, ignore_errors=True)
+            for phase in ("phase2", "phase3"):
+                shutil.copytree(baseline / phase, self.session / phase)
+
         def run_case(name: str, mutate) -> None:
-            # Each subtest needs a pristine sealed Phase 2/3 graph and no Phase 5 output.
-            self.setUp()
             with self.subTest(name=name):
+                reset_session_graph()
                 self.reseal_hostile_runtime(mutate)
                 packet = self.prepare_work()
                 work_seal = self.session / "phase4/work-review-seal.json"
@@ -191,14 +203,14 @@ class Work7ReviewPacketTests(unittest.TestCase):
         # This complete relocation is intentionally first: before R0 it is a
         # valid, fully resealed graph and therefore produces the distinguishing RED.
         run_case("complete-foreign-build", lambda runtime: relocate_complete_runtime(
-            runtime, str(self.temporary / "foreign-builds" / ("build-" + self.commit))))
+            runtime, str((self.temporary / "foreign-builds" / ("build-" + self.commit)).resolve())))
         run_case("relative", lambda runtime: set_configure_build(runtime, "build-" + self.commit))
         run_case("ordinary-symlink", lambda runtime: (
             (self.temporary / "build-link").symlink_to(self.temporary / "builds", target_is_directory=True),
             set_configure_build(runtime, str(self.temporary / "build-link" / ("build-" + self.commit))))[-1])
         run_case("wrong-commit", lambda runtime: (
             (self.temporary / "wrong" / ("build-" + "0" * 40)).mkdir(parents=True),
-            set_configure_build(runtime, str(self.temporary / "wrong" / ("build-" + "0" * 40))))[-1])
+            set_configure_build(runtime, str((self.temporary / "wrong" / ("build-" + "0" * 40)).resolve())))[-1])
         run_case("missing", lambda runtime: set_configure_build(runtime, str(self.temporary / "missing" / ("build-" + self.commit))))
         for label, guarded in (("source", lambda: self.source), ("paper", lambda: self.paper),
                                ("threshold", lambda: self.threshold), ("session", lambda: self.session)):
@@ -209,8 +221,23 @@ class Work7ReviewPacketTests(unittest.TestCase):
             def tmp_alias(runtime: Path) -> None:
                 alias = Path("/tmp") / ("work7-r0-" + self.temporary.name) / ("build-" + self.commit)
                 alias.mkdir(parents=True)
+                self.addCleanup(shutil.rmtree, alias.parent.resolve(), True)
                 set_configure_build(runtime, str(alias))
             run_case("tmp-private-tmp-alias", tmp_alias)
+
+    def test_validate_canonical_build_root_rejects_guarded_overlaps_after_name_checks(self):
+        """A canonical expected build is still invalid if it overlaps any guarded root."""
+        from scripts.work7_review_packet import Failure, validate_canonical_build_root
+
+        parent = self.temporary / "canonical-overlap-checks"
+        build = parent / ("build-" + self.commit)
+        build.mkdir(parents=True)
+        expected = str(build.resolve())
+        for guarded in (build, parent, build / "guarded-descendant"):
+            guarded.mkdir(exist_ok=True)
+            with self.subTest(guarded=guarded):
+                with self.assertRaisesRegex(Failure, "noncanonical build root"):
+                    validate_canonical_build_root(expected, self.commit, (guarded.resolve(),), expected)
 
     def test_prepare_work_creates_deterministic_sealed_session_relative_packet(self):
         """Removing a required member or allowing absolute paths must break this behavior."""

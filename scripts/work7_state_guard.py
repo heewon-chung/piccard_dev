@@ -44,10 +44,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("all path arguments must be absolute")
         for path in path_arguments:
             _reject_symlink_components(path)
-        source, paper, threshold = (args.source_root.resolve(strict=True),
-                                    args.paper_root.resolve(strict=True),
-                                    args.threshold_root.resolve(strict=True))
-        assert_output_roots_outside([source, paper, threshold], [args.build_root, args.session_root])
+        source, paper, threshold, build = (args.source_root.resolve(strict=True),
+                                            args.paper_root.resolve(strict=True),
+                                            args.threshold_root.resolve(strict=True),
+                                            args.build_root.resolve(strict=True))
+        assert_output_roots_outside([source, paper, threshold], [build, args.session_root])
         assert_output_roots_outside([source, paper, threshold], [args.output])
         output = args.output.resolve(strict=False)
         try:
@@ -63,9 +64,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("source commit does not match expected commit")
         if not _source_is_clean(source):
             raise ValueError("source worktree is dirty")
-        state = {"schema": "piccard-work7-phase0-state-v1", "source": source_snapshot,
+        state = {"schema": "piccard-work7-phase0-state-v2", "source": source_snapshot,
                  "paper": snapshot_git_worktree(paper),
                  "threshold": snapshot_git_worktree(threshold),
+                 "build": {"root": str(build)},
                  "session_id": f"work7-{source_snapshot['head']}"}
         _atomic_create(output, canonical_json_bytes(state))
     except (ValueError, FileExistsError, OSError) as error:

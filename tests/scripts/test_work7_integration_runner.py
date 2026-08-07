@@ -91,17 +91,19 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             subprocess.run(("git", "-C", str(paper), "add", "."), check=True)
             subprocess.run(("git", "-C", str(paper), "commit", "-qm", "response baseline"), check=True)
         commit = subprocess.check_output(("git", "-C", str(source), "rev-parse", "HEAD"), text=True).strip()
-        state = {"schema": "piccard-work7-phase0-state-v1", "source": {"head": commit},
+        state = {"schema": "piccard-work7-phase0-state-v2", "source": {"head": commit},
                  "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold),
+                 "build": {"root": str((temporary / "builds" / ("build-" + commit)).resolve())},
                  "session_id": "work7-" + commit}
         scripts = source / "scripts"
-        if source_snapshot is None:
-            self.write(scripts / "work7_state_guard.py", """
+        self.write(scripts / "work7_state_guard.py", """
                 import json, os, pathlib, sys
                 p=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.parent.mkdir(parents=True,exist_ok=True)
                 if os.environ.get('FAKE_FAULT') == 'dirty': raise SystemExit(2)
-                p.write_text(os.environ['FAKE_STATE']); print('work7_state_guard: PASS')
+                state=json.loads(os.environ['FAKE_STATE']); state['build']={'root':str(pathlib.Path(sys.argv[sys.argv.index('--build-root')+1]).resolve())}
+                p.write_text(json.dumps(state, sort_keys=True, separators=(',', ':'))+'\\n'); print('work7_state_guard: PASS')
             """)
+        if source_snapshot is None:
             self.write(scripts / "verify_work7_claims.py", """
                 import json, os, pathlib, sys
                 a=sys.argv; mode=a[a.index('--mode')+1]; output=pathlib.Path(a[a.index('--output')+1]); commit=a[a.index('--source-commit')+1]
@@ -220,6 +222,14 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         if source_snapshot is not None and terminal_wrapper:
             verifier = scripts / "verify_work7_claims.py"
             verifier.rename(scripts / "verify_work7_claims_real.py")
+            verifier_real = scripts / "verify_work7_claims_real.py"
+            verifier_real.write_text(
+                verifier_real.read_text(encoding="utf-8")
+                .replace("piccard-work7-phase0-state-v1", "piccard-work7-phase0-state-v2")
+                .replace('{"schema", "source", "paper", "threshold", "session_id"}',
+                         '{"schema", "source", "paper", "threshold", "build", "session_id"}'),
+                encoding="utf-8",
+            )
             self.write(verifier, """
                 #!/usr/bin/env python3
                 import os, pathlib, runpy, sys
@@ -275,8 +285,9 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             subprocess.run(("git", "-C", str(source), "add", "."), check=True)
             subprocess.run(("git", "-C", str(source), "commit", "-qm", "fake producer dependencies"), check=True)
             commit = subprocess.check_output(("git", "-C", str(source), "rev-parse", "HEAD"), text=True).strip()
-            state = {"schema": "piccard-work7-phase0-state-v1", "source": snapshot_git_worktree(source),
+            state = {"schema": "piccard-work7-phase0-state-v2", "source": snapshot_git_worktree(source),
                      "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold),
+                     "build": {"root": str((temporary / "builds" / ("build-" + commit)).resolve())},
                      "session_id": "work7-" + commit}
         env = {**os.environ, "PATH": str(fakebin) + os.pathsep + os.environ["PATH"], "FAKE_STATE": json.dumps(state),
                "FAKE_TESTS": ",".join(name for name in FROZEN_CTESTS if not (fault == "missing" and name == "MinHash")),

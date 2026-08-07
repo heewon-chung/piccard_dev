@@ -108,13 +108,14 @@ def required(path: Path, label: str, *, directory: bool = False, exists: bool = 
     return result
 
 
-def validate_canonical_build_root(raw: object, commit: str, guarded: tuple[Path, ...]) -> Path:
+def validate_canonical_build_root(raw: object, commit: str, guarded: tuple[Path, ...], expected: object) -> Path:
     """Bind the recorded CMake ``-B`` value to the one fresh build root."""
     try:
         if not isinstance(raw, str):
             raise ValueError("build root is not a string")
         path = Path(raw)
-        if not path.is_absolute():
+        expected_path = Path(expected) if isinstance(expected, str) else None
+        if not path.is_absolute() or expected_path is None or not expected_path.is_absolute():
             raise ValueError("build root is not absolute")
         current = Path(path.anchor)
         for component in path.parts[1:]:
@@ -122,8 +123,16 @@ def validate_canonical_build_root(raw: object, commit: str, guarded: tuple[Path,
             if stat.S_ISLNK(current.lstat().st_mode):
                 raise ValueError("build root has a symlink component")
         canonical = path.resolve(strict=True)
+        expected_current = Path(expected_path.anchor)
+        for component in expected_path.parts[1:]:
+            expected_current /= component
+            if stat.S_ISLNK(expected_current.lstat().st_mode):
+                raise ValueError("expected build root has a symlink component")
+        expected_canonical = expected_path.resolve(strict=True)
         if raw != str(canonical) or not canonical.is_dir() or canonical.name != "build-" + commit:
             raise ValueError("build root is not the canonical named directory")
+        if expected != str(expected_canonical) or canonical != expected_canonical:
+            raise ValueError("build root differs from sealed Phase 0 build root")
         assert_output_roots_outside(list(guarded), [canonical])
         for root in guarded:
             resolved = root.resolve(strict=True)
@@ -180,8 +189,10 @@ def phase0(session: Path, path: Path) -> tuple[dict, str]:
         raise Failure("foreign Phase 0 seal")
     state = canonical_object(session / "phase0/artifacts/state.json", "Phase 0 state")
     commit = state.get("source", {}).get("head") if isinstance(state.get("source"), dict) else None
-    if (set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
-            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(commit, str) or
+    build_state = state.get("build")
+    if (set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or not isinstance(build_state, dict) or
+            set(build_state) != {"root"} or not isinstance(build_state.get("root"), str) or not isinstance(commit, str) or
             len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit) or
             state.get("session_id") != "work7-" + commit):
         raise Failure("invalid Phase 0 state")
@@ -364,7 +375,7 @@ def validate_phase2_runtime(session: Path, source: Path, state: dict, commit: st
         threshold = Path(state["threshold"]["root"])
     except (KeyError, TypeError) as error:
         raise Failure("invalid Phase 0 external roots") from error
-    build = validate_canonical_build_root(configure_argv[4], commit, (source, paper, threshold, session))
+    build = validate_canonical_build_root(configure_argv[4], commit, (source, paper, threshold, session), state["build"]["root"])
     expected_configure = ("cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
                           "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
     _command_record(commands, "configure", expected_configure, source)

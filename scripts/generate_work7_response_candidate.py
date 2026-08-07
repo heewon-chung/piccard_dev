@@ -103,8 +103,10 @@ def exact_state(phase0: Path, source: Path, paper: Path, threshold: Path, sessio
         state = json.loads(state_path.read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise Failure("invalid Phase 0 state") from error
-    if (not isinstance(state, dict) or set(state) != {"schema", "source", "paper", "threshold", "session_id"} or
-            state.get("schema") != "piccard-work7-phase0-state-v1" or not isinstance(state.get("source"), dict) or
+    build = state.get("build") if isinstance(state, dict) else None
+    if (not isinstance(state, dict) or set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or not isinstance(state.get("source"), dict) or
+            not isinstance(build, dict) or set(build) != {"root"} or not isinstance(build.get("root"), str) or
             state.get("session_id") != "work7-" + state["source"].get("head", "")):
         raise Failure("invalid Phase 0 state")
     commit = state["source"].get("head")

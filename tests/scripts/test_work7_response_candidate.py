@@ -46,10 +46,13 @@ class Work7ResponseCandidateTests(unittest.TestCase):
         source = ROOT.resolve()
         commit = subprocess.check_output(("git", "-C", str(source), "rev-parse", "HEAD"), text=True).strip()
         session = temporary / "session"
+        build = temporary / ("build-" + commit)
+        build.mkdir()
         phase0_artifacts = session / "phase0" / "artifacts"
         phase0_artifacts.mkdir(parents=True)
-        state = {"schema": "piccard-work7-phase0-state-v1", "source": snapshot_git_worktree(source),
+        state = {"schema": "piccard-work7-phase0-state-v2", "source": snapshot_git_worktree(source),
                  "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold),
+                 "build": {"root": str(build.resolve())},
                  "session_id": "work7-" + commit}
         (phase0_artifacts / "state.json").write_bytes(canonical_json_bytes(state))
         phase0 = session / "phase0" / "seal.json"
