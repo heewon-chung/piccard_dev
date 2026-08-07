@@ -685,6 +685,7 @@ if(BUILD_TESTS)
                 src/core/sqrt_encoder.cpp
                 src/core/bottom_structure.cpp
                 src/fhe/bfv_context.cpp
+                src/fhe/public_ciphertext_codec.cpp
                 src/protocol/piccard.cpp
                 src/protocol/dynamic_piccard.cpp
                 src/protocol/sqrt_piccard.cpp
