@@ -54,6 +54,44 @@ class Work7CTestInventoryTests(unittest.TestCase):
             _ctest_inventory(self.inventory(*FROZEN_CTESTS, "UnrelatedProjectSmoke", total=len(FROZEN_CTESTS)))
 
 
+class Work7FocusedCTestTests(unittest.TestCase):
+    """Fail-closed parsing for the frozen focused CTest invocation."""
+
+    @staticmethod
+    def focused_output(summary: str) -> bytes:
+        from scripts.run_work7_integration import FROZEN_CTESTS
+
+        rows = [f"{index}/{len(FROZEN_CTESTS)} Test #{index}: {name} ... Passed 0.01 sec"
+                for index, name in enumerate(FROZEN_CTESTS, 1)]
+        return ("\n".join((*rows, "", summary, ""))).encode("utf-8")
+
+    def test_focused_ctest_accepts_current_success_summary(self):
+        """Current CTest success output still validates the complete frozen pass set."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import _validate_focused_ctest
+
+        self.assertEqual(
+            _validate_focused_ctest(self.focused_output(f"100% tests passed out of {len(FROZEN_CTESTS)}")),
+            len(FROZEN_CTESTS),
+        )
+
+    def test_focused_ctest_rejects_malformed_success_summary(self):
+        """A non-CTest success-summary shape cannot authorize the frozen pass set."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import Failure, _validate_focused_ctest
+
+        with self.assertRaises(Failure):
+            _validate_focused_ctest(self.focused_output(f"100% tests passed out of {len(FROZEN_CTESTS)} extra"))
+
+    def test_focused_ctest_rejects_wrong_count_success_summary(self):
+        """A success summary must report the exact frozen CTest count."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import Failure, _validate_focused_ctest
+
+        with self.assertRaises(Failure):
+            _validate_focused_ctest(self.focused_output(f"100% tests passed out of {len(FROZEN_CTESTS) - 1}"))
+
+
 class Work7ReviewPacketTests(unittest.TestCase):
     """The packet is a real session-local snapshot, never a source-text check."""
 

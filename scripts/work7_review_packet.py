@@ -776,8 +776,13 @@ def _validate_focused_ctest(stdout: bytes) -> int:
         raise Failure("focused CTest has failed, skipped, or not-run tests")
     passed = tuple(re.findall(r"^\s*\d+/\d+\s+Test\s+#\d+:\s+([A-Za-z0-9_]+)\s+.*\bPassed\b", text, re.MULTILINE))
     count = len(_frozen_ctests())
-    summary = rf"100% tests passed, 0 tests failed out of {count}"
-    if len(passed) != count or len(set(passed)) != count or set(passed) != set(_frozen_ctests()) or summary not in text:
+    summaries = re.findall(r"^100% tests passed.*$", text, re.MULTILINE)
+    allowed_summaries = {
+        f"100% tests passed out of {count}",
+        f"100% tests passed, 0 tests failed out of {count}",
+    }
+    if (len(passed) != count or len(set(passed)) != count or set(passed) != set(_frozen_ctests()) or
+            len(summaries) != 1 or summaries[0] not in allowed_summaries):
         raise Failure("focused CTest result is not the exact frozen pass set")
     return count
 
