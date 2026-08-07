@@ -450,12 +450,13 @@ class Work7RunLifecycleTests(unittest.TestCase):
                 sentinel.write_text("preserve me\n", encoding="utf-8")
 
                 diagnostic = record_and_apply_failure(
-                    diagnostic_root=root / "diagnostics", build_parent=root / "builds",
-                    session_parent=root / "sessions", build=build, session=session,
-                    commit=commit, kind=kind, packet_sha256=None, guarded=(), ledger=ledger)
+                    kind, root / "diagnostics", root / "builds", root / "sessions",
+                    build, session, commit, (), None, None)
 
-                self.assertEqual(diagnostic, (root / "diagnostics" / ("failure-" + commit + ".json")).resolve())
-                self.assertEqual(json.loads(diagnostic.read_text(encoding="utf-8")), {
+                self.assertIsInstance(diagnostic, str)
+                diagnostic_path = Path(diagnostic)
+                self.assertEqual(diagnostic_path, (root / "diagnostics" / ("failure-" + commit + ".json")).resolve())
+                self.assertEqual(json.loads(diagnostic_path.read_text(encoding="utf-8")), {
                     "schema": "piccard-work7-failure-v1", "source_commit": commit,
                     "failure_kind": kind, "action": "DISPOSE",
                     "build_root": str(build.resolve()), "session_root": str(session.resolve()),
@@ -464,12 +465,12 @@ class Work7RunLifecycleTests(unittest.TestCase):
                 self.assertFalse(build.exists())
                 self.assertFalse(session.exists())
                 self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
-                self.assertTrue(diagnostic.is_file())
+                self.assertTrue(diagnostic_path.is_file())
 
     def test_second_reservation_collision_disposes_only_first_ledger_root(self):
         """Removing an unowned collision target instead of the first reservation is a bug."""
         from scripts.work7_run_lifecycle import (ReservationLedger,
-                                                  record_and_apply_failure,
+                                                  _record_and_apply_owned_failure,
                                                   reserve_owned)
 
         with self.make_roots() as temporary:
@@ -483,12 +484,13 @@ class Work7RunLifecycleTests(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 reserve_owned(root / "sessions", session.name, ledger)
-            diagnostic = record_and_apply_failure(
+            diagnostic = _record_and_apply_owned_failure(
                 diagnostic_root=root / "diagnostics", build_parent=root / "builds",
                 session_parent=root / "sessions", build=build, session=session,
-                commit=self.commit, kind="execution", packet_sha256=None, guarded=(), ledger=ledger)
+                commit=self.commit, kind="execution", packet=None, packet_sha256=None,
+                guarded=(), ledger=ledger)
 
-            self.assertTrue(diagnostic.is_file())
+            self.assertTrue(Path(diagnostic).is_file())
             self.assertFalse(build.exists())
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not delete\n")
 
@@ -511,6 +513,30 @@ class Work7RunLifecycleTests(unittest.TestCase):
 
             self.assertTrue(build.is_dir())
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+
+    def test_disposal_rejects_diagnostic_inside_guarded_root_before_writing_or_deleting(self):
+        """A diagnostic inside source/Paper/threshold is not durable external evidence."""
+        from scripts.work7_run_lifecycle import record_and_apply_failure
+
+        with self.make_roots() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            diagnostic_root = source / "diagnostics"
+            diagnostic_root.mkdir()
+            build = root / "builds" / ("build-" + self.commit)
+            session = root / "sessions" / ("session-" + self.commit)
+            build.mkdir()
+            session.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "diagnostic root must be external"):
+                record_and_apply_failure(
+                    "execution", diagnostic_root, root / "builds", root / "sessions",
+                    build, session, self.commit, (source,), None, None)
+
+            self.assertEqual(list(diagnostic_root.iterdir()), [])
+            self.assertTrue(build.is_dir())
+            self.assertTrue(session.is_dir())
 
 
 if __name__ == "__main__":

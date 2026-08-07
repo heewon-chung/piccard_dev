@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Iterable
 
 try:
-    from work7_evidence import canonical_json_bytes
+    from work7_evidence import canonical_json_bytes, sha256_file
 except ModuleNotFoundError:
-    from scripts.work7_evidence import canonical_json_bytes
+    from scripts.work7_evidence import canonical_json_bytes, sha256_file
 
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -124,6 +124,39 @@ def _diagnostic_path(diagnostic_root: Path, commit: str) -> tuple[Path, str]:
     return root / ("failure-" + commit + ".json"), commit
 
 
+def _external_diagnostic_root(diagnostic_root: Path, guarded: tuple[Path, ...],
+                              build: Path, session: Path) -> Path:
+    """Require a durable diagnostic root outside every protected generated root."""
+    root = _parent(diagnostic_root, "diagnostic root")
+    for raw_protected in (*guarded, build, session):
+        protected = _parent(raw_protected, "guarded root")
+        try:
+            root.relative_to(protected)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("diagnostic root must be external")
+        try:
+            protected.relative_to(root)
+        except ValueError:
+            continue
+        raise ValueError("diagnostic root must be external")
+    return root
+
+
+def _packet_digest(packet: Path | None, packet_sha256: str | None) -> str | None:
+    if packet_sha256 is not None and (not isinstance(packet_sha256, str) or not _SHA256.fullmatch(packet_sha256)):
+        raise ValueError("packet SHA-256 must be lowercase hexadecimal or null")
+    if packet is None:
+        return packet_sha256
+    if not isinstance(packet, Path) or not packet.is_absolute() or not packet.is_file():
+        raise ValueError("packet must be an existing absolute regular file")
+    captured = sha256_file(packet)
+    if packet_sha256 is not None and packet_sha256 != captured:
+        raise ValueError("packet SHA-256 does not match stable packet bytes")
+    return captured
+
+
 def _write_exclusive(path: Path, raw: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -164,19 +197,19 @@ def _cleanup_ledger(ledger: ReservationLedger, build_parent: Path, session_paren
             break
 
 
-def record_and_apply_failure(*, diagnostic_root: Path, build_parent: Path, session_parent: Path,
-                             build: Path, session: Path, commit: str, kind: str,
-                             packet_sha256: str | None, guarded: Iterable[Path],
-                             ledger: ReservationLedger) -> Path:
-    """Persist one canonical external failure record before any owned cleanup."""
+def _write_failure_diagnostic(kind: str, diagnostic_root: Path, build_parent: Path,
+                              session_parent: Path, build: Path, session: Path,
+                              commit: str, guarded: tuple[Path, ...], packet: Path | None,
+                              packet_sha256: str | None) -> tuple[Path, Path, Path]:
+    """Validate the full boundary and persist the exact diagnostic before cleanup."""
     action = classify_failure(kind)
     canonical_build, canonical_session = _validate_generated_pair(
         build_parent, session_parent, build, session, commit, guarded)
-    if packet_sha256 is not None and (not isinstance(packet_sha256, str) or not _SHA256.fullmatch(packet_sha256)):
-        raise ValueError("packet SHA-256 must be lowercase hexadecimal or null")
-    diagnostic, commit = _diagnostic_path(diagnostic_root, commit)
-    _separate(diagnostic.parent.resolve(strict=True), canonical_build, "diagnostic and build root")
-    _separate(diagnostic.parent.resolve(strict=True), canonical_session, "diagnostic and session root")
+    canonical_diagnostic_root = _external_diagnostic_root(
+        diagnostic_root, guarded, canonical_build, canonical_session)
+    packet_sha256 = _packet_digest(packet, packet_sha256)
+    commit = _commit_value(commit)
+    diagnostic = canonical_diagnostic_root / ("failure-" + commit + ".json")
     record: dict[str, object] = {
         "schema": "piccard-work7-failure-v1",
         "source_commit": commit,
@@ -190,12 +223,37 @@ def record_and_apply_failure(*, diagnostic_root: Path, build_parent: Path, sessi
     raw = canonical_json_bytes(record)
     _write_exclusive(diagnostic, raw)
     _stable_diagnostic(diagnostic, record, raw)
+    return diagnostic, canonical_build, canonical_session
 
+
+def record_and_apply_failure(kind: str, diagnostic_root: Path, build_parent: Path,
+                             session_parent: Path, build: Path, session: Path, commit: str,
+                             guarded: tuple[Path, ...], packet: Path | None,
+                             packet_sha256: str | None) -> str:
+    """Write the diagnostic, dispose both validated roots, and return its path string."""
+    diagnostic, canonical_build, canonical_session = _write_failure_diagnostic(
+        kind, diagnostic_root, build_parent, session_parent, build, session, commit,
+        guarded, packet, packet_sha256)
+    shutil.rmtree(canonical_build)
+    shutil.rmtree(canonical_session)
+    return str(diagnostic)
+
+
+def _record_and_apply_owned_failure(*, diagnostic_root: Path, build_parent: Path,
+                                    session_parent: Path, build: Path, session: Path,
+                                    commit: str, kind: str, guarded: tuple[Path, ...],
+                                    packet: Path | None, packet_sha256: str | None,
+                                    ledger: ReservationLedger) -> str:
+    """Runner-only partial-reservation coordinator using its creation ledger."""
+    diagnostic, canonical_build, canonical_session = _write_failure_diagnostic(
+        kind, diagnostic_root, build_parent, session_parent, build, session, commit,
+        guarded, packet, packet_sha256)
     if canonical_build in ledger.created and canonical_session in ledger.created:
-        dispose_generated_run(build_parent, session_parent, build, session, commit, guarded)
+        shutil.rmtree(canonical_build)
+        shutil.rmtree(canonical_session)
     else:
         _cleanup_ledger(ledger, build_parent, session_parent, build, session, commit)
-    return diagnostic
+    return str(diagnostic)
 
 
 def clear_diagnostic(diagnostic_root: Path, commit: str) -> None:
@@ -219,9 +277,9 @@ def _parser() -> argparse.ArgumentParser:
         failure.add_argument("--" + name, required=True, type=Path)
     failure.add_argument("--commit", required=True)
     failure.add_argument("--kind", required=True)
+    failure.add_argument("--packet", type=Path)
     failure.add_argument("--packet-sha256")
     failure.add_argument("--guarded-root", action="append", default=[], type=Path)
-    failure.add_argument("--owned-root", action="append", required=True, type=Path)
     clear = commands.add_parser("clear-diagnostic", add_help=False)
     clear.add_argument("--diagnostic-root", required=True, type=Path)
     clear.add_argument("--commit", required=True)
@@ -234,12 +292,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "clear-diagnostic":
             clear_diagnostic(args.diagnostic_root, args.commit)
         else:
-            ledger = ReservationLedger(created=list(args.owned_root))
             record_and_apply_failure(
-                diagnostic_root=args.diagnostic_root, build_parent=args.build_parent,
-                session_parent=args.session_parent, build=args.build_root,
-                session=args.session_root, commit=args.commit, kind=args.kind,
-                packet_sha256=args.packet_sha256, guarded=args.guarded_root, ledger=ledger)
+                args.kind, args.diagnostic_root, args.build_parent, args.session_parent,
+                args.build_root, args.session_root, args.commit, tuple(args.guarded_root),
+                args.packet, args.packet_sha256)
     except (OSError, ValueError, FileExistsError) as error:
         print("work7_run_lifecycle: FAIL: " + str(error), file=sys.stderr)
         return 2

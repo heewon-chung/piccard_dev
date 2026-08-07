@@ -19,12 +19,12 @@ from pathlib import Path
 try:  # Module execution and unittest package import use different sys.path roots.
     from work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                 sha256_file, snapshot_git_worktree, verify_tree_seal)
-    from work7_run_lifecycle import (ReservationLedger, record_and_apply_failure,
+    from work7_run_lifecycle import (ReservationLedger, _record_and_apply_owned_failure,
                                      reserve_owned)
 except ModuleNotFoundError:
     from scripts.work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                         sha256_file, snapshot_git_worktree, verify_tree_seal)
-    from scripts.work7_run_lifecycle import (ReservationLedger, record_and_apply_failure,
+    from scripts.work7_run_lifecycle import (ReservationLedger, _record_and_apply_owned_failure,
                                              reserve_owned)
 
 # This is deliberately a literal registry, rather than an inventory-derived set.
@@ -756,10 +756,10 @@ def main(argv: list[str] | None = None) -> int:
         if (ledger is not None and ledger.created and build is not None and session is not None
                 and commit is not None and diagnostic_root is not None):
             try:
-                record_and_apply_failure(
+                _record_and_apply_owned_failure(
                     diagnostic_root=diagnostic_root, build_parent=build_parent,
                     session_parent=session_parent, build=build, session=session,
-                    commit=commit, kind="execution", packet_sha256=None,
+                    commit=commit, kind="execution", packet=None, packet_sha256=None,
                     guarded=(source, paper, threshold), ledger=ledger)
             except (ValueError, OSError, json.JSONDecodeError) as coordinator_error:
                 print(f"run_work7_integration: FAIL: failure coordination failed: {coordinator_error}", file=sys.stderr)
@@ -769,10 +769,10 @@ def main(argv: list[str] | None = None) -> int:
         if (ledger is not None and ledger.created and build is not None and session is not None
                 and commit is not None and diagnostic_root is not None):
             try:
-                record_and_apply_failure(
+                _record_and_apply_owned_failure(
                     diagnostic_root=diagnostic_root, build_parent=build_parent,
                     session_parent=session_parent, build=build, session=session,
-                    commit=commit, kind="user-cancel", packet_sha256=None,
+                    commit=commit, kind="user-cancel", packet=None, packet_sha256=None,
                     guarded=(source, paper, threshold), ledger=ledger)
             except (ValueError, OSError, json.JSONDecodeError) as coordinator_error:
                 print(f"run_work7_integration: FAIL: failure coordination failed: {coordinator_error}", file=sys.stderr)

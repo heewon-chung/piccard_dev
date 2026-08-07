@@ -173,3 +173,61 @@ Per the approved PoC override, Unit C does not add an exhaustive injected
 failure matrix, symlink/path-spelling or concurrent-replacement cases,
 actual-data execution, or repeated performance measurements.  The exercised
 normal cases use toy inputs and all measured counts remain one.
+
+## R3 review fix round 1 — external diagnostics and fixed public interface
+
+`record_and_apply_failure` now has the restored fixed public signature:
+
+```text
+record_and_apply_failure(kind, diagnostic_root, build_parent, session_parent,
+                         build, session, commit, guarded, packet,
+                         packet_sha256) -> str
+```
+
+It has no ledger argument and accepts positional calls.  It validates the two
+exact generated roots, then requires the canonical diagnostic root to be
+strictly external to every guarded root and to both generated roots before any
+diagnostic write or deletion.  Where `packet` is supplied, the wrapper
+stable-captures its SHA-256 and requires any supplied digest to match.  On
+success it returns the deterministic canonical diagnostic-path string.
+
+Runner-specific partial-reservation behavior is deliberately private in
+`_record_and_apply_owned_failure(...)`; it uses the same validation/write
+boundary but consults `ReservationLedger` only to roll back paths the runner
+actually created.  This retains the existing session-collision behavior while
+keeping the fixed public disposal API independent of runner state.
+
+### TDD evidence
+
+The added guarded-contained diagnostic case and restored positional calls were
+run before the implementation update:
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_integration_runner.Work7RunLifecycleTests
+Ran 4 tests in 0.015s
+FAILED (errors=6)
+```
+
+The public API failed exactly because it still accepted zero positional
+arguments (`TypeError: ... takes 0 positional arguments but 10 were given`),
+and the private runner coordinator had not yet been introduced.
+
+Focused GREEN verification:
+
+```text
+python3 -m unittest -v \
+  tests.scripts.test_work7_integration_runner.Work7RunLifecycleTests \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_post_reservation_failure_is_disposed_then_requires_clear_for_fresh_phase0 \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_partial_session_collision_keeps_foreign_root_and_disposes_created_build
+Ran 6 tests in 3.232s
+OK
+```
+
+The new real-filesystem test places the proposed diagnostic directory beneath
+a guarded source root and verifies rejection, no diagnostic creation, and both
+generated roots retained.  The lifecycle test also asserts that the public
+return is a `str` equal to the resolved `failure-<commit>.json` path.
+
+`python3 -m py_compile scripts/work7_run_lifecycle.py
+scripts/run_work7_integration.py tests/scripts/test_work7_integration_runner.py`
+and `git diff --check` completed successfully with the focused run.
