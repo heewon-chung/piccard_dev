@@ -1326,6 +1326,50 @@ assert verify_work7_claims.CapturedBlob is package_blob
                 with self.assertRaises(Failure):
                     capture_phase04(trial, self.source)
 
+    def test_capture_phase04_rejects_resealed_production_output_alias(self):
+        """Each pre-threshold producer role must bind a distinct sealed artifact."""
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+        from scripts.work7_review_packet import Failure, capture_phase04
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+
+        def reseal_chain() -> None:
+            for seal_relative, root_relative, kind, previous_relative in (
+                ("phase0/seal.json", "phase0/artifacts", "phase0", None),
+                ("phase2/runtime-seal.json", "phase2/runtime", "phase2-runtime-artifacts", "phase0/seal.json"),
+                ("phase2/closure-seal.json", "phase2/closure-artifacts", "phase2-closure", "phase2/runtime-seal.json"),
+                ("phase3/candidate-seal.json", "phase3/candidate-artifacts", "phase3-candidate-artifacts", "phase2/closure-seal.json"),
+                ("phase3/closure-seal.json", "phase3/closure-artifacts", "phase3-closure", "phase3/candidate-seal.json"),
+                ("phase4/work-review-seal.json", "phase4/work-review-artifacts", "phase4-work-review", "phase3/closure-seal.json"),
+            ):
+                seal = self.session / seal_relative
+                seal.unlink()
+                previous = None if previous_relative is None else sha256_file(self.session / previous_relative)
+                create_tree_seal(self.session / root_relative, seal, previous, kind)
+
+        runtime = self.session / "phase2/runtime"
+        manifest_path = runtime / "pre-threshold/manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        cell = next(item for item in manifest["cells"] if item["producer"] == "bench_piccard")
+        old_log = runtime / "pre-threshold" / cell["output"]["log"]
+        cell["output"]["log"] = cell["output"]["csv"]
+        cell["output"]["log_sha256"] = cell["output"]["csv_sha256"]
+        old_log.unlink()
+        terminal_path = runtime / "pre-threshold/terminal-cells.tsv"
+        terminal = terminal_path.read_text(encoding="utf-8").replace(
+            hashlib.sha256(b"log").hexdigest(), cell["output"]["csv_sha256"])
+        terminal_path.write_text(terminal, encoding="utf-8")
+        manifest["terminal_cells"]["sha256"] = hashlib.sha256(terminal.encode()).hexdigest()
+        manifest_path.write_bytes((json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        reseal_chain()
+
+        # A path-only set comparison accepted this alias before logical roles were counted.
+        with self.assertRaises(Failure):
+            capture_phase04(self.session, self.source)
+
     def test_prepare_final_never_publishes_transient_source_packet_bytes(self):
         """A restored source file cannot replace the first captured source packet bytes."""
         from scripts import work7_review_packet

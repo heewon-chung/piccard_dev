@@ -105,6 +105,7 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
     expected = {"evidence-index.json", "static-report.json", "pre-threshold/manifest.json",
                 "pre-threshold/terminal-cells.tsv", "real-datasets/run_metadata.tsv",
                 "real-datasets/verification_status.tsv"}
+    logical_dynamic_paths: list[str] = []
     for label in _RUNTIME_COMMANDS:
         expected.update({f"commands/{label}.json", f"commands/{label}.stdout.txt", f"commands/{label}.stderr.txt"})
     try:
@@ -127,7 +128,9 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
             path = Path(relative) if isinstance(relative, str) else Path()
             if not isinstance(relative, str) or not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
                 raise ValueError("pre-threshold manifest has noncanonical producer output")
-            expected.add("pre-threshold/" + relative)
+            member = "pre-threshold/" + relative
+            logical_dynamic_paths.append(member)
+            expected.add(member)
     try:
         metadata_lines = values["real-datasets/run_metadata.tsv"].raw.decode("utf-8", "strict").splitlines()
     except (KeyError, UnicodeError) as error:
@@ -147,7 +150,11 @@ def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> 
         path = Path(relative)
         if not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
             raise ValueError("real-data metadata has noncanonical artifact path")
-        expected.add("real-datasets/" + relative)
+        member = "real-datasets/" + relative
+        logical_dynamic_paths.append(member)
+        expected.add(member)
+    if len(logical_dynamic_paths) != len(set(logical_dynamic_paths)):
+        raise ValueError("runtime producer roles alias one sealed member")
     return frozenset(expected)
 
 
