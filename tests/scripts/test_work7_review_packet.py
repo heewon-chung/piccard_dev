@@ -123,6 +123,95 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse((self.session / "phase5/members").exists())
 
+    def test_prepare_final_rejects_noncanonical_build_roots_before_output(self):
+        """A resealed runtime must not redirect validation to any other build tree."""
+        from scripts.work7_evidence import canonical_json_bytes
+
+        def set_configure_build(runtime: Path, raw: str) -> None:
+            record = runtime / "commands/configure.json"
+            value = json.loads(record.read_bytes())
+            value["argv"][4] = raw
+            record.write_bytes(canonical_json_bytes(value))
+
+        def relocate_complete_runtime(runtime: Path, raw: str) -> None:
+            """Reseal a complete fake producer graph bound to a foreign build."""
+            original = self.temporary / "builds" / ("build-" + self.commit)
+            foreign = Path(raw)
+            foreign.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(original, foreign)
+            environment = {**os.environ, "FAKE_COMMIT": self.commit}
+            pre, real = runtime / "pre-threshold", runtime / "real-datasets"
+            shutil.rmtree(pre)
+            shutil.rmtree(real)
+            subprocess.run((str(self.source / "scripts/run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2",
+                            "--build-dir=" + raw, "--results-root=" + str(pre)), cwd=self.source, env=environment, check=True)
+            subprocess.run((str(self.source / "scripts/run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2",
+                            "--build-dir=" + raw, "--results-root=" + str(real)), cwd=self.source, env=environment, check=True)
+            subprocess.run((sys.executable, str(self.source / "scripts/verify_real_dataset_outputs.py"), str(real)),
+                           cwd=self.source, env=environment, check=True)
+            commands = runtime / "commands"
+            replacements = {
+                "configure": ["cmake", "-S", str(self.source), "-B", raw, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON"],
+                "build": ["cmake", "--build", raw, "--parallel", "2"],
+                "ctest-inventory": ["ctest", "--test-dir", raw, "-N"],
+                "ctest-focused": ["ctest", "--test-dir", raw, "--output-on-failure", "-R",
+                                  "^(MinHash|Hash|Encoding|Encryption|Decryption|Jaccard|Binning|FHE|OpenFHE|BigInteger|Ciphertext|Serialization|KeyGeneration|Multiplication|Rotation|Noise|Parameters|SecretKey|PublicKey|EvaluationKey|Plaintext|Decryptor|Encryptor|Scheme|Context|Utilities|Integration)$"],
+                "pre-threshold": [str(self.source / "scripts/run_pre_threshold_profiles.sh"), "--suite=smoke", "--seed=7", "--threads=2",
+                                  "--build-dir=" + raw, "--results-root=" + str(pre)],
+                "real-datasets": [str(self.source / "scripts/run_real_datasets.sh"), "--quick", "--seed=7", "--threads=2",
+                                  "--build-dir=" + raw, "--results-root=" + str(real)],
+                "deletion-survival": [str(foreign / "bench_deletion_survival"), "--n=64", "--d=3", "--k=8",
+                                       "--required_survival=0.99", "--r_values=1,4,8", "--trials=1", "--seed=7"],
+            }
+            for label, argv in replacements.items():
+                record = commands / (label + ".json")
+                value = json.loads(record.read_bytes())
+                value["argv"] = argv
+                record.write_bytes(canonical_json_bytes(value))
+
+        def run_case(name: str, mutate) -> None:
+            # Each subtest needs a pristine sealed Phase 2/3 graph and no Phase 5 output.
+            self.setUp()
+            with self.subTest(name=name):
+                self.reseal_hostile_runtime(mutate)
+                packet = self.prepare_work()
+                work_seal = self.session / "phase4/work-review-seal.json"
+                self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                              "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+                output = self.session / "phase5/final-packet.json"
+                result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                                      "--work-review-seal", str(work_seal), "--output", str(output))
+                failures = [line for line in result.stderr.decode().splitlines() if "FAIL" in line]
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+                self.assertEqual(len(failures), 1, result.stderr.decode())
+                self.assertIn("noncanonical build root", failures[0])
+                self.assertFalse(output.exists())
+                self.assertFalse((self.session / "phase5/members").exists())
+
+        # This complete relocation is intentionally first: before R0 it is a
+        # valid, fully resealed graph and therefore produces the distinguishing RED.
+        run_case("complete-foreign-build", lambda runtime: relocate_complete_runtime(
+            runtime, str(self.temporary / "foreign-builds" / ("build-" + self.commit))))
+        run_case("relative", lambda runtime: set_configure_build(runtime, "build-" + self.commit))
+        run_case("ordinary-symlink", lambda runtime: (
+            (self.temporary / "build-link").symlink_to(self.temporary / "builds", target_is_directory=True),
+            set_configure_build(runtime, str(self.temporary / "build-link" / ("build-" + self.commit))))[-1])
+        run_case("wrong-commit", lambda runtime: (
+            (self.temporary / "wrong" / ("build-" + "0" * 40)).mkdir(parents=True),
+            set_configure_build(runtime, str(self.temporary / "wrong" / ("build-" + "0" * 40))))[-1])
+        run_case("missing", lambda runtime: set_configure_build(runtime, str(self.temporary / "missing" / ("build-" + self.commit))))
+        for label, guarded in (("source", lambda: self.source), ("paper", lambda: self.paper),
+                               ("threshold", lambda: self.threshold), ("session", lambda: self.session)):
+            run_case(label + "-equal", lambda runtime, guarded=guarded: set_configure_build(runtime, str(guarded())))
+            run_case(label + "-inside", lambda runtime, guarded=guarded: set_configure_build(runtime, str(guarded() / ("build-" + self.commit))))
+            run_case(label + "-ancestor", lambda runtime, guarded=guarded: set_configure_build(runtime, str(guarded().parent)))
+        if Path("/tmp").is_symlink() and Path("/private/tmp").is_dir():
+            def tmp_alias(runtime: Path) -> None:
+                alias = Path("/tmp") / ("work7-r0-" + self.temporary.name) / ("build-" + self.commit)
+                alias.mkdir(parents=True)
+                set_configure_build(runtime, str(alias))
+            run_case("tmp-private-tmp-alias", tmp_alias)
+
     def test_prepare_work_creates_deterministic_sealed_session_relative_packet(self):
         """Removing a required member or allowing absolute paths must break this behavior."""
         output = self.prepare_work()

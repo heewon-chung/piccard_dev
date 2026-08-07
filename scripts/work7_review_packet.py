@@ -108,6 +108,42 @@ def required(path: Path, label: str, *, directory: bool = False, exists: bool = 
     return result
 
 
+def validate_canonical_build_root(raw: object, commit: str, guarded: tuple[Path, ...]) -> Path:
+    """Bind the recorded CMake ``-B`` value to the one fresh build root."""
+    try:
+        if not isinstance(raw, str):
+            raise ValueError("build root is not a string")
+        path = Path(raw)
+        if not path.is_absolute():
+            raise ValueError("build root is not absolute")
+        current = Path(path.anchor)
+        for component in path.parts[1:]:
+            current /= component
+            if stat.S_ISLNK(current.lstat().st_mode):
+                raise ValueError("build root has a symlink component")
+        canonical = path.resolve(strict=True)
+        if raw != str(canonical) or not canonical.is_dir() or canonical.name != "build-" + commit:
+            raise ValueError("build root is not the canonical named directory")
+        assert_output_roots_outside(list(guarded), [canonical])
+        for root in guarded:
+            resolved = root.resolve(strict=True)
+            try:
+                canonical.relative_to(resolved)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("build root is inside a guarded root")
+            try:
+                resolved.relative_to(canonical)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("build root contains a guarded root")
+        return canonical
+    except (OSError, ValueError) as error:
+        raise Failure("noncanonical build root") from error
+
+
 def session_path(session: Path, path: Path, label: str, *, exists: bool = True) -> Path:
     result = required(path, label, exists=exists)
     try:
@@ -323,7 +359,12 @@ def validate_phase2_runtime(session: Path, source: Path, state: dict, commit: st
     configure_argv = configure[0]["argv"]
     if not isinstance(configure_argv, list) or len(configure_argv) != 8 or not isinstance(configure_argv[4], str):
         raise Failure("configure command record is not exact")
-    build = Path(configure_argv[4])
+    try:
+        paper = Path(state["paper"]["root"])
+        threshold = Path(state["threshold"]["root"])
+    except (KeyError, TypeError) as error:
+        raise Failure("invalid Phase 0 external roots") from error
+    build = validate_canonical_build_root(configure_argv[4], commit, (source, paper, threshold, session))
     expected_configure = ("cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
                           "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
     _command_record(commands, "configure", expected_configure, source)
