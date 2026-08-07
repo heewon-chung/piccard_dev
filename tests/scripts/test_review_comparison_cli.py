@@ -30,7 +30,7 @@ class ReviewComparisonCliTest(unittest.TestCase):
             "--universe=64",
             "--target-jaccard=0.5",
             "--trials=1",
-            "--accuracy-trials=2",
+            "--accuracy-trials=1",
             "--seed=7",
             "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16",
             "--sj16-key-bits=1024",
@@ -77,6 +77,15 @@ class ReviewComparisonCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--security=LEVEL (optional with --profile)", result.stdout)
         self.assertIn("Profile supplies security when --security is omitted.", result.stdout)
+
+    def test_toy_profile_rejects_two_accuracy_trials_before_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = self.base_command(pathlib.Path(tmp))
+            command[command.index("--accuracy-trials=1")] = "--accuracy-trials=2"
+            result = self.run_cli(command)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("trial counts do not match the frozen policy", result.stderr)
 
 
 if __name__ == "__main__":

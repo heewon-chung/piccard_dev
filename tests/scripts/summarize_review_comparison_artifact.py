@@ -4,7 +4,6 @@
 import argparse
 import csv
 import hashlib
-import math
 from pathlib import Path
 
 
@@ -21,10 +20,10 @@ EXPECTED_ROWS = [
     ("sj16", "ahe-accuracy", "accuracy", "", "", "not-applicable", ""),
 ]
 EXPECTED_WORKLOAD_SHA256 = (
-    "e5a1f07c6912592197c1d17b40f9487ce002b8067927aabd456bc4712a3b3a56"
+    "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa"
 )
 EXPECTED_TRACE_SHA256 = (
-    "b637d8275e106f1a517e1b063b2ec694cfdef618d782af654319ea9e6ac0aa7e"
+    "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec"
 )
 
 
@@ -81,16 +80,12 @@ def main() -> int:
         ):
             require(row[columns[name]] == value, f"row {index} {name} mismatch")
         require(row[columns["comparison_eligible"]] == "false", f"row {index} eligibility")
-        require(row[columns["workload_id"]] == "review-64-e5a1f07c69125921", f"row {index} workload id")
+        require(row[columns["workload_id"]] == "review-64-669d54d779bc31e4", f"row {index} workload id")
         require(row[columns["workload_manifest_sha256"]] == EXPECTED_WORKLOAD_SHA256, f"row {index} workload hash")
         require(row[columns["execution_trace_sha256"]] == EXPECTED_TRACE_SHA256, f"row {index} trace hash")
         require(row[columns["measurement_status"]] == "measured", f"row {index} status")
         sd = row[columns["total_ms_sd"]]
-        if expected[2] == "timing":
-            require(sd == "", f"row {index} one-trial timing SD is not empty")
-        else:
-            parsed_sd = float(sd)
-            require(math.isfinite(parsed_sd) and parsed_sd >= 0.0, f"row {index} accuracy SD is not finite")
+        require(sd == "", f"row {index} one-trial SD is not empty")
 
     workload_hash = sha256(args.workload)
     trace_hash = sha256(args.trace)
@@ -123,8 +118,7 @@ def main() -> int:
     for line in shape_lines + hash_lines:
         print(line)
     print("method_applicability_check=PASS")
-    print("timing_sd_empty_check=PASS")
-    print("accuracy_sd_finite_check=PASS")
+    print("one_trial_sd_empty_check=PASS")
     print("stderr_empty_check=PASS")
     return 0
 

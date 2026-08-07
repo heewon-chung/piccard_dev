@@ -150,7 +150,7 @@ void ValidateSuite(const WorkloadSpec& spec) {
         expected = &ToyMethods();
         profile = "toy-smoke";
         timing = 1;
-        accuracy = 2;
+        accuracy = 1;
     } else if (spec.suite == "sj16-precompute-sensitivity") {
         expected = &SensitivityMethods();
         profile = "std128-t64-sensitivity";

@@ -33,7 +33,7 @@ WorkloadSpec ToySpec(uint64_t seed = 7) {
     spec.methods = {"piccard", "piccard_sqrt", "bcg12_mh_ec",
                     "bcg12_exact_ec", "sj16"};
     spec.timing_trials = 1;
-    spec.accuracy_trials = 2;
+    spec.accuracy_trials = 1;
     return spec;
 }
 
@@ -88,7 +88,7 @@ std::vector<AggregateIdentity> ValidToyRows(
                               : "crs-and-keys-only");
         timing.exact_estimator = c.exact;
         rows.push_back(std::move(timing));
-        auto accuracy = Row(workload, c.method, c.accuracy_kind, "accuracy", 2,
+        auto accuracy = Row(workload, c.method, c.accuracy_kind, "accuracy", 1,
                             c.method == std::string("sj16")
                                 ? "randomizer-generation-included"
                                 : "crs-and-keys-only");
@@ -112,11 +112,11 @@ std::vector<std::string> CsvCells(const std::string& line) {
 TEST(ComparisonWorkload, DeterministicBinaryDigestAndCanonicalRecords) {
     const ComparisonWorkload workload = ComparisonWorkload::Generate(ToySpec());
 
-    EXPECT_EQ(workload.Bytes().size(), 1045u);
+    EXPECT_EQ(workload.Bytes().size(), 832u);
     EXPECT_EQ(workload.ManifestSha256Hex(),
-              "e5a1f07c6912592197c1d17b40f9487ce002b8067927aabd456bc4712a3b3a56");
-    EXPECT_EQ(workload.WorkloadId(), "review-64-e5a1f07c69125921");
-    ASSERT_EQ(workload.Records().size(), 4u);
+              "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa");
+    EXPECT_EQ(workload.WorkloadId(), "review-64-669d54d779bc31e4");
+    ASSERT_EQ(workload.Records().size(), 3u);
 
     const auto& warmup = workload.Records()[0];
     EXPECT_EQ(warmup.kind, TrialKind::Warmup);
@@ -138,11 +138,10 @@ TEST(ComparisonWorkload, DeterministicBinaryDigestAndCanonicalRecords) {
 
 TEST(ComparisonWorkload, ExactCardinalityJaccardAndCrsRules) {
     const ComparisonWorkload workload = ComparisonWorkload::Generate(ToySpec());
-    ASSERT_EQ(workload.Records().size(), 4u);
+    ASSERT_EQ(workload.Records().size(), 3u);
     const uint64_t timing_hash_seed = workload.Records()[1].hash_seed;
     EXPECT_EQ(timing_hash_seed, UINT64_C(15329580584519071531));
     EXPECT_NE(workload.Records()[2].hash_seed, timing_hash_seed);
-    EXPECT_NE(workload.Records()[2].hash_seed, workload.Records()[3].hash_seed);
     std::vector<uint64_t> trial_seeds;
 
     for (const auto& record : workload.Records()) {
@@ -220,9 +219,9 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         ASSERT_TRUE(column.find(name) != column.end()) << name;
     }
     const std::string expected_digest =
-        "e5a1f07c6912592197c1d17b40f9487ce002b8067927aabd456bc4712a3b3a56";
+        "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa";
     const std::string expected_trace =
-        "b637d8275e106f1a517e1b063b2ec694cfdef618d782af654319ea9e6ac0aa7e";
+        "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec";
     const struct {
         const char* method;
         const char* kind;
@@ -261,19 +260,12 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         EXPECT_EQ(cells[column.at("hash_seed")], expected.hash_seed);
         EXPECT_EQ(cells[column.at("comparison_eligible")], "false");
         EXPECT_EQ(cells[column.at("workload_id")],
-                  "review-64-e5a1f07c69125921");
+                  "review-64-669d54d779bc31e4");
         EXPECT_EQ(cells[column.at("workload_manifest_sha256")], expected_digest);
         EXPECT_EQ(cells[column.at("execution_trace_sha256")], expected_trace);
         EXPECT_EQ(cells[column.at("measurement_status")], "measured");
         const std::string& sd = cells[column.at("total_ms_sd")];
-        if (std::string(expected.arm) == "timing") {
-            EXPECT_TRUE(sd.empty());
-        } else {
-            ASSERT_FALSE(sd.empty());
-            const double parsed_sd = std::stod(sd);
-            EXPECT_TRUE(std::isfinite(parsed_sd));
-            EXPECT_GE(parsed_sd, 0.0);
-        }
+        EXPECT_TRUE(sd.empty());
         ++rows;
     }
     EXPECT_EQ(rows, 10u);
@@ -348,6 +340,15 @@ TEST(ComparisonWorkload, FrozenSuitesEnforceExactRowsAndTrials) {
                  std::invalid_argument);
 }
 
+TEST(ComparisonWorkload, ToySmokeAcceptsOneAccuracyTrialAndRejectsTwo) {
+    EXPECT_NO_THROW(ComparisonWorkload::Generate(ToySpec()));
+
+    auto two_accuracy_trials = ToySpec();
+    two_accuracy_trials.accuracy_trials = 2;
+    EXPECT_THROW(ComparisonWorkload::Generate(two_accuracy_trials),
+                 std::invalid_argument);
+}
+
 TEST(ComparisonWorkload, PrimaryAndSj16SensitivityMembershipIsFrozen) {
     WorkloadSpec primary;
     primary.suite = "primary-review";
@@ -405,9 +406,9 @@ TEST(ComparisonWorkload, ExecutionTraceBindsManifestAndCanonicalDispatchOrder) {
         trace.CompleteRecord();
     }
     const auto bytes = trace.SerializeAndVerify();
-    EXPECT_EQ(bytes.size(), 402u);
+    EXPECT_EQ(bytes.size(), 320u);
     EXPECT_EQ(Sha256Hex(bytes),
-              "b637d8275e106f1a517e1b063b2ec694cfdef618d782af654319ea9e6ac0aa7e");
+              "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec");
     EXPECT_NO_THROW(VerifyExecutionTrace(bytes, workload));
 
     auto reordered = bytes;

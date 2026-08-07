@@ -34,7 +34,7 @@ SUITES = {
         "piccard", "piccard_sqrt", "bcg12_mh_ff", "bcg12_mh_ec",
         "bcg12_exact_ff", "bcg12_exact_ec", "sj16"], 30, 50),
     "toy-smoke": ("toy-smoke", [
-        "piccard", "piccard_sqrt", "bcg12_mh_ec", "bcg12_exact_ec", "sj16"], 1, 2),
+        "piccard", "piccard_sqrt", "bcg12_mh_ec", "bcg12_exact_ec", "sj16"], 1, 1),
     "sj16-precompute-sensitivity": ("std128-t64-sensitivity", [
         "sj16", "sj16_precomputed"], 3, 0),
 }
