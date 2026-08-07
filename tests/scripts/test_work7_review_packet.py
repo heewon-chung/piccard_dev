@@ -10,6 +10,7 @@ import sys
 import threading
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import replace
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
@@ -352,6 +353,65 @@ class Work7ReviewPacketTests(unittest.TestCase):
             (json.dumps([str(target), "--n=64", "--d=3", "--k=8", "--required_survival=0.99",
                         "--r_values=1,4,8", "--trials=1", "--seed=7"], sort_keys=True,
                        separators=(",", ":"), ensure_ascii=True) + "\n").encode()).hexdigest())
+
+    def test_captured_prethreshold_validator_rejects_missing_terminal_and_output_bindings(self):
+        """Dropping path-validator-required terminal/output bindings must fail byte validation."""
+        from scripts.run_work7_integration import Failure, validate_prethreshold_capture
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_work(); seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        blobs = dict(capture.packet_members)
+        value = json.loads(blobs["phase2/runtime/pre-threshold/manifest.json"].raw)
+        del value["terminal_cells"]
+        del value["cells"][0]["output"]["csv_sha256"]
+        raw = json.dumps(value).encode()
+        blobs["phase2/runtime/pre-threshold/manifest.json"] = CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
+        blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
+        with self.assertRaises(Failure):
+            validate_prethreshold_capture(tuple(blobs.items()), capture.commit,
+                                          tuple(json.loads(dict(capture.packet_members)["phase2/runtime/commands/pre-threshold.json"].raw)["argv"]),
+                                          str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
+
+    def test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings(self):
+        """A metadata prefix cannot stand in for the complete real-run schema."""
+        from scripts.run_work7_integration import Failure, validate_real_capture
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_work(); seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source); blobs = dict(capture.packet_members)
+        metadata = blobs["phase2/runtime/real-datasets/run_metadata.tsv"].raw.decode().splitlines()
+        raw = ("\n".join(row for row in metadata if not any(key in row for key in ("root_count", "artifact_count", "cell.000", "bench_real_datasets_sha256"))) + "\n").encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        blobs["phase2/runtime/real-datasets/run_metadata.tsv"] = CapturedBlob(raw, digest, len(raw), "0644")
+        status = b"key\tvalue\nschema_version\tpiccard-real-verification-v1\nrun_metadata_sha256\t" + digest.encode() + b"\nstatus\tVERIFIED\n"
+        blobs["phase2/runtime/real-datasets/verification_status.tsv"] = CapturedBlob(status, hashlib.sha256(status).hexdigest(), len(status), "0644")
+        blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
+        with self.assertRaises(Failure):
+            validate_real_capture(tuple(blobs.items()), capture.commit, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
+
+    def test_captured_claim_reports_require_claims_and_runtime_seal_binding(self):
+        """Top-level PASS fields alone cannot validate static/evidence claim reports."""
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import Failure, capture_phase04, validate_phase2_runtime_capture
+
+        packet = self.prepare_work(); seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source); members = dict(capture.packet_members)
+        for relative in ("phase2/runtime/static-report.json", "phase2/static-report.json", "phase2/closure-artifacts/evidence-bound-report.json"):
+            value = json.loads(members[relative].raw)
+            value.pop("claims", None); value.pop("input_seals", None)
+            raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            members[relative] = CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
+        with self.assertRaises(Failure):
+            validate_phase2_runtime_capture(replace(capture, packet_members=tuple(sorted(members.items()))))
 
     def test_capture_phase04_rejects_phase2_static_copy_that_differs_from_runtime_sealed_twin(self):
         """A standalone static copy must be byte-identical to its sealed runtime twin."""

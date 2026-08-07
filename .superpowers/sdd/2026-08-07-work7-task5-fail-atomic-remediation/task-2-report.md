@@ -263,3 +263,37 @@ Observed: `ok`; `Ran 1 test in 0.188s`; `OK`.
 The remaining reviewer Critical producer-schema port plus Important exact
 manifest/source-capture/creation-ledger/closure-input findings are not yet
 implemented.  This report entry intentionally does not claim R1 completion.
+
+## Unit D — captured claim-report schema parity
+
+Enumerated legacy producer/report validation coverage: pre-threshold validates
+the manifest key set, toy one-run cells, terminal binding and output digests;
+real-data validates the flattened metadata roots/artifacts/cells/argv/input and
+output digest bindings; deletion validates its fixed CSV; claim reports bind
+the contract claims and, for evidence-bound mode, the runtime seal.
+
+Focused hostile coverage was added for missing pre-threshold terminal/output
+bindings, missing real metadata root/artifact/cell/digest bindings, and missing
+claim-report claims/input-seals.  The first two were characterization checks:
+the current captured validators already rejected them.  The claim report test
+was a genuine RED: removal of `claims` and `input_seals` still passed the old
+four-top-level-field screen.
+
+The byte-only runtime validator now requires each report's exact top-level key
+set, complete ordered contract claim IDs, and exact input seals (`{}` for
+static reports; the captured runtime seal SHA-256 for evidence-bound report).
+
+Focused command:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_prethreshold_validator_rejects_missing_terminal_and_output_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_claim_reports_require_claims_and_runtime_seal_binding \
+  tests.scripts.test_work7_state_guard -v
+```
+
+Observed focused tests: all three `ok`; state-guard output streamed all listed
+tests as `ok` before runner completion.  The remaining full producer schema
+port (notably exact argv/artifact-field parity for every path-validator branch)
+remains outside this partial Unit D change.

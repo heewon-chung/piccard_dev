@@ -714,11 +714,24 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
     validate_deletion_bytes(deletion)
     validate_record_counts_capture(pre_blobs)
     validate_record_counts_capture(real_blobs)
+    contract = _json_blob(capture.contract_raw, "claim contract")
+    contract_claims = contract.get("claims")
+    if not isinstance(contract_claims, list) or len(contract_claims) != 7:
+        raise Failure("invalid immutable lifecycle contract")
+    claim_ids = [item.get("id") for item in contract_claims if isinstance(item, dict)]
+    if len(claim_ids) != 7 or any(not isinstance(item, str) for item in claim_ids):
+        raise Failure("invalid immutable lifecycle contract")
+    runtime_seal = dict(capture.seals)["phase2/runtime-seal.json"].blob.sha256
     for relative, mode in (("phase2/runtime/static-report.json", "static"),
                            ("phase2/static-report.json", "static"),
                            ("phase2/closure-artifacts/evidence-bound-report.json", "evidence-bound")):
         report = _canonical_blob(members[relative], "sealed claim report")
-        if report.get("schema") != "piccard-work7-claim-report-v1" or report.get("source_commit") != capture.commit or report.get("mode") != mode or report.get("status") != "PASS":
+        expected_seals = {} if mode == "static" else {"runtime_seal_sha256": runtime_seal}
+        report_claims = report.get("claims")
+        if (set(report) != {"schema", "mode", "source_commit", "status", "claims", "input_seals", "work_gate_state", "threshold_gate_state", "validation_errors"} or
+                report.get("schema") != "piccard-work7-claim-report-v1" or report.get("source_commit") != capture.commit or
+                report.get("mode") != mode or report.get("status") != "PASS" or report.get("input_seals") != expected_seals or
+                not isinstance(report_claims, list) or [item.get("id") for item in report_claims if isinstance(item, dict)] != claim_ids):
             raise Failure("foreign source commit or invalid claim verifier report")
     return RuntimeSummary(ctest_focused=canonical_argv_sha256(list(focused_argv)),
                           pre_threshold=canonical_argv_sha256(list(pre_argv)),
