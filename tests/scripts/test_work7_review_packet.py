@@ -88,6 +88,30 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(value["kind"], "phase4-work-review")
         self.assertEqual((self.session / "phase4/work-review-artifacts/raw-review.txt").read_bytes(), approved.read_bytes())
 
+    def test_close_work_rejects_missing_extra_or_recanonicalized_manifest_members(self):
+        """A self-consistent but non-exact packet manifest is not reviewable evidence."""
+        packet = self.prepare_work()
+        original = json.loads(packet.read_bytes())
+        for mutation in ("missing", "extra", "reordered"):
+            with self.subTest(mutation=mutation):
+                value = json.loads(packet.read_bytes())
+                if mutation == "missing":
+                    value["members"].pop()
+                elif mutation == "extra":
+                    value["members"].append(dict(value["members"][0]))
+                    value["members"][-1]["path"] = "phase4/members/extra.txt"
+                    (self.session / "phase4/members/extra.txt").write_bytes(b"extra\n")
+                    value["members"][-1]["size"] = 6
+                    value["members"][-1]["sha256"] = hashlib.sha256(b"extra\n").hexdigest()
+                else:
+                    value["members"].reverse()
+                packet.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+                result = self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(self.session / "phase4/work-review-seal.json"))
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+                self.assertFalse((self.session / "phase4/work-review-seal.json").exists())
+                packet.write_bytes((json.dumps(original, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
     def test_final_close_binds_two_distinct_final_approvals_and_terminal_seal(self):
         """A duplicate provider or a final packet not bound to Phase 4 must fail closure."""
         from scripts.work7_evidence import sha256_file, verify_tree_seal

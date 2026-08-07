@@ -38,6 +38,14 @@ CHECKS_WORK = ("POC_SCOPE", "ONE_RUN_POLICY", "PROVENANCE", "FAIL_CLOSED",
                "EXTERNAL_IMMUTABILITY", "NO_OVERCLAIM")
 CHECKS_FINAL = ("G1_G7_INTENT", "EVIDENCE_FRESHNESS", "PERFORMANCE_PENDING",
                 "THRESHOLD_DEFERRED", "EXTERNAL_IMMUTABILITY", "TERMINAL_STATUS_MAXIMAL")
+WORK_SESSION_MEMBERS = (
+    "phase2/static-report.json", "phase2/closure-artifacts/evidence-bound-report.json",
+    "phase3/closure-artifacts/claim7-report.json", "phase0/seal.json", "phase2/runtime-seal.json",
+    "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json",
+    "phase3/candidate-artifacts/ResponseStrategy.candidate.md", "phase3/candidate-artifacts/ResponseStrategy.candidate.diff",
+    "phase3/candidate-artifacts/candidate-metadata.json", "phase3/candidate-artifacts/candidate-validation.json",
+    "phase0/artifacts/state.json",
+)
 
 
 class Failure(ValueError):
@@ -167,6 +175,22 @@ def packet_bytes(phase: str, commit: str, seals: dict[str, str], members: list[d
                                  "members": sorted(members, key=lambda item: item["path"])})
 
 
+def expected_member_paths(phase: str) -> set[str]:
+    work = {"phase4/members/source/" + item for item in DESIGNS + (PLAN, "scripts/work7_claims.json")}
+    work |= {"phase4/members/source/git-diff-b907fae-to-head.patch"}
+    work |= {"phase4/members/session/" + item for item in WORK_SESSION_MEMBERS}
+    work |= {"phase4/members/external/current-paper-state.json", "phase4/members/external/current-threshold-state.json"}
+    if phase == "work": return work
+    final = {path.replace("phase4/members/", "phase5/members/") for path in work}
+    final |= {"phase5/members/source/docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md",
+              "phase5/members/session/phase4/work-review-artifacts/work-packet.json",
+              "phase5/members/session/phase4/work-review-artifacts/raw-review.txt",
+              "phase5/members/session/phase4/work-review-seal.json",
+              "phase5/members/generated/works1-6-source-test-map.json",
+              "phase5/members/generated/final-verification-summary.json"}
+    return final
+
+
 def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: dict[str, str]) -> dict:
     value = canonical_object(path, f"{phase} packet")
     if (set(value) != {"schema", "phase", "source_commit", "prerequisite_seals", "members"} or
@@ -188,12 +212,16 @@ def validate_packet(path: Path, session: Path, phase: str, commit: str, seals: d
         candidate = session / relative
         if not candidate.is_file() or candidate.is_symlink() or candidate.stat().st_size != member["size"] or sha256_file(candidate) != member["sha256"]:
             raise Failure("review packet member changed or missing")
+    if paths != expected_member_paths(phase):
+        raise Failure("review packet member manifest is not exact")
+    if value["members"] != sorted(value["members"], key=lambda item: item["path"]):
+        raise Failure("review packet member order is not canonical")
     return value
 
 
 def git_diff(source: Path, baseline: str) -> bytes:
-    if not baseline or any(c not in "0123456789abcdef" for c in baseline):
-        raise Failure("baseline commit is invalid")
+    if baseline != "b907fae":
+        raise Failure("baseline commit must be exactly b907fae")
     result = subprocess.run(("git", "diff", f"{baseline}..HEAD"), cwd=source, capture_output=True,
                             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     if result.returncode:
@@ -217,19 +245,14 @@ def prepare_work(args: argparse.Namespace) -> None:
     diff = root / "source/git-diff-b907fae-to-head.patch"
     _atomic_create(diff, git_diff(source, args.baseline_commit))
     members.append({"label": "git-diff-b907fae-to-head.patch", "path": diff.relative_to(session).as_posix(), "size": diff.stat().st_size, "sha256": sha256_file(diff)})
-    for relative in ("phase2/static-report.json", "phase2/closure-artifacts/evidence-bound-report.json",
-                     "phase3/closure-artifacts/claim7-report.json", "phase0/seal.json", "phase2/runtime-seal.json",
-                     "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json",
-                     "phase3/candidate-artifacts/ResponseStrategy.candidate.md", "phase3/candidate-artifacts/ResponseStrategy.candidate.diff",
-                     "phase3/candidate-artifacts/candidate-metadata.json", "phase3/candidate-artifacts/candidate-validation.json",
-                     "phase0/artifacts/state.json"):
+    for relative in WORK_SESSION_MEMBERS:
         copy_member(session / relative, session, root, "session/" + relative, members)
     for name in ("paper", "threshold"):
         current = snapshot_git_worktree(Path(state[name]["root"]))
         if current != state[name]: raise Failure(f"Phase 0 snapshot changed: {name}")
         target = root / f"external/current-{name}-state.json"
         _atomic_create(target, canonical_json_bytes(current))
-        copy_member(target, session, root, f"external/current-{name}-state.json", members) if False else members.append({"label": f"current-{name}-state", "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
+        members.append({"label": f"current-{name}-state", "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
     seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json")}
     _atomic_create(output, packet_bytes("work", commit, seals, members))
 
@@ -251,6 +274,22 @@ def parse_review(path: Path, commit: str, digest: str, provider: str, model: str
         raise Failure("review identity, verdict, commit, packet, or status is invalid")
     for check in checks:
         if sum(line == f"CHECK {check}: CONFIRMED" for line in lines[7:]) != 1: raise Failure("review substantive confirmation is missing")
+
+
+def validate_phase4(session: Path, commit: str) -> dict:
+    work = session / "phase4/work-review-seal.json"
+    try:
+        value = verify_tree_seal(work, sha256_file(session / "phase3/closure-seal.json"))
+    except (OSError, ValueError) as error:
+        raise Failure("invalid work review seal") from error
+    root = session / "phase4/work-review-artifacts"
+    if (value["kind"] != "phase4-work-review" or Path(value["artifact_root"]) != root or
+            {entry["path"] for entry in value["entries"]} != {"work-packet.json", "raw-review.txt"}):
+        raise Failure("foreign work review seal")
+    seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json")}
+    validate_packet(root / "work-packet.json", session, "work", commit, seals)
+    parse_review(root / "raw-review.txt", commit, sha256_file(root / "work-packet.json"), "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
+    return value
 
 
 def close_work(args: argparse.Namespace) -> None:
@@ -275,28 +314,37 @@ def prepare_final(args: argparse.Namespace) -> None:
     output, work = session_path(session, args.output, "output", exists=False), session_path(session, args.work_review_seal, "work review seal")
     state, commit = chain(session)
     if state["source"] != snapshot_git_worktree(source): raise Failure("Phase 0 snapshot changed: source")
-    try: work_value = verify_tree_seal(work, sha256_file(session / "phase3/closure-seal.json"))
-    except (OSError, ValueError) as error: raise Failure("invalid work review seal") from error
-    if work_value["kind"] != "phase4-work-review" or Path(work_value["artifact_root"]) != session / "phase4/work-review-artifacts": raise Failure("foreign work review seal")
+    if work != session / "phase4/work-review-seal.json": raise Failure("foreign work review seal path")
+    validate_phase4(session, commit)
     root = session / "phase5/members"
     if root.exists() or output.exists(): raise Failure("final packet output collision")
     root.mkdir(parents=True, mode=0o700); members: list[dict] = []
-    for relative in ("docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md",) + DESIGNS:
+    for relative in DESIGNS + (PLAN, "scripts/work7_claims.json", "docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md"):
         copy_member(source / relative, session, root, "source/" + relative, members)
-    for relative in ("phase2/static-report.json", "phase2/closure-artifacts/evidence-bound-report.json",
-                     "phase3/closure-artifacts/claim7-report.json", "phase3/candidate-artifacts/ResponseStrategy.candidate.md",
-                     "phase3/candidate-artifacts/ResponseStrategy.candidate.diff", "phase3/candidate-artifacts/candidate-metadata.json",
-                     "phase3/candidate-artifacts/candidate-validation.json", "phase4/work-review-artifacts/work-packet.json",
-                     "phase4/work-review-artifacts/raw-review.txt", "phase4/work-review-seal.json", "phase0/seal.json",
-                     "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json"):
+    diff = root / "source/git-diff-b907fae-to-head.patch"
+    _atomic_create(diff, git_diff(source, "b907fae"))
+    members.append({"label": "git-diff-b907fae-to-head.patch", "path": diff.relative_to(session).as_posix(), "size": diff.stat().st_size, "sha256": sha256_file(diff)})
+    for relative in WORK_SESSION_MEMBERS + ("phase4/work-review-artifacts/work-packet.json",
+                     "phase4/work-review-artifacts/raw-review.txt", "phase4/work-review-seal.json"):
         copy_member(session / relative, session, root, "session/" + relative, members)
+    for name in ("paper", "threshold"):
+        current = snapshot_git_worktree(Path(state[name]["root"]))
+        if current != state[name]: raise Failure(f"Phase 0 snapshot changed: {name}")
+        target = root / f"external/current-{name}-state.json"
+        _atomic_create(target, canonical_json_bytes(current))
+        members.append({"label": f"current-{name}-state", "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
     try:
-        contract = json.loads((source / "scripts/work7_claims.json").read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
-        raise Failure("invalid claim contract") from error
-    if not isinstance(contract, dict) or not isinstance(contract.get("claims"), list):
-        raise Failure("invalid claim contract")
-    mappings = [{"id": row["id"], "source_paths": row["source_paths"], "required_ctest_names": row["required_ctest_names"]} for row in contract.get("claims", [])]
+        try:
+            from verify_work7_claims import inventory, load_contract
+        except ModuleNotFoundError:
+            from scripts.verify_work7_claims import inventory, load_contract
+        claims = load_contract(source / "scripts/work7_claims.json", source,
+                               inventory(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"))
+    except Exception as error:
+        raise Failure("invalid immutable lifecycle contract") from error
+    if len(claims) != 7:
+        raise Failure("invalid immutable lifecycle contract")
+    mappings = [{"id": row["id"], "source_paths": row["source_paths"], "required_ctest_names": row["required_ctest_names"]} for row in claims]
     mapping = root / "generated/works1-6-source-test-map.json"
     _atomic_create(mapping, canonical_json_bytes({"schema": "piccard-work7-source-test-map-v1", "claims": mappings[:6]}))
     inventory = session / "phase2/runtime/commands/ctest-inventory.stdout.txt"
@@ -323,12 +371,7 @@ def close_final(args: argparse.Namespace) -> None:
     if snapshot_git_worktree(paper) != state["paper"] or snapshot_git_worktree(threshold) != state["threshold"]: raise Failure("external worktree snapshot changed")
     chain(session)
     work_seal = session / "phase4/work-review-seal.json"
-    try:
-        work_value = verify_tree_seal(work_seal, sha256_file(session / "phase3/closure-seal.json"))
-    except (OSError, ValueError) as error:
-        raise Failure("invalid work review seal") from error
-    if work_value["kind"] != "phase4-work-review" or Path(work_value["artifact_root"]) != session / "phase4/work-review-artifacts":
-        raise Failure("foreign work review seal")
+    validate_phase4(session, commit)
     seals = {relative: sha256_file(session / relative) for relative in ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json", "phase4/work-review-seal.json")}
     validate_packet(packet, session, "final", commit, seals)
     digest = sha256_file(packet)
@@ -348,8 +391,16 @@ def close_final(args: argparse.Namespace) -> None:
     for path, label in ((packet, "final-packet.json"), (claude, "claude-review.txt"), (sol, "sol-review.txt"), (terminal_report, "terminal-report.json")):
         _, _, data = _stable_regular_file(path); _atomic_create(root / label, data)
     create_tree_seal(root, output, sha256_file(session / "phase4/work-review-seal.json"), "phase5-terminal")
+    try:
+        final_seal = verify_tree_seal(output, sha256_file(session / "phase4/work-review-seal.json"))
+    except (OSError, ValueError) as error:
+        raise Failure("new terminal seal did not verify") from error
+    if final_seal["kind"] != "phase5-terminal" or Path(final_seal["artifact_root"]) != root:
+        raise Failure("new terminal seal is foreign")
     digest = sha256_file(output); pointer = output.with_name("terminal-seal.sha256")
     _atomic_create(pointer, (digest + "\n").encode("ascii"))
+    if pointer.read_bytes() != (sha256_file(output) + "\n").encode("ascii"):
+        raise Failure("terminal seal pointer mismatch")
     print(f"WORK7_TERMINAL_SEAL_SHA256={digest}")
 
 

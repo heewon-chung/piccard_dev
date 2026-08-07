@@ -69,3 +69,44 @@ run; Paper and threshold were not written.  No CTest registry change was made.
 Concern: the historical terminal verifier had an append-only ordering bug; the
 authorized compatibility change is intentionally narrow and covered by its
 terminal CLI regression.  Task 6 remains unstarted.
+
+## Fix round 1/5 — exact manifests and Phase 4 gate
+
+### RED
+
+```text
+python3 -m unittest -v tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_work_rejects_missing_extra_or_recanonicalized_manifest_members
+FAIL (3 failures)
+missing: close-work returned 0
+extra: close-work returned 0
+reordered: close-work returned 0
+```
+
+The mutation creates canonical JSON and valid member hashes, proving the old
+validator only checked self-consistency rather than the specified manifest.
+
+### GREEN
+
+`validate_packet` now requires the exact ordered phase-specific member-path
+set: Work includes every specified design/plan/claim/diff/report/seal/candidate
+and external snapshot; final cumulatively includes those, the original design,
+Phase 4 packet/raw/seal, and exactly the two generated members.  `prepare-final`
+now snapshots the full inherited Work input set rather than a partial subset.
+
+`prepare-final` and `close-final` independently validate the exact sealed
+Phase 4 root, predecessor, two-entry artifact set, exact Work manifest, and
+the sealed Sol-high work approval.  The baseline argument is now exactly
+`b907fae`.  The dead external-member branch was removed.  Phase 5 is verified
+after creation with its exact predecessor/kind/root and its pointer is compared
+to a freshly recomputed seal digest before success output.
+
+The source/test map now invokes the immutable lifecycle contract loader and
+the frozen CTest inventory parser before deriving its first six rows.
+
+```text
+python3 -m unittest -q tests.scripts.test_work7_review_packet tests.scripts.test_work7_claim_contract
+Ran 17 tests in 23.625s
+OK
+
+git diff --check
+```
