@@ -4,10 +4,33 @@
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True)
+class CapturedBlob:
+    """A stable, immutable regular-file read used by a sealed evidence graph."""
+
+    raw: bytes
+    sha256: str
+    size: int
+    mode: str
+
+
+@dataclass(frozen=True)
+class CapturedTreeSeal:
+    """The seal bytes plus the exact stable bytes named by its manifest."""
+
+    blob: CapturedBlob
+    kind: str
+    artifact_root: str
+    previous_seal_sha256: str | None
+    members: tuple[tuple[str, CapturedBlob], ...]
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -317,6 +340,79 @@ def create_tree_seal(artifact_root: Path, seal_path: Path,
 
 def _is_sha256(value: str) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _captured_blob(path: Path) -> CapturedBlob:
+    digest, info, raw = _stable_regular_file(path)
+    return CapturedBlob(raw=raw, sha256=digest, size=info.st_size, mode=_mode(info.st_mode))
+
+
+def capture_tree_seal(path: Path, expected_previous: str | None, expected_kind: str,
+                      expected_root: Path, expected_members: set[str] | None = None) -> CapturedTreeSeal:
+    """Capture one canonical seal and every manifest member exactly once.
+
+    Callers consume the returned bytes rather than reopening member paths.  This
+    intentionally differs from ``verify_tree_seal``: it validates the same
+    on-disk contract while retaining the stable reads that proved it.
+    """
+    _reject_symlink_components(path)
+    _reject_symlink_components(expected_root)
+    if path.is_symlink() or not isinstance(expected_kind, str) or not expected_kind:
+        raise ValueError("invalid tree seal capture arguments")
+    if expected_previous is not None and not _is_sha256(expected_previous):
+        raise ValueError("expected previous seal digest must be SHA-256")
+    try:
+        seal_blob = _captured_blob(path)
+        value = json.loads(seal_blob.raw)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("invalid seal JSON") from error
+    required = {"schema", "kind", "artifact_root", "previous_seal_sha256", "entries"}
+    if (not isinstance(value, dict) or set(value) != required or canonical_json_bytes(value) != seal_blob.raw or
+            value.get("schema") != "piccard-work7-tree-seal-v1" or value.get("kind") != expected_kind or
+            not isinstance(value.get("artifact_root"), str) or not Path(value["artifact_root"]).is_absolute() or
+            value.get("previous_seal_sha256") != expected_previous or not isinstance(value.get("entries"), list)):
+        raise ValueError("non-canonical or invalid seal")
+    try:
+        root = expected_root.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("expected artifact root is invalid") from error
+    if value["artifact_root"] != str(root):
+        raise ValueError("foreign artifact root")
+    try:
+        path.resolve(strict=False).relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("seal path is inside artifact root")
+
+    members: list[tuple[str, CapturedBlob]] = []
+    names: set[str] = set()
+    for entry in value["entries"]:
+        if (not isinstance(entry, dict) or set(entry) != {"path", "size", "mode", "sha256"} or
+                not isinstance(entry.get("path"), str) or not entry["path"] or
+                not isinstance(entry.get("size"), int) or isinstance(entry["size"], bool) or entry["size"] < 0 or
+                not isinstance(entry.get("mode"), str) or not re.fullmatch(r"[0-7]{4}", entry["mode"]) or
+                not _is_sha256(entry.get("sha256"))):
+            raise ValueError("invalid tree seal entry")
+        relative = Path(entry["path"])
+        if (relative.is_absolute() or ".." in relative.parts or relative.as_posix() != entry["path"] or
+                entry["path"] in names):
+            raise ValueError("duplicate, escaping, or noncanonical tree seal member")
+        names.add(entry["path"])
+        candidate = root / relative
+        try:
+            blob = _captured_blob(candidate)
+        except ValueError as error:
+            raise ValueError(f"invalid tree seal member: {entry['path']}") from error
+        if (blob.size != entry["size"] or blob.mode != entry["mode"] or blob.sha256 != entry["sha256"]):
+            raise ValueError(f"tree seal member differs from manifest: {entry['path']}")
+        members.append((entry["path"], blob))
+    if value["entries"] != sorted(value["entries"], key=lambda entry: entry["path"]):
+        raise ValueError("tree seal entries are not canonical")
+    if expected_members is not None and names != expected_members:
+        raise ValueError("tree seal member manifest is not exact")
+    return CapturedTreeSeal(blob=seal_blob, kind=value["kind"], artifact_root=value["artifact_root"],
+                            previous_seal_sha256=value["previous_seal_sha256"], members=tuple(members))
 
 
 def _atomic_create(path: Path, data: bytes) -> None:

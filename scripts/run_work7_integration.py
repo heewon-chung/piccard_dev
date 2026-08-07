@@ -11,14 +11,15 @@ import os
 import shutil
 import subprocess
 import sys
+from io import StringIO
 from datetime import datetime, timezone
 from pathlib import Path
 
 try:  # Module execution and unittest package import use different sys.path roots.
-    from work7_evidence import (canonical_json_bytes, create_tree_seal,
+    from work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                 sha256_file, snapshot_git_worktree, verify_tree_seal)
 except ModuleNotFoundError:
-    from scripts.work7_evidence import (canonical_json_bytes, create_tree_seal,
+    from scripts.work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                         sha256_file, snapshot_git_worktree, verify_tree_seal)
 
 # This is deliberately a literal registry, rather than an inventory-derived set.
@@ -381,6 +382,134 @@ def validate_deletion(path: Path) -> None:
     try: rows=list(csv.reader(path.open(newline="",encoding="utf-8"), strict=True))
     except (OSError, UnicodeError, csv.Error) as error: raise Failure("malformed deletion CSV") from error
     if len(rows)!=4 or rows[0]!=header or [row[5] for row in rows[1:]] != ["1","4","8"] or any(len(row)!=17 or row[0]!="ideal-independent-random-ranking-v1" or row[1:4]!=["64","3","8"] or row[4]!="0.99" or row[15:]!=["1","7"] for row in rows[1:]): raise Failure("invalid deletion CSV")
+
+
+def _capture_map(blobs: tuple[tuple[str, CapturedBlob], ...]) -> dict[str, CapturedBlob]:
+    value = dict(blobs)
+    if len(value) != len(blobs):
+        raise Failure("duplicate captured evidence member")
+    return value
+
+
+def _capture_json(blobs: dict[str, CapturedBlob], relative: str, label: str) -> dict:
+    try:
+        raw = blobs[relative].raw
+        value = json.loads(raw)
+    except (KeyError, json.JSONDecodeError) as error:
+        raise Failure(f"malformed {label}") from error
+    # Producer JSON is sealed by its owning tree, but producer formatters do
+    # not promise canonical serialization; retain and parse the exact bytes.
+    if not isinstance(value, dict):
+        raise Failure(f"malformed {label}")
+    return value
+
+
+def _capture_tsv(raw: bytes, label: str) -> dict[str, str]:
+    try:
+        rows = list(csv.reader(StringIO(raw.decode("utf-8", "strict")), delimiter="\t", strict=True))
+    except (UnicodeError, csv.Error) as error:
+        raise Failure(f"malformed {label}") from error
+    if not rows or rows[0] != ["key", "value"] or any(len(row) != 2 for row in rows[1:]):
+        raise Failure(f"malformed {label}")
+    value = dict(rows[1:])
+    if len(value) != len(rows) - 1:
+        raise Failure(f"malformed {label}")
+    return value
+
+
+def validate_deletion_bytes(raw: bytes) -> None:
+    header = "model,n,d,k,required_survival,r,exact_survival,union_bound_survival,mc_survival,mc_standard_error,maximum_safe_deletions,exact_expected_first_failure,exact_expected_safe_deletions,mc_mean_first_failure,mc_mean_safe_deletions,trials,seed".split(",")
+    try:
+        rows = list(csv.reader(StringIO(raw.decode("utf-8", "strict")), strict=True))
+    except (UnicodeError, csv.Error) as error:
+        raise Failure("malformed deletion CSV") from error
+    if len(rows) != 4 or rows[0] != header or [row[5] for row in rows[1:]] != ["1", "4", "8"] or any(
+            len(row) != 17 or row[0] != "ideal-independent-random-ranking-v1" or row[1:4] != ["64", "3", "8"] or
+            row[4] != "0.99" or row[15:] != ["1", "7"] for row in rows[1:]):
+        raise Failure("invalid deletion CSV")
+
+
+def validate_record_counts_capture(blobs: tuple[tuple[str, CapturedBlob], ...]) -> None:
+    """Apply the runner's one-run/no-actual-data screen without reopening files."""
+    count_names = {"trials", "accuracy_trials", "refresh_updates", "reps", "iterations"}
+
+    def check(value: object, timing: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = key.lower().replace("-", "_")
+                if normalized in count_names and item != 1:
+                    raise Failure("measured count must equal 1")
+                if "warmup" in normalized and (not timing or item not in (0, 1, "discarded", "discarded_warmup")):
+                    raise Failure("unlabelled or multiple warmups")
+                check(item, timing or "timing" in normalized)
+        elif isinstance(value, list):
+            for item in value:
+                check(item, timing)
+        elif isinstance(value, str) and any(token in value.lower() for token in ("enron", "actual-data", "paper-manifest")):
+            raise Failure("actual-data artifact path is forbidden")
+
+    for relative, blob in blobs:
+        if any(token in relative.lower() for token in ("enron", "actual-data", "paper-manifest")):
+            raise Failure("actual-data artifact path is forbidden")
+        if relative.endswith(".json"):
+            try:
+                check(json.loads(blob.raw))
+            except json.JSONDecodeError as error:
+                raise Failure("malformed JSON artifact") from error
+        elif relative.endswith(".csv"):
+            try:
+                rows = list(csv.DictReader(StringIO(blob.raw.decode("utf-8", "strict"))))
+            except (UnicodeError, csv.Error) as error:
+                raise Failure("malformed CSV artifact") from error
+            if not rows:
+                raise Failure("malformed CSV artifact")
+            for row in rows:
+                for key, item in row.items():
+                    if key.lower().replace("-", "_") in count_names and item != "1":
+                        raise Failure("measured count must equal 1")
+
+
+def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: str,
+                                  expected_argv: tuple[str, ...], source: str, build: str) -> str:
+    values = _capture_map(blobs)
+    manifest = _capture_json(values, "phase2/runtime/pre-threshold/manifest.json", "pre-threshold manifest")
+    if (manifest.get("schema") != "piccard-pre-threshold-run-v1" or manifest.get("suite") != "smoke" or
+            manifest.get("seed") != 7 or manifest.get("repetitions") != 1 or
+            manifest.get("classification") != "diagnostic" or manifest.get("profiles") != ["toy-smoke"]):
+        raise Failure("invalid pre-threshold manifest identity")
+    source_record, build_record = manifest.get("source"), manifest.get("build")
+    if (not isinstance(source_record, dict) or source_record.get("commit") != commit or source_record.get("dirty") is not False or
+            source_record.get("dir") != source or not isinstance(build_record, dict) or build_record.get("dir") != build or
+            build_record.get("type") != "Release" or not isinstance(build_record.get("binaries"), dict)):
+        raise Failure("invalid pre-threshold provenance")
+    expected_binary_names = {"bench_review_comparison", "bench_piccard", "bench_dynamic"}
+    if set(build_record["binaries"]) != expected_binary_names:
+        raise Failure("invalid pre-threshold binary binding")
+    for name, record in build_record["binaries"].items():
+        captured = values.get("@build/" + name)
+        if not isinstance(record, dict) or captured is None or record.get("path") != build + "/" + name or record.get("sha256") != captured.sha256:
+            raise Failure("invalid pre-threshold binary binding")
+    if not isinstance(manifest.get("cells"), list) or len(manifest["cells"]) != 3:
+        raise Failure("invalid pre-threshold cells")
+    validate_record_counts_capture(blobs)
+    return values["phase2/runtime/pre-threshold/manifest.json"].sha256
+
+
+def validate_real_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: str, source: str, build: str) -> str:
+    values = _capture_map(blobs)
+    metadata = _capture_tsv(values["phase2/runtime/real-datasets/run_metadata.tsv"].raw, "real-data metadata")
+    if (metadata.get("schema_version") != "piccard-real-run-v1" or metadata.get("evidence_mode") != "quick" or
+            metadata.get("source_commit") != commit or metadata.get("git_dirty") != "false" or
+            metadata.get("build_type") != "Release" or metadata.get("cell_count") != "3" or
+            metadata.get("bench_real_datasets_sha256") != values.get("@build/bench_real_datasets", CapturedBlob(b"", "", 0, "")).sha256):
+        raise Failure("invalid real-data metadata")
+    if metadata.get("committed-source-root", source) not in (source, None):
+        raise Failure("invalid real-data authoritative root")
+    status = _capture_tsv(values["phase2/runtime/real-datasets/verification_status.tsv"].raw, "real-data verification status")
+    if status.get("status") != "VERIFIED" or status.get("run_metadata_sha256") != values["phase2/runtime/real-datasets/run_metadata.tsv"].sha256:
+        raise Failure("stale real-data verification status")
+    validate_record_counts_capture(blobs)
+    return values["phase2/runtime/real-datasets/run_metadata.tsv"].sha256
 
 
 def main(argv: list[str] | None = None) -> int:

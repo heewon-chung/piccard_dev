@@ -413,7 +413,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
         work_seal = self.session / "phase4/work-review-seal.json"
         terminal, seal = self.session / "phase5/raced-report.json", self.session / "phase5/raced-seal.json"
-        original_validate_runtime = work7_review_packet.validate_phase2_runtime
+        original_validate_runtime = work7_review_packet.validate_phase2_runtime_capture
 
         def replace_phase4_after_runtime(*arguments):
             summary = original_validate_runtime(*arguments)
@@ -427,7 +427,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
                          session_root=self.session, phase0_seal=self.session / "phase0/seal.json",
                          paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
-        with mock.patch.object(work7_review_packet, "validate_phase2_runtime", side_effect=replace_phase4_after_runtime):
+        with mock.patch.object(work7_review_packet, "validate_phase2_runtime_capture", side_effect=replace_phase4_after_runtime):
             with self.assertRaises(work7_review_packet.Failure):
                 work7_review_packet.close_final(args)
         self.assertFalse(terminal.exists())
@@ -526,7 +526,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
                                       "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
         output = self.session / "phase5/final-packet.json"
-        original_validate_runtime = work7_review_packet.validate_phase2_runtime
+        original_validate_runtime = work7_review_packet.validate_phase2_runtime_capture
 
         def replace_phase4_after_runtime(*arguments):
             summary = original_validate_runtime(*arguments)
@@ -539,14 +539,14 @@ class Work7ReviewPacketTests(unittest.TestCase):
 
         args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
                          output=output)
-        with mock.patch.object(work7_review_packet, "validate_phase2_runtime", side_effect=replace_phase4_after_runtime):
+        with mock.patch.object(work7_review_packet, "validate_phase2_runtime_capture", side_effect=replace_phase4_after_runtime):
             with self.assertRaises(work7_review_packet.Failure):
                 work7_review_packet.prepare_final(args)
         self.assertFalse(output.exists())
         self.assertFalse((self.session / "phase5/members").exists())
 
-    def test_prepare_final_rejects_phase4_replacement_during_member_snapshot(self):
-        """A Phase 4 seal swapped just before copying cannot become a final packet prerequisite."""
+    def test_prepare_final_uses_captured_phase4_bytes_during_member_publication(self):
+        """A Phase 4 swap after the second capture cannot replace packet member bytes."""
         from scripts import work7_review_packet
         from scripts.work7_evidence import create_tree_seal, sha256_file
 
@@ -569,9 +569,11 @@ class Work7ReviewPacketTests(unittest.TestCase):
         args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
                          output=output)
         with mock.patch.object(work7_review_packet, "copy_raw_member", side_effect=replace_phase4_before_copy):
-            with self.assertRaises(work7_review_packet.Failure):
-                work7_review_packet.prepare_final(args)
-        self.assertFalse(output.exists())
+            work7_review_packet.prepare_final(args)
+        value = json.loads(output.read_bytes())
+        member = next(item for item in value["members"]
+                      if item["path"] == "phase5/members/session/phase4/work-review-seal.json")
+        self.assertNotEqual((self.session / member["path"]).read_bytes(), work_seal.read_bytes())
 
     def test_prepare_final_seals_validated_phase4_bytes_despite_transient_replacement(self):
         """A replaced-and-restored Phase 4 path cannot substitute the copied validated seal bytes."""
@@ -585,7 +587,6 @@ class Work7ReviewPacketTests(unittest.TestCase):
         original_seal = work_seal.read_bytes()
         output = self.session / "phase5/final-packet.json"
         original_copy_raw_member = work7_review_packet.copy_raw_member
-        original_snapshot = work7_review_packet.snapshot_git_worktree
         replaced = False
 
         def replace_before_phase4_seal_copy(raw, session, member_root, label, members):
@@ -597,23 +598,17 @@ class Work7ReviewPacketTests(unittest.TestCase):
                 create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
                                  "phase4-work-review")
                 replaced = True
-            return original_copy_raw_member(raw, session, member_root, label, members)
-
-        def restore_before_external_snapshot(root):
-            nonlocal replaced
-            if replaced and Path(root).resolve() == self.paper.resolve():
                 artifacts = self.session / "phase4/work-review-artifacts"
                 (artifacts / "foreign.txt").unlink()
                 work_seal.unlink()
                 create_tree_seal(artifacts, work_seal, sha256_file(self.session / "phase3/closure-seal.json"),
                                  "phase4-work-review")
                 replaced = False
-            return original_snapshot(root)
+            return original_copy_raw_member(raw, session, member_root, label, members)
 
         args = Namespace(source_root=self.source, session_root=self.session, work_review_seal=work_seal,
                          output=output)
-        with mock.patch.object(work7_review_packet, "copy_raw_member", side_effect=replace_before_phase4_seal_copy), \
-             mock.patch.object(work7_review_packet, "snapshot_git_worktree", side_effect=restore_before_external_snapshot):
+        with mock.patch.object(work7_review_packet, "copy_raw_member", side_effect=replace_before_phase4_seal_copy):
             work7_review_packet.prepare_final(args)
         self.assertFalse(replaced)
         value = json.loads(output.read_bytes())

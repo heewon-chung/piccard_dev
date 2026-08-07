@@ -14,6 +14,7 @@ from unittest import mock
 from scripts import work7_evidence
 from scripts.work7_evidence import (
     assert_output_roots_outside,
+    capture_tree_seal,
     canonical_json_bytes,
     create_tree_seal,
     snapshot_git_worktree,
@@ -252,6 +253,47 @@ class Work7StateGuardTest(unittest.TestCase):
         (artifact / "link").symlink_to("proof.txt")
         with self.assertRaises(ValueError):
             create_tree_seal(artifact, self.root / "other-seal.json", None, "phase1")
+
+    def test_capture_tree_seal_returns_exact_member_bytes_without_reopen(self) -> None:
+        """Replacing a member after capture cannot alter its captured byte record."""
+        artifact = self.root / "artifact"
+        artifact.mkdir()
+        member = artifact / "proof.txt"
+        member.write_bytes(b"verified bytes\n")
+        os.chmod(member, 0o755)
+        seal = self.root / "seal.json"
+        create_tree_seal(artifact, seal, None, "phase0")
+
+        captured = capture_tree_seal(seal, None, "phase0", artifact, {"proof.txt"})
+        member.write_bytes(b"foreign transient bytes\n")
+        os.chmod(member, 0o600)
+        member.write_bytes(b"verified bytes\n")
+        os.chmod(member, 0o755)
+
+        blob = dict(captured.members)["proof.txt"]
+        self.assertEqual(blob.raw, b"verified bytes\n")
+        self.assertEqual(blob.sha256, hashlib.sha256(b"verified bytes\n").hexdigest())
+        self.assertEqual(blob.size, len(b"verified bytes\n"))
+        self.assertEqual(blob.mode, "0755")
+
+    def test_captured_graph_is_recursively_immutable_and_preserves_seal_modes(self) -> None:
+        """A sealed member's bytes and recorded mode are immutable capture data."""
+        artifact = self.root / "artifact"
+        artifact.mkdir()
+        member = artifact / "proof.txt"
+        member.write_bytes(b"proof\n")
+        os.chmod(member, 0o755)
+        seal = self.root / "seal.json"
+        create_tree_seal(artifact, seal, None, "phase0")
+        captured = capture_tree_seal(seal, None, "phase0", artifact)
+
+        with self.assertRaises(TypeError):
+            captured.members[0] = ("other", dict(captured.members)["proof.txt"])
+        with self.assertRaises((AttributeError, TypeError)):
+            setattr(dict(captured.members)["proof.txt"], "raw", b"mutated")
+        os.chmod(member, 0o600)
+        with self.assertRaises(ValueError):
+            capture_tree_seal(seal, None, "phase0", artifact)
 
     def test_verify_tree_seal_rejects_malformed_structure_and_digest(self) -> None:
         malformed = self.root / "malformed-seal.json"

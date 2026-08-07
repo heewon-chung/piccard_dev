@@ -8,21 +8,23 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from work7_evidence import (assert_output_roots_outside, _atomic_create,
+    from work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
                                 _reject_symlink_components, _stable_regular_file,
-                                canonical_json_bytes, create_tree_seal, sha256_file,
+                                canonical_json_bytes, capture_tree_seal, create_tree_seal, sha256_file,
                                 snapshot_git_worktree, verify_tree_seal)
 except ModuleNotFoundError:
-    from scripts.work7_evidence import (assert_output_roots_outside, _atomic_create,
+    from scripts.work7_evidence import (CapturedBlob, CapturedTreeSeal, assert_output_roots_outside, _atomic_create,
                                          _reject_symlink_components, _stable_regular_file,
-                                         canonical_json_bytes, create_tree_seal, sha256_file,
+                                         canonical_json_bytes, capture_tree_seal, create_tree_seal, sha256_file,
                                          snapshot_git_worktree, verify_tree_seal)
 
 
@@ -52,6 +54,32 @@ WORK_SESSION_MEMBERS = (
 
 class Failure(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class Phase04Capture:
+    commit: str
+    state_raw: CapturedBlob
+    contract_raw: CapturedBlob
+    ctest_inventory_raw: CapturedBlob
+    seals: tuple[tuple[str, CapturedTreeSeal], ...]
+    packet_members: tuple[tuple[str, CapturedBlob], ...]
+    build_binaries: tuple[tuple[str, CapturedBlob], ...]
+    phase4_packet: CapturedBlob
+    phase4_review: CapturedBlob
+    source_snapshot_raw: bytes
+    paper_snapshot_raw: bytes
+    threshold_snapshot_raw: bytes
+
+
+@dataclass(frozen=True)
+class RuntimeSummary:
+    ctest_focused: str
+    pre_threshold: str
+    real_datasets: str
+    verify_real_datasets: str
+    deletion_survival: str
+    focused_pass_count: int
 
 
 def _sha256_bytes(raw: bytes) -> str:
@@ -171,6 +199,180 @@ def stable_canonical_object(path: Path, label: str) -> tuple[dict, bytes, str]:
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise Failure(f"non-canonical {label}")
     return value, raw, digest
+
+
+def _captured_file(path: Path, label: str) -> CapturedBlob:
+    try:
+        digest, info, raw = _stable_regular_file(path)
+    except (OSError, ValueError) as error:
+        raise Failure(f"unsafe {label}") from error
+    return CapturedBlob(raw=raw, sha256=digest, size=info.st_size,
+                        mode=format(stat.S_IMODE(info.st_mode), "04o"))
+
+
+def _canonical_blob(blob: CapturedBlob, label: str) -> dict:
+    try:
+        value = json.loads(blob.raw)
+    except json.JSONDecodeError as error:
+        raise Failure(f"invalid {label}") from error
+    if not isinstance(value, dict) or canonical_json_bytes(value) != blob.raw:
+        raise Failure(f"non-canonical {label}")
+    return value
+
+
+def _json_blob(blob: CapturedBlob, label: str) -> dict:
+    try:
+        value = json.loads(blob.raw)
+    except json.JSONDecodeError as error:
+        raise Failure(f"invalid {label}") from error
+    if not isinstance(value, dict):
+        raise Failure(f"invalid {label}")
+    return value
+
+
+def _captured_member_map(capture: Phase04Capture) -> dict[str, CapturedBlob]:
+    return dict(capture.packet_members)
+
+
+def _canonical_external_root(raw: object, label: str, guarded: tuple[Path, ...]) -> Path:
+    try:
+        if not isinstance(raw, str):
+            raise ValueError("not a string")
+        path = Path(raw)
+        if not path.is_absolute():
+            raise ValueError("not absolute")
+        _reject_symlink_components(path)
+        canonical = path.resolve(strict=True)
+        if raw != str(canonical) or not canonical.is_dir():
+            raise ValueError("not canonical directory")
+        for other in guarded:
+            try:
+                canonical.relative_to(other)
+            except ValueError:
+                try:
+                    other.relative_to(canonical)
+                except ValueError:
+                    continue
+            raise ValueError("overlaps guarded root")
+        return canonical
+    except (OSError, ValueError) as error:
+        raise Failure(f"noncanonical Phase 0 {label} root") from error
+
+
+def capture_phase04(session: Path, source: Path, paper: Path | None = None,
+                    threshold: Path | None = None) -> Phase04Capture:
+    """Capture the immutable Phase 0--4 evidence graph before finalization.
+
+    Every Phase-owned regular file is read only by ``capture_tree_seal`` or
+    ``_captured_file`` in this one boundary; downstream consumers use blobs.
+    """
+    try:
+        phase0 = capture_tree_seal(session / "phase0/seal.json", None, "phase0",
+                                   session / "phase0/artifacts", {"state.json"})
+    except (OSError, ValueError) as error:
+        raise Failure("invalid or tampered Phase 0 seal") from error
+    state_raw = dict(phase0.members)["state.json"]
+    state = _canonical_blob(state_raw, "Phase 0 state")
+    commit = state.get("source", {}).get("head") if isinstance(state.get("source"), dict) else None
+    if (set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or not isinstance(commit, str) or
+            not re.fullmatch(r"[0-9a-f]{40}", commit) or state.get("session_id") != "work7-" + commit or
+            not isinstance(state.get("build"), dict) or set(state["build"]) != {"root"}):
+        raise Failure("invalid Phase 0 state")
+    source_state = state.get("source")
+    if not isinstance(source_state, dict) or not isinstance(source_state.get("root"), str):
+        raise Failure("invalid Phase 0 source root")
+    source_root = _canonical_external_root(source_state["root"], "source", (session,))
+    if source_root != source:
+        raise Failure("source root differs from sealed Phase 0 root")
+    recorded_paper = _canonical_external_root(state.get("paper", {}).get("root") if isinstance(state.get("paper"), dict) else None,
+                                              "paper", (source, session))
+    recorded_threshold = _canonical_external_root(state.get("threshold", {}).get("root") if isinstance(state.get("threshold"), dict) else None,
+                                                  "threshold", (source, paper or recorded_paper, session))
+    if recorded_paper == recorded_threshold:
+        raise Failure("Phase 0 external roots must be distinct")
+    if paper is not None and paper != recorded_paper:
+        raise Failure("paper root differs from sealed Phase 0 root")
+    if threshold is not None and threshold != recorded_threshold:
+        raise Failure("threshold root differs from sealed Phase 0 root")
+    build = validate_canonical_build_root(state["build"].get("root"), commit,
+                                          (source, recorded_paper, recorded_threshold, session), state["build"].get("root"))
+
+    order = (
+        ("phase0/seal.json", phase0),
+        ("phase2/runtime-seal.json", capture_tree_seal(session / "phase2/runtime-seal.json", phase0.blob.sha256,
+                                                         "phase2-runtime-artifacts", session / "phase2/runtime")),
+        ("phase2/closure-seal.json", None),
+        ("phase3/candidate-seal.json", None),
+        ("phase3/closure-seal.json", None),
+        ("phase4/work-review-seal.json", None),
+    )
+    seals: list[tuple[str, CapturedTreeSeal]] = [order[0], order[1]]  # type: ignore[list-item]
+    runtime_members = dict(seals[-1][1].members)
+    try:
+        configure = json.loads(runtime_members["commands/configure.json"].raw)
+        configured_build = configure["argv"][4]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise Failure("configure command record is not exact") from error
+    # R0 binds this value to the Phase 0 string, rather than merely accepting
+    # a currently usable build directory from a resealed runtime graph.
+    validate_canonical_build_root(configured_build, commit, (source, recorded_paper, recorded_threshold, session),
+                                  state["build"]["root"])
+    previous = seals[-1][1].blob.sha256
+    for relative, kind, root, expected in (
+        ("phase2/closure-seal.json", "phase2-closure", "phase2/closure-artifacts",
+         {"evidence-bound-report.json", "commands/evidence-bound.json", "commands/evidence-bound.stderr.txt", "commands/evidence-bound.stdout.txt"}),
+        ("phase3/candidate-seal.json", "phase3-candidate-artifacts", "phase3/candidate-artifacts", None),
+        ("phase3/closure-seal.json", "phase3-closure", "phase3/closure-artifacts", None),
+        ("phase4/work-review-seal.json", "phase4-work-review", "phase4/work-review-artifacts", {"work-packet.json", "raw-review.txt"}),
+    ):
+        try:
+            seal = capture_tree_seal(session / relative, previous, kind, session / root, expected)
+        except (OSError, ValueError) as error:
+            raise Failure("invalid or tampered prerequisite seal") from error
+        seals.append((relative, seal))
+        previous = seal.blob.sha256
+    all_members: dict[str, CapturedBlob] = {}
+    for _, seal in seals:
+        root = Path(seal.artifact_root)
+        for relative, blob in seal.members:
+            all_members[(root.relative_to(session) / relative).as_posix()] = blob
+    for relative in WORK_SESSION_MEMBERS:
+        if relative in {"phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json", "phase3/candidate-seal.json", "phase3/closure-seal.json"}:
+            continue
+        if relative not in all_members:
+            # The standalone Phase 2 static report has no owning manifest;
+            # capture it once and compare it to its runtime-sealed twin below.
+            all_members[relative] = _captured_file(session / relative, "packet member")
+    runtime_static = all_members.get("phase2/runtime/static-report.json")
+    static = all_members.get("phase2/static-report.json")
+    if runtime_static is None or static is None or runtime_static.raw != static.raw:
+        raise Failure("Phase 2 static report is not the sealed runtime copy")
+    contract_raw = _captured_file(source / "scripts/work7_claims.json", "claim contract")
+    inventory_raw = all_members.get("phase2/runtime/commands/ctest-inventory.stdout.txt")
+    phase4_packet = all_members.get("phase4/work-review-artifacts/work-packet.json")
+    phase4_review = all_members.get("phase4/work-review-artifacts/raw-review.txt")
+    if inventory_raw is None or phase4_packet is None or phase4_review is None:
+        raise Failure("captured Phase 0--4 graph is incomplete")
+    binaries: list[tuple[str, CapturedBlob]] = []
+    for name in ("bench_review_comparison", "bench_piccard", "bench_dynamic", "bench_real_datasets", "bench_deletion_survival"):
+        blob = _captured_file(build / name, "build binary")
+        if int(blob.mode, 8) & 0o111 == 0:
+            raise Failure("build binary is not executable")
+        binaries.append((name, blob))
+    source_snapshot_raw = canonical_json_bytes(snapshot_git_worktree(source))
+    paper_snapshot_raw = canonical_json_bytes(snapshot_git_worktree(recorded_paper))
+    threshold_snapshot_raw = canonical_json_bytes(snapshot_git_worktree(recorded_threshold))
+    if (source_snapshot_raw != canonical_json_bytes(state["source"]) or
+            paper_snapshot_raw != canonical_json_bytes(state["paper"]) or
+            threshold_snapshot_raw != canonical_json_bytes(state["threshold"])):
+        raise Failure("Phase 0 snapshot changed")
+    return Phase04Capture(commit=commit, state_raw=state_raw, contract_raw=contract_raw,
+                          ctest_inventory_raw=inventory_raw, seals=tuple(seals),
+                          packet_members=tuple(sorted(all_members.items())), build_binaries=tuple(binaries),
+                          phase4_packet=phase4_packet, phase4_review=phase4_review,
+                          source_snapshot_raw=source_snapshot_raw, paper_snapshot_raw=paper_snapshot_raw,
+                          threshold_snapshot_raw=threshold_snapshot_raw)
 
 
 def canonical_object(path: Path, label: str) -> dict:
@@ -438,6 +640,89 @@ def validate_phase2_runtime(session: Path, source: Path, state: dict, commit: st
             "registry_test_count": len(_frozen_ctests()), "registry_pass_count": pass_count}
 
 
+def _captured_command(members: dict[str, CapturedBlob], label: str, argv: tuple[str, ...], cwd: str) -> bytes:
+    record = _canonical_blob(members.get(f"phase2/runtime/commands/{label}.json", CapturedBlob(b"", "", 0, "")),
+                             f"{label} command record")
+    expected = {"argv", "cwd", "started_at", "ended_at", "returncode", "stdout", "stderr", "executable_sha256"}
+    if (set(record) != expected or record.get("argv") != list(argv) or record.get("cwd") != cwd or
+            record.get("returncode") != 0 or record.get("stdout") != f"{label}.stdout.txt" or
+            record.get("stderr") != f"{label}.stderr.txt" or not isinstance(record.get("started_at"), str) or
+            not isinstance(record.get("ended_at"), str) or not re.fullmatch(r"[0-9a-f]{64}|unresolved|unreadable", str(record.get("executable_sha256")))):
+        raise Failure(f"{label} command record is not exact")
+    stdout = members.get(f"phase2/runtime/commands/{label}.stdout.txt")
+    stderr = members.get(f"phase2/runtime/commands/{label}.stderr.txt")
+    if stdout is None or stderr is None:
+        raise Failure(f"{label} command output is missing")
+    return stdout.raw
+
+
+def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
+    """Validate the captured runtime graph without reopening Phase 0--4 paths."""
+    state = _canonical_blob(capture.state_raw, "Phase 0 state")
+    source = str(state["source"]["root"])
+    build = str(state["build"]["root"])
+    members = _captured_member_map(capture)
+    members.update({"@build/" + name: blob for name, blob in capture.build_binaries})
+    regex = "^(" + "|".join(_frozen_ctests()) + ")$"
+    configure = ("cmake", "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
+    _captured_command(members, "configure", configure, source)
+    _captured_command(members, "build", ("cmake", "--build", build, "--parallel", "2"), source)
+    inventory = _captured_command(members, "ctest-inventory", ("ctest", "--test-dir", build, "-N"), source)
+    _ctest_inventory(inventory)
+    focused_argv = ("ctest", "--test-dir", build, "--output-on-failure", "-R", regex)
+    focused = _captured_command(members, "ctest-focused", focused_argv, source)
+    pass_count = _validate_focused_ctest(focused)
+    pre_argv = (source + "/scripts/run_pre_threshold_profiles.sh", "--suite=smoke", "--seed=7", "--threads=2",
+                "--build-dir=" + build, "--results-root=" + str(Path(build).parent.parent / "unused"))
+    # Results roots are session-local, so preserve the exact captured value from
+    # the command record while constraining all other immutable arguments.
+    pre_record = _canonical_blob(members["phase2/runtime/commands/pre-threshold.json"], "pre-threshold command record")
+    real_record = _canonical_blob(members["phase2/runtime/commands/real-datasets.json"], "real-datasets command record")
+    for record, label, prefix in ((pre_record, "pre-threshold", [source + "/scripts/run_pre_threshold_profiles.sh", "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + build]),
+                                  (real_record, "real-datasets", [source + "/scripts/run_real_datasets.sh", "--quick", "--seed=7", "--threads=2", "--build-dir=" + build])):
+        argv = record.get("argv")
+        if not isinstance(argv, list) or argv[:5] != prefix or len(argv) != 6 or not isinstance(argv[-1], str) or not argv[-1].startswith("--results-root="):
+            raise Failure(f"{label} command record is not exact")
+        _captured_command(members, label, tuple(argv), source)
+    pre_argv = tuple(pre_record["argv"])
+    real_argv = tuple(real_record["argv"])
+    verify_argv = (sys.executable, source + "/scripts/verify_real_dataset_outputs.py", real_argv[-1].split("=", 1)[1])
+    _captured_command(members, "verify-real-datasets", verify_argv, source)
+    deletion_argv = (build + "/bench_deletion_survival", "--n=64", "--d=3", "--k=8", "--required_survival=0.99",
+                     "--r_values=1,4,8", "--trials=1", "--seed=7")
+    deletion = _captured_command(members, "deletion-survival", deletion_argv, source)
+    deletion_record = _canonical_blob(members["phase2/runtime/commands/deletion-survival.json"], "deletion command record")
+    if deletion_record["executable_sha256"] != members["@build/bench_deletion_survival"].sha256:
+        raise Failure("deletion command binary differs from captured build binary")
+    try:
+        from run_work7_integration import (validate_deletion_bytes, validate_prethreshold_capture,
+                                           validate_real_capture, validate_record_counts_capture)
+    except ModuleNotFoundError:
+        from scripts.run_work7_integration import (validate_deletion_bytes, validate_prethreshold_capture,
+                                                   validate_real_capture, validate_record_counts_capture)
+    pre_blobs = tuple((path, blob) for path, blob in members.items()
+                      if path.startswith("phase2/runtime/pre-threshold/") or path.startswith("@build/"))
+    real_blobs = tuple((path, blob) for path, blob in members.items()
+                       if path.startswith("phase2/runtime/real-datasets/") or path.startswith("@build/"))
+    validate_prethreshold_capture(pre_blobs, capture.commit, pre_argv, source, build)
+    validate_real_capture(real_blobs, capture.commit, source, build)
+    validate_deletion_bytes(deletion)
+    validate_record_counts_capture(pre_blobs)
+    validate_record_counts_capture(real_blobs)
+    for relative, mode in (("phase2/runtime/static-report.json", "static"),
+                           ("phase2/static-report.json", "static"),
+                           ("phase2/closure-artifacts/evidence-bound-report.json", "evidence-bound")):
+        report = _canonical_blob(members[relative], "sealed claim report")
+        if report.get("schema") != "piccard-work7-claim-report-v1" or report.get("source_commit") != capture.commit or report.get("mode") != mode or report.get("status") != "PASS":
+            raise Failure("foreign source commit or invalid claim verifier report")
+    return RuntimeSummary(ctest_focused=canonical_argv_sha256(list(focused_argv)),
+                          pre_threshold=canonical_argv_sha256(list(pre_argv)),
+                          real_datasets=canonical_argv_sha256(list(real_argv)),
+                          verify_real_datasets=canonical_argv_sha256(list(verify_argv)),
+                          deletion_survival=canonical_argv_sha256(list(deletion_argv)),
+                          focused_pass_count=pass_count)
+
+
 def final_generated_member_bytes(session: Path, source: Path, state: dict, commit: str,
                                  runtime_summary: dict[str, str | int]) -> tuple[bytes, bytes]:
     """Derive the two Phase 5 generated members from freshly verified inputs."""
@@ -656,63 +941,76 @@ def close_work(args: argparse.Namespace) -> None:
 
 
 def prepare_final(args: argparse.Namespace) -> None:
-    source, session = required(args.source_root, "source root", directory=True), required(args.session_root, "session root", directory=True)
-    output, work = session_path(session, args.output, "output", exists=False), session_path(session, args.work_review_seal, "work review seal")
-    state, commit = chain(session)
-    if state["source"] != snapshot_git_worktree(source): raise Failure("Phase 0 snapshot changed: source")
-    if work != session / "phase4/work-review-seal.json": raise Failure("foreign work review seal path")
-    runtime_summary = validate_phase2_runtime(session, source, state, commit)
-    # Runtime validation is intentionally substantial.  Validate and retain
-    # Phase 4 only after it, then snapshot those exact verified bytes below.
-    _, phase4_seal_raw, phase4_seal_digest, phase4_packet_raw, phase4_review_raw = validate_phase4(session, commit)
-    seals = {relative: sha256_file(session / relative) for relative in
-             ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json",
-              "phase3/candidate-seal.json", "phase3/closure-seal.json")}
-    seals["phase4/work-review-seal.json"] = phase4_seal_digest
+    source = required(args.source_root, "source root", directory=True)
+    session = required(args.session_root, "session root", directory=True)
+    output = session_path(session, args.output, "output", exists=False)
+    work = session_path(session, args.work_review_seal, "work review seal")
+    if work != session / "phase4/work-review-seal.json":
+        raise Failure("foreign work review seal path")
     root = session / "phase5/members"
-    if root.exists() or output.exists(): raise Failure("final packet output collision")
-    root.mkdir(parents=True, mode=0o700); members: list[dict] = []
+    if root.exists() or root.is_symlink() or output.exists() or output.is_symlink():
+        raise Failure("final packet output collision")
+    capture = capture_phase04(session, source)
+    runtime = validate_phase2_runtime_capture(capture)
+    state = _canonical_blob(capture.state_raw, "Phase 0 state")
+    seals = {relative: seal.blob.sha256 for relative, seal in capture.seals}
+    phase4_packet_value = _canonical_blob(capture.phase4_packet, "work packet")
+    if phase4_packet_value.get("phase") != "work" or phase4_packet_value.get("source_commit") != capture.commit or phase4_packet_value.get("prerequisite_seals") != {key: value for key, value in seals.items() if key != "phase4/work-review-seal.json"}:
+        raise Failure("foreign work review packet")
+    parse_review_bytes(capture.phase4_review.raw, capture.commit, capture.phase4_packet.sha256,
+                       "openai", "gpt-5.6-sol", "WORK7_APPROVED", CHECKS_WORK)
+    claims = _json_blob(capture.contract_raw, "claim contract").get("claims")
+    if not isinstance(claims, list) or len(claims) != 7 or any(not isinstance(row, dict) for row in claims):
+        raise Failure("invalid immutable lifecycle contract")
+    mappings = [{"id": row.get("id"), "source_paths": row.get("source_paths"),
+                 "required_ctest_names": row.get("required_ctest_names")} for row in claims]
+    mapping_raw = canonical_json_bytes({"schema": "piccard-work7-source-test-map-v1", "claims": mappings[:6]})
+    summary_raw = canonical_json_bytes({"schema": "piccard-work7-final-verification-v1", "source_commit": capture.commit,
+        "registry_test_count": len(_frozen_ctests()), "registry_pass_count": runtime.focused_pass_count,
+        "registry_skip_count": 0, "toy_argv_sha256": {"ctest_focused": runtime.ctest_focused,
+        "pre_threshold": runtime.pre_threshold, "real_datasets": runtime.real_datasets,
+        "deletion_survival": runtime.deletion_survival}, "measured_count_policy": "PASS",
+        "external_snapshot_equality": True, "performance_state": "PERFORMANCE_PENDING"})
+    sources: list[tuple[str, bytes]] = []
     for relative in DESIGNS + (PLAN, "scripts/work7_claims.json", "docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md"):
-        copy_member(source / relative, session, root, "source/" + relative, members)
-    diff = root / "source/git-diff-b907fae-to-head.patch"
-    _atomic_create(diff, git_diff(source, "b907fae"))
-    members.append({"label": "git-diff-b907fae-to-head.patch", "path": diff.relative_to(session).as_posix(), "size": diff.stat().st_size, "sha256": sha256_file(diff)})
+        sources.append(("source/" + relative, _captured_file(source / relative, "source packet member").raw))
+    sources.append(("source/git-diff-b907fae-to-head.patch", git_diff(source, "b907fae")))
+    member_map = _captured_member_map(capture)
+    seal_map = dict(capture.seals)
     for relative in WORK_SESSION_MEMBERS:
-        copy_member(session / relative, session, root, "session/" + relative, members)
-    copy_raw_member(phase4_packet_raw, session, root, "session/phase4/work-review-artifacts/work-packet.json", members)
-    copy_raw_member(phase4_review_raw, session, root, "session/phase4/work-review-artifacts/raw-review.txt", members)
-    copy_raw_member(phase4_seal_raw, session, root, "session/phase4/work-review-seal.json", members)
-    for name in ("paper", "threshold"):
-        current = snapshot_git_worktree(Path(state[name]["root"]))
-        if current != state[name]: raise Failure(f"Phase 0 snapshot changed: {name}")
-        target = root / f"external/current-{name}-state.json"
-        _atomic_create(target, canonical_json_bytes(current))
-        members.append({"label": f"current-{name}-state", "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
-    mapping_raw, summary_raw = final_generated_member_bytes(session, source, state, commit, runtime_summary)
-    mapping = root / "generated/works1-6-source-test-map.json"
-    _atomic_create(mapping, mapping_raw)
-    summary = root / "generated/final-verification-summary.json"
-    _atomic_create(summary, summary_raw)
-    for target, label in ((mapping, "generated/works1-6-source-test-map.json"), (summary, "generated/final-verification-summary.json")):
-        members.append({"label": label.replace("/", ":"), "path": target.relative_to(session).as_posix(), "size": target.stat().st_size, "sha256": sha256_file(target)})
-    if state["source"] != snapshot_git_worktree(source):
-        raise Failure("Phase 0 snapshot changed: source")
-    if any(snapshot_git_worktree(Path(state[name]["root"])) != state[name] for name in ("paper", "threshold")):
-        raise Failure("external worktree snapshot changed")
-    current_seals = {relative: sha256_file(session / relative) for relative in seals}
-    if current_seals != seals:
-        raise Failure("prerequisite seal changed during final packet preparation")
-    chain(session)
+        raw = seal_map[relative].blob.raw if relative in seal_map else member_map[relative].raw
+        sources.append(("session/" + relative, raw))
+    sources.extend((("session/phase4/work-review-artifacts/work-packet.json", capture.phase4_packet.raw),
+                    ("session/phase4/work-review-artifacts/raw-review.txt", capture.phase4_review.raw),
+                    ("session/phase4/work-review-seal.json", seal_map["phase4/work-review-seal.json"].blob.raw),
+                    ("external/current-paper-state.json", capture.paper_snapshot_raw),
+                    ("external/current-threshold-state.json", capture.threshold_snapshot_raw),
+                    ("generated/works1-6-source-test-map.json", mapping_raw),
+                    ("generated/final-verification-summary.json", summary_raw)))
+    # A complete second capture is the post-validation race detector.  Only
+    # immutable in-memory bytes above survive to publication.
+    if capture_phase04(session, source) != capture:
+        raise Failure("Phase 0--4 evidence changed during final packet preparation")
+    members: list[dict] = []
+    created_root = False
     try:
-        phase4_value = verify_tree_seal(session / "phase4/work-review-seal.json",
-                                        sha256_file(session / "phase3/closure-seal.json"))
-    except (OSError, ValueError) as error:
-        raise Failure("invalid work review seal") from error
-    if (phase4_value["kind"] != "phase4-work-review" or
-            Path(phase4_value["artifact_root"]) != session / "phase4/work-review-artifacts" or
-            {entry["path"] for entry in phase4_value["entries"]} != {"work-packet.json", "raw-review.txt"}):
-        raise Failure("foreign work review seal")
-    _atomic_create(output, packet_bytes("final", commit, seals, members))
+        root.mkdir(parents=True, mode=0o700)
+        created_root = True
+        for label, raw in sources:
+            copy_raw_member(raw, session, root, label, members)
+            if label == "source/git-diff-b907fae-to-head.patch":
+                members[-1]["label"] = "git-diff-b907fae-to-head.patch"
+            elif label == "external/current-paper-state.json":
+                members[-1]["label"] = "current-paper-state"
+            elif label == "external/current-threshold-state.json":
+                members[-1]["label"] = "current-threshold-state"
+        _atomic_create(output, packet_bytes("final", capture.commit, seals, members))
+    except Exception:
+        if output.exists() and output.is_file():
+            output.unlink()
+        if created_root:
+            shutil.rmtree(root, ignore_errors=True)
+        raise
 
 
 def validate_terminal_report(path: Path, source: Path, ctest_inventory: Path, commit: str) -> tuple[dict, bytes, str]:
