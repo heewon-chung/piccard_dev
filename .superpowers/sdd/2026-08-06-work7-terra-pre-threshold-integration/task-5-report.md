@@ -449,3 +449,39 @@ OK
 
 The complete five-suite gate was deliberately not restarted here; it is left
 to the controller after this focused repair.
+
+### R4 authoritative retry and PoC handoff
+
+The controller discarded the failed gate result and restarted the complete
+ordered gate from its first suite after the import-identity repair.  Static
+checks (`py_compile` for the changed Work 7 scripts/tests and
+`git diff --check`) were clean before the retry.
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q \
+  tests.scripts.test_work7_state_guard \
+  tests.scripts.test_work7_claim_contract \
+  tests.scripts.test_work7_integration_runner \
+  tests.scripts.test_work7_response_candidate \
+  tests.scripts.test_work7_review_packet
+Ran 111 tests in 749.006s
+OK
+```
+
+The immutable external snapshots were equal before and after that run:
+
+```text
+PAPER     ea5f5435e0ec43e7148876efe11b98ebc2e5f53980a312606a2129d802a7e25d
+THRESHOLD 3c828d28e15511faae8b565f4ede3f72f24202d37071b3e7699dd51698702249
+```
+
+This is the final R4 PoC gate.  It exercises toy/quick inputs only, with every
+measured repetition/trial count equal to one.  Actual DBLP/Enron data,
+multi-run measurements, performance conclusions, and unusual adversarial
+path/symlink/race cases remain intentionally deferred.
+
+The approved failure runbook applies to every supported authoritative failure
+kind: write the external diagnostic, delete the exact owned build and session
+pair completely, clear the diagnostic only after remediation, and start a new
+run at Phase 0.  Partial resume and reuse of evidence from a failed run are not
+permitted.
