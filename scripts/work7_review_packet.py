@@ -354,6 +354,14 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     if runtime_static is None or static is None or runtime_static.raw != static.raw:
         raise Failure("Phase 2 static report is not the sealed runtime copy")
     contract_raw = _captured_file(source / "scripts/work7_claims.json", "claim contract")
+    # The real-data metadata binds the summarizer digest.  Retain its exact
+    # source bytes in the capture graph; this private namespace is consumed
+    # only by byte validators and is never a Phase 5 packet member.
+    all_members["@source/scripts/summarize_real_datasets.py"] = _captured_file(
+        source / "scripts/summarize_real_datasets.py", "real-data summarizer source")
+    all_members["@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"] = _captured_file(
+        source / "tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv",
+        "real-data fixture source")
     inventory_raw = all_members.get("phase2/runtime/commands/ctest-inventory.stdout.txt")
     phase4_packet = all_members.get("phase4/work-review-artifacts/work-packet.json")
     phase4_review = all_members.get("phase4/work-review-artifacts/raw-review.txt")
@@ -700,39 +708,94 @@ def validate_phase2_runtime_capture(capture: Phase04Capture) -> RuntimeSummary:
     if deletion_record["executable_sha256"] != members["@build/bench_deletion_survival"].sha256:
         raise Failure("deletion command binary differs from captured build binary")
     try:
-        from run_work7_integration import (validate_deletion_bytes, validate_prethreshold_capture,
+        from run_work7_integration import (_capture_tsv, validate_deletion_bytes, validate_prethreshold_capture,
                                            validate_real_capture, validate_record_counts_capture)
     except ModuleNotFoundError:
-        from scripts.run_work7_integration import (validate_deletion_bytes, validate_prethreshold_capture,
+        from scripts.run_work7_integration import (_capture_tsv, validate_deletion_bytes, validate_prethreshold_capture,
                                                    validate_real_capture, validate_record_counts_capture)
-    pre_blobs = tuple((path, blob) for path, blob in members.items()
-                      if path.startswith("phase2/runtime/pre-threshold/") or path.startswith("@build/"))
-    real_blobs = tuple((path, blob) for path, blob in members.items()
-                       if path.startswith("phase2/runtime/real-datasets/") or path.startswith("@build/"))
+    pre_manifest = _json_blob(members["phase2/runtime/pre-threshold/manifest.json"], "pre-threshold manifest")
+    pre_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv",
+                 "@build/bench_review_comparison", "@build/bench_piccard", "@build/bench_dynamic"}
+    for cell in pre_manifest.get("cells", []):
+        if isinstance(cell, dict) and isinstance(cell.get("output"), dict):
+            for key, value in cell["output"].items():
+                if not key.endswith("_sha256") and key not in {"expected_csv_rows", "csv_row_count", "measurement_output"} and isinstance(value, str):
+                    pre_paths.add("phase2/runtime/pre-threshold/" + value)
+    pre_blobs = tuple((path, members[path]) for path in sorted(pre_paths) if path in members)
+    real_metadata = _capture_tsv(members["phase2/runtime/real-datasets/run_metadata.tsv"].raw, "real-data metadata")
+    real_paths = {"phase2/runtime/real-datasets/run_metadata.tsv", "phase2/runtime/real-datasets/verification_status.tsv",
+                  "@build/bench_real_datasets", "@source/scripts/summarize_real_datasets.py",
+                  "@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"}
+    for key, value in real_metadata.items():
+        if (key.startswith("artifact.") or ".output." in key) and key.endswith(".path"):
+            real_paths.add("phase2/runtime/real-datasets/" + value)
+    real_blobs = tuple((path, members[path]) for path in sorted(real_paths) if path in members)
+    if real_argv[-1] != "--results-root=" + real_metadata.get("root.000.path", ""):
+        raise Failure("real-data command results root is not exact")
     validate_prethreshold_capture(pre_blobs, capture.commit, pre_argv, source, build)
     validate_real_capture(real_blobs, capture.commit, source, build)
     validate_deletion_bytes(deletion)
     validate_record_counts_capture(pre_blobs)
     validate_record_counts_capture(real_blobs)
+    try:
+        from verify_work7_claims import IDS, ROW_KEYS, STATES, TOP_KEYS, report_claims
+    except ModuleNotFoundError:
+        from scripts.verify_work7_claims import IDS, ROW_KEYS, STATES, TOP_KEYS, report_claims
+    # The immutable tracked contract is sealed as exact bytes but is not a
+    # canonical-JSON producer format; retain its established parser semantics.
     contract = _json_blob(capture.contract_raw, "claim contract")
     contract_claims = contract.get("claims")
-    if not isinstance(contract_claims, list) or len(contract_claims) != 7:
+    inventory_names = set(_ctest_inventory(capture.ctest_inventory_raw.raw))
+    if (set(contract) != TOP_KEYS or contract.get("schema") != "piccard-work7-claim-lifecycle-v1" or
+            contract.get("allowed_gates") != {"threshold_gate_state": ["DEFERRED_EXPECTED"],
+                                              "work_gate_state": ["PENDING", "POC_APPROVED_PERFORMANCE_PENDING"]} or
+            not isinstance(contract_claims, list) or len(contract_claims) != 7 or
+            tuple(item.get("id") for item in contract_claims if isinstance(item, dict)) != IDS):
         raise Failure("invalid immutable lifecycle contract")
-    claim_ids = [item.get("id") for item in contract_claims if isinstance(item, dict)]
-    if len(claim_ids) != 7 or any(not isinstance(item, str) for item in claim_ids):
-        raise Failure("invalid immutable lifecycle contract")
+    for claim in contract_claims:
+        if (not isinstance(claim, dict) or set(claim) != ROW_KEYS or claim.get("allowed_states") != STATES or
+                claim.get("performance_state") != "PERFORMANCE_PENDING" or
+                not isinstance(claim.get("original_intent"), str) or not claim["original_intent"] or
+                any(not isinstance(claim.get(field), list) or not claim[field] or len(set(claim[field])) != len(claim[field]) or
+                    any(not isinstance(value, str) or not value for value in claim[field])
+                    for field in ("source_paths", "required_ctest_names", "evidence_keys")) or
+                any(name not in inventory_names for name in claim["required_ctest_names"]) or
+                any(not isinstance(claim.get(field), str) or not claim[field]
+                    for field in ("deferred_rationale", "prohibited_overclaim"))):
+            raise Failure("invalid immutable lifecycle contract")
+    claim_ids = list(IDS)
     runtime_seal = dict(capture.seals)["phase2/runtime-seal.json"].blob.sha256
     for relative, mode in (("phase2/runtime/static-report.json", "static"),
                            ("phase2/static-report.json", "static"),
                            ("phase2/closure-artifacts/evidence-bound-report.json", "evidence-bound")):
         report = _canonical_blob(members[relative], "sealed claim report")
         expected_seals = {} if mode == "static" else {"runtime_seal_sha256": runtime_seal}
-        report_claims = report.get("claims")
-        if (set(report) != {"schema", "mode", "source_commit", "status", "claims", "input_seals", "work_gate_state", "threshold_gate_state", "validation_errors"} or
-                report.get("schema") != "piccard-work7-claim-report-v1" or report.get("source_commit") != capture.commit or
-                report.get("mode") != mode or report.get("status") != "PASS" or report.get("input_seals") != expected_seals or
-                not isinstance(report_claims, list) or [item.get("id") for item in report_claims if isinstance(item, dict)] != claim_ids):
+        states = ["PENDING"] * 7 if mode == "static" else ["TOY_VERIFIED"] * 6 + ["PENDING"]
+        try:
+            report_claims(report, mode, capture.commit, states, contract_claims)
+        except ValueError as error:
+            raise Failure("foreign source commit or invalid claim verifier report") from error
+        if report.get("input_seals") != expected_seals:
             raise Failure("foreign source commit or invalid claim verifier report")
+    evidence_index = _json_blob(members["phase2/runtime/evidence-index.json"], "runtime evidence index")
+    runtime_members = dict(dict(capture.seals)["phase2/runtime-seal.json"].members)
+    if (set(evidence_index) != {"schema", "source_commit", "claims"} or
+            evidence_index.get("schema") != "piccard-work7-evidence-index-v2" or evidence_index.get("source_commit") != capture.commit or
+            not isinstance(evidence_index.get("claims"), dict) or set(evidence_index["claims"]) != set(claim_ids[:6])):
+        raise Failure("foreign or invalid runtime evidence")
+    used: set[str] = set()
+    for claim in contract_claims[:6]:
+        records = evidence_index["claims"].get(claim["id"])
+        if not isinstance(records, dict) or set(records) != set(claim["evidence_keys"]):
+            raise Failure("missing sealed claim evidence")
+        for record in records.values():
+            if (not isinstance(record, dict) or set(record) != {"path", "sha256", "artifact_kind"} or
+                    not isinstance(record.get("path"), str) or not isinstance(record.get("sha256"), str) or
+                    record.get("artifact_kind") not in {"ctest-log", "probe-output", "csv-artifact"} or
+                    record["path"] == "evidence-index.json" or record["path"] in used or
+                    record["path"] not in runtime_members or record["sha256"] != runtime_members[record["path"]].sha256):
+                raise Failure("invalid sealed claim evidence")
+            used.add(record["path"])
     return RuntimeSummary(ctest_focused=canonical_argv_sha256(list(focused_argv)),
                           pre_threshold=canonical_argv_sha256(list(pre_argv)),
                           real_datasets=canonical_argv_sha256(list(real_argv)),

@@ -320,3 +320,88 @@ RED: prethreshold assertion `Failure not raised` (real baseline/mutation inputs
 were filtered exactly as production).  GREEN: both tests `ok`; `Ran 2 tests in
 16.983s`; `OK`.  Full per-cell argv/provenance and flattened real metadata
 parity remains to be ported.
+
+## Unit D completion — exact captured producer and claim parity
+
+### RED
+
+The new byte-only parity regression was first run before the producer port:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_producer_validators_require_exact_byte_only_schemas
+```
+
+Observed: six expected failures.  The old captured pre-threshold validator
+accepted mutation of the machine schema, binary provenance, cell ID, duplicate
+sampling flag, and output row count; it also had no captured
+`@source/scripts/summarize_real_datasets.py` blob.  The focused claim-semantic
+RED then showed three accepted mutations: a static per-claim performance state,
+an evidence-bound per-claim toy state, and an evidence-index artifact kind.
+
+### GREEN
+
+The completion uses only production-filtered captured blobs.  The capture graph
+now retains private namespaced source blobs for the real-data summarizer and
+the external quick-fixture dataset bytes.  They participate in the complete
+second-capture equality comparison but are never emitted as Phase 5 packet
+members.  The runtime selector passes only each producer's manifest, declared
+artifacts, required captured binary/source blobs, and verification TSV; it no
+longer hands the validators unrelated producer files.
+
+Fresh focused verification:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_producer_validators_require_exact_byte_only_schemas \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_claim_reports_preserve_full_contract_and_evidence_semantics
+```
+
+The final five-test command below re-ran both new cases plus all three existing
+Unit D regressions and exited `0`.
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_prethreshold_validator_rejects_missing_terminal_and_output_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_claim_reports_require_claims_and_runtime_seal_binding
+```
+
+Observed: all three `ok`; `Ran 3 tests in 22.331s`; `OK`.
+
+Final fresh command:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_producer_validators_require_exact_byte_only_schemas \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_claim_reports_preserve_full_contract_and_evidence_semantics \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_prethreshold_validator_rejects_missing_terminal_and_output_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_claim_reports_require_claims_and_runtime_seal_binding
+```
+
+Observed: exit `0`.
+
+### Field-by-field parity statement
+
+`validate_prethreshold_capture` now matches `validate_prethreshold` for the
+exact top/source/build/binary-provenance/machine/directory schemas; producer
+set; all three cell schemas, IDs, argv vectors, sampling uniqueness,
+environment, status and one-run counts; output schema/row counts/digests; and
+terminal TSV path/count/digest/header/sorted cell bindings.  The runner argv's
+captured results root is tied to the dynamic manifest/trace cell arguments.
+
+`validate_real_capture` now rebuilds and compares the entire flattened metadata
+map: canonical quick roots, binary and captured summarizer digests, artifact
+roles/paths/digests, three exact cell IDs/argv framing/hash/environment/input
+and output counts/paths/digests/statuses, and the exact verification-status TSV.
+The externally referenced fixture input is validated from its captured source
+blob, so no live evidence path is reopened.
+
+Captured static and evidence-bound reports now run the established pure
+`report_claims` semantics against the captured contract and captured CTest
+inventory, preserve the exact static `{}` versus evidence runtime-seal input
+bindings, and independently validate the captured runtime evidence index
+against the owning captured seal members.  The generic count screen remains in
+both producer paths, preserving exactly-one trials/accuracy-trials/
+refresh-updates and rejecting actual-data artifacts.

@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -473,28 +474,58 @@ def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], c
                                   expected_argv: tuple[str, ...], source: str, build: str) -> str:
     values = _capture_map(blobs)
     manifest = _capture_json(values, "phase2/runtime/pre-threshold/manifest.json", "pre-threshold manifest")
+    top_keys = {"schema", "suite", "seed", "repetitions", "classification", "thread_policy", "profiles",
+                "source", "build", "machine", "directories", "cells", "terminal_cells"}
+    if set(manifest) != top_keys:
+        raise Failure("invalid pre-threshold manifest schema")
     if (manifest.get("schema") != "piccard-pre-threshold-run-v1" or manifest.get("suite") != "smoke" or
-            manifest.get("seed") != 7 or manifest.get("repetitions") != 1 or
-            manifest.get("classification") != "diagnostic" or manifest.get("profiles") != ["toy-smoke"]):
+            manifest.get("seed") != 7 or manifest.get("repetitions") != 1 or manifest.get("classification") != "diagnostic" or
+            manifest.get("profiles") != ["toy-smoke"] or manifest.get("directories") != {"csv": "csv", "workloads": "workloads", "traces": "traces", "logs": "logs"} or
+            manifest.get("thread_policy") != {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}):
         raise Failure("invalid pre-threshold manifest identity")
     source_record, build_record = manifest.get("source"), manifest.get("build")
-    if (not isinstance(source_record, dict) or source_record.get("commit") != commit or source_record.get("dirty") is not False or
-            source_record.get("dir") != source or not isinstance(build_record, dict) or build_record.get("dir") != build or
-            build_record.get("type") != "Release" or not isinstance(build_record.get("binaries"), dict)):
+    if (not isinstance(source_record, dict) or set(source_record) != {"commit", "dirty", "dir"} or
+            source_record != {"commit": commit, "dirty": False, "dir": source} or
+            not isinstance(build_record, dict) or set(build_record) != {"dir", "type", "binaries"} or
+            build_record.get("dir") != build or build_record.get("type") != "Release" or not isinstance(build_record.get("binaries"), dict)):
         raise Failure("invalid pre-threshold provenance")
-    expected_binary_names = {"bench_review_comparison", "bench_piccard", "bench_dynamic"}
-    if set(build_record["binaries"]) != expected_binary_names:
+    expected_binary_names = ("bench_review_comparison", "bench_piccard", "bench_dynamic")
+    if set(build_record["binaries"]) != set(expected_binary_names):
         raise Failure("invalid pre-threshold binary binding")
-    for name, record in build_record["binaries"].items():
+    versions: list[str] = []
+    for name in expected_binary_names:
+        record = build_record["binaries"][name]
         captured = values.get("@build/" + name)
-        if not isinstance(record, dict) or captured is None or record.get("path") != build + "/" + name or record.get("sha256") != captured.sha256:
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        if (not isinstance(record, dict) or set(record) != {"path", "sha256", "provenance"} or captured is None or
+                record.get("path") != build + "/" + name or record.get("sha256") != captured.sha256 or
+                not isinstance(provenance, dict) or set(provenance) != {"schema", "commit", "dirty", "build_type", "openfhe_version", "source_dir"} or
+                provenance.get("schema") != "piccard-build-provenance-v1" or provenance.get("commit") != commit or
+                provenance.get("dirty") is not False or provenance.get("build_type") != "Release" or provenance.get("source_dir") != source or
+                not isinstance(provenance.get("openfhe_version"), str) or not provenance["openfhe_version"] or provenance["openfhe_version"].lower() == "unknown" or
+                not re.fullmatch(r"[0-7]{4}", captured.mode) or not (int(captured.mode, 8) & 0o111)):
             raise Failure("invalid pre-threshold binary binding")
-    if set(manifest) != {"schema", "suite", "seed", "repetitions", "classification", "thread_policy", "profiles", "source", "build", "machine", "directories", "cells", "terminal_cells"}:
-        raise Failure("invalid pre-threshold manifest schema")
-    if manifest.get("directories") != {"csv": "csv", "workloads": "workloads", "traces": "traces", "logs": "logs"} or manifest.get("thread_policy") != {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}:
-        raise Failure("invalid pre-threshold manifest identity")
-    if not isinstance(manifest.get("cells"), list) or len(manifest["cells"]) != 3:
+        versions.append(provenance["openfhe_version"])
+    machine = manifest.get("machine")
+    if (not isinstance(machine, dict) or set(machine) != {"cpu", "ram", "os", "compiler", "libraries"} or
+            any(not isinstance(machine.get(key), str) or not machine[key] for key in ("cpu", "os", "compiler")) or
+            not isinstance(machine.get("ram"), (str, int)) or (isinstance(machine.get("ram"), str) and not machine["ram"]) or
+            machine.get("libraries") != {"openfhe": sorted(set(versions))}):
+        raise Failure("invalid pre-threshold machine provenance")
+    # The caller supplies the captured runner argv; its last value is the
+    # session-specific producer root and is bound to every dynamic cell output.
+    if (not isinstance(expected_argv, tuple) or len(expected_argv) != 6 or
+            expected_argv[:5] != (source + "/scripts/run_pre_threshold_profiles.sh", "--suite=smoke", "--seed=7", "--threads=2", "--build-dir=" + build) or
+            not isinstance(expected_argv[-1], str) or not expected_argv[-1].startswith("--results-root=")):
+        raise Failure("pre-threshold command record is not exact")
+    results_root = expected_argv[-1].split("=", 1)[1]
+    if not Path(results_root).is_absolute() or not results_root.endswith("/phase2/runtime/pre-threshold"):
+        raise Failure("pre-threshold command results root is not exact")
+    if not isinstance(manifest.get("cells"), list) or len(manifest["cells"]) != 3 or {row.get("producer") for row in manifest["cells"] if isinstance(row, dict)} != set(expected_binary_names):
         raise Failure("invalid pre-threshold cells")
+    cell_keys = {"cell_id", "profile_id", "producer", "parameter_sha256", "argv", "environment", "output", "status", "reason_code", "required_bits", "available_bits", "shortfall_bits"}
+    if any(not isinstance(row, dict) or set(row) != cell_keys for row in manifest["cells"]):
+        raise Failure("invalid pre-threshold cell schema")
     terminal = manifest.get("terminal_cells")
     if not isinstance(terminal, dict) or set(terminal) != {"path", "row_count", "sha256"} or terminal.get("path") != "terminal-cells.tsv" or terminal.get("row_count") != 3:
         raise Failure("missing pre-threshold terminal cells")
@@ -510,33 +541,97 @@ def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], c
     expected_outputs = {"bench_review_comparison": {"csv", "csv_sha256", "log", "log_sha256", "workload", "workload_sha256", "trace", "trace_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
                         "bench_piccard": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
                         "bench_dynamic": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"}}
-    if {row.get("producer") for row in manifest["cells"] if isinstance(row, dict)} != set(expected_outputs):
-        raise Failure("invalid pre-threshold cells")
+    expected_args = {"bench_review_comparison": ["--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16", "--set-size=10", "--universe=64", "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1", "--seed=7", "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16", "--sj16-key-bits=1024", "--allow-unmatched-security"],
+                     "bench_piccard": ["--profile=toy-smoke", "--security=TOY", "--mode=timing", "--evidence_point", "--k=16", "--m=16", "--set_size=10", "--target-jaccard=0.5", "--trials=1", "--seed=7"],
+                     "bench_dynamic": ["--scenario=refresh", "--refresh_updates=1", "--profile=toy-smoke", "--security=TOY", "--mode=timing", "--evidence_point", "--k=16", "--m=16", "--set_size=100", "--target-jaccard=0.5", "--depth=5", "--trials=1", "--seed=7"]}
+    expected_rows = {"bench_review_comparison": 10, "bench_piccard": 1, "bench_dynamic": 1}
+    expected_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv", *("@build/" + name for name in expected_binary_names)}
     for row in manifest["cells"]:
-        if not isinstance(row, dict) or not isinstance(row.get("output"), dict) or set(row["output"]) != expected_outputs.get(row.get("producer"), set()):
+        producer, output, argv = row["producer"], row.get("output"), row.get("argv")
+        if not isinstance(output, dict) or set(output) != expected_outputs[producer] or output.get("measurement_output") != "measured-csv" or output.get("expected_csv_rows") != expected_rows[producer] or output.get("csv_row_count") != expected_rows[producer]:
             raise Failure("invalid pre-threshold output schema")
+        dynamic = (["--manifest-out=" + results_root + "/" + output["workload"], "--execution-trace-out=" + results_root + "/" + output["trace"]] if producer == "bench_review_comparison" else [])
+        sampling = [item for item in argv if isinstance(item, str) and (item.startswith("--trials=") or item.startswith("--accuracy-trials=") or item.startswith("--refresh_updates="))] if isinstance(argv, list) else []
+        digest = smoke_parameter_sha256(producer, argv if isinstance(argv, list) else [])
+        if (row.get("status") != "MEASURED" or row.get("profile_id") != "toy-smoke" or row.get("environment") != {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"} or
+                row.get("parameter_sha256") != digest or row.get("cell_id") != "toy-smoke/" + producer + "/" + digest or row.get("reason_code") != "NONE" or
+                any(row.get(key) != "" for key in ("required_bits", "available_bits", "shortfall_bits")) or not isinstance(argv, list) or argv != [producer, *expected_args[producer], *dynamic] or len(sampling) != len(set(sampling))):
+            raise Failure("pre-threshold row/argv mismatch")
         for key, relative in row["output"].items():
             if key.endswith("_sha256") or key in {"expected_csv_rows", "csv_row_count", "measurement_output"}:
                 continue
-            target = values.get("phase2/runtime/pre-threshold/" + str(relative))
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                raise Failure("invalid pre-threshold artifact digest")
+            target_path = "phase2/runtime/pre-threshold/" + relative
+            target = values.get(target_path)
             if target is None or target.sha256 != row["output"].get(key + "_sha256"):
                 raise Failure("invalid pre-threshold artifact digest")
+            expected_paths.add(target_path)
+    expected_terminal_rows = [["piccard-benchmark-terminal-cell-v1", row["cell_id"], "toy-smoke", row["producer"], row["parameter_sha256"], "MEASURED", "NONE", "", "", "", row["output"]["log_sha256"]] for row in sorted(manifest["cells"], key=lambda item: item["cell_id"])]
+    if terminal_rows[1:] != expected_terminal_rows or set(values) != expected_paths:
+        raise Failure("pre-threshold terminal rows do not bind cells")
     validate_record_counts_capture(blobs)
     return values["phase2/runtime/pre-threshold/manifest.json"].sha256
 
 
 def validate_real_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: str, source: str, build: str) -> str:
     values = _capture_map(blobs)
-    metadata = _capture_tsv(values["phase2/runtime/real-datasets/run_metadata.tsv"].raw, "real-data metadata")
-    if (metadata.get("schema_version") != "piccard-real-run-v1" or metadata.get("evidence_mode") != "quick" or
-            metadata.get("source_commit") != commit or metadata.get("git_dirty") != "false" or
-            metadata.get("build_type") != "Release" or metadata.get("cell_count") != "3" or
-            metadata.get("bench_real_datasets_sha256") != values.get("@build/bench_real_datasets", CapturedBlob(b"", "", 0, "")).sha256):
-        raise Failure("invalid real-data metadata")
-    if metadata.get("committed-source-root", source) not in (source, None):
+    try:
+        metadata_blob = values["phase2/runtime/real-datasets/run_metadata.tsv"]
+        source_blob = values["@source/scripts/summarize_real_datasets.py"]
+        fixture_blob = values["@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"]
+        binary = values["@build/bench_real_datasets"]
+    except KeyError as error:
+        raise Failure("real-data capture is incomplete") from error
+    metadata = _capture_tsv(metadata_blob.raw, "real-data metadata")
+    variant = "dblp_acm_u65536"
+    results_root = metadata.get("root.000.path")
+    if (not isinstance(results_root, str) or not Path(results_root).is_absolute() or
+            ".." in Path(results_root).parts or not results_root.endswith("/phase2/runtime/real-datasets")):
         raise Failure("invalid real-data authoritative root")
+    root = results_root
+    fixture = source + "/tests/fixtures/real_datasets/quick/" + variant
+    roots = [("results-root", root), ("build-dir", build), ("committed-source-root", source), ("source-root-" + variant, fixture), ("processed-dataset-" + variant, fixture)]
+    expected: dict[str, str] = {"schema_version": "piccard-real-run-v1", "evidence_mode": "quick", "source_commit": commit,
+                                "git_dirty": "false", "build_type": "Release", "bench_real_datasets_sha256": binary.sha256,
+                                "summarize_real_datasets_sha256": source_blob.sha256, "root_count": str(len(roots))}
+    for number, (root_id, path) in enumerate(roots):
+        expected[f"root.{number:03d}.id"] = root_id; expected[f"root.{number:03d}.path"] = path
+    artifacts = [("system-info", "system_info.txt"), ("copied-source-manifest-" + variant, "input_manifests/" + variant + "/source.manifest.tsv"),
+                 ("copied-processed-manifest-" + variant, "input_manifests/" + variant + "/dataset.manifest.tsv"), ("run-log", "run.log")]
+    expected["artifact_count"] = str(len(artifacts))
+    expected_paths = {"phase2/runtime/real-datasets/run_metadata.tsv", "phase2/runtime/real-datasets/verification_status.tsv", "@build/bench_real_datasets", "@source/scripts/summarize_real_datasets.py", "@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"}
+    for number, (role, relative) in enumerate(artifacts):
+        path = "phase2/runtime/real-datasets/" + relative
+        blob = values.get(path)
+        if blob is None: raise Failure("real-data artifact is missing")
+        expected.update({f"artifact.{number:03d}.role": role, f"artifact.{number:03d}.path": relative, f"artifact.{number:03d}.sha256": blob.sha256})
+        expected_paths.add(path)
+    dataset = fixture + "/dataset.manifest.tsv"
+    cells = [(variant + ":accuracy", ["bench_real_datasets", "--dataset-manifest=" + dataset, "--mode=accuracy", "--k=128", "--m=64", "--max-pairs=2", "--accuracy_trials=1", "--seed=7", "--hash_randomness=resampled", "--csv=" + root + "/csv/real_accuracy_" + variant + ".csv", "--workload-manifest-out=" + root + "/workloads/accuracy_" + variant + ".manifest.tsv", "--workload-rows-out=" + root + "/workloads/accuracy_" + variant + ".rows.tsv"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"}, [("processed-manifest", "processed-dataset-" + variant, fixture, "dataset.manifest.tsv")], ["csv/real_accuracy_" + variant + ".csv", "workloads/accuracy_" + variant + ".manifest.tsv", "workloads/accuracy_" + variant + ".rows.tsv"]),
+             (variant + ":accuracy-summary", ["summarize_real_datasets.py", "--input=" + root + "/csv/real_accuracy_" + variant + ".csv", "--output=" + root + "/csv/real_accuracy_summary_" + variant + ".csv"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"}, [("accuracy-csv", "results-root", root, "csv/real_accuracy_" + variant + ".csv")], ["csv/real_accuracy_summary_" + variant + ".csv"]),
+             (variant + ":timing:toy-smoke", ["bench_real_datasets", "--dataset-manifest=" + dataset, "--mode=timing", "--profile=toy-smoke", "--k=128", "--m=64", "--trials=1", "--timing-pair=median", "--seed=7", "--csv=" + root + "/csv/real_timing_" + variant + "_toy-smoke.csv", "--workload-manifest-out=" + root + "/workloads/timing_" + variant + "_toy-smoke.manifest.tsv"], {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}, [("processed-manifest", "processed-dataset-" + variant, fixture, "dataset.manifest.tsv")], ["csv/real_timing_" + variant + "_toy-smoke.csv", "workloads/timing_" + variant + "_toy-smoke.manifest.tsv"])]
+    expected["cell_count"] = str(len(cells))
+    for number, (cell_id, argv, env, inputs, outputs) in enumerate(cells):
+        prefix = f"cell.{number:03d}."
+        expected.update({prefix + "id": cell_id, prefix + "argv_count": str(len(argv)), prefix + "argv_sha256": real_argv_sha256(argv), prefix + "env_count": str(len(env)), prefix + "input_count": str(len(inputs)), prefix + "output_count": str(len(outputs)), prefix + "status": "complete"})
+        for index, item in enumerate(argv): expected[prefix + f"argv.{index:03d}"] = item
+        for index, (key, item) in enumerate(sorted(env.items())): expected[prefix + f"env.{index:03d}.key"] = key; expected[prefix + f"env.{index:03d}.value"] = item
+        for index, (role, root_id, input_root, relative) in enumerate(inputs):
+            path = ("@source/tests/fixtures/real_datasets/quick/" + variant + "/dataset.manifest.tsv" if role == "processed-manifest"
+                    else "phase2/runtime/real-datasets/" + relative)
+            blob = fixture_blob if role == "processed-manifest" else values.get(path)
+            if blob is None: raise Failure("real-data input is missing")
+            expected.update({prefix + f"input.{index:03d}.role": role, prefix + f"input.{index:03d}.root_id": root_id, prefix + f"input.{index:03d}.path": relative, prefix + f"input.{index:03d}.sha256": blob.sha256})
+            expected_paths.add(path)
+        for index, relative in enumerate(outputs):
+            path = "phase2/runtime/real-datasets/" + relative; blob = values.get(path)
+            if blob is None: raise Failure("real-data output is missing")
+            expected[prefix + f"output.{index:03d}.path"] = relative; expected[prefix + f"output.{index:03d}.sha256"] = blob.sha256; expected_paths.add(path)
+    if metadata != expected or set(values) != expected_paths:
+        raise Failure("real-data metadata does not exactly bind quick provenance")
     status = _capture_tsv(values["phase2/runtime/real-datasets/verification_status.tsv"].raw, "real-data verification status")
-    if status.get("status") != "VERIFIED" or status.get("run_metadata_sha256") != values["phase2/runtime/real-datasets/run_metadata.tsv"].sha256:
+    if status != {"schema_version": "piccard-real-verification-v1", "run_metadata_sha256": metadata_blob.sha256, "status": "VERIFIED"}:
         raise Failure("stale real-data verification status")
     validate_record_counts_capture(blobs)
     return values["phase2/runtime/real-datasets/run_metadata.tsv"].sha256

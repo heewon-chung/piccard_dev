@@ -371,9 +371,17 @@ class Work7ReviewPacketTests(unittest.TestCase):
         raw = json.dumps(value).encode()
         blobs["phase2/runtime/pre-threshold/manifest.json"] = CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
         blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
-        baseline = tuple((path, blob) for path, blob in dict(capture.packet_members).items()
-                         if path.startswith("phase2/runtime/pre-threshold/")) + tuple(("@build/" + name, blob) for name, blob in capture.build_binaries)
-        argv = tuple(json.loads(dict(capture.packet_members)["phase2/runtime/commands/pre-threshold.json"].raw)["argv"])
+        captured_members = dict(capture.packet_members)
+        baseline_manifest = json.loads(captured_members["phase2/runtime/pre-threshold/manifest.json"].raw)
+        pre_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv"}
+        for cell in baseline_manifest["cells"]:
+            for key, item in cell["output"].items():
+                if not key.endswith("_sha256") and key not in {"expected_csv_rows", "csv_row_count", "measurement_output"}:
+                    pre_paths.add("phase2/runtime/pre-threshold/" + item)
+        baseline = tuple((path, captured_members[path]) for path in sorted(pre_paths)) + tuple(
+            ("@build/" + name, dict(capture.build_binaries)[name]) for name in
+            ("bench_review_comparison", "bench_piccard", "bench_dynamic"))
+        argv = tuple(json.loads(captured_members["phase2/runtime/commands/pre-threshold.json"].raw)["argv"])
         validate_prethreshold_capture(baseline, capture.commit, argv, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
         blobs = {path: blob for path, blob in blobs.items() if path.startswith("phase2/runtime/pre-threshold/") or path.startswith("@build/")}
         with self.assertRaises(Failure):
@@ -397,12 +405,108 @@ class Work7ReviewPacketTests(unittest.TestCase):
         status = b"key\tvalue\nschema_version\tpiccard-real-verification-v1\nrun_metadata_sha256\t" + digest.encode() + b"\nstatus\tVERIFIED\n"
         blobs["phase2/runtime/real-datasets/verification_status.tsv"] = CapturedBlob(status, hashlib.sha256(status).hexdigest(), len(status), "0644")
         blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
-        baseline = tuple((path, blob) for path, blob in dict(capture.packet_members).items()
-                         if path.startswith("phase2/runtime/real-datasets/")) + tuple(("@build/" + name, blob) for name, blob in capture.build_binaries)
+        captured_members = dict(capture.packet_members)
+        baseline_metadata = captured_members["phase2/runtime/real-datasets/run_metadata.tsv"].raw.decode().splitlines()
+        real_paths = {"phase2/runtime/real-datasets/run_metadata.tsv", "phase2/runtime/real-datasets/verification_status.tsv",
+                      "phase2/runtime/real-datasets/input_manifests/dblp_acm_u65536/dataset.manifest.tsv"}
+        for row in baseline_metadata[1:]:
+            key, item = row.split("\t", 1)
+            if key.endswith(".path") and (key.startswith("artifact.") or ".output." in key):
+                real_paths.add("phase2/runtime/real-datasets/" + item)
+        baseline = tuple((path, captured_members[path]) for path in sorted(real_paths)) + (
+            ("@build/bench_real_datasets", dict(capture.build_binaries)["bench_real_datasets"]),
+            ("@source/scripts/summarize_real_datasets.py", captured_members["@source/scripts/summarize_real_datasets.py"]),
+            ("@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv",
+             captured_members["@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"]),
+        )
         validate_real_capture(baseline, capture.commit, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
         blobs = {path: blob for path, blob in blobs.items() if path.startswith("phase2/runtime/real-datasets/") or path.startswith("@build/")}
         with self.assertRaises(Failure):
             validate_real_capture(tuple(blobs.items()), capture.commit, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
+
+    def test_captured_producer_validators_require_exact_byte_only_schemas(self):
+        """Every path-validator field remains binding when only captured blobs exist."""
+        from scripts.run_work7_integration import Failure, validate_prethreshold_capture, validate_real_capture
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_work(); seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        members = dict(capture.packet_members)
+        build = str(self.temporary / "builds" / ("build-" + self.commit))
+        pre_manifest = json.loads(members["phase2/runtime/pre-threshold/manifest.json"].raw)
+        pre_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv"}
+        for cell in pre_manifest["cells"]:
+            for key, value in cell["output"].items():
+                if not key.endswith("_sha256") and key not in {"expected_csv_rows", "csv_row_count", "measurement_output"}:
+                    pre_paths.add("phase2/runtime/pre-threshold/" + value)
+        pre = tuple(sorted((path, members[path]) for path in pre_paths) +
+                    [("@build/" + name, dict(capture.build_binaries)[name]) for name in
+                     ("bench_review_comparison", "bench_piccard", "bench_dynamic")])
+        pre_argv = tuple(json.loads(members["phase2/runtime/commands/pre-threshold.json"].raw)["argv"])
+        validate_prethreshold_capture(pre, capture.commit, pre_argv, str(self.source), build)
+
+        def altered_blob(raw: bytes) -> CapturedBlob:
+            return CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
+
+        pre_mutations = (
+            ("machine schema", lambda value: value["machine"].pop("libraries")),
+            ("binary provenance", lambda value: value["build"]["binaries"]["bench_piccard"]["provenance"].__setitem__("dirty", True)),
+            ("cell identity", lambda value: value["cells"][0].__setitem__("cell_id", "hostile")),
+            ("sampling uniqueness", lambda value: value["cells"][0].__setitem__("argv", value["cells"][0]["argv"] + ["--trials=1"])),
+            ("output row count", lambda value: value["cells"][1]["output"].__setitem__("csv_row_count", 2)),
+            ("terminal cell binding", lambda value: value["terminal_cells"].__setitem__("row_count", 2)),
+        )
+        for label, mutate in pre_mutations:
+            with self.subTest(prethreshold=label):
+                value = json.loads(members["phase2/runtime/pre-threshold/manifest.json"].raw)
+                mutate(value)
+                hostile = dict(pre)
+                raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                hostile["phase2/runtime/pre-threshold/manifest.json"] = altered_blob(raw)
+                with self.assertRaises(Failure):
+                    validate_prethreshold_capture(tuple(hostile.items()), capture.commit, pre_argv, str(self.source), build)
+
+        self.assertIn("@source/scripts/summarize_real_datasets.py", members)
+        real_metadata = members["phase2/runtime/real-datasets/run_metadata.tsv"].raw.decode("utf-8")
+        real_paths = {"phase2/runtime/real-datasets/verification_status.tsv", "phase2/runtime/real-datasets/run_metadata.tsv"}
+        for row in real_metadata.splitlines()[1:]:
+            key, value = row.split("\t", 1)
+            if key.endswith(".path") and (key.startswith("artifact.") or ".output." in key):
+                real_paths.add("phase2/runtime/real-datasets/" + value)
+        real_paths.add("phase2/runtime/real-datasets/input_manifests/dblp_acm_u65536/dataset.manifest.tsv")
+        real = tuple(sorted((path, members[path]) for path in real_paths) + [
+            ("@build/bench_real_datasets", dict(capture.build_binaries)["bench_real_datasets"]),
+            ("@source/scripts/summarize_real_datasets.py", members["@source/scripts/summarize_real_datasets.py"]),
+            ("@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv",
+             members["@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"]),
+        ])
+        validate_real_capture(real, capture.commit, str(self.source), build)
+        real_mutations = (
+            ("canonical root", "root.000.path", "/hostile/results"),
+            ("artifact role", "artifact.000.role", "hostile"),
+            ("cell argv", "cell.000.argv.000", "hostile-binary"),
+            ("cell environment", "cell.002.env.001.value", "9"),
+            ("input root binding", "cell.000.input.000.root_id", "results-root"),
+            ("output digest", "cell.001.output.000.sha256", "0" * 64),
+        )
+        for label, key, replacement in real_mutations:
+            with self.subTest(real=label):
+                rows = [row.split("\t", 1) for row in real_metadata.splitlines()]
+                raw = ("\n".join("\t".join((item[0], replacement if item[0] == key else item[1])) for item in rows) + "\n").encode()
+                hostile = dict(real)
+                hostile["phase2/runtime/real-datasets/run_metadata.tsv"] = altered_blob(raw)
+                with self.assertRaises(Failure):
+                    validate_real_capture(tuple(hostile.items()), capture.commit, str(self.source), build)
+
+        hostile = dict(real)
+        hostile["phase2/runtime/real-datasets/verification_status.tsv"] = altered_blob(
+            b"key\tvalue\nschema_version\tpiccard-real-verification-v1\nrun_metadata_sha256\t" +
+            members["phase2/runtime/real-datasets/run_metadata.tsv"].sha256.encode() + b"\nstatus\tHOSTILE\n")
+        with self.assertRaises(Failure):
+            validate_real_capture(tuple(hostile.items()), capture.commit, str(self.source), build)
 
     def test_captured_claim_reports_require_claims_and_runtime_seal_binding(self):
         """Top-level PASS fields alone cannot validate static/evidence claim reports."""
@@ -420,6 +524,37 @@ class Work7ReviewPacketTests(unittest.TestCase):
             members[relative] = CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
         with self.assertRaises(Failure):
             validate_phase2_runtime_capture(replace(capture, packet_members=tuple(sorted(members.items()))))
+
+    def test_captured_claim_reports_preserve_full_contract_and_evidence_semantics(self):
+        """Captured claim reports cannot weaken a per-claim state or sealed evidence role."""
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import Failure, capture_phase04, validate_phase2_runtime_capture
+
+        packet = self.prepare_work(); seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        self.assertEqual(validate_phase2_runtime_capture(capture).focused_pass_count, 28)
+
+        def blob(value: object) -> CapturedBlob:
+            raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            return CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
+
+        mutations = []
+        static = json.loads(dict(capture.packet_members)["phase2/runtime/static-report.json"].raw)
+        static["claims"][0]["performance_state"] = "TOY_VERIFIED"
+        mutations.append(("phase2/runtime/static-report.json", blob(static)))
+        evidence = json.loads(dict(capture.packet_members)["phase2/closure-artifacts/evidence-bound-report.json"].raw)
+        evidence["claims"][5]["toy_evidence_state"] = "PENDING"
+        mutations.append(("phase2/closure-artifacts/evidence-bound-report.json", blob(evidence)))
+        index = json.loads(dict(capture.packet_members)["phase2/runtime/evidence-index.json"].raw)
+        index["claims"]["W7-G4-COMPARISON"]["comparison-toy"]["artifact_kind"] = "hostile"
+        mutations.append(("phase2/runtime/evidence-index.json", blob(index)))
+        for relative, hostile_blob in mutations:
+            with self.subTest(claim_report=relative):
+                members = dict(capture.packet_members); members[relative] = hostile_blob
+                with self.assertRaises(Failure):
+                    validate_phase2_runtime_capture(replace(capture, packet_members=tuple(sorted(members.items()))))
 
     def test_capture_phase04_rejects_phase2_static_copy_that_differs_from_runtime_sealed_twin(self):
         """A standalone static copy must be byte-identical to its sealed runtime twin."""
