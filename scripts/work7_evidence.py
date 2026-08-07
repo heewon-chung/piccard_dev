@@ -401,6 +401,10 @@ def capture_tree_seal(path: Path, expected_previous: str | None, expected_kind: 
         names.add(entry["path"])
         candidate = root / relative
         try:
+            # ``O_NOFOLLOW`` protects only the terminal component.  A manifest
+            # member must also reject an attacker-controlled symlink directory
+            # between the captured artifact root and that terminal file.
+            _reject_symlink_components(candidate)
             blob = _captured_blob(candidate)
         except ValueError as error:
             raise ValueError(f"invalid tree seal member: {entry['path']}") from error

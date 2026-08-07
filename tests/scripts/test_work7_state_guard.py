@@ -3,6 +3,7 @@
 
 import os
 import hashlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -292,6 +293,22 @@ class Work7StateGuardTest(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             setattr(dict(captured.members)["proof.txt"], "raw", b"mutated")
         os.chmod(member, 0o600)
+        with self.assertRaises(ValueError):
+            capture_tree_seal(seal, None, "phase0", artifact)
+
+    def test_capture_tree_seal_rejects_nested_member_directory_symlink(self) -> None:
+        """A manifest member cannot traverse a symlinked directory component."""
+        artifact = self.root / "artifact"
+        nested = artifact / "nested"
+        nested.mkdir(parents=True)
+        (nested / "proof.txt").write_bytes(b"proof\n")
+        seal = self.root / "seal.json"
+        create_tree_seal(artifact, seal, None, "phase0")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "proof.txt").write_bytes(b"proof\n")
+        shutil.rmtree(nested)
+        nested.symlink_to(outside, target_is_directory=True)
         with self.assertRaises(ValueError):
             capture_tree_seal(seal, None, "phase0", artifact)
 

@@ -244,3 +244,22 @@ python3 -m unittest \
 
 Observed: two `ok`; `Ran 2 tests in 17.752s`; `OK`.  Python emitted existing
 `ResourceWarning` diagnostics from legacy runner path reads; no test failure.
+
+## Remediation round 2 (partial)
+
+Addressed reviewer Important 1: `capture_tree_seal` now calls
+`_reject_symlink_components` for every manifest member before its stable
+terminal-file read.  This closes the gap where `O_NOFOLLOW` protected only the
+final component and an intermediate directory symlink could be followed.
+
+Focused evidence:
+
+```text
+python3 -m unittest tests.scripts.test_work7_state_guard.Work7StateGuardTest.test_capture_tree_seal_rejects_nested_member_directory_symlink -v
+```
+
+Observed: `ok`; `Ran 1 test in 0.188s`; `OK`.
+
+The remaining reviewer Critical producer-schema port plus Important exact
+manifest/source-capture/creation-ledger/closure-input findings are not yet
+implemented.  This report entry intentionally does not claim R1 completion.
