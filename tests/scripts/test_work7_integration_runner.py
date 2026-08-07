@@ -362,5 +362,99 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 self.assertIn(expected, result.stderr.decode())
 
 
+class Work7RunLifecycleTests(unittest.TestCase):
+    """Normal-operation disposal coverage for the deliberately small R3 PoC."""
+
+    commit = "a" * 40
+
+    def make_roots(self) -> tempfile.TemporaryDirectory[str]:
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        for name in ("builds", "sessions", "diagnostics"):
+            (root / name).mkdir()
+        return temporary
+
+    def test_authoritative_failures_write_diagnostic_then_dispose_owned_run(self):
+        """Changing the failure action or omitting either deletion must fail this test."""
+        from scripts.work7_run_lifecycle import (ReservationLedger,
+                                                  record_and_apply_failure,
+                                                  reserve_owned)
+
+        for index, kind in enumerate(("execution", "technical-review", "review-delivery", "user-cancel")):
+            with self.subTest(kind=kind), self.make_roots() as temporary:
+                root = Path(temporary)
+                commit = chr(ord("a") + index) * 40
+                ledger = ReservationLedger(created=[])
+                build = reserve_owned(root / "builds", "build-" + commit, ledger)
+                session = reserve_owned(root / "sessions", "session-" + commit, ledger)
+                (build / "generated.txt").write_text("generated build\n", encoding="utf-8")
+                (session / "generated.txt").write_text("generated session\n", encoding="utf-8")
+                sentinel = root / "outside-sentinel.txt"
+                sentinel.write_text("preserve me\n", encoding="utf-8")
+
+                diagnostic = record_and_apply_failure(
+                    diagnostic_root=root / "diagnostics", build_parent=root / "builds",
+                    session_parent=root / "sessions", build=build, session=session,
+                    commit=commit, kind=kind, packet_sha256=None, guarded=(), ledger=ledger)
+
+                self.assertEqual(diagnostic, (root / "diagnostics" / ("failure-" + commit + ".json")).resolve())
+                self.assertEqual(json.loads(diagnostic.read_text(encoding="utf-8")), {
+                    "schema": "piccard-work7-failure-v1", "source_commit": commit,
+                    "failure_kind": kind, "action": "DISPOSE",
+                    "build_root": str(build.resolve()), "session_root": str(session.resolve()),
+                    "packet_sha256": None, "publishable": False,
+                })
+                self.assertFalse(build.exists())
+                self.assertFalse(session.exists())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+                self.assertTrue(diagnostic.is_file())
+
+    def test_second_reservation_collision_disposes_only_first_ledger_root(self):
+        """Removing an unowned collision target instead of the first reservation is a bug."""
+        from scripts.work7_run_lifecycle import (ReservationLedger,
+                                                  record_and_apply_failure,
+                                                  reserve_owned)
+
+        with self.make_roots() as temporary:
+            root = Path(temporary)
+            ledger = ReservationLedger(created=[])
+            build = reserve_owned(root / "builds", "build-" + self.commit, ledger)
+            session = root / "sessions" / ("session-" + self.commit)
+            session.mkdir()
+            sentinel = session / "foreign-sentinel.txt"
+            sentinel.write_text("do not delete\n", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                reserve_owned(root / "sessions", session.name, ledger)
+            diagnostic = record_and_apply_failure(
+                diagnostic_root=root / "diagnostics", build_parent=root / "builds",
+                session_parent=root / "sessions", build=build, session=session,
+                commit=self.commit, kind="execution", packet_sha256=None, guarded=(), ledger=ledger)
+
+            self.assertTrue(diagnostic.is_file())
+            self.assertFalse(build.exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not delete\n")
+
+    def test_disposal_rejects_mismatched_target_before_either_root_is_deleted(self):
+        """Accepting a broad or wrong basename would permit deletion beyond this run."""
+        from scripts.work7_run_lifecycle import dispose_generated_run
+
+        with self.make_roots() as temporary:
+            root = Path(temporary)
+            build = root / "builds" / ("build-" + self.commit)
+            session = root / "sessions" / ("session-" + self.commit)
+            build.mkdir()
+            session.mkdir()
+            sentinel = session / "generated.txt"
+            sentinel.write_text("keep\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "exact generated root"):
+                dispose_generated_run(root / "builds", root / "sessions", build,
+                                      root / "sessions", self.commit, ())
+
+            self.assertTrue(build.is_dir())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
+
+
 if __name__ == "__main__":
     unittest.main()
