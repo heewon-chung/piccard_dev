@@ -44,6 +44,20 @@ class Failure(ValueError):
     pass
 
 
+COUNT_NAMES = {"trials", "accuracy_trials", "refresh_updates", "reps", "iterations"}
+
+
+def validate_count_value(value: object) -> None:
+    """Permit one active repetition or an explicitly unmeasured axis."""
+    if value is None or value == "":
+        return
+    if type(value) in (int, float) and value in (0, 1):
+        return
+    if isinstance(value, str) and value in ("0", "1"):
+        return
+    raise Failure("measured count must equal 1")
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise Failure(f"invalid arguments: {message}")
@@ -135,13 +149,12 @@ def inventory_names(path: Path) -> set[str]:
 
 def validate_records(root: Path) -> None:
     """Reject repeated measurement, non-toy data, invalid CSV, and bad warmups."""
-    count_names = {"trials", "accuracy_trials", "accuracy-trials", "refresh_updates", "refresh-updates", "reps", "iterations"}
     def validate_value(value: object, location: str, timing: bool = False) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized = key.lower().replace("-", "_")
-                if normalized in {item.replace("-", "_") for item in count_names} and item != 1:
-                    raise Failure("measured count must equal 1")
+                if normalized in COUNT_NAMES:
+                    validate_count_value(item)
                 if "warmup" in normalized:
                     if normalized not in {"warmup", "discarded_warmup", "warmup_count"} or item not in (0, 1, "discarded", "discarded_warmup"):
                         raise Failure("unlabelled or multiple warmups")
@@ -179,9 +192,8 @@ def validate_records(root: Path) -> None:
         for row in rows:
             for key, raw in row.items():
                 normalized = key.lower().replace("-", "_")
-                if normalized in {item.replace("-", "_") for item in count_names}:
-                    if raw != "1":
-                        raise Failure("measured count must equal 1")
+                if normalized in COUNT_NAMES:
+                    validate_count_value(raw)
                 if "warmup" in normalized:
                     if raw not in ("", "0", "1", "discarded", "discarded_warmup"):
                         raise Failure("unlabelled warmup")
@@ -445,14 +457,12 @@ def validate_deletion_bytes(raw: bytes) -> None:
 
 def validate_record_counts_capture(blobs: tuple[tuple[str, CapturedBlob], ...]) -> None:
     """Apply the runner's one-run/no-actual-data screen without reopening files."""
-    count_names = {"trials", "accuracy_trials", "refresh_updates", "reps", "iterations"}
-
     def check(value: object, timing: bool = False) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized = key.lower().replace("-", "_")
-                if normalized in count_names and item != 1:
-                    raise Failure("measured count must equal 1")
+                if normalized in COUNT_NAMES:
+                    validate_count_value(item)
                 if "warmup" in normalized and (not timing or item not in (0, 1, "discarded", "discarded_warmup")):
                     raise Failure("unlabelled or multiple warmups")
                 check(item, timing or "timing" in normalized)
@@ -479,8 +489,8 @@ def validate_record_counts_capture(blobs: tuple[tuple[str, CapturedBlob], ...]) 
                 raise Failure("malformed CSV artifact")
             for row in rows:
                 for key, item in row.items():
-                    if key.lower().replace("-", "_") in count_names and item != "1":
-                        raise Failure("measured count must equal 1")
+                    if key.lower().replace("-", "_") in COUNT_NAMES:
+                        validate_count_value(item)
 
 
 def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: str,

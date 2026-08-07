@@ -35,6 +35,43 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(Failure, "measured count"):
                 validate_records(root)
 
+    def test_count_validators_allow_unmeasured_axes_and_reject_repeats(self):
+        """Only active measurements are required to have exactly one repetition."""
+        from scripts.run_work7_integration import (Failure, validate_record_counts_capture,
+                                                   validate_records)
+        from scripts.work7_evidence import CapturedBlob
+
+        accepted = (
+            ("timing.csv", b"trials,accuracy_trials\n1,0\n"),
+            ("refresh-optional.csv", b"trials,refresh_updates\n1,\n"),
+            ("refresh.csv", b"trials,refresh_updates\n1,1\n"),
+        )
+        rejected = (
+            ("trials.csv", b"trials\n2\n"),
+            ("accuracy.csv", b"accuracy_trials\n2\n"),
+            ("refresh.csv", b"refresh_updates\n2\n"),
+        )
+
+        def captured(raw: bytes) -> CapturedBlob:
+            return CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0600")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, raw in accepted:
+                (root / name).write_bytes(raw)
+            validate_records(root)
+        validate_record_counts_capture(tuple((name, captured(raw)) for name, raw in accepted))
+
+        for name, raw in rejected:
+            with self.subTest(validator="live", artifact=name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    (Path(temporary) / name).write_bytes(raw)
+                    with self.assertRaisesRegex(Failure, "measured count"):
+                        validate_records(Path(temporary))
+            with self.subTest(validator="captured", artifact=name):
+                with self.assertRaisesRegex(Failure, "measured count"):
+                    validate_record_counts_capture(((name, captured(raw)),))
+
     def test_rejects_multiple_or_analytic_warmups_in_fake_artifact(self):
         from scripts.run_work7_integration import Failure, validate_records
 
