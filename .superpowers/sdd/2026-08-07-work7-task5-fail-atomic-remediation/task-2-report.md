@@ -541,3 +541,64 @@ python3 -W ignore::ResourceWarning -m unittest -q tests.scripts.test_work7_revie
 ```
 
 Observed: exit 0 (toy fixture suite only).
+
+## Unit G — reviewer Important legacy live-path closure inputs
+
+`close_final` now establishes exactly one R1 Phase 0--4 capture with the
+canonical CLI source, Paper, and threshold roots:
+
+```text
+capture_phase04(session, source, paper, threshold)
+```
+
+It validates that immutable graph through `validate_phase2_runtime_capture`
+and derives both generated final-member byte strings through the shared pure
+`captured_generated_member_bytes(capture, RuntimeSummary)` helper also used by
+`prepare_final`.  The final-packet checker compares every public Phase 5 member
+back to its captured (or pure rederived) bytes, including all session seal and
+member copies.  It preserves the existing packet schema: frozen registry count
+and argv hashes remain exact, and `verify_real_datasets` remains intentionally
+absent from `toy_argv_sha256`.
+
+The old path-based `phase0`, `chain`, `validate_phase4`,
+`validate_phase2_runtime`, and `final_generated_member_bytes` paths no longer
+provide closure inputs.  A late seal-byte comparison and external-snapshot
+comparison remain explicitly transitional race detectors only: they never feed
+any derived packet, generated-member, or seal value.  They preserve the
+existing Phase 0/Phase 4 race fail-closed behavior before terminal publication.
+
+### R1/R2 boundary
+
+This is deliberately R1 only.  `close_final` still invokes the existing
+terminal verifier subprocess, then validates its report against the captured
+contract bytes.  It does not add `TerminalInputs`, `terminal_report_bytes`, or
+the R2 shared terminal core, and it does not remove the terminal subprocess.
+
+### TDD evidence
+
+RED before the Unit G refactor:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_reaches_terminal_boundary_without_legacy_phase_paths \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_generated_members_remain_captured_while_live_inputs_are_transiently_foreign
+```
+
+Observed: the legacy-path bomb raised at `close_final -> phase0`; the
+transient-capture case failed in `final_generated_member_bytes` after it
+reopened the live CTest inventory (`malformed CTest inventory header`).
+
+Focused GREEN outputs observed directly after the refactor:
+
+* `test_close_final_reaches_terminal_boundary_without_legacy_phase_paths`:
+  `ok` with all five legacy functions patched to raise.
+* `test_close_final_generated_members_remain_captured_while_live_inputs_are_transiently_foreign`:
+  `ok` while the live contract, CTest inventory, and Paper file were foreign
+  throughout the captured final-member validation boundary.
+* `test_close_final_revalidates_phase4_after_runtime_validation`: `ok`; the
+  Phase 4 reseal reached the transitional seal race detector and produced no
+  terminal artifact.
+
+The later aggregate `-k close_final` run was duplicated by the controller and
+interrupted; it is intentionally not claimed as verification evidence.  The
+authoritative post-commit focused closure run remains pending.

@@ -80,7 +80,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
     def close_final(self, packet: Path, claude: Path, sol: Path, terminal: Path, seal: Path) -> subprocess.CompletedProcess[bytes]:
         return self.command("close-final", "--packet", str(packet), "--claude-review", str(claude), "--sol-review", str(sol),
                             "--terminal-report", str(terminal), "--session-root", str(self.session),
-                            "--phase0-seal", str(self.session / "phase0/seal.json"), "--paper-root", str(self.paper),
+                            "--phase0-seal", str(self.session / "phase0/seal.json"), "--source-root", str(self.source), "--paper-root", str(self.paper),
                             "--threshold-root", str(self.threshold), "--output-seal", str(seal))
 
     def reseal_hostile_runtime(self, mutate) -> None:
@@ -922,7 +922,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
             return summary
 
         args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
-                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json",
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
                          paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
         with mock.patch.object(work7_review_packet, "validate_phase2_runtime_capture", side_effect=replace_phase4_after_runtime):
             with self.assertRaises(work7_review_packet.Failure):
@@ -930,6 +930,79 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse(terminal.exists())
         self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
         self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+
+    def test_close_final_reaches_terminal_boundary_without_legacy_phase_paths(self):
+        """A valid captured closure does not invoke any retired Phase 0--4 path reader."""
+        from scripts import work7_review_packet
+
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/captured-report.json", self.session / "phase5/captured-seal.json"
+        args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
+                         paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
+
+        def legacy_path(*_args, **_kwargs):
+            raise AssertionError("legacy Phase 0--4 path reader was called")
+
+        with mock.patch.multiple(work7_review_packet, phase0=legacy_path, chain=legacy_path,
+                                 validate_phase4=legacy_path, validate_phase2_runtime=legacy_path,
+                                 final_generated_member_bytes=legacy_path, create=True):
+            work7_review_packet.close_final(args)
+        self.assertTrue(terminal.exists())
+        self.assertTrue(seal.exists())
+
+    def test_close_final_generated_members_remain_captured_while_live_inputs_are_transiently_foreign(self):
+        """Foreign live contract/inventory/external bytes after capture cannot enter final-member validation."""
+        from scripts import work7_review_packet
+
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        terminal, seal = self.session / "phase5/transient-report.json", self.session / "phase5/transient-seal.json"
+        args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
+                         paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
+        contract = self.source / "scripts/work7_claims.json"
+        inventory = self.session / "phase2/runtime/commands/ctest-inventory.stdout.txt"
+        paper_file = self.paper / "tracked"
+        originals = {path: path.read_bytes() for path in (contract, inventory, paper_file)}
+        modes = {path: path.stat().st_mode & 0o777 for path in originals}
+        original_capture = work7_review_packet.capture_phase04
+        original_validate_members = work7_review_packet.validate_final_packet_members_capture
+        seen_foreign = False
+
+        def replace(path: Path, raw: bytes) -> None:
+            replacement = path.with_name(path.name + ".foreign")
+            replacement.write_bytes(raw)
+            os.chmod(replacement, modes[path])
+            os.replace(replacement, path)
+
+        def restore() -> None:
+            for path, raw in originals.items():
+                replace(path, raw)
+
+        def capture_then_replace(*capture_args):
+            capture = original_capture(*capture_args)
+            replace(contract, b'{"foreign":"contract"}\n')
+            replace(inventory, b"Test #1: Foreign\nTotal Tests: 1\n")
+            replace(paper_file, b"foreign external state\n")
+            return capture
+
+        def validate_while_foreign(*validation_args):
+            nonlocal seen_foreign
+            self.assertEqual(contract.read_bytes(), b'{"foreign":"contract"}\n')
+            self.assertEqual(inventory.read_bytes(), b"Test #1: Foreign\nTotal Tests: 1\n")
+            self.assertEqual(paper_file.read_bytes(), b"foreign external state\n")
+            seen_foreign = True
+            restore()
+            return original_validate_members(*validation_args)
+
+        with mock.patch.object(work7_review_packet, "capture_phase04", side_effect=capture_then_replace), \
+             mock.patch.object(work7_review_packet, "validate_final_packet_members_capture", side_effect=validate_while_foreign):
+            work7_review_packet.close_final(args)
+        self.assertTrue(seen_foreign)
+        self.assertTrue(terminal.exists())
+        self.assertTrue(seal.exists())
 
     def test_work_review_rejects_every_header_identity_and_check_mutation(self):
         """A parser that accepts one mutated Work approval would create a Phase 4 seal."""
