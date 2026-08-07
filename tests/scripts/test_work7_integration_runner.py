@@ -1,5 +1,6 @@
 """Hermetic behavior coverage for the Work 7 Phase 2 runner."""
 
+import hashlib
 import shutil
 import json
 import os
@@ -328,6 +329,127 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertEqual(closure["kind"], "phase2-closure")
         self.assertEqual(closure["previous_seal_sha256"], __import__("hashlib").sha256((session / "phase2" / "runtime-seal.json").read_bytes()).hexdigest())
         self.assertTrue((session / "phase2" / "closure-artifacts" / "evidence-bound-report.json").is_file())
+
+    def test_final_scope_audit_accepts_only_toy_count_one_and_deferred_status(self):
+        """The final captured-byte boundary permits only the narrowly approved PoC."""
+        from scripts.run_work7_integration import Failure, validate_real_capture, validate_record_counts_capture
+        from scripts.verify_work7_claims import TerminalInputs, terminal_report_bytes
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import (Failure as ReviewFailure, capture_phase04,
+                                                  validate_phase2_runtime_capture, validate_terminal_report_capture)
+
+        source_snapshot = Path(__file__).parents[2]
+        produced, temporary, commit = self.invoke_fake_runner(source_snapshot=source_snapshot, terminal_wrapper=True)
+        temporary = temporary.resolve()
+        self.addCleanup(shutil.rmtree, temporary, True)
+        self.assertEqual(produced.returncode, 0, produced.stderr.decode())
+        source, paper, threshold = (temporary / name for name in ("source", "paper", "threshold"))
+        session = temporary / "sessions" / ("session-" + commit)
+
+        generated = subprocess.run((
+            sys.executable, str(source_snapshot / "scripts/generate_work7_response_candidate.py"),
+            "--source-root", str(source), "--paper-root", str(paper), "--threshold-root", str(threshold),
+            "--session-root", str(session), "--phase0-seal", str(session / "phase0/seal.json"),
+            "--phase2-closure-seal", str(session / "phase2/closure-seal.json")), capture_output=True)
+        self.assertEqual(generated.returncode, 0, generated.stderr.decode())
+
+        review_tool = source_snapshot / "scripts/work7_review_packet.py"
+        work_packet = session / "phase4/work-packet.json"
+        prepared = subprocess.run((sys.executable, str(review_tool), "prepare-work", "--source-root", str(source),
+                                   "--session-root", str(session), "--baseline-commit", "b907fae",
+                                   "--output", str(work_packet)), capture_output=True)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr.decode())
+        work_review = temporary / "work-review.txt"
+        work_review.write_text((source / "tests/fixtures/work7/reviews/work-approved.template.txt").read_text(
+            encoding="utf-8").format(SOURCE_COMMIT=commit,
+                                      PACKET_SHA256=hashlib.sha256(work_packet.read_bytes()).hexdigest()), encoding="utf-8")
+        work_seal = session / "phase4/work-review-seal.json"
+        closed = subprocess.run((sys.executable, str(review_tool), "close-work", "--packet", str(work_packet),
+                                 "--raw-review", str(work_review), "--session-root", str(session),
+                                 "--output-seal", str(work_seal)), capture_output=True)
+        self.assertEqual(closed.returncode, 0, closed.stderr.decode())
+        final_packet_path = session / "phase5/final-packet.json"
+        final_prepared = subprocess.run((sys.executable, str(review_tool), "prepare-final", "--source-root", str(source),
+                                         "--session-root", str(session), "--work-review-seal", str(work_seal),
+                                         "--output", str(final_packet_path)), capture_output=True)
+        self.assertEqual(final_prepared.returncode, 0, final_prepared.stderr.decode())
+
+        capture = capture_phase04(session, source, paper, threshold)
+
+        def captured(raw: bytes, mode: str = "0600") -> CapturedBlob:
+            return CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), mode)
+
+        members = dict(capture.packet_members)
+        build_binaries = dict(capture.build_binaries)
+        pre_manifest = json.loads(members["phase2/runtime/pre-threshold/manifest.json"].raw)
+        real_metadata = members["phase2/runtime/real-datasets/run_metadata.tsv"].raw.decode("utf-8")
+        real_values = dict(line.split("\t", 1) for line in real_metadata.splitlines()[1:])
+        commands = {
+            label: json.loads(members[f"phase2/runtime/commands/{label}.json"].raw)["argv"]
+            for label in ("pre-threshold", "real-datasets", "deletion-survival")
+        }
+        fixture = source / "tests/fixtures/real_datasets/quick/dblp_acm_u65536"
+        self.assertEqual(commands["pre-threshold"][1], "--suite=smoke")
+        self.assertIn("--quick", commands["real-datasets"])
+        self.assertEqual(pre_manifest["repetitions"], 1)
+        self.assertIn("--trials=1", commands["deletion-survival"])
+        self.assertIn("--refresh_updates=1", pre_manifest["cells"][2]["argv"])
+        self.assertIn("--trials=1", pre_manifest["cells"][2]["argv"])
+        self.assertIn("--accuracy_trials=1", real_metadata)
+        self.assertIn("--trials=1", real_metadata)
+        self.assertEqual(real_values["evidence_mode"], "quick")
+        self.assertEqual(real_values["root.003.path"], str(fixture))
+        self.assertEqual(real_values["root.004.path"], str(fixture))
+
+        final_packet_raw = final_packet_path.read_bytes()
+        final_packet = captured(final_packet_raw)
+        final_value = json.loads(final_packet_raw)
+        final_members = tuple((record["path"], captured((session / record["path"]).read_bytes()))
+                              for record in final_value["members"])
+        packet_sha256 = hashlib.sha256(final_packet_raw).hexdigest()
+        reviews = {}
+        for identity, filename in (("claude", "final-claude-approved.template.txt"),
+                                   ("sol", "final-sol-approved.template.txt")):
+            raw = (source / "tests/fixtures/work7/reviews" / filename).read_bytes().replace(
+                b"{SOURCE_COMMIT}", commit.encode()).replace(b"{PACKET_SHA256}", packet_sha256.encode())
+            reviews[identity] = captured(raw)
+        terminal_inputs = TerminalInputs(capture, final_packet, final_members, reviews["claude"], reviews["sol"])
+        terminal_raw = terminal_report_bytes(terminal_inputs)
+        terminal_report = temporary / "terminal-report.json"
+        terminal_report.write_bytes(terminal_raw)
+        terminal_value, _, _ = validate_terminal_report_capture(terminal_report, capture)
+        self.assertEqual(validate_phase2_runtime_capture(capture).focused_pass_count, len(__import__("scripts.run_work7_integration", fromlist=["FROZEN_CTESTS"]).FROZEN_CTESTS))
+        self.assertEqual(terminal_value["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
+        self.assertTrue(all(row["performance_state"] == "PERFORMANCE_PENDING" for row in terminal_value["claims"]))
+
+        with self.subTest("measured_count_two"):
+            trial_path = "phase2/runtime/pre-threshold/csv/toy-1.csv"
+            mutated = captured(members[trial_path].raw.replace(b"trials\n1\n", b"trials\n2\n", 1))
+            with self.assertRaisesRegex(Failure, "measured count must equal 1"):
+                validate_record_counts_capture(((trial_path, mutated),))
+
+        with self.subTest("external_actual_data_root"):
+            external_root = str(source / "external-actual-data" / "dblp_acm_u65536")
+            hostile_metadata = real_metadata.replace(
+                "root.003.path\t" + str(fixture), "root.003.path\t" + external_root)
+            real_blobs = [(path, blob) for path, blob in members.items()
+                          if path.startswith("phase2/runtime/real-datasets/")]
+            real_blobs.extend((
+                ("@build/bench_real_datasets", build_binaries["bench_real_datasets"]),
+                ("@source/scripts/summarize_real_datasets.py", members["@source/scripts/summarize_real_datasets.py"]),
+                ("@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv",
+                 members["@source/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"]),
+            ))
+            real_blobs = [(path, captured(hostile_metadata.encode()) if path.endswith("run_metadata.tsv") else blob)
+                          for path, blob in real_blobs]
+            with self.assertRaisesRegex(Failure, "quick provenance"):
+                validate_real_capture(tuple(real_blobs), commit, str(source), str(temporary / "builds" / ("build-" + commit)))
+
+        with self.subTest("premature_final_status"):
+            premature = captured(reviews["sol"].raw.replace(
+                b"STATUS: POC_APPROVED_PERFORMANCE_PENDING", b"STATUS: POC_APPROVED", 1))
+            with self.assertRaisesRegex(ReviewFailure, "review identity, verdict, commit, packet, or status"):
+                terminal_report_bytes(TerminalInputs(capture, final_packet, final_members, reviews["claude"], premature))
 
     def test_post_reservation_failure_is_disposed_then_requires_clear_for_fresh_phase0(self):
         """A failed owned run cannot be resumed or overwrite its failure record."""
