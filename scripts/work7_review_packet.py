@@ -1350,7 +1350,31 @@ def _revalidate_captured_seals(session: Path, capture: Phase04Capture) -> None:
             raise Failure("prerequisite seal changed during final closure")
 
 
-def close_final(args: argparse.Namespace) -> None:
+def _terminal_inputs_capture(session: Path, packet: Path, claude: Path, sol: Path,
+                             capture: Phase04Capture):
+    """Stable-capture all final inputs before entering the R2 terminal core."""
+    try:
+        from verify_work7_claims import TerminalInputs
+    except ModuleNotFoundError:
+        from scripts.verify_work7_claims import TerminalInputs
+    final_packet = _captured_file(packet, "final packet")
+    value = _canonical_blob(final_packet, "final packet")
+    records = value.get("members")
+    if not isinstance(records, list):
+        raise Failure("final packet members are invalid")
+    members: list[tuple[str, CapturedBlob]] = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise Failure("final packet member is invalid")
+        relative = Path(record["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise Failure("final packet member escapes session root")
+        members.append((record["path"], _captured_file(session / relative, "final packet member")))
+    return TerminalInputs(capture, final_packet, tuple(members),
+                          _captured_file(claude, "Claude review"), _captured_file(sol, "sol review"))
+
+
+def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | None = None) -> None:
     session = required(args.session_root, "session root", directory=True)
     packet, claude, sol = (session_path(session, args.packet, "packet"), required(args.claude_review, "claude review"), required(args.sol_review, "sol review"))
     terminal_report, output = session_path(session, args.terminal_report, "terminal report", exists=False), session_path(session, args.output_seal, "output seal", exists=False)
@@ -1363,35 +1387,21 @@ def close_final(args: argparse.Namespace) -> None:
     # CLI roots against the sealed canonical roots before returning immutable
     # evidence bytes to every following R1 consumer.
     capture = capture_phase04(session, source, paper, threshold)
-    runtime_summary = validate_phase2_runtime_capture(capture)
+    inputs = _terminal_inputs_capture(session, packet, claude, sol, capture)
+    if synchronize is not None:
+        synchronize("after_terminal_capture")
+    try:
+        from verify_work7_claims import terminal_report_bytes
+    except ModuleNotFoundError:
+        from scripts.verify_work7_claims import terminal_report_bytes
+    # The terminal core is the complete semantic boundary.  In particular it
+    # receives no Phase 3/4 path and cannot reopen the session after capture.
+    terminal_raw = terminal_report_bytes(inputs)
+    if synchronize is not None:
+        synchronize("after_terminal_core")
+    _atomic_create(terminal_report, terminal_raw)
     seals = {relative: seal.blob.sha256 for relative, seal in capture.seals}
-    final_packet, packet_raw, packet_digest = validate_packet(packet, session, "final", capture.commit, seals)
-    validate_final_packet_members_capture(session, final_packet, capture, runtime_summary)
-    first_name, first_raw = parse_final_review(claude, capture.commit, packet_digest)
-    second_name, second_raw = parse_final_review(sol, capture.commit, packet_digest)
-    if first_name == second_name:
-        raise Failure("final reviews duplicate one provider")
-    reviews = {first_name: first_raw, second_name: second_raw}
-    claude_raw, sol_raw = reviews["claude"], reviews["sol"]
-    _revalidate_captured_seals(session, capture)
-    phase5 = session / "phase5"
-    with tempfile.TemporaryDirectory(prefix=".close-final-inputs-", dir=phase5) as temporary:
-        private = Path(temporary)
-        private_packet, private_claude, private_sol = (private / "final-packet.json", private / "claude-review.txt", private / "sol-review.txt")
-        _atomic_create(private_packet, packet_raw)
-        _atomic_create(private_claude, claude_raw)
-        _atomic_create(private_sol, sol_raw)
-        # R2 will replace this legacy subprocess with terminal_report_bytes.
-        # Its report is revalidated below against captured contract bytes; it
-        # cannot contribute any Phase 0--4 member or generated-member value.
-        command = (sys.executable, str(source / "scripts/verify_work7_claims.py"), "--mode", "terminal", "--contract", str(source / "scripts/work7_claims.json"),
-                   "--source-root", str(source), "--source-commit", capture.commit, "--ctest-inventory", str(session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
-                   "--output", str(terminal_report), "--phase3-closure-seal", str(session / "phase3/closure-seal.json"), "--work-review-seal", str(session / "phase4/work-review-seal.json"),
-                   "--review-packet", str(private_packet), "--claude-review", str(private_claude), "--sol-review", str(private_sol), "--phase0-seal", str(session / "phase0/seal.json"), "--paper-root", str(paper), "--threshold-root", str(threshold))
-        result = subprocess.run(command, capture_output=True)
-        if result.returncode != 0: raise Failure("terminal verifier rejected final review")
-        _, terminal_raw, _ = validate_terminal_report_capture(terminal_report, capture)
-    _revalidate_external_snapshots(capture, source, paper, threshold)
+    packet_raw, claude_raw, sol_raw = inputs.final_packet.raw, inputs.claude_review.raw, inputs.sol_review.raw
     root = session / "phase5/terminal-artifacts"
     if root.exists(): raise Failure("terminal artifacts collision")
     root.mkdir(parents=True, mode=0o700)

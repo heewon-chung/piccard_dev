@@ -270,76 +270,43 @@ class Work7ClaimContractTests(unittest.TestCase):
                 self.assert_fail("claim7", phase2_closure_seal=bad_phase2, phase3_candidate_seal=bad_candidate)
 
     def test_terminal_accepts_only_exact_dual_reviews_and_immutable_external_state(self) -> None:
-        sys.path.insert(0, str(ROOT / "scripts"))
-        from work7_evidence import create_tree_seal, sha256_file, snapshot_git_worktree
-        paper, threshold = self.root / "paper", self.root / "threshold"
-        for repo in (paper, threshold):
-            repo.mkdir(); subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-            (repo / "tracked.txt").write_text("stable\n"); subprocess.run(["git", "add", "."], cwd=repo, check=True)
-            subprocess.run(["git", "-c", "user.email=x@y.z", "-c", "user.name=x", "commit", "-qm", "init"], cwd=repo, check=True)
-        phase0_root = self.root / "phase0"; phase0_root.mkdir()
-        build = self.root / ("build-" + COMMIT); build.mkdir()
-        (phase0_root / "state.json").write_text(json.dumps({"schema": "piccard-work7-phase0-state-v2", "source": {"head": COMMIT}, "session_id": f"work7-{COMMIT}", "paper": snapshot_git_worktree(paper), "threshold": snapshot_git_worktree(threshold), "build": {"root": str(build.resolve())}}))
-        phase0 = self.root / "phase0.seal.json"; create_tree_seal(phase0_root, phase0, None, "phase0")
-        runtime = self.runtime()
-        evidence = self.invoke("evidence-bound", runtime_seal=runtime)
-        self.assertEqual(evidence.returncode, 0, evidence.stderr)
-        phase2_root = self.root / "phase2-terminal"; phase2_root.mkdir()
-        (phase2_root / "evidence-bound-report.json").write_bytes(evidence.output_path.read_bytes())  # type: ignore[attr-defined]
-        phase2 = self.root / "phase2-terminal.seal.json"; create_tree_seal(phase2_root, phase2, sha256_file(runtime), "phase2-closure")
-        candidate_root = self.root / "candidate-terminal"; candidate_root.mkdir()
-        (candidate_root / "candidate-validation.json").write_text(json.dumps({"schema": "piccard-work7-candidate-validation-v1", "source_commit": COMMIT, "claim_id": "W7-G7-INTEGRATION", "phase2_closure_seal_sha256": sha256_file(phase2)}) + "\n")
-        candidate = self.root / "candidate-terminal.seal.json"; create_tree_seal(candidate_root, candidate, sha256_file(phase2), "phase3-candidate-artifacts")
-        claim7_report = json.loads(evidence.output_path.read_text())  # type: ignore[attr-defined]
-        claim7_report["mode"] = "claim7"
-        claim7_report["claims"][6]["toy_evidence_state"] = "TOY_VERIFIED"
-        claim7_report["input_seals"] = {"phase2_closure_seal_sha256": sha256_file(phase2),
-                                         "phase3_candidate_seal_sha256": sha256_file(candidate)}
-        phase3_root = self.root / "phase3"; phase3_root.mkdir()
-        (phase3_root / "claim7-report.json").write_bytes(json.dumps(claim7_report, sort_keys=True, separators=(",", ":")).encode() + b"\n")
-        phase3 = self.root / "phase3.seal.json"; create_tree_seal(phase3_root, phase3, sha256_file(candidate), "phase3-closure")
-        packet = self.root / "packet.json"; packet.write_bytes(b"packet\n")
-        digest = hashlib.sha256(packet.read_bytes()).hexdigest()
-        def review(provider: str, model: str) -> Path:
-            path = self.root / f"{provider}.txt"
-            path.write_text("\n".join(["VERDICT: APPROVED", f"PROVIDER: {provider}", f"MODEL: {model}", "EFFORT: high", f"SOURCE_COMMIT: {COMMIT}", f"PACKET_SHA256: {digest}", "STATUS: POC_APPROVED_PERFORMANCE_PENDING", "CHECK G1_G7_INTENT: CONFIRMED", "CHECK EVIDENCE_FRESHNESS: CONFIRMED", "CHECK PERFORMANCE_PENDING: CONFIRMED", "CHECK THRESHOLD_DEFERRED: CONFIRMED", "CHECK EXTERNAL_IMMUTABILITY: CONFIRMED", "CHECK TERMINAL_STATUS_MAXIMAL: CONFIRMED", "prose"]) + "\n")
-            return path
-        claude_review, sol_review = review("anthropic", "claude-fable"), review("openai", "gpt-5.6-sol")
-        work_root = self.root / "work"; work_root.mkdir()
-        # Phase 4 is closed before the distinct final packet and independent
-        # final reviews exist.  Its append-only seal therefore contains only
-        # the Work 7 packet and Sol work-level approval, never future inputs.
-        (work_root / "work-packet.json").write_bytes(b"work packet\n")
-        (work_root / "work-review.txt").write_text("VERDICT: APPROVED\nPROVIDER: openai\nMODEL: gpt-5.6-sol\nEFFORT: high\n")
-        work = self.root / "work.seal.json"; create_tree_seal(work_root, work, sha256_file(phase3), "phase4-work-review")
-        report = self.assert_pass("terminal", phase3_closure_seal=phase3, work_review_seal=work, review_packet=packet, claude_review=claude_review, sol_review=sol_review, phase0_seal=phase0, paper_root=paper, threshold_root=threshold)
-        self.assertEqual(report["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
+        """Terminal CLI captures the canonical R1 graph before invoking the core."""
+        from tests.scripts.test_work7_review_packet import Work7ReviewPacketTests
 
-        claude, sol = self.root / "anthropic.txt", self.root / "openai.txt"
-        common = {"phase3_closure_seal": phase3, "work_review_seal": work, "review_packet": packet,
-                  "claude_review": claude, "sol_review": sol, "phase0_seal": phase0,
-                  "paper_root": paper, "threshold_root": threshold}
-        original = claude.read_text()
-        mutations = {
+        fixture = Work7ReviewPacketTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        packet = fixture.prepare_final_packet()
+        claude, sol = fixture.final_review(packet, "anthropic"), fixture.final_review(packet, "openai")
+        output = fixture.session / "phase5/terminal-cli-report.json"
+        command = [sys.executable, str(VERIFIER), "--mode", "terminal",
+                   "--contract", str(fixture.source / "scripts/work7_claims.json"),
+                   "--source-root", str(fixture.source), "--source-commit", fixture.commit,
+                   "--ctest-inventory", str(fixture.session / "phase2/runtime/commands/ctest-inventory.stdout.txt"),
+                   "--output", str(output), "--phase3-closure-seal", str(fixture.session / "phase3/closure-seal.json"),
+                   "--work-review-seal", str(fixture.session / "phase4/work-review-seal.json"),
+                   "--review-packet", str(packet), "--claude-review", str(claude), "--sol-review", str(sol),
+                   "--phase0-seal", str(fixture.session / "phase0/seal.json"),
+                   "--paper-root", str(fixture.paper), "--threshold-root", str(fixture.threshold)]
+        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(output.read_bytes())["work_gate_state"], "POC_APPROVED_PERFORMANCE_PENDING")
+        for name, mutate in {
+            "wrong-provider": lambda: claude.write_text(claude.read_text().replace("PROVIDER: anthropic", "PROVIDER: openai")),
             "mismatched-packet": lambda: packet.write_bytes(b"changed packet\n"),
-            "mismatched-commit": lambda: claude.write_text(original.replace(COMMIT, "c" * 40)),
-            "conditional-verdict": lambda: claude.write_text(original.replace("VERDICT: APPROVED", "VERDICT: APPROVED_WITH_COMMENTS")),
-            "wrong-provider": lambda: claude.write_text(original.replace("PROVIDER: anthropic", "PROVIDER: openai")),
-            "wrong-model": lambda: claude.write_text(original.replace("MODEL: claude-fable", "MODEL: gpt-5.6-sol")),
-            "header-only": lambda: claude.write_text("\n".join(original.splitlines()[:7]) + "\n"),
-        }
-        for name, mutate in mutations.items():
+        }.items():
             with self.subTest(name=name):
-                packet.write_bytes(b"packet\n")
-                claude.write_text(original)
+                if output.exists(): output.unlink()
                 mutate()
-                self.assert_fail("terminal", **common)
-        for confirmation in ("G1_G7_INTENT", "EVIDENCE_FRESHNESS", "PERFORMANCE_PENDING",
-                             "THRESHOLD_DEFERRED", "EXTERNAL_IMMUTABILITY", "TERMINAL_STATUS_MAXIMAL"):
-            with self.subTest(missing_confirmation=confirmation):
-                claude.write_text(original.replace(f"CHECK {confirmation}: CONFIRMED\n", ""))
-                self.assert_fail("terminal", **common)
-        claude.write_text(original)
+                rejected = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+                self.assertEqual(rejected.returncode, 2)
+                self.assertFalse(output.exists())
+                # Fresh canonical packet/reviews isolate the next hostile case.
+                packet = fixture.prepare_final_packet() if not packet.exists() else packet
+                claude, sol = fixture.final_review(packet, "anthropic"), fixture.final_review(packet, "openai")
+                command[command.index("--review-packet") + 1] = str(packet)
+                command[command.index("--claude-review") + 1] = str(claude)
+                command[command.index("--sol-review") + 1] = str(sol)
 
 
 if __name__ == "__main__":

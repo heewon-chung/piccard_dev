@@ -7,16 +7,24 @@ import hashlib
 import json
 import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 try:
-    from work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
+    from work7_evidence import (CapturedBlob, assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
                                 canonical_json_bytes, sha256_file, snapshot_git_worktree,
                                 verify_tree_seal)
 except ModuleNotFoundError:
-    from scripts.work7_evidence import (assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
+    from scripts.work7_evidence import (CapturedBlob, assert_output_roots_outside, _atomic_create, _reject_symlink_components, _stable_regular_file,
                                         canonical_json_bytes, sha256_file, snapshot_git_worktree,
                                         verify_tree_seal)
+
+if TYPE_CHECKING:
+    try:
+        from work7_review_packet import Phase04Capture
+    except ModuleNotFoundError:
+        from scripts.work7_review_packet import Phase04Capture
 
 IDS = ("W7-G1-ESTIMATOR", "W7-G2-SANITIZER", "W7-G3-CALIBRATION",
        "W7-G4-COMPARISON", "W7-G5-REAL-DATA", "W7-G6-DYNAMIC", "W7-G7-INTEGRATION")
@@ -30,6 +38,21 @@ STATES = {"implementation_state": ["IMPLEMENTED"],
 
 class Failure(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class TerminalInputs:
+    """The complete, immutable terminal-verification boundary.
+
+    This is deliberately path-free.  The terminal core below accepts no
+    caller-provided parsed JSON or live root, so every value it derives is
+    reproducible from this capture alone.
+    """
+    phase04: "Phase04Capture"
+    final_packet: CapturedBlob
+    final_packet_members: tuple[tuple[str, CapturedBlob], ...]
+    claude_review: CapturedBlob
+    sol_review: CapturedBlob
 
 
 class Parser(argparse.ArgumentParser):
@@ -213,6 +236,174 @@ def report_claims(report: object, mode: str, commit: str, states: list[str], con
             any(any(report_row[field] != contract_row[field] for field in ("source_paths", "required_ctest_names", "evidence_keys", "deferred_rationale", "prohibited_overclaim"))
                 for report_row, contract_row in zip(report["claims"], contract_claims))):
         raise Failure("invalid sealed claim report")
+
+
+def _checked_blob(blob: CapturedBlob, label: str) -> bytes:
+    """Check a byte capture without consulting the filesystem."""
+    if (not isinstance(blob, CapturedBlob) or not isinstance(blob.raw, bytes) or
+            blob.size != len(blob.raw) or blob.sha256 != hashlib.sha256(blob.raw).hexdigest() or
+            not isinstance(blob.mode, str) or len(blob.mode) != 4 or any(char not in "01234567" for char in blob.mode)):
+        raise Failure(f"invalid captured {label}")
+    return blob.raw
+
+
+def _canonical_bytes_object(raw: bytes, label: str) -> dict:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise Failure(f"invalid {label}") from error
+    if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
+        raise Failure(f"non-canonical {label}")
+    return value
+
+
+def _terminal_imports():
+    """Late import avoids a module cycle while keeping the core path-free."""
+    try:
+        from work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
+                                         _final_member_sources, _validate_captured_contract_sources,
+                                         captured_generated_member_bytes, expected_member_paths,
+                                         expected_member_tuples, parse_review_bytes,
+                                         validate_phase2_runtime_capture)
+    except ModuleNotFoundError:
+        from scripts.work7_review_packet import (CHECKS_FINAL, CHECKS_WORK, _canonical_blob,
+                                                 _final_member_sources, _validate_captured_contract_sources,
+                                                 captured_generated_member_bytes, expected_member_paths,
+                                                 expected_member_tuples, parse_review_bytes,
+                                                 validate_phase2_runtime_capture)
+    return (CHECKS_FINAL, CHECKS_WORK, _canonical_blob, _final_member_sources,
+            _validate_captured_contract_sources, captured_generated_member_bytes,
+            expected_member_paths, expected_member_tuples, parse_review_bytes,
+            validate_phase2_runtime_capture)
+
+
+def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
+    """Validate all terminal evidence strictly from immutable captured bytes.
+
+    No path, filesystem operation, subprocess, or output object is accepted by
+    this core.  Both public callers construct ``TerminalInputs`` at their own
+    stable-capture boundary and then call this exact function.
+    """
+    (checks_final, checks_work, captured_object, final_sources,
+     validate_contract_sources, generated_bytes, expected_paths, expected_tuples,
+     parse_review, validate_runtime) = _terminal_imports()
+    capture = inputs.phase04
+    state = captured_object(capture.state_raw, "Phase 0 state")
+    if (set(state) != {"schema", "source", "paper", "threshold", "build", "session_id"} or
+            state.get("schema") != "piccard-work7-phase0-state-v2" or
+            state.get("session_id") != "work7-" + capture.commit or
+            not isinstance(state.get("source"), dict) or state["source"].get("head") != capture.commit or
+            not isinstance(state.get("build"), dict) or set(state["build"]) != {"root"}):
+        raise Failure("invalid captured Phase 0 state")
+    if (canonical_json_bytes(state["source"]) != _checked_blob(CapturedBlob(capture.source_snapshot_raw, hashlib.sha256(capture.source_snapshot_raw).hexdigest(), len(capture.source_snapshot_raw), "0600"), "source snapshot") or
+            canonical_json_bytes(state.get("paper")) != capture.paper_snapshot_raw or
+            canonical_json_bytes(state.get("threshold")) != capture.threshold_snapshot_raw):
+        raise Failure("captured Phase 0 snapshot changed")
+    try:
+        contract = json.loads(_checked_blob(capture.contract_raw, "claim contract"))
+    except json.JSONDecodeError as error:
+        raise Failure("invalid immutable lifecycle contract") from error
+    if (set(contract) != TOP_KEYS or contract.get("schema") != "piccard-work7-claim-lifecycle-v1" or
+            contract.get("allowed_gates") != {"threshold_gate_state": ["DEFERRED_EXPECTED"],
+                                               "work_gate_state": ["PENDING", "POC_APPROVED_PERFORMANCE_PENDING"]} or
+            not isinstance(contract.get("claims"), list) or
+            tuple(row.get("id") for row in contract["claims"] if isinstance(row, dict)) != IDS):
+        raise Failure("invalid immutable lifecycle contract")
+    validate_contract_sources(capture.contract_raw, dict(capture.packet_members))
+    seals = dict(capture.seals)
+    required_seals = ("phase0/seal.json", "phase2/runtime-seal.json", "phase2/closure-seal.json",
+                      "phase3/candidate-seal.json", "phase3/closure-seal.json", "phase4/work-review-seal.json")
+    if tuple(seals) != required_seals or len(seals) != len(required_seals):
+        raise Failure("captured seal chain is incomplete")
+    previous = None
+    expected_kinds = ("phase0", "phase2-runtime-artifacts", "phase2-closure", "phase3-candidate-artifacts",
+                      "phase3-closure", "phase4-work-review")
+    for relative, kind in zip(required_seals, expected_kinds):
+        seal = seals[relative]
+        value = _canonical_bytes_object(_checked_blob(seal.blob, "seal"), "captured seal")
+        if (set(value) != {"schema", "kind", "artifact_root", "previous_seal_sha256", "entries"} or
+                value.get("schema") != "piccard-work7-tree-seal-v1" or value.get("kind") != kind or
+                value.get("previous_seal_sha256") != previous or not isinstance(value.get("entries"), list)):
+            raise Failure("captured seal chain is invalid")
+        members = dict(seal.members)
+        if len(members) != len(seal.members):
+            raise Failure("captured seal members are duplicated")
+        for entry in value["entries"]:
+            if (not isinstance(entry, dict) or set(entry) != {"path", "mode", "size", "sha256"} or
+                    not isinstance(entry.get("path"), str) or
+                    members.get(entry["path"]) is None):
+                raise Failure("captured seal manifest is invalid")
+            member = members[entry["path"]]
+            _checked_blob(member, "seal member")
+            if entry["mode"] != member.mode or entry["size"] != member.size or entry["sha256"] != member.sha256:
+                raise Failure("captured seal member differs from manifest")
+        if len(value["entries"]) != len(members):
+            raise Failure("captured seal manifest is incomplete")
+        previous = seal.blob.sha256
+    runtime = validate_runtime(capture)
+    claim7 = dict(capture.packet_members).get("phase3/closure-artifacts/claim7-report.json")
+    if claim7 is None:
+        raise Failure("captured claim-7 report is missing")
+    claim7_value = _canonical_bytes_object(_checked_blob(claim7, "claim-7 report"), "claim-7 report")
+    report_claims(claim7_value, "claim7", capture.commit, ["TOY_VERIFIED"] * 7, contract["claims"])
+    if claim7_value.get("input_seals") != {"phase2_closure_seal_sha256": seals["phase2/closure-seal.json"].blob.sha256,
+                                             "phase3_candidate_seal_sha256": seals["phase3/candidate-seal.json"].blob.sha256}:
+        raise Failure("claim7 report has wrong captured predecessors")
+    work_packet_raw = _checked_blob(capture.phase4_packet, "Work packet")
+    work_packet = _canonical_bytes_object(work_packet_raw, "Work packet")
+    if (work_packet.get("phase") != "work" or work_packet.get("source_commit") != capture.commit or
+            work_packet.get("prerequisite_seals") != {key: seals[key].blob.sha256 for key in required_seals[:-1]}):
+        raise Failure("captured Work packet is invalid")
+    parse_review(_checked_blob(capture.phase4_review, "Work review"), capture.commit,
+                 capture.phase4_packet.sha256, "openai", "gpt-5.6-sol", "WORK7_APPROVED", checks_work)
+    packet_raw = _checked_blob(inputs.final_packet, "final packet")
+    packet = _canonical_bytes_object(packet_raw, "final packet")
+    final_members = dict(inputs.final_packet_members)
+    if len(final_members) != len(inputs.final_packet_members):
+        raise Failure("final packet members are duplicated")
+    if (set(packet) != {"schema", "phase", "source_commit", "prerequisite_seals", "members"} or
+            packet.get("schema") != "piccard-work7-review-packet-v1" or packet.get("phase") != "final" or
+            packet.get("source_commit") != capture.commit or
+            packet.get("prerequisite_seals") != {key: seals[key].blob.sha256 for key in required_seals} or
+            not isinstance(packet.get("members"), list) or
+            {entry.get("path") for entry in packet["members"] if isinstance(entry, dict)} != expected_paths("final") or
+            [(entry.get("label"), entry.get("path")) for entry in packet["members"] if isinstance(entry, dict)] != expected_tuples("final")):
+        raise Failure("final packet manifest is invalid")
+    source_map = dict(final_sources(capture, runtime))
+    mapping_raw, summary_raw = generated_bytes(capture, runtime)
+    for entry in packet["members"]:
+        if not isinstance(entry, dict) or set(entry) != {"label", "path", "size", "sha256"}:
+            raise Failure("final packet member is invalid")
+        blob = final_members.get(entry["path"])
+        expected = source_map.get(entry["path"].removeprefix("phase5/members/"))
+        if blob is None or expected is None:
+            raise Failure("final packet member is missing")
+        actual = _checked_blob(blob, "final packet member")
+        if entry["size"] != len(actual) or entry["sha256"] != hashlib.sha256(actual).hexdigest() or actual != expected:
+            raise Failure("final packet member differs from captured evidence")
+    # These comparisons intentionally remain explicit so a self-consistent
+    # forged generated packet cannot escape the shared terminal boundary.
+    if (final_members.get("phase5/members/generated/works1-6-source-test-map.json") is None or
+            final_members.get("phase5/members/generated/final-verification-summary.json") is None or
+            final_members["phase5/members/generated/works1-6-source-test-map.json"].raw != mapping_raw or
+            final_members["phase5/members/generated/final-verification-summary.json"].raw != summary_raw):
+        raise Failure("generated final member differs from verified runtime")
+    packet_digest = hashlib.sha256(packet_raw).hexdigest()
+    parse_review(_checked_blob(inputs.claude_review, "Claude review"), capture.commit, packet_digest,
+                 "anthropic", "claude-fable", "POC_APPROVED_PERFORMANCE_PENDING", checks_final)
+    parse_review(_checked_blob(inputs.sol_review, "sol review"), capture.commit, packet_digest,
+                 "openai", "gpt-5.6-sol", "POC_APPROVED_PERFORMANCE_PENDING", checks_final)
+    report = {"schema": "piccard-work7-claim-report-v1", "source_commit": capture.commit,
+              "mode": "terminal", "threshold_gate_state": "DEFERRED_EXPECTED",
+              "work_gate_state": "POC_APPROVED_PERFORMANCE_PENDING",
+              "claims": [{"id": row["id"], "implementation_state": "IMPLEMENTED",
+                          "toy_evidence_state": "TOY_VERIFIED", "performance_state": "PERFORMANCE_PENDING",
+                          "source_paths": row["source_paths"], "required_ctest_names": row["required_ctest_names"],
+                          "evidence_keys": row["evidence_keys"], "deferred_rationale": row["deferred_rationale"],
+                          "prohibited_overclaim": row["prohibited_overclaim"]} for row in contract["claims"]],
+              "status": "PASS", "validation_errors": [], "input_seals": {}}
+    report_claims(report, "terminal", capture.commit, ["TOY_VERIFIED"] * 7, contract["claims"])
+    return canonical_json_bytes(report)
 
 
 def _canonical_object(path: Path, label: str) -> dict:
@@ -425,6 +616,61 @@ def terminal(args: argparse.Namespace, commit: str, claims: list[dict]) -> dict:
     return state
 
 
+def _capture_blob(path: Path, label: str) -> CapturedBlob:
+    try:
+        digest, info, raw = _stable_regular_file(path)
+    except (OSError, ValueError) as error:
+        raise Failure(f"cannot capture {label}") from error
+    return CapturedBlob(raw, digest, info.st_size, format(stat.S_IMODE(info.st_mode), "04o"))
+
+
+def _terminal_inputs_from_paths(args: argparse.Namespace, source: Path) -> TerminalInputs:
+    """One stable filesystem capture for the standalone terminal CLI wrapper."""
+    if args.phase0_seal is None:
+        raise Failure("phase0 seal is required for terminal")
+    phase0 = require_absolute(args.phase0_seal, "phase0 seal")
+    if phase0.name != "seal.json" or phase0.parent.name != "phase0":
+        raise Failure("Phase 0 seal is outside its declared session")
+    session = phase0.parent.parent
+    if phase0 != session / "phase0/seal.json" or not session.is_dir():
+        raise Failure("Phase 0 seal is outside its declared session")
+    for attribute, relative, label in (("phase3_closure_seal", "phase3/closure-seal.json", "phase3 closure seal"),
+                                       ("work_review_seal", "phase4/work-review-seal.json", "work review seal")):
+        value = require_absolute(getattr(args, attribute), label)
+        if value != session / relative:
+            raise Failure(f"foreign {label} path")
+    try:
+        from work7_review_packet import capture_phase04
+    except ModuleNotFoundError:
+        from scripts.work7_review_packet import capture_phase04
+    paper = require_absolute(args.paper_root, "paper root")
+    threshold = require_absolute(args.threshold_root, "threshold root")
+    capture = capture_phase04(session, source, paper, threshold)
+    if args.source_commit != capture.commit:
+        raise Failure("source commit differs from captured Phase 0")
+    packet_path = require_absolute(args.review_packet, "review packet")
+    try:
+        packet_path.relative_to(session)
+    except ValueError as error:
+        raise Failure("review packet escapes session root") from error
+    packet = _capture_blob(packet_path, "final packet")
+    packet_value = _canonical_bytes_object(packet.raw, "final packet")
+    records = packet_value.get("members")
+    if not isinstance(records, list):
+        raise Failure("final packet members are invalid")
+    members: list[tuple[str, CapturedBlob]] = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise Failure("final packet member is invalid")
+        relative = Path(record["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise Failure("final packet member escapes session")
+        members.append((record["path"], _capture_blob(session / relative, "final packet member")))
+    return TerminalInputs(capture, packet, tuple(members),
+                          _capture_blob(require_absolute(args.claude_review, "claude review"), "Claude review"),
+                          _capture_blob(require_absolute(args.sol_review, "sol review"), "sol review"))
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
@@ -441,6 +687,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode in ("claim7", "terminal"):
             guarded.extend([require_absolute(args.paper_root, "paper root"), require_absolute(args.threshold_root, "threshold root")])
         assert_output_roots_outside(guarded, [output])
+        if args.mode == "terminal":
+            inputs = _terminal_inputs_from_paths(args, source)
+            _atomic_create(output, terminal_report_bytes(inputs))
+            print("verify_work7_claims: PASS (terminal)")
+            return 0
         claims = load_contract(contract, source, inventory(ctest))
         toy = {claim["id"]: "PENDING" for claim in claims}
         if args.mode == "evidence-bound":
@@ -454,8 +705,7 @@ def main(argv: list[str] | None = None) -> int:
                                require_absolute(args.phase3_candidate_seal, "phase3 candidate seal"), args.source_commit, claims)
             toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
         elif args.mode == "terminal":
-            state = terminal(args, args.source_commit, claims)
-            toy = {claim_id: "TOY_VERIFIED" for claim_id in IDS}
+            raise Failure("terminal must use captured verifier")
         report = {"schema": "piccard-work7-claim-report-v1", "source_commit": args.source_commit,
                   "mode": args.mode, "threshold_gate_state": "DEFERRED_EXPECTED",
                   "work_gate_state": "POC_APPROVED_PERFORMANCE_PENDING" if args.mode == "terminal" else "PENDING",
@@ -466,10 +716,6 @@ def main(argv: list[str] | None = None) -> int:
                               "prohibited_overclaim": row["prohibited_overclaim"]} for row in claims],
                   "status": "PASS", "validation_errors": [], "input_seals": ({"runtime_seal_sha256": sha256_file(runtime)} if args.mode == "evidence-bound" else {"phase2_closure_seal_sha256": sha256_file(args.phase2_closure_seal), "phase3_candidate_seal_sha256": sha256_file(args.phase3_candidate_seal)} if args.mode == "claim7" else {})}
         _atomic_create(output, canonical_json_bytes(report))
-        if args.mode == "terminal":
-            if snapshot_git_worktree(require_absolute(args.paper_root, "paper root")) != state.get("paper") or snapshot_git_worktree(require_absolute(args.threshold_root, "threshold root")) != state.get("threshold"):
-                output.unlink()
-                raise Failure("external worktree snapshot changed after report creation")
     except (Failure, ValueError, OSError) as error:
         print(f"verify_work7_claims: FAIL: {error}", file=sys.stderr)
         return 2

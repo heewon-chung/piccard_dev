@@ -855,6 +855,43 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual((self.session / "phase5/terminal-seal.sha256").read_text(), sha256_file(seal) + "\n")
         self.assertEqual(verify_tree_seal(seal, sha256_file(self.session / "phase4/work-review-seal.json"))["kind"], "phase5-terminal")
 
+    def test_terminal_core_matches_cli_report_from_identical_captured_bytes(self):
+        """The CLI is only a capture/publish wrapper around the byte-only core."""
+        from scripts.verify_work7_claims import TerminalInputs, terminal_report_bytes
+        from scripts.work7_evidence import CapturedBlob
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        capture = capture_phase04(self.session, self.source, self.paper, self.threshold)
+        packet_raw = packet.read_bytes()
+        packet_value = json.loads(packet_raw)
+        members = tuple((entry["path"], CapturedBlob(
+            raw=(self.session / entry["path"]).read_bytes(), sha256=entry["sha256"],
+            size=entry["size"], mode="0600")) for entry in packet_value["members"])
+        core = terminal_report_bytes(TerminalInputs(
+            phase04=capture, final_packet=CapturedBlob(packet_raw, hashlib.sha256(packet_raw).hexdigest(), len(packet_raw), "0600"),
+            final_packet_members=members,
+            claude_review=CapturedBlob(claude.read_bytes(), hashlib.sha256(claude.read_bytes()).hexdigest(), claude.stat().st_size, "0600"),
+            sol_review=CapturedBlob(sol.read_bytes(), hashlib.sha256(sol.read_bytes()).hexdigest(), sol.stat().st_size, "0600"),
+        ))
+        terminal, seal = self.session / "phase5/core-cli-report.json", self.session / "phase5/core-cli-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(terminal.read_bytes(), core)
+
+    def test_close_final_revalidates_packet_members_before_publication(self):
+        """A packet manifest that names a missing member cannot create terminal output."""
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        victim = self.session / "phase5/members/generated/final-verification-summary.json"
+        victim.unlink()
+        terminal, seal = self.session / "phase5/missing-member-report.json", self.session / "phase5/missing-member-seal.json"
+        result = self.close_final(packet, claude, sol, terminal, seal)
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertFalse(terminal.exists())
+        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
+
     def test_close_final_rejects_recanonicalized_generated_summary(self):
         """A self-consistent final packet cannot replace the verified generated summary."""
         packet = self.prepare_final_packet()
@@ -901,8 +938,8 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
         self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
 
-    def test_close_final_revalidates_phase4_after_runtime_validation(self):
-        """A Phase 4 reseal during final runtime validation cannot reach terminal closure."""
+    def test_close_final_does_not_reopen_phase3_or_phase4_after_capture(self):
+        """A Phase 4 replacement after capture cannot alter the byte-only terminal core."""
         from scripts import work7_review_packet
         from scripts.work7_evidence import create_tree_seal, sha256_file
 
@@ -925,11 +962,10 @@ class Work7ReviewPacketTests(unittest.TestCase):
                          session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
                          paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
         with mock.patch.object(work7_review_packet, "validate_phase2_runtime_capture", side_effect=replace_phase4_after_runtime):
-            with self.assertRaises(work7_review_packet.Failure):
-                work7_review_packet.close_final(args)
-        self.assertFalse(terminal.exists())
-        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
-        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+            work7_review_packet.close_final(args)
+        self.assertTrue(terminal.exists())
+        self.assertTrue((self.session / "phase5/terminal-artifacts").exists())
+        self.assertTrue(seal.exists())
 
     def test_close_final_reaches_terminal_boundary_without_legacy_phase_paths(self):
         """A valid captured closure does not invoke any retired Phase 0--4 path reader."""
@@ -968,7 +1004,6 @@ class Work7ReviewPacketTests(unittest.TestCase):
         originals = {path: path.read_bytes() for path in (contract, inventory, paper_file)}
         modes = {path: path.stat().st_mode & 0o777 for path in originals}
         original_capture = work7_review_packet.capture_phase04
-        original_validate_members = work7_review_packet.validate_final_packet_members_capture
         seen_foreign = False
 
         def replace(path: Path, raw: bytes) -> None:
@@ -988,18 +1023,18 @@ class Work7ReviewPacketTests(unittest.TestCase):
             replace(paper_file, b"foreign external state\n")
             return capture
 
-        def validate_while_foreign(*validation_args):
+        def synchronize(point: str):
             nonlocal seen_foreign
-            self.assertEqual(contract.read_bytes(), b'{"foreign":"contract"}\n')
-            self.assertEqual(inventory.read_bytes(), b"Test #1: Foreign\nTotal Tests: 1\n")
-            self.assertEqual(paper_file.read_bytes(), b"foreign external state\n")
-            seen_foreign = True
-            restore()
-            return original_validate_members(*validation_args)
+            if point == "after_terminal_capture":
+                self.assertEqual(contract.read_bytes(), b'{"foreign":"contract"}\n')
+                self.assertEqual(inventory.read_bytes(), b"Test #1: Foreign\nTotal Tests: 1\n")
+                self.assertEqual(paper_file.read_bytes(), b"foreign external state\n")
+                seen_foreign = True
+            elif point == "after_terminal_core":
+                restore()
 
-        with mock.patch.object(work7_review_packet, "capture_phase04", side_effect=capture_then_replace), \
-             mock.patch.object(work7_review_packet, "validate_final_packet_members_capture", side_effect=validate_while_foreign):
-            work7_review_packet.close_final(args)
+        with mock.patch.object(work7_review_packet, "capture_phase04", side_effect=capture_then_replace):
+            work7_review_packet.close_final(args, synchronize=synchronize)
         self.assertTrue(seen_foreign)
         self.assertTrue(terminal.exists())
         self.assertTrue(seal.exists())
@@ -1407,40 +1442,31 @@ class Work7ReviewPacketTests(unittest.TestCase):
             manifest.write_text(json.dumps(value), encoding="utf-8")
         self.assert_hostile_runtime_blocks_prepare_final(mutate)
 
-    def test_close_final_uses_private_stable_review_copies_and_rejects_bad_terminal_report_or_drift(self):
-        """Replacing a raw file after parsing cannot alter a seal; bad reports and drift cannot create one."""
+    def test_close_final_uses_stable_captured_review_and_packet_bytes(self):
+        """A real replacement after capture cannot alter bytes passed to publication."""
+        from scripts import work7_review_packet
         packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
         original_sol = sol.read_bytes()
         original_packet = packet.read_bytes()
-        os.environ.update({"WORK7_TEST_TERMINAL_ACTION": "replace-inputs", "WORK7_TEST_REVIEW_PATH": str(sol),
-                           "WORK7_TEST_PACKET_PATH": str(packet)})
-        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None); self.addCleanup(os.environ.pop, "WORK7_TEST_REVIEW_PATH", None)
-        self.addCleanup(os.environ.pop, "WORK7_TEST_PACKET_PATH", None)
         terminal, seal = self.session / "phase5/stable-report.json", self.session / "phase5/stable-seal.json"
-        result = self.close_final(packet, claude, sol, terminal, seal)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
+                         paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
+        def synchronize(point: str) -> None:
+            if point == "after_terminal_capture":
+                sol.write_bytes(b"foreign review\n")
+                packet.write_bytes(b"foreign packet\n")
+        work7_review_packet.close_final(args, synchronize=synchronize)
         self.assertEqual((self.session / "phase5/terminal-artifacts/sol-review.txt").read_bytes(), original_sol)
         self.assertEqual((self.session / "phase5/terminal-artifacts/final-packet.json").read_bytes(), original_packet)
         self.assertNotEqual(sol.read_bytes(), original_sol)
         self.assertNotEqual(packet.read_bytes(), original_packet)
 
-    def test_close_final_invalid_terminal_report_leaves_no_phase5_seal_or_pointer(self):
-        """A verifier success exit with a malformed report cannot create a terminal seal."""
+    def test_close_final_core_rejection_leaves_no_phase5_seal_or_pointer(self):
+        """A malformed captured final review fails before terminal publication."""
         packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        sol.write_text("malformed\n", encoding="utf-8")
         terminal, seal = self.session / "phase5/invalid-report.json", self.session / "phase5/invalid-seal.json"
-        os.environ["WORK7_TEST_TERMINAL_ACTION"] = "invalid-report"
-        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None)
-        result = self.close_final(packet, claude, sol, terminal, seal)
-        self.assertEqual(result.returncode, 2, result.stderr.decode())
-        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
-        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
-
-    def test_close_final_missing_terminal_report_leaves_no_phase5_seal_or_pointer(self):
-        """A verifier success exit without a report cannot create a terminal seal."""
-        packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
-        terminal, seal = self.session / "phase5/missing-report.json", self.session / "phase5/missing-seal.json"
-        os.environ["WORK7_TEST_TERMINAL_ACTION"] = "missing-report"
-        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None)
         result = self.close_final(packet, claude, sol, terminal, seal)
         self.assertEqual(result.returncode, 2, result.stderr.decode())
         self.assertFalse(terminal.exists())
@@ -1458,13 +1484,20 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
         self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
 
-    def test_close_final_external_drift_after_terminal_verification_leaves_no_phase5_seal_or_pointer(self):
-        """A worktree change after the verifier writes its report still fails closure."""
+    def test_close_final_uses_captured_external_snapshot_after_terminal_capture(self):
+        """External replacement after capture cannot be reopened by the terminal core."""
+        from scripts import work7_review_packet
         packet = self.prepare_final_packet(); claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
         terminal, seal = self.session / "phase5/drift-report.json", self.session / "phase5/drift-seal.json"
-        os.environ.update({"WORK7_TEST_TERMINAL_ACTION": "external-drift", "WORK7_TEST_PAPER_PATH": str(self.paper)})
-        self.addCleanup(os.environ.pop, "WORK7_TEST_TERMINAL_ACTION", None); self.addCleanup(os.environ.pop, "WORK7_TEST_PAPER_PATH", None)
-        result = self.close_final(packet, claude, sol, terminal, seal)
-        self.assertEqual(result.returncode, 2, result.stderr.decode())
-        self.assertFalse((self.session / "phase5/terminal-artifacts").exists())
-        self.assertFalse(seal.exists()); self.assertFalse(seal.with_name("terminal-seal.sha256").exists())
+        args = Namespace(packet=packet, claude_review=claude, sol_review=sol, terminal_report=terminal,
+                         session_root=self.session, phase0_seal=self.session / "phase0/seal.json", source_root=self.source,
+                         paper_root=self.paper, threshold_root=self.threshold, output_seal=seal)
+        original = (self.paper / "tracked").read_bytes()
+        def synchronize(point: str) -> None:
+            if point == "after_terminal_capture":
+                (self.paper / "tracked").write_bytes(b"foreign external state\n")
+            elif point == "after_terminal_core":
+                (self.paper / "tracked").write_bytes(original)
+        work7_review_packet.close_final(args, synchronize=synchronize)
+        self.assertTrue(terminal.exists())
+        self.assertTrue(seal.exists())
