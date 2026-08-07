@@ -468,3 +468,76 @@ python3 -W ignore::ResourceWarning -m unittest -q tests.scripts.test_work7_revie
 python3 -W error::ResourceWarning -m unittest -v tests.scripts.test_work7_state_guard
 # Ran 23 tests in 7.182s — OK
 ```
+
+## Unit F — reviewer Important publication rollback ownership
+
+### Finding mapping
+
+The reviewer Important publication finding was that `prepare_final` created
+`phase5/members` with recursive `mkdir(parents=True)` and, on a caught failure,
+called `shutil.rmtree(root)`.  That broad cleanup could delete a collision
+sentinel or any non-owned descendant created after publication began.  It also
+did not distinguish an absent Phase 5 root from an already-present empty one.
+
+`_PublicationLedger` now records, in creation order, every directory and
+regular file successfully created by this `prepare-final` invocation.  This
+includes an absent `phase5`, `phase5/members`, all member parents/files, and
+the output packet (including any newly required packet-parent directories).
+Each ledger entry stores its `lstat` device/inode/type identity.  On every
+caught publication error, rollback visits entries in strict reverse order and
+only `unlink`s an unchanged owned regular file or `rmdir`s an unchanged owned
+empty directory.  It never recursively traverses a tree, and it leaves a
+replaced path or non-owned descendant untouched.  Pre-existing directories are
+never added to the ledger.
+
+### TDD evidence
+
+RED was run before the ledger implementation:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_ordinary_member_collision_after_publication_starts \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_generated_member_collision_after_ordinary_members
+```
+
+Observed: both tests errored with `FileNotFoundError` reading the injected
+`collision sentinel`; the old `shutil.rmtree` had deleted it (`Ran 2 tests in
+17.372s`, `FAILED (errors=2)`).
+
+The snapshot helper now records an absent root separately from an empty root,
+and every captured entry includes relative path, type, mode, and bytes (or the
+symlink target bytes).  The focused real-filesystem rollback matrix was then
+run against toy fixtures only:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_ordinary_member_collision_after_publication_starts \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_generated_member_collision_after_ordinary_members \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_second_capture_boundary_rejects_real_seal_replacement_without_output \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_packet_creation_boundary_rolls_back_members_and_preserves_sentinel
+```
+
+Observed: all four tests passed.  The ordinary collision occurs after ordinary
+member publication; the generated-summary collision occurs after the first
+generated member; the second-capture case asserts byte/mode-exact restoration
+for both a missing and a pre-existing empty `phase5`; and the packet-creation
+collision preserves its `0640` sentinel while removing owned members.  The
+ordinary and generated pair independently reported `Ran 2 tests in 16.189s —
+OK`; the packet-creation case independently reported `Ran 1 test in 8.511s —
+OK`.
+
+Mutation proof temporarily replaced `ledger.rollback()` with `pass` in the
+disposable local edit, then ran the ordinary collision regression.  It failed
+as intended because `phase5/members/source` remained after the failure
+(`AssertionError: True is not false`; `Ran 1 test in 8.845s`, `FAILED
+(failures=1)`).  The exact rollback call was restored immediately; no mutation
+was committed.  This is behavioral evidence rather than a source-text or mock
+call-count assertion.
+
+Final owned-suite verification was run once after the focused matrix:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q tests.scripts.test_work7_review_packet
+```
+
+Observed: exit 0 (toy fixture suite only).

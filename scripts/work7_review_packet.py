@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -96,6 +95,77 @@ SOURCE_PACKET_MEMBERS = DESIGNS + (
 
 class Failure(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class _OwnedPublicationPath:
+    """A path this invocation created, tied to its lstat identity."""
+
+    path: Path
+    device: int
+    inode: int
+    kind: int
+
+
+@dataclass
+class _PublicationLedger:
+    """Exact Phase 5 creations, unwound without traversing shared trees."""
+
+    created: list[_OwnedPublicationPath]
+
+    def record(self, path: Path) -> None:
+        info = path.lstat()
+        self.created.append(_OwnedPublicationPath(path, info.st_dev, info.st_ino,
+                                                  stat.S_IFMT(info.st_mode)))
+
+    def rollback(self) -> None:
+        for owned in reversed(self.created):
+            try:
+                info = owned.path.lstat()
+            except FileNotFoundError:
+                continue
+            if (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)) != (
+                    owned.device, owned.inode, owned.kind):
+                continue
+            try:
+                if stat.S_ISDIR(info.st_mode):
+                    owned.path.rmdir()
+                elif stat.S_ISREG(info.st_mode):
+                    owned.path.unlink()
+            except (FileNotFoundError, OSError):
+                # A concurrent non-owned descendant or replacement is never
+                # removed merely to make rollback appear complete.
+                continue
+
+
+def _ledger_directory(ledger: _PublicationLedger, path: Path, *, allow_existing: bool) -> None:
+    """Create one directory exclusively, recording it only on this call's success."""
+    _reject_symlink_components(path)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            # The name changed between mkdir and lstat; retry through the same
+            # exclusive branch rather than treating a vanished object as ours.
+            return _ledger_directory(ledger, path, allow_existing=allow_existing)
+        if allow_existing and stat.S_ISDIR(info.st_mode):
+            return
+        raise Failure("final packet output collision") from None
+    ledger.record(path)
+
+
+def _ledger_directories(ledger: _PublicationLedger, base: Path, parent: Path) -> None:
+    """Materialize missing parents one at a time, retaining no ownership of old ones."""
+    try:
+        relative = parent.relative_to(base)
+    except ValueError as error:
+        raise Failure("final packet output escapes session root") from error
+    current = base
+    for component in relative.parts:
+        current /= component
+        _ledger_directory(ledger, current, allow_existing=True)
 
 
 @dataclass(frozen=True)
@@ -1138,13 +1208,17 @@ def prepare_final(args: argparse.Namespace, synchronize: Callable[[str], None] |
     if second_capture != capture:
         raise Failure("Phase 0--4 evidence changed during final packet preparation")
     members: list[dict] = []
-    created_root = False
-    created_output = False
+    ledger = _PublicationLedger([])
     try:
-        root.mkdir(parents=True, mode=0o700)
-        created_root = True
+        # ``phase5`` is allowed to predate this call (and might be deliberately
+        # empty), but the members root itself must be an exclusive creation.
+        _ledger_directories(ledger, session, root.parent)
+        _ledger_directory(ledger, root, allow_existing=False)
         for label, raw in sources:
+            target = root / label
+            _ledger_directories(ledger, root, target.parent)
             copy_raw_member(raw, session, root, label, members)
+            ledger.record(target)
             if label == "source/git-diff-b907fae-to-head.patch":
                 members[-1]["label"] = "git-diff-b907fae-to-head.patch"
             elif label == "external/current-paper-state.json":
@@ -1153,13 +1227,11 @@ def prepare_final(args: argparse.Namespace, synchronize: Callable[[str], None] |
                 members[-1]["label"] = "current-threshold-state"
         if synchronize is not None:
             synchronize("before_packet_create")
+        _ledger_directories(ledger, session, output.parent)
         _atomic_create(output, packet_bytes("final", capture.commit, seals, members))
-        created_output = True
+        ledger.record(output)
     except Exception:
-        if created_output and output.exists() and output.is_file():
-            output.unlink()
-        if created_root:
-            shutil.rmtree(root, ignore_errors=True)
+        ledger.rollback()
         raise
 
 

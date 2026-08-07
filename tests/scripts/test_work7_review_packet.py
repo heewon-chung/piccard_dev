@@ -169,22 +169,33 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse((self.session / "phase5/members").exists())
         return result[0]
 
-    def _phase5_snapshot(self) -> tuple[tuple[str, str, int, bytes], ...]:
+    def _phase5_snapshot(self) -> tuple[tuple[str, str, int | None, bytes], ...]:
+        """Capture missing roots distinctly from empty roots and every entry's identity."""
         phase5 = self.session / "phase5"
-        if not phase5.exists():
-            return ()
-        result = []
-        for path in sorted(phase5.rglob("*")):
+        try:
+            phase5.lstat()
+        except FileNotFoundError:
+            return ((".", "missing", None, b""),)
+
+        def entry(path: Path, relative: str) -> tuple[str, str, int, bytes]:
             info = path.lstat()
             if path.is_file() and not path.is_symlink():
-                result.append((path.relative_to(phase5).as_posix(), "file", info.st_mode & 0o777, path.read_bytes()))
+                return (relative, "file", info.st_mode & 0o777, path.read_bytes())
             elif path.is_dir() and not path.is_symlink():
-                result.append((path.relative_to(phase5).as_posix(), "directory", info.st_mode & 0o777, b""))
-            else:
-                result.append((path.relative_to(phase5).as_posix(), "other", info.st_mode & 0o777, b""))
+                return (relative, "directory", info.st_mode & 0o777, b"")
+            if path.is_symlink():
+                return (relative, "symlink", info.st_mode & 0o777,
+                        os.readlink(path).encode("utf-8", "surrogateescape"))
+            return (relative, "other", info.st_mode & 0o777, b"")
+
+        result = [entry(phase5, ".")]
+        if not phase5.is_dir() or phase5.is_symlink():
+            return tuple(result)
+        for path in sorted(phase5.rglob("*")):
+            result.append(entry(path, path.relative_to(phase5).as_posix()))
         return tuple(result)
 
-    def _prepare_final_with_member_collision(self, relative: str) -> subprocess.CompletedProcess[bytes]:
+    def _prepare_final_with_member_collision(self, relative: str) -> tuple[subprocess.CompletedProcess[bytes], Path]:
         """Create a real packet-member collision only after publication starts."""
         packet = self.prepare_work()
         seal = self.session / "phase4/work-review-seal.json"
@@ -199,6 +210,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
                 if root.is_dir():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(b"collision sentinel\n")
+                    os.chmod(target, 0o640)
                     injected.set()
                     return
                 threading.Event().wait(0.001)
@@ -209,21 +221,29 @@ class Work7ReviewPacketTests(unittest.TestCase):
                               "--work-review-seal", str(seal), "--output", str(self.session / "phase5/final-packet.json"))
         worker.join(timeout=10)
         self.assertTrue(injected.is_set(), "collision worker did not synchronize with publication")
-        return result
+        return result, target
 
     def test_prepare_final_rolls_back_ordinary_member_collision_after_publication_starts(self):
-        """A late ordinary-member collision leaves Phase 5 exactly as it was."""
+        """A late ordinary collision preserves the foreign sentinel and removes owned outputs."""
         before = self._phase5_snapshot()
-        result = self._prepare_final_with_member_collision("session/phase2/static-report.json")
+        result, sentinel = self._prepare_final_with_member_collision("session/phase2/static-report.json")
         self.assertEqual(result.returncode, 2, result.stderr.decode())
-        self.assertEqual(self._phase5_snapshot(), before)
+        self.assertNotEqual(before, self._phase5_snapshot())
+        self.assertEqual(sentinel.read_bytes(), b"collision sentinel\n")
+        self.assertEqual(sentinel.stat().st_mode & 0o777, 0o640)
+        self.assertFalse((self.session / "phase5/members/source").exists())
+        self.assertFalse((self.session / "phase5/final-packet.json").exists())
 
     def test_prepare_final_rolls_back_generated_member_collision_after_ordinary_members(self):
-        """A generated-member collision removes all previously published members."""
+        """A generated collision preserves its descendant while rolling back owned members."""
         before = self._phase5_snapshot()
-        result = self._prepare_final_with_member_collision("generated/works1-6-source-test-map.json")
+        result, sentinel = self._prepare_final_with_member_collision("generated/final-verification-summary.json")
         self.assertEqual(result.returncode, 2, result.stderr.decode())
-        self.assertEqual(self._phase5_snapshot(), before)
+        self.assertNotEqual(before, self._phase5_snapshot())
+        self.assertEqual(sentinel.read_bytes(), b"collision sentinel\n")
+        self.assertEqual(sentinel.stat().st_mode & 0o777, 0o640)
+        self.assertFalse((self.session / "phase5/members/source").exists())
+        self.assertFalse((self.session / "phase5/final-packet.json").exists())
 
     def test_capture_phase04_seal_swap_fails_second_capture_without_phase5_output(self):
         """A transient prerequisite-seal replacement cannot enter a later capture."""
@@ -267,7 +287,7 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(self._phase5_snapshot(), before)
 
     def test_prepare_final_second_capture_boundary_rejects_real_seal_replacement_without_output(self):
-        """A seal changed after prospective bytes exist must make capture two fail closed."""
+        """A capture-two failure restores both a missing and an empty Phase 5 root exactly."""
         from scripts import work7_review_packet
 
         packet = self.prepare_work()
@@ -275,33 +295,40 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
                                       "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
         output = self.session / "phase5/final-packet.json"
-        before = self._phase5_snapshot()
         runtime_seal = self.session / "phase2/runtime-seal.json"
         original, mode = runtime_seal.read_bytes(), runtime_seal.stat().st_mode & 0o777
-        reached = []
+        phase5 = self.session / "phase5"
+        self.assertFalse(phase5.exists())
+        for initial in ("missing", "empty"):
+            with self.subTest(initial=initial):
+                if initial == "empty":
+                    phase5.mkdir(mode=0o750)
+                    os.chmod(phase5, 0o750)
+                before = self._phase5_snapshot()
+                reached = []
 
-        def synchronize(point: str) -> None:
-            if point == "before_second_capture":
-                replacement = runtime_seal.with_name("runtime-seal.boundary")
-                replacement.write_bytes(b'{"foreign":true}\n')
-                os.chmod(replacement, mode)
-                os.replace(replacement, runtime_seal)
-                reached.append(point)
+                def synchronize(point: str) -> None:
+                    if point == "before_second_capture":
+                        replacement = runtime_seal.with_name("runtime-seal.boundary")
+                        replacement.write_bytes(b'{"foreign":true}\n')
+                        os.chmod(replacement, mode)
+                        os.replace(replacement, runtime_seal)
+                        reached.append(point)
 
-        stderr = io.StringIO()
-        with redirect_stderr(stderr):
-            status = work7_review_packet.main(["prepare-final", "--source-root", str(self.source),
-                                                "--session-root", str(self.session), "--work-review-seal", str(seal),
-                                                "--output", str(output)], synchronize=synchronize)
-        restore = runtime_seal.with_name("runtime-seal.restore")
-        restore.write_bytes(original)
-        os.chmod(restore, mode)
-        os.replace(restore, runtime_seal)
-        self.assertEqual(reached, ["before_second_capture"])
-        self.assertEqual(status, 2)
-        self.assertIn("Phase 0--4 evidence changed during final packet preparation", stderr.getvalue())
-        self.assertFalse(output.exists())
-        self.assertEqual(self._phase5_snapshot(), before)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    status = work7_review_packet.main(["prepare-final", "--source-root", str(self.source),
+                                                        "--session-root", str(self.session), "--work-review-seal", str(seal),
+                                                        "--output", str(output)], synchronize=synchronize)
+                restore = runtime_seal.with_name("runtime-seal.restore")
+                restore.write_bytes(original)
+                os.chmod(restore, mode)
+                os.replace(restore, runtime_seal)
+                self.assertEqual(reached, ["before_second_capture"])
+                self.assertEqual(status, 2)
+                self.assertIn("Phase 0--4 evidence changed during final packet preparation", stderr.getvalue())
+                self.assertFalse(output.exists())
+                self.assertEqual(self._phase5_snapshot(), before)
 
     def test_prepare_final_packet_creation_boundary_rolls_back_members_and_preserves_sentinel(self):
         """A late packet collision preserves its sentinel and removes every published member."""
