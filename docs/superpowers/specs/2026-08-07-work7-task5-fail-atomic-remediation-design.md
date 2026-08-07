@@ -128,23 +128,27 @@ boundaries:
 - A publishing function removes only paths that the failing invocation created.
   It never removes a pre-existing path or an enclosing run directory.
 - The Task 6 orchestrator owns the exact generated
-  `build-<source-commit>` and `session-<source-commit>` directories.  After it
-  captures a minimal diagnostic record outside the guarded source, Paper,
-  threshold, build, and session roots, it removes both directories when an
-  execution-invalidating failure occurs.
+  `build-<source-commit>` and `session-<source-commit>` directories.  For
+  every supported authoritative failure, it first captures a minimal external
+  diagnostic outside the guarded source, Paper, threshold, build, and session
+  roots, then removes both directories completely.
 
-Execution-invalidating failures are build, test, verifier, seal, schema, argv,
-count, provenance, external-drift, caught publication, terminal-verification,
-or technical-review failures.  A technical review fails when a required
+Supported authoritative failures are execution, technical-review,
+review-delivery, and user-cancel.  Execution covers build, test, verifier,
+seal, schema, argv, count, provenance, external-drift, caught publication, and
+terminal-verification failures. A technical review fails when a required
 reviewer returns `REJECTED`, `NEEDS_FIXES`, or any Critical or Important
-finding.  The implementation or design is diagnosed and fixed before exactly
-one new authoritative toy run starts from Phase 0; the orchestrator never
-retries until a run happens to pass.
+finding. Review delivery includes a transport timeout, provider error, or
+syntactically unusable response, whether or not it makes a technical judgment.
+All four kinds classify to `DISPOSE`; no failure preserves a packet, evidence,
+or session for partial resumption or reviewer-only delivery.
 
-A reviewer transport timeout, provider error, or syntactically unusable reply
-that makes no technical judgment does not invalidate frozen evidence.  The
-session remains unchanged and only that reviewer is called again against the
-same packet.  User cancellation disposes the generated build and session.
+After disposal, diagnose and remediate the implementation or design, clear the
+exact external diagnostic record, and begin exactly one wholly fresh
+authoritative toy run from Phase 0. The orchestrator never retries an
+experiment, verifier, reviewer, packet, or evidence graph until a run happens
+to pass. User cancellation follows the same fail-atomic disposal and fresh-run
+boundary if work is resumed.
 
 Disposal accepts only two already validated, fully resolved targets beneath
 their configured temporary parents: the canonical `build-<source-commit>` and
@@ -221,9 +225,11 @@ pointer contain the exact prevalidated bytes.
   commit.
 - `gpt-5.6-sol` high returns no Critical or Important finding and approves the
   remediation task.
-- Every execution-invalidating Task 6 failure disposes the exact generated
-  build and session before a new Phase 0 run; reviewer-only delivery failures
-  retry only the failed reviewer against unchanged evidence.
+- Every supported authoritative Task 6 failure, including reviewer delivery,
+  timeout, provider, and unparseable-response failure, records an external
+  diagnostic, disposes the exact generated build and session, is remediated,
+  has that exact diagnostic cleared, and then begins a wholly fresh Phase 0
+  run.
 - No actual-data or repeated-performance campaign runs.
 - Paper and threshold byte-level snapshots are unchanged.
 - Task 6 starts only after this remediation approval.
@@ -236,10 +242,12 @@ pointer contain the exact prevalidated bytes.
 - A caught failure leaves a new terminal report, Phase 5 member, seal, or
   pointer.
 - A foreign or noncanonical build root reaches producer validation.
-- An execution-invalidating failure leaves its generated build or session, or
-  a retry begins before the failure is diagnosed and corrected.
-- A reviewer-only transport/format failure mutates or regenerates the frozen
-  packet or authoritative execution evidence.
+- Any supported authoritative failure leaves its generated build or session,
+  permits partial resume, reuses a packet/evidence graph, or starts a new run
+  before remediation and exact diagnostic clearing.
+- A reviewer transport, timeout, provider, or unparseable-response failure is
+  treated as retry-only rather than fail-atomic disposal and a fresh Phase 0
+  run.
 - Tests assert source text or mocks instead of observable CLI/filesystem
   behavior.
 - The remediation changes performance status, measured counts, Paper, or the

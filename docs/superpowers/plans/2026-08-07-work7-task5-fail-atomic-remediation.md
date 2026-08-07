@@ -28,12 +28,14 @@ seal helpers in `scripts/work7_evidence.py`, Git, subprocess-based CLI tests.
 - Paper and threshold worktrees are read-only and must equal their Phase 0
   byte-level snapshots at every finalization boundary.
 - A caught publication failure rolls back only paths created by that call.
-- An execution-invalidating failure disposes the exact validated
-  `build-<commit>` and `session-<commit>` roots only after a minimal diagnostic
-  is written outside guarded roots.  Diagnose/fix before one fresh Phase 0 run.
-- A reviewer transport/provider/format failure without a technical verdict
-  preserves the frozen session and retries only that reviewer.
-- Never retry an experiment or verifier until it happens to pass.
+- Every supported authoritative failure—execution, technical-review,
+  review-delivery, or user-cancel—records a minimal diagnostic outside guarded
+  roots, disposes the exact validated `build-<commit>` and `session-<commit>`
+  roots completely, is remediated, clears that exact diagnostic, and then
+  starts one wholly fresh Phase 0 run. Review delivery includes timeout,
+  provider, and unparseable-response failures; it is never retry-only.
+- Never partially resume or reuse a packet, evidence graph, reviewer result,
+  experiment, or verifier after an authoritative failure.
 
 ## File Map and Fixed Interfaces
 
@@ -47,8 +49,9 @@ seal helpers in `scripts/work7_evidence.py`, Git, subprocess-based CLI tests.
   existing CLI wrapper.
 - `scripts/run_work7_integration.py`: safe exact-run disposal helpers and
   failure cleanup for roots reserved by the current invocation.
-- `scripts/work7_run_lifecycle.py`: explicit failure classification,
-  diagnostic, reviewer retry, and owned-root disposal coordinator.
+- `scripts/work7_run_lifecycle.py`: explicit fail-atomic failure
+  classification, external diagnostic, exact diagnostic clearing, and owned-root
+  disposal coordinator.
 - `tests/scripts/test_work7_review_packet.py`: R0--R3 hostile behavioral tests.
 - `tests/scripts/test_work7_claim_contract.py`: terminal core/CLI equivalence.
 - `tests/scripts/test_work7_integration_runner.py`: exact disposal lifecycle.
@@ -151,24 +154,15 @@ class ReservationLedger:
 def reserve_owned(parent: Path, name: str,
                   ledger: ReservationLedger) -> Path: ...
 
-def classify_failure(kind: str) -> Literal["DISPOSE", "RETRY_REVIEWER"]: ...
-
-@dataclass(frozen=True)
-class CapturedReviewBundle:
-    packet: CapturedBlob
-    members: tuple[tuple[str, CapturedBlob], ...]
-
-def capture_review_bundle(packet: Path, session: Path,
-                          expected_packet_sha256: str) -> CapturedReviewBundle: ...
-
-def deliver_reviewer_retry(bundle: CapturedReviewBundle,
-                           delivery: Callable[[CapturedReviewBundle], bytes]) -> bytes: ...
+def classify_failure(kind: str) -> str: ...  # every supported kind returns "DISPOSE"
 
 def record_and_apply_failure(kind: str, diagnostic_root: Path,
                              build_parent: Path, session_parent: Path,
                              build: Path, session: Path, commit: str,
                              guarded: tuple[Path, ...], packet: Path | None,
                              packet_sha256: str | None) -> str: ...
+
+def clear_diagnostic(diagnostic_root: Path, commit: str) -> None: ...
 ```
 
 Captured objects expose only immutable scalars, bytes, frozen dataclasses, and
@@ -542,17 +536,16 @@ cleanup, `classify_failure`, `record_and_apply_failure`, and
   `test_run_disposal_rejects_broad_foreign_symlink_or_mismatched_targets`.
   Cover exact success, wrong basename/commit/parent, source/Paper/threshold
   containment or ancestry, parent itself, a sibling sentinel, and user
-  cancellation.  Include a pre-existing session sentinel where build
-  reservation would otherwise succeed, and a race where session appears after
-  preflight.  Assert reviewer-only delivery failure retains an unchanged packet
-  and member byte graph through reviewer consumption; replace and restore a
-  live member between classification and the reviewer callback and require the
-  callback to receive the captured bytes.  Technical rejection disposes both
-  owned roots only after its diagnostic record exists outside them.
-
-  Also replace and consistently reseal the complete packet/member graph before
-  retry capture.  Supply the packet digest recorded by the original delivery
-  attempt and require rejection before parsing or provider invocation.
+  cancellation. Include a pre-existing session sentinel where build reservation
+  would otherwise succeed, and a race where session appears after preflight.
+  For each supported failure kind (`execution`, `technical-review`,
+  `review-delivery`, and `user-cancel`), assert that an external diagnostic
+  exists before disposal, both owned roots are absent afterward, no packet or
+  evidence is retained for reuse, and only the exact diagnostic path can be
+  cleared. Cover reviewer timeout, provider failure, and unparseable response
+  as `review-delivery`; each must follow that same full disposal path. Assert a
+  fresh Phase 0 attempt is rejected while the diagnostic exists and allowed
+  only after remediation plus `clear-diagnostic`.
 
 - [ ] **Step 3: Prove RED.**
 
@@ -596,34 +589,26 @@ cleanup, `classify_failure`, `record_and_apply_failure`, and
 
 - [ ] **Step 6: Implement the executable failure coordinator.**
 
-  In `work7_run_lifecycle.py`, define exact `kind` values:
-  `execution`, `technical-review`, and `user-cancel` map to `DISPOSE`;
-  `review-delivery` maps to `RETRY_REVIEWER`.  For disposal, exclusively write
-  canonical JSON
+  In `work7_run_lifecycle.py`, define exact supported `kind` values:
+  `execution`, `technical-review`, `review-delivery`, and `user-cancel`; every
+  one maps to `DISPOSE`. `review-delivery` includes reviewer transport timeout,
+  provider failure, and unparseable response and must not expose a retry or
+  evidence-preservation path. For every kind, exclusively write canonical JSON
   `failure-<commit>.json` beneath an explicit absolute `--diagnostic-root`
   that is outside source, Paper, threshold, build, and session.  Its exact keys
   are `schema`, `source_commit`, `failure_kind`, `action`,
   `build_root`, `session_root`, `packet_sha256`, and `publishable=false`.
-  Stable-read it, then dispose jointly owned roots.
+  Stable-read it, then dispose both jointly owned roots completely. The
+  diagnostic is non-publishable and must contain no preserved review, seal,
+  terminal pointer, packet, or reusable evidence material.
 
-  For reviewer retry, `capture_review_bundle` stable-captures and validates the
-  canonical packet plus every packet member exactly once.  Before parsing any
-  captured member, it requires the packet SHA-256 to equal
-  `expected_packet_sha256` taken from the immutable original-delivery record,
-  never recomputed from the current session path.  Classification and delivery
-  occur in one coordinator call:
-  `deliver_reviewer_retry(bundle, delivery)` passes only
-  `CapturedReviewBundle`, never a live session path, to the provider adapter.
-  The production Task 6 adapters materialize/read only those supplied bytes;
-  the sol/Fable prompt is bound to `bundle.packet.sha256`.  A synchronized test
-  replaces and restores the live packet and a member after classification but
-  before callback consumption and requires the adapter to observe the captured
-  originals.  No endpoint reread is used as proof.
-
-  Before any fresh Phase 0 run, the coordinator requires removal of the prior
-  diagnostic via an exact-path `clear-diagnostic` action; it refuses a new run
-  while the record exists.  Tests invoke the CLI/API through a subprocess and
-  compare actual filesystem bytes, not mock calls.
+  Before any fresh Phase 0 run, diagnose and remediate the failure, then remove
+  the prior diagnostic through the exact-path `clear-diagnostic` action; the
+  coordinator refuses a fresh run while that record exists. A resumed effort
+  creates a new build/session pair and a wholly new Phase 0--4 evidence graph;
+  it never partially resumes, redelivers an old packet, or retries only a
+  reviewer. Tests invoke the CLI/API through a subprocess and compare actual
+  filesystem bytes, not mock calls.
 
 - [ ] **Step 7: Prove GREEN.**
 
@@ -638,11 +623,14 @@ cleanup, `classify_failure`, `record_and_apply_failure`, and
   ```
 
 **R3 success:** no caught failure leaves a new terminal report/member/seal/
-pointer, and invalid-run disposal removes exactly the owned build and session.
+pointer, and every supported authoritative failure records an external
+diagnostic, removes exactly the owned build and session, is remediated, clears
+that exact diagnostic, and restarts only from wholly fresh Phase 0.
 
 **R3 failure:** partial publication survives, pre-existing data is removed,
 only one disposal target is validated before deletion begins, or a reviewer
-transport error regenerates evidence.
+transport/timeout/provider/unparseable-response failure is preserved for
+retry, partial resume, or evidence reuse.
 
 ### Task 5: R4 — Hostile regression gate and independent approval
 
@@ -760,23 +748,20 @@ dirty at handoff, or review is not an exact approval.
 
 1. Start once from fresh exact `build-<approved-commit>` and
    `session-<approved-commit>` roots.
-2. On build/test/schema/argv/count/provenance/seal/drift/crash/terminal failure,
-   write a minimal non-publishable diagnostic outside guarded roots, invoke
-   `record_and_apply_failure`, diagnose and fix, invoke the exact
-   `clear-diagnostic` action, then begin one new Phase 0 run.  A lingering
-   `failure-<commit>.json` blocks the rerun.
-3. On sol/Fable technical rejection, preserve the raw rejection only as
-   external diagnostic evidence, dispose build/session, fix, and restart from
-   Phase 0.
-4. On reviewer timeout/provider failure/unparseable response with no technical
-   judgment, classify it as `review-delivery`, create one
-   `CapturedReviewBundle` using the packet digest stored before the original
-   delivery, and call `deliver_reviewer_retry` so only captured packet/member
-   bytes reach the failed provider adapter.  Do not modify or regenerate the
-   packet/session and retry only that reviewer.
-5. On user cancellation, dispose exact build/session.  Never delete via a glob,
+2. On any execution, technical-review, review-delivery, or user-cancel
+   failure—including build/test/schema/argv/count/provenance/seal/drift/
+   terminal failure and reviewer timeout/provider failure/unparseable
+   response—write one minimal non-publishable external diagnostic and invoke
+   `record_and_apply_failure`. It records first and then deletes the exact
+   owned build/session pair completely. Do not preserve any packet, evidence,
+   review, seal, or terminal output for reuse.
+3. Diagnose and remediate the failure, invoke the exact `clear-diagnostic`
+   action, and then begin one wholly fresh Phase 0 run with fresh generated
+   roots. A lingering `failure-<commit>.json` blocks the rerun. There is no
+   partial resume, packet/evidence reuse, or reviewer-only retry.
+4. On user cancellation, dispose exact build/session. Never delete via a glob,
    unresolved variable, workspace root, source root, Paper, or threshold.
-6. Run only the approved toy profile with every measured repetition equal to
+5. Run only the approved toy profile with every measured repetition equal to
    `1`.  Actual data and repeated performance remain deferred.
 
 ## Plan Self-Review
