@@ -180,7 +180,7 @@ path that a later consumer is expected to reopen.
 
 ---
 
-### Task R0: Bind the canonical build root
+### Task 1: R0 — Bind the canonical build root
 
 **Files:**
 
@@ -261,7 +261,7 @@ output.
 **R0 failure:** a caller-controlled path reaches a producer validator, a valid
 fresh root is rejected, or any Paper/threshold/source/session byte changes.
 
-### Task R1: Capture the exact Phase 0--4 evidence graph
+### Task 2: R1 — Capture the exact Phase 0--4 evidence graph
 
 **Files:**
 
@@ -382,7 +382,7 @@ two complete captures agree.
 enter the packet, a parsed mutable object escapes the API, runtime semantics
 use live paths, or failure leaves new output.
 
-### Task R2: Share a path-free terminal verifier core
+### Task 3: R2 — Share a path-free terminal verifier core
 
 **Files:**
 
@@ -493,7 +493,7 @@ bytes and both callers produce identical canonical output.
 **R2 failure:** the core accepts paths, reads the filesystem, emits output
 before success, or the CLI and close-final enforce different semantics.
 
-### Task R3: Publish Phase 5 atomically and dispose invalid runs safely
+### Task 4: R3 — Publish Phase 5 atomically and dispose invalid runs safely
 
 **Files:**
 
@@ -635,7 +635,7 @@ pointer, and invalid-run disposal removes exactly the owned build and session.
 only one disposal target is validated before deletion begins, or a reviewer
 transport error regenerates evidence.
 
-### Task R4: Hostile regression gate and independent approval
+### Task 5: R4 — Hostile regression gate and independent approval
 
 **Files:**
 
