@@ -210,3 +210,37 @@ Both passing tests were mutation-proven in disposable detached worktrees at
   `main` returned `0` rather than `2`;
 * restoring the old broad cleanup (`unlink` any existing output on failure)
   made the packet-collision test error because its sentinel was deleted.
+
+## Remediation round 1 — terminal closure Phase 4 race
+
+Controller reproduction:
+
+```text
+python3 -m unittest tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_revalidates_phase4_after_runtime_validation -v
+```
+
+RED observed: `AssertionError: Failure not raised` at
+`test_work7_review_packet.py:698`; the terminal seal was printed, proving the
+Phase 4 reseal reached terminal closure.
+
+Cause: `close_final` continued to run the legacy path-based
+`validate_phase2_runtime`, while the R1 race boundary and the regression patch
+`validate_phase2_runtime_capture`.  The test's real Phase 4 reseal was never
+triggered, so the later closure check still saw the original seal.
+
+Fix: after the legacy summary needed by the terminal-packet schema, close-final
+now captures Phase 0--4 and calls `validate_phase2_runtime_capture` before
+deriving generated members and running `validate_final_closure_prerequisites`.
+Thus a reseal in that window is observed by the existing final closure
+revalidation and prevents all terminal outputs.
+
+GREEN command:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_revalidates_phase4_after_runtime_validation \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_close_final_external_drift_after_packet_preparation_leaves_no_phase5_seal_or_pointer -v
+```
+
+Observed: two `ok`; `Ran 2 tests in 17.752s`; `OK`.  Python emitted existing
+`ResourceWarning` diagnostics from legacy runner path reads; no test failure.

@@ -1061,6 +1061,10 @@ def close_final(args: argparse.Namespace) -> None:
     source = required(Path(state["source"]["root"]), "sealed source root", directory=True)
     if state["source"] != snapshot_git_worktree(source): raise Failure("Phase 0 snapshot changed: source")
     runtime_summary = validate_phase2_runtime(session, source, state, commit)
+    # Re-enter the R1 captured-byte boundary before any terminal artifacts are
+    # derived.  The subsequent closure check must reject a Phase 4 reseal that
+    # occurs during this runtime validation window.
+    validate_phase2_runtime_capture(capture_phase04(session, source, paper, threshold))
     mapping_raw, summary_raw = final_generated_member_bytes(session, source, state, commit, runtime_summary)
     validate_final_generated_members(session, final_packet, mapping_raw, summary_raw)
     validate_final_closure_prerequisites(session, source, paper, threshold, state, commit, seals)
