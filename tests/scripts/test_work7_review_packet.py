@@ -19,6 +19,41 @@ ROOT = Path(__file__).parents[2]
 REVIEW_FIXTURES = ROOT / "tests/fixtures/work7/reviews"
 
 
+class Work7CTestInventoryTests(unittest.TestCase):
+    """Fail-closed parsing for the complete CTest registry."""
+
+    @staticmethod
+    def inventory(*names: str, total: int | None = None) -> bytes:
+        """Render the relevant stable portion of ``ctest -N`` output."""
+        rendered = [f"  Test #{index}: {name}" for index, name in enumerate(names, 1)]
+        rendered.append(f"Total Tests: {len(names) if total is None else total}")
+        return ("\n".join(rendered) + "\n").encode("utf-8")
+
+    def test_inventory_allows_unrelated_registered_test(self):
+        """The full registry may contain tests outside the frozen Work 7 scope."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import _ctest_inventory
+
+        names = (*FROZEN_CTESTS, "UnrelatedProjectSmoke")
+        self.assertEqual(_ctest_inventory(self.inventory(*names)), names)
+
+    def test_inventory_rejects_missing_frozen_test(self):
+        """Every frozen Work 7 test must still be registered."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import Failure, _ctest_inventory
+
+        with self.assertRaises(Failure):
+            _ctest_inventory(self.inventory(*FROZEN_CTESTS[1:]))
+
+    def test_inventory_rejects_total_that_disagrees_with_complete_registry(self):
+        """The declared total must truthfully count every parsed registry test."""
+        from scripts.run_work7_integration import FROZEN_CTESTS
+        from scripts.work7_review_packet import Failure, _ctest_inventory
+
+        with self.assertRaises(Failure):
+            _ctest_inventory(self.inventory(*FROZEN_CTESTS, "UnrelatedProjectSmoke", total=len(FROZEN_CTESTS)))
+
+
 class Work7ReviewPacketTests(unittest.TestCase):
     """The packet is a real session-local snapshot, never a source-text check."""
 

@@ -761,8 +761,9 @@ def _ctest_inventory(stdout: bytes) -> tuple[str, ...]:
         raise Failure("CTest inventory is not UTF-8") from error
     names = tuple(re.findall(r"^\s*Test\s+#\d+:\s+([A-Za-z0-9_]+)\s*$", text, re.MULTILINE))
     total = re.findall(r"^Total Tests:\s*(\d+)\s*$", text, re.MULTILINE)
-    if len(names) != len(set(names)) or set(names) != set(_frozen_ctests()) or total != [str(len(_frozen_ctests()))]:
-        raise Failure("CTest registry is not the exact frozen registry")
+    if (not names or len(names) != len(set(names)) or total != [str(len(names))] or
+            not set(_frozen_ctests()).issubset(names)):
+        raise Failure("CTest registry is not a complete registry containing the frozen tests")
     return names
 
 
