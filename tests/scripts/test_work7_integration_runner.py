@@ -64,7 +64,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         path.chmod(0o755)
 
     def invoke_fake_runner(self, fault: str | None = None, *, source_snapshot: Path | None = None,
-                           terminal_wrapper: bool = False) -> tuple[subprocess.CompletedProcess[bytes], Path, str]:
+                           terminal_wrapper: bool = False, return_command: bool = False):
         """Drive the actual runner process with executable fake dependencies."""
         from scripts.run_work7_integration import FROZEN_CTESTS
         from scripts.work7_evidence import snapshot_git_worktree
@@ -258,7 +258,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         fakebin = temporary / "bin"; fakebin.mkdir()
         self.write(fakebin / "cmake", """
             #!/usr/bin/env python3
-            import pathlib, sys
+            import os, pathlib, sys
             a=sys.argv
             if '-B' in a:
                 b=pathlib.Path(a[a.index('-B')+1]); b.mkdir(parents=True,exist_ok=True)
@@ -267,6 +267,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 for name in ('bench_review_comparison','bench_piccard','bench_dynamic'):
                     q=b/name; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
                 print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
+                if os.environ.get('FAKE_FAULT') == 'configure-fail': raise SystemExit(9)
         """)
         self.write(fakebin / "ctest", """
             #!/usr/bin/env python3
@@ -293,12 +294,20 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                "FAKE_TESTS": ",".join(name for name in FROZEN_CTESTS if not (fault == "missing" and name == "MinHash")),
                "FAKE_FAULT": fault or "", "FAKE_PAPER": str(paper), "FAKE_THRESHOLD": str(threshold), "FAKE_COMMIT": commit}
         if fault == "existing-build": (temporary / "builds" / ("build-" + commit)).mkdir(parents=True)
-        if fault == "existing-session": (temporary / "sessions" / ("session-" + commit)).mkdir(parents=True)
+        if fault == "existing-session":
+            collision = temporary / "sessions" / ("session-" + commit)
+            collision.mkdir(parents=True)
+            (collision / "foreign-sentinel.txt").write_text("do not delete\\n", encoding="utf-8")
         (temporary / "builds").mkdir(exist_ok=True); (temporary / "sessions").mkdir(exist_ok=True)
-        result = subprocess.run((sys.executable, str(Path(__file__).parents[2] / "scripts" / "run_work7_integration.py"),
-                                 "--source-root", str(source), "--paper-root", str(paper), "--threshold-root", str(threshold),
-                                 "--build-parent", str(temporary / "builds"), "--session-parent", str(temporary / "sessions"),
-                                 "--expected-source-branch", "tkde-major/pre-threshold-poc"), env=env, capture_output=True)
+        (temporary / "diagnostics").mkdir(exist_ok=True)
+        command = (sys.executable, str(Path(__file__).parents[2] / "scripts" / "run_work7_integration.py"),
+                   "--source-root", str(source), "--paper-root", str(paper), "--threshold-root", str(threshold),
+                   "--build-parent", str(temporary / "builds"), "--session-parent", str(temporary / "sessions"),
+                   "--diagnostic-root", str(temporary / "diagnostics"),
+                   "--expected-source-branch", "tkde-major/pre-threshold-poc")
+        result = subprocess.run(command, env=env, capture_output=True)
+        if return_command:
+            return result, temporary, commit, command, env
         return result, temporary, commit
 
     def test_fake_tools_prove_exact_sequence_and_seal_lifecycle(self):
@@ -319,6 +328,54 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertEqual(closure["kind"], "phase2-closure")
         self.assertEqual(closure["previous_seal_sha256"], __import__("hashlib").sha256((session / "phase2" / "runtime-seal.json").read_bytes()).hexdigest())
         self.assertTrue((session / "phase2" / "closure-artifacts" / "evidence-bound-report.json").is_file())
+
+    def test_post_reservation_failure_is_disposed_then_requires_clear_for_fresh_phase0(self):
+        """A failed owned run cannot be resumed or overwrite its failure record."""
+        from scripts.work7_run_lifecycle import clear_diagnostic
+
+        result, root, commit, command, env = self.invoke_fake_runner(
+            "configure-fail", return_command=True)
+        build = root / "builds" / ("build-" + commit)
+        session = root / "sessions" / ("session-" + commit)
+        diagnostic = root / "diagnostics" / ("failure-" + commit + ".json")
+        sibling = root / "sibling-sentinel.txt"
+        sibling.write_text("preserve me\\n", encoding="utf-8")
+
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertEqual(json.loads(diagnostic.read_text(encoding="utf-8")), {
+            "schema": "piccard-work7-failure-v1", "source_commit": commit,
+            "failure_kind": "execution", "action": "DISPOSE",
+            "build_root": str(build.resolve()), "session_root": str(session.resolve()),
+            "packet_sha256": None, "publishable": False,
+        })
+        self.assertFalse(build.exists())
+        self.assertFalse(session.exists())
+        self.assertEqual(sibling.read_text(encoding="utf-8"), "preserve me\\n")
+
+        refused = subprocess.run(command, env=env, capture_output=True)
+        self.assertEqual(refused.returncode, 2, refused.stderr.decode())
+        self.assertIn("clear_diagnostic", refused.stderr.decode())
+        self.assertFalse(build.exists())
+        self.assertFalse(session.exists())
+
+        clear_diagnostic(root / "diagnostics", commit)
+        restarted = subprocess.run(command, env={**env, "FAKE_FAULT": ""}, capture_output=True)
+        self.assertEqual(restarted.returncode, 0, restarted.stderr.decode())
+        self.assertTrue((session / "phase0" / "artifacts" / "state.json").is_file())
+        self.assertTrue(build.is_dir())
+        self.assertTrue(session.is_dir())
+        self.assertFalse(diagnostic.exists())
+
+    def test_partial_session_collision_keeps_foreign_root_and_disposes_created_build(self):
+        """A reservation race may not delete the collision target."""
+        result, root, commit = self.invoke_fake_runner("existing-session")
+        build = root / "builds" / ("build-" + commit)
+        session = root / "sessions" / ("session-" + commit)
+        diagnostic = root / "diagnostics" / ("failure-" + commit + ".json")
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertTrue(diagnostic.is_file())
+        self.assertFalse(build.exists())
+        self.assertEqual((session / "foreign-sentinel.txt").read_text(encoding="utf-8"), "do not delete\\n")
 
     def test_fake_tool_hard_failures(self):
         cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification", "pre-argv", "pre-output", "pre-digest", "pre-escape", "real-argv", "real-root")

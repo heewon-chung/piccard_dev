@@ -19,9 +19,13 @@ from pathlib import Path
 try:  # Module execution and unittest package import use different sys.path roots.
     from work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                 sha256_file, snapshot_git_worktree, verify_tree_seal)
+    from work7_run_lifecycle import (ReservationLedger, record_and_apply_failure,
+                                     reserve_owned)
 except ModuleNotFoundError:
     from scripts.work7_evidence import (CapturedBlob, canonical_json_bytes, create_tree_seal,
                                         sha256_file, snapshot_git_worktree, verify_tree_seal)
+    from scripts.work7_run_lifecycle import (ReservationLedger, record_and_apply_failure,
+                                             reserve_owned)
 
 # This is deliberately a literal registry, rather than an inventory-derived set.
 FROZEN_CTESTS = (
@@ -47,7 +51,8 @@ class Parser(argparse.ArgumentParser):
 
 def parser() -> argparse.ArgumentParser:
     value = Parser(add_help=False)
-    for name in ("source-root", "paper-root", "threshold-root", "build-parent", "session-parent"):
+    for name in ("source-root", "paper-root", "threshold-root", "build-parent", "session-parent",
+                 "diagnostic-root"):
         value.add_argument("--" + name, required=True, type=Path)
     value.add_argument("--expected-source-branch", required=True)
     return value
@@ -73,13 +78,21 @@ def git_head(source: Path) -> str:
     return item.stdout.strip()
 
 
-def reserve(parent: Path, name: str) -> Path:
-    target = parent / name
-    try:
-        target.mkdir(mode=0o700)
-    except FileExistsError as error:
-        raise Failure(f"output root already exists: {target}") from error
-    return target
+def require_external_diagnostic_root(diagnostic: Path, guarded: tuple[Path, ...]) -> Path:
+    """Keep the durable failure record outside every mutable runner root."""
+    for protected in guarded:
+        try:
+            diagnostic.relative_to(protected)
+        except ValueError:
+            pass
+        else:
+            raise Failure("diagnostic-root must be outside runner roots")
+        try:
+            protected.relative_to(diagnostic)
+        except ValueError:
+            continue
+        raise Failure("diagnostic-root must be outside runner roots")
+    return diagnostic
 
 
 def executable_digest(argv: tuple[str, ...], cwd: Path) -> str:
@@ -638,6 +651,11 @@ def validate_real_capture(blobs: tuple[tuple[str, CapturedBlob], ...], commit: s
 
 
 def main(argv: list[str] | None = None) -> int:
+    ledger: ReservationLedger | None = None
+    build: Path | None = None
+    session: Path | None = None
+    commit: str | None = None
+    diagnostic_root: Path | None = None
     try:
         args = parser().parse_args(argv)
         source = require_absolute(args.source_root, "source-root")
@@ -645,9 +663,18 @@ def main(argv: list[str] | None = None) -> int:
         threshold = require_absolute(args.threshold_root, "threshold-root")
         build_parent = require_absolute(args.build_parent, "build-parent")
         session_parent = require_absolute(args.session_parent, "session-parent")
+        diagnostic_root = require_external_diagnostic_root(
+            require_absolute(args.diagnostic_root, "diagnostic-root"),
+            (source, paper, threshold, build_parent, session_parent))
         commit = git_head(source)
-        build = reserve(build_parent, "build-" + commit)
-        session = reserve(session_parent, "session-" + commit)
+        diagnostic = diagnostic_root / ("failure-" + commit + ".json")
+        if diagnostic.exists():
+            raise Failure("failure diagnostic exists; use clear_diagnostic before a fresh Phase 0 run")
+        ledger = ReservationLedger(created=[])
+        build = build_parent / ("build-" + commit)
+        session = session_parent / ("session-" + commit)
+        build = reserve_owned(build_parent, "build-" + commit, ledger)
+        session = reserve_owned(session_parent, "session-" + commit, ledger)
         phase0_artifacts = session / "phase0" / "artifacts"
         phase0_artifacts.mkdir(parents=True)
         state = phase0_artifacts / "state.json"
@@ -726,7 +753,30 @@ def main(argv: list[str] | None = None) -> int:
             if snapshot_git_worktree(root)["snapshot_sha256"] != initial[name]["snapshot_sha256"]:
                 raise Failure("external snapshot changed: " + name)
     except (Failure, ValueError, OSError, json.JSONDecodeError) as error:
+        if (ledger is not None and ledger.created and build is not None and session is not None
+                and commit is not None and diagnostic_root is not None):
+            try:
+                record_and_apply_failure(
+                    diagnostic_root=diagnostic_root, build_parent=build_parent,
+                    session_parent=session_parent, build=build, session=session,
+                    commit=commit, kind="execution", packet_sha256=None,
+                    guarded=(source, paper, threshold), ledger=ledger)
+            except (ValueError, OSError, json.JSONDecodeError) as coordinator_error:
+                print(f"run_work7_integration: FAIL: failure coordination failed: {coordinator_error}", file=sys.stderr)
         print(f"run_work7_integration: FAIL: {error}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        if (ledger is not None and ledger.created and build is not None and session is not None
+                and commit is not None and diagnostic_root is not None):
+            try:
+                record_and_apply_failure(
+                    diagnostic_root=diagnostic_root, build_parent=build_parent,
+                    session_parent=session_parent, build=build, session=session,
+                    commit=commit, kind="user-cancel", packet_sha256=None,
+                    guarded=(source, paper, threshold), ledger=ledger)
+            except (ValueError, OSError, json.JSONDecodeError) as coordinator_error:
+                print(f"run_work7_integration: FAIL: failure coordination failed: {coordinator_error}", file=sys.stderr)
+        print("run_work7_integration: FAIL: user interrupted", file=sys.stderr)
         return 2
     print("run_work7_integration: PASS")
     return 0

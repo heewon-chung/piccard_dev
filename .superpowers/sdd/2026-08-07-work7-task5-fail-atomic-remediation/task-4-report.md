@@ -120,3 +120,56 @@ symlink/path-spelling/race matrices, actual-data runs, repeated measurement,
 or integration-runner wiring.  Unit C is responsible for passing the runner's
 real reservation ledger and diagnostic root into this boundary on every caught
 post-reservation failure.
+
+## Unit C — integration-runner lifecycle wiring
+
+`run_work7_integration.py` now requires an absolute, externally located
+`--diagnostic-root`.  It derives the exact `failure-<commit>.json` path before
+reservation and refuses a new invocation while that file exists, naming the
+explicit `clear_diagnostic` action required before a fresh Phase 0 attempt.
+The runner uses one `ReservationLedger` and `reserve_owned` for the exact
+build root followed by the exact session root.  After a partial session
+collision, it records the same canonical nonpublishable execution diagnostic
+and rolls back only the ledger-created build root.  After joint ownership,
+caught execution failures write and stable-validate the external diagnostic
+before the Unit B helper deletes both exact roots.  A caught keyboard interrupt
+is coordinated identically with `user-cancel`; successful runs retain both
+evidence roots and create no diagnostic.
+
+### TDD evidence
+
+RED before runner wiring:
+
+```text
+python3 -m unittest -v \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_post_reservation_failure_is_disposed_then_requires_clear_for_fresh_phase0 \
+  tests.scripts.test_work7_integration_runner.Work7IntegrationRunnerTests.test_partial_session_collision_keeps_foreign_root_and_disposes_created_build
+Ran 2 tests in 1.138s
+FAILED (failures=1, errors=1)
+```
+
+The post-reservation configure failure produced no external diagnostic, and
+the existing-session collision left no diagnostic/rollback proof—the expected
+pre-wiring failures.
+
+GREEN focused rerun:
+
+```text
+Ran 2 tests in 4.257s
+OK
+```
+
+The real fake-tool configure failure proves the exact diagnostic bytes and
+paths, that both generated roots are absent, and that an outside sibling
+sentinel survives.  A second invocation is rejected before reservation until
+the exact diagnostic is removed through `clear_diagnostic`; after clearing and
+repairing the fake tool, a new run succeeds from Phase 0 and retains its build
+and session evidence.  The collision test proves the pre-existing session
+sentinel is retained while only the newly-created build root is rolled back.
+
+### Unit C deferrals
+
+Per the approved PoC override, Unit C does not add an exhaustive injected
+failure matrix, symlink/path-spelling or concurrent-replacement cases,
+actual-data execution, or repeated performance measurements.  The exercised
+normal cases use toy inputs and all measured counts remain one.
