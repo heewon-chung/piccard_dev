@@ -986,6 +986,105 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr.decode())
         self.assertFalse(output.exists())
 
+    def test_capture_phase04_rejects_resealed_extra_and_missing_phase0_through3_members(self):
+        """Every Phase 0--3 manifest has one fixed, complete member set."""
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+        from scripts.work7_review_packet import Failure, capture_phase04
+
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        phases = (
+            ("phase0", "phase0/artifacts", "state.json"),
+            ("runtime", "phase2/runtime", "commands/build.json"),
+            ("candidate", "phase3/candidate-artifacts", "ResponseStrategy.candidate.md"),
+            ("closure", "phase3/closure-artifacts", "claim7-report.json"),
+        )
+
+        def reseal_chain(session: Path) -> None:
+            chain = (
+                ("phase0/seal.json", "phase0/artifacts", "phase0", None),
+                ("phase2/runtime-seal.json", "phase2/runtime", "phase2-runtime-artifacts", "phase0/seal.json"),
+                ("phase2/closure-seal.json", "phase2/closure-artifacts", "phase2-closure", "phase2/runtime-seal.json"),
+                ("phase3/candidate-seal.json", "phase3/candidate-artifacts", "phase3-candidate-artifacts", "phase2/closure-seal.json"),
+                ("phase3/closure-seal.json", "phase3/closure-artifacts", "phase3-closure", "phase3/candidate-seal.json"),
+                ("phase4/work-review-seal.json", "phase4/work-review-artifacts", "phase4-work-review", "phase3/closure-seal.json"),
+            )
+            for seal_relative, root_relative, kind, previous_relative in chain:
+                seal = session / seal_relative
+                seal.unlink()
+                previous = None if previous_relative is None else sha256_file(session / previous_relative)
+                create_tree_seal(session / root_relative, seal, previous, kind)
+
+        for phase, root_relative, missing_relative in phases:
+            for mutation in ("extra", "missing"):
+                with self.subTest(phase=phase, mutation=mutation):
+                    trial = self.temporary / f"resealed-{phase}-{mutation}"
+                    shutil.copytree(self.session, trial)
+                    root = trial / root_relative
+                    if mutation == "extra":
+                        (root / "hostile-extra.txt").write_bytes(b"hostile member\n")
+                    else:
+                        (root / missing_relative).unlink()
+                    reseal_chain(trial)
+                    with self.assertRaises(Failure):
+                        capture_phase04(trial, self.source)
+
+    def test_prepare_final_never_publishes_transient_source_packet_bytes(self):
+        """A restored source file cannot replace the first captured source packet bytes."""
+        from scripts import work7_review_packet
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_work(); work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        expected_capture = capture_phase04(self.session, self.source)
+        target = self.source / "docs/superpowers/specs/2026-08-06-work7-phase0-state-guard-design.md"
+        original, mode = target.read_bytes(), target.stat().st_mode & 0o777
+        foreign = b"transient foreign source packet bytes\n"
+        reached: list[str] = []
+
+        def synchronize(point: str) -> None:
+            if point == "after_first_capture":
+                replacement = target.with_name(target.name + ".foreign")
+                replacement.write_bytes(foreign)
+                os.chmod(replacement, mode)
+                os.replace(replacement, target)
+                reached.append(point)
+            elif point == "before_second_capture":
+                restore = target.with_name(target.name + ".restore")
+                restore.write_bytes(original)
+                os.chmod(restore, mode)
+                os.replace(restore, target)
+                reached.append(point)
+
+        output = self.session / "phase5/final-packet.json"
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = work7_review_packet.main(["prepare-final", "--source-root", str(self.source),
+                                                "--session-root", str(self.session), "--work-review-seal", str(work_seal),
+                                                "--output", str(output)], synchronize=synchronize)
+        self.assertEqual(status, 0, stderr.getvalue())
+        self.assertEqual(reached, ["after_first_capture", "before_second_capture"])
+        value = json.loads(output.read_bytes())
+        member = next(item for item in value["members"]
+                      if item["path"] == "phase5/members/source/docs/superpowers/specs/2026-08-06-work7-phase0-state-guard-design.md")
+        published = self.session / member["path"]
+        self.assertEqual(published.read_bytes(), original)
+        self.assertNotEqual(published.read_bytes(), foreign)
+        self.assertEqual(member["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(published.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        for relative, blob in expected_capture.source_packet_members:
+            path = self.session / "phase5/members/source" / relative
+            self.assertEqual(path.read_bytes(), blob.raw)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        diff = self.session / "phase5/members/source/git-diff-b907fae-to-head.patch"
+        self.assertEqual(diff.read_bytes(), expected_capture.baseline_diff_raw.raw)
+        self.assertEqual(diff.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(any(name.startswith("@source/") for name, _ in expected_capture.packet_members))
+        self.assertFalse(any("@source/" in item["path"] for item in value["members"]))
+
     def test_prepare_final_revalidates_phase4_after_runtime_validation(self):
         """A Phase 4 replacement after its first validation cannot enter the final packet."""
         from scripts import work7_review_packet

@@ -405,3 +405,66 @@ bindings, and independently validate the captured runtime evidence index
 against the owning captured seal members.  The generic count screen remains in
 both producer paths, preserving exactly-one trials/accuracy-trials/
 refresh-updates and rejecting actual-data artifacts.
+
+## Unit E — exact prerequisite manifests and source/diff capture equality
+
+### Finding A — exact manifest sets
+
+`capture_phase04` now supplies complete fixed member sets to every Phase 0--4
+seal capture: Phase 0 state, the full Phase 2 runtime graph, Phase 2 closure,
+Phase 3 candidate, Phase 3 closure, and Phase 4 review.  This closes the three
+remaining acceptance paths for a self-consistently resealed runtime, candidate,
+or claim-7 closure graph with an added member; the existing Phase 0, Phase 2
+closure, and Phase 4 fixed sets are now expressed through the same constants.
+
+The real-filesystem hostile regression makes an extra and a missing member for
+each Phase 0--3 root, reseals the entire predecessor chain (including Phase 4),
+and requires `capture_phase04` to reject it.  It does not assert source text or
+mock invocation counts.
+
+### Finding B — source/diff capture equality
+
+`Phase04Capture` now retains every final packet source member and the baseline
+Git diff as immutable captured blobs.  The contract blob is the same captured
+source-member blob, and those new fields participate in the dataclass equality
+used for the complete second capture.  `prepare_final` constructs all source
+and diff members exclusively from these first-capture blobs; it does not reopen
+a source packet path or regenerate the diff after capture.  The existing
+private `@source/` summarizer and fixture blobs stay in `packet_members` for
+validation/equality only and are never emitted as Phase 5 packet members.
+
+The new `after_first_capture` synchronization point supports a deterministic
+filesystem race regression.  It atomically replaces a source design after the
+first complete capture, restores the original before the second capture, and
+requires the final member to contain the verified original bytes, never the
+transient bytes.  The same test checks every source member and diff against the
+captured blobs, verifies safe `0600` packet/member output modes, and verifies
+that no private namespace is emitted.
+
+### TDD evidence and verification
+
+RED before the Unit E implementation:
+
+```text
+python3 -m unittest -v \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_capture_phase04_rejects_resealed_extra_and_missing_phase0_through3_members \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_never_publishes_transient_source_packet_bytes
+```
+
+Observed `Ran 2 tests in 18.114s`, `FAILED (failures=5)`: self-consistently
+resealed runtime extra/missing and Phase 3 candidate/closure extra manifests
+were accepted; the source test observed only `before_second_capture`, proving
+the required first-capture race boundary did not exist.
+
+Focused GREEN after the minimal implementation ran the same command and
+observed `Ran 2 tests in 16.701s`, `OK`.
+
+Fresh owned-suite verification:
+
+```text
+python3 -W ignore::ResourceWarning -m unittest -q tests.scripts.test_work7_review_packet
+# Ran 41 tests in 494.477s — OK
+
+python3 -W error::ResourceWarning -m unittest -v tests.scripts.test_work7_state_guard
+# Ran 23 tests in 7.182s — OK
+```

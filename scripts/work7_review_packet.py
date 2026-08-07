@@ -51,6 +51,47 @@ WORK_SESSION_MEMBERS = (
     "phase3/candidate-artifacts/candidate-metadata.json", "phase3/candidate-artifacts/candidate-validation.json",
     "phase0/artifacts/state.json",
 )
+PHASE0_SEAL_MEMBERS = frozenset({"state.json"})
+PHASE2_RUNTIME_SEAL_MEMBERS = frozenset({
+    "commands/build.json", "commands/build.stderr.txt", "commands/build.stdout.txt",
+    "commands/configure.json", "commands/configure.stderr.txt", "commands/configure.stdout.txt",
+    "commands/ctest-focused.json", "commands/ctest-focused.stderr.txt", "commands/ctest-focused.stdout.txt",
+    "commands/ctest-inventory.json", "commands/ctest-inventory.stderr.txt", "commands/ctest-inventory.stdout.txt",
+    "commands/deletion-survival.json", "commands/deletion-survival.stderr.txt", "commands/deletion-survival.stdout.txt",
+    "commands/phase0-guard.json", "commands/phase0-guard.stderr.txt", "commands/phase0-guard.stdout.txt",
+    "commands/pre-threshold.json", "commands/pre-threshold.stderr.txt", "commands/pre-threshold.stdout.txt",
+    "commands/real-datasets.json", "commands/real-datasets.stderr.txt", "commands/real-datasets.stdout.txt",
+    "commands/static.json", "commands/static.stderr.txt", "commands/static.stdout.txt",
+    "commands/verify-real-datasets.json", "commands/verify-real-datasets.stderr.txt", "commands/verify-real-datasets.stdout.txt",
+    "evidence-index.json", "pre-threshold/csv/toy-0.csv", "pre-threshold/csv/toy-1.csv",
+    "pre-threshold/csv/toy-2.csv", "pre-threshold/logs/toy-0.log", "pre-threshold/logs/toy-1.log",
+    "pre-threshold/logs/toy-2.log", "pre-threshold/manifest.json", "pre-threshold/terminal-cells.tsv",
+    "pre-threshold/timing.csv", "pre-threshold/traces/toy-0.bin", "pre-threshold/workloads/toy-0.bin",
+    "real-datasets/csv/real_accuracy_dblp_acm_u65536.csv",
+    "real-datasets/csv/real_accuracy_summary_dblp_acm_u65536.csv",
+    "real-datasets/csv/real_timing_dblp_acm_u65536_toy-smoke.csv",
+    "real-datasets/input_manifests/dblp_acm_u65536/dataset.manifest.tsv",
+    "real-datasets/input_manifests/dblp_acm_u65536/source.manifest.tsv", "real-datasets/run.log",
+    "real-datasets/run_metadata.tsv", "real-datasets/system_info.txt", "real-datasets/verification_status.tsv",
+    "real-datasets/workloads/accuracy_dblp_acm_u65536.manifest.tsv",
+    "real-datasets/workloads/accuracy_dblp_acm_u65536.rows.tsv",
+    "real-datasets/workloads/timing_dblp_acm_u65536_toy-smoke.manifest.tsv", "static-report.json",
+})
+PHASE2_CLOSURE_SEAL_MEMBERS = frozenset({
+    "evidence-bound-report.json", "commands/evidence-bound.json", "commands/evidence-bound.stderr.txt",
+    "commands/evidence-bound.stdout.txt",
+})
+PHASE3_CANDIDATE_SEAL_MEMBERS = frozenset({
+    "ResponseStrategy.candidate.md", "ResponseStrategy.candidate.diff", "candidate-metadata.json",
+    "candidate-validation.json",
+})
+PHASE3_CLOSURE_SEAL_MEMBERS = frozenset({
+    "claim7-command.json", "claim7-report.json", "claim7.stderr.txt", "claim7.stdout.txt",
+})
+PHASE4_SEAL_MEMBERS = frozenset({"work-packet.json", "raw-review.txt"})
+SOURCE_PACKET_MEMBERS = DESIGNS + (
+    PLAN, "scripts/work7_claims.json", "docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md",
+)
 
 
 class Failure(ValueError):
@@ -62,6 +103,8 @@ class Phase04Capture:
     commit: str
     state_raw: CapturedBlob
     contract_raw: CapturedBlob
+    source_packet_members: tuple[tuple[str, CapturedBlob], ...]
+    baseline_diff_raw: CapturedBlob
     ctest_inventory_raw: CapturedBlob
     seals: tuple[tuple[str, CapturedTreeSeal], ...]
     packet_members: tuple[tuple[str, CapturedBlob], ...]
@@ -211,6 +254,10 @@ def _captured_file(path: Path, label: str) -> CapturedBlob:
                         mode=format(stat.S_IMODE(info.st_mode), "04o"))
 
 
+def _captured_bytes(raw: bytes, mode: str = "0600") -> CapturedBlob:
+    return CapturedBlob(raw=raw, sha256=_sha256_bytes(raw), size=len(raw), mode=mode)
+
+
 def _canonical_blob(blob: CapturedBlob, label: str) -> dict:
     try:
         value = json.loads(blob.raw)
@@ -269,7 +316,7 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     """
     try:
         phase0 = capture_tree_seal(session / "phase0/seal.json", None, "phase0",
-                                   session / "phase0/artifacts", {"state.json"})
+                                   session / "phase0/artifacts", PHASE0_SEAL_MEMBERS)
     except (OSError, ValueError) as error:
         raise Failure("invalid or tampered Phase 0 seal") from error
     state_raw = dict(phase0.members)["state.json"]
@@ -301,7 +348,8 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
 
     try:
         runtime_seal = capture_tree_seal(session / "phase2/runtime-seal.json", phase0.blob.sha256,
-                                         "phase2-runtime-artifacts", session / "phase2/runtime")
+                                         "phase2-runtime-artifacts", session / "phase2/runtime",
+                                         PHASE2_RUNTIME_SEAL_MEMBERS)
     except (OSError, ValueError) as error:
         raise Failure("invalid or tampered prerequisite seal") from error
     order = (
@@ -326,10 +374,11 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     previous = seals[-1][1].blob.sha256
     for relative, kind, root, expected in (
         ("phase2/closure-seal.json", "phase2-closure", "phase2/closure-artifacts",
-         {"evidence-bound-report.json", "commands/evidence-bound.json", "commands/evidence-bound.stderr.txt", "commands/evidence-bound.stdout.txt"}),
-        ("phase3/candidate-seal.json", "phase3-candidate-artifacts", "phase3/candidate-artifacts", None),
-        ("phase3/closure-seal.json", "phase3-closure", "phase3/closure-artifacts", None),
-        ("phase4/work-review-seal.json", "phase4-work-review", "phase4/work-review-artifacts", {"work-packet.json", "raw-review.txt"}),
+         PHASE2_CLOSURE_SEAL_MEMBERS),
+        ("phase3/candidate-seal.json", "phase3-candidate-artifacts", "phase3/candidate-artifacts",
+         PHASE3_CANDIDATE_SEAL_MEMBERS),
+        ("phase3/closure-seal.json", "phase3-closure", "phase3/closure-artifacts", PHASE3_CLOSURE_SEAL_MEMBERS),
+        ("phase4/work-review-seal.json", "phase4-work-review", "phase4/work-review-artifacts", PHASE4_SEAL_MEMBERS),
     ):
         try:
             seal = capture_tree_seal(session / relative, previous, kind, session / root, expected)
@@ -353,7 +402,13 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     static = all_members.get("phase2/static-report.json")
     if runtime_static is None or static is None or runtime_static.raw != static.raw:
         raise Failure("Phase 2 static report is not the sealed runtime copy")
-    contract_raw = _captured_file(source / "scripts/work7_claims.json", "claim contract")
+    source_packet_members = tuple(sorted(
+        ((relative, _captured_file(source / relative, "source packet member")) for relative in SOURCE_PACKET_MEMBERS),
+        key=lambda item: item[0],
+    ))
+    source_member_map = dict(source_packet_members)
+    contract_raw = source_member_map["scripts/work7_claims.json"]
+    baseline_diff_raw = _captured_bytes(git_diff(source, "b907fae"))
     # The real-data metadata binds the summarizer digest.  Retain its exact
     # source bytes in the capture graph; this private namespace is consumed
     # only by byte validators and is never a Phase 5 packet member.
@@ -381,6 +436,7 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
             threshold_snapshot_raw != canonical_json_bytes(state["threshold"])):
         raise Failure("Phase 0 snapshot changed")
     return Phase04Capture(commit=commit, state_raw=state_raw, contract_raw=contract_raw,
+                          source_packet_members=source_packet_members, baseline_diff_raw=baseline_diff_raw,
                           ctest_inventory_raw=inventory_raw, seals=tuple(seals),
                           packet_members=tuple(sorted(all_members.items())), build_binaries=tuple(binaries),
                           phase4_packet=phase4_packet, phase4_review=phase4_review,
@@ -1033,6 +1089,8 @@ def prepare_final(args: argparse.Namespace, synchronize: Callable[[str], None] |
         raise Failure("final packet output collision")
     capture = capture_phase04(session, source)
     runtime = validate_phase2_runtime_capture(capture)
+    if synchronize is not None:
+        synchronize("after_first_capture")
     state = _canonical_blob(capture.state_raw, "Phase 0 state")
     seals = {relative: seal.blob.sha256 for relative, seal in capture.seals}
     phase4_packet_value = _canonical_blob(capture.phase4_packet, "work packet")
@@ -1053,9 +1111,10 @@ def prepare_final(args: argparse.Namespace, synchronize: Callable[[str], None] |
         "deletion_survival": runtime.deletion_survival}, "measured_count_policy": "PASS",
         "external_snapshot_equality": True, "performance_state": "PERFORMANCE_PENDING"})
     sources: list[tuple[str, bytes]] = []
-    for relative in DESIGNS + (PLAN, "scripts/work7_claims.json", "docs/superpowers/specs/2026-07-29-pre-threshold-poc-design.md"):
-        sources.append(("source/" + relative, _captured_file(source / relative, "source packet member").raw))
-    sources.append(("source/git-diff-b907fae-to-head.patch", git_diff(source, "b907fae")))
+    source_members = dict(capture.source_packet_members)
+    for relative in SOURCE_PACKET_MEMBERS:
+        sources.append(("source/" + relative, source_members[relative].raw))
+    sources.append(("source/git-diff-b907fae-to-head.patch", capture.baseline_diff_raw.raw))
     member_map = _captured_member_map(capture)
     seal_map = dict(capture.seals)
     for relative in WORK_SESSION_MEMBERS:
