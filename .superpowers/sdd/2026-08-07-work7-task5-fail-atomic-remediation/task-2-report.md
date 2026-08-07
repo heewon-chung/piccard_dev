@@ -297,3 +297,26 @@ Observed focused tests: all three `ok`; state-guard output streamed all listed
 tests as `ok` before runner completion.  The remaining full producer schema
 port (notably exact argv/artifact-field parity for every path-validator branch)
 remains outside this partial Unit D change.
+
+### Unit D round 2b
+
+Corrected the hostile producer tests to feed exactly the production filtered
+`pre_blobs`/`real_blobs`, and to establish the unmodified captured baseline
+before applying each mutation.  This exposed a real pre-threshold RED: deleting
+`terminal_cells` and a referenced output digest passed the old captured-byte
+validator.  The validator now enforces the complete top-level manifest key
+set, directories/thread policy, terminal TSV identity/digest/header, exact
+producer/output schemas, and every referenced output blob SHA-256.
+
+Focused RED/GREEN command:
+
+```text
+python3 -m unittest \
+ tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_prethreshold_validator_rejects_missing_terminal_and_output_bindings \
+ tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings -v
+```
+
+RED: prethreshold assertion `Failure not raised` (real baseline/mutation inputs
+were filtered exactly as production).  GREEN: both tests `ok`; `Ran 2 tests in
+16.983s`; `OK`.  Full per-cell argv/provenance and flattened real metadata
+parity remains to be ported.

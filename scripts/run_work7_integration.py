@@ -489,8 +489,38 @@ def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], c
         captured = values.get("@build/" + name)
         if not isinstance(record, dict) or captured is None or record.get("path") != build + "/" + name or record.get("sha256") != captured.sha256:
             raise Failure("invalid pre-threshold binary binding")
+    if set(manifest) != {"schema", "suite", "seed", "repetitions", "classification", "thread_policy", "profiles", "source", "build", "machine", "directories", "cells", "terminal_cells"}:
+        raise Failure("invalid pre-threshold manifest schema")
+    if manifest.get("directories") != {"csv": "csv", "workloads": "workloads", "traces": "traces", "logs": "logs"} or manifest.get("thread_policy") != {"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "2"}:
+        raise Failure("invalid pre-threshold manifest identity")
     if not isinstance(manifest.get("cells"), list) or len(manifest["cells"]) != 3:
         raise Failure("invalid pre-threshold cells")
+    terminal = manifest.get("terminal_cells")
+    if not isinstance(terminal, dict) or set(terminal) != {"path", "row_count", "sha256"} or terminal.get("path") != "terminal-cells.tsv" or terminal.get("row_count") != 3:
+        raise Failure("missing pre-threshold terminal cells")
+    terminal_blob = values.get("phase2/runtime/pre-threshold/" + terminal["path"])
+    if terminal_blob is None or terminal_blob.sha256 != terminal.get("sha256"):
+        raise Failure("invalid pre-threshold terminal cells")
+    try:
+        terminal_rows = list(csv.reader(StringIO(terminal_blob.raw.decode("utf-8", "strict")), delimiter="\t", strict=True))
+    except (UnicodeError, csv.Error) as error:
+        raise Failure("invalid pre-threshold terminal cells") from error
+    if len(terminal_rows) != 4 or terminal_rows[0] != "schema_version\tcell_id\tprofile_id\tproducer\tparameter_sha256\tstatus\treason_code\trequired_bits\tavailable_bits\tshortfall_bits\tlog_sha256".split("\t"):
+        raise Failure("invalid pre-threshold terminal cells")
+    expected_outputs = {"bench_review_comparison": {"csv", "csv_sha256", "log", "log_sha256", "workload", "workload_sha256", "trace", "trace_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
+                        "bench_piccard": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
+                        "bench_dynamic": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"}}
+    if {row.get("producer") for row in manifest["cells"] if isinstance(row, dict)} != set(expected_outputs):
+        raise Failure("invalid pre-threshold cells")
+    for row in manifest["cells"]:
+        if not isinstance(row, dict) or not isinstance(row.get("output"), dict) or set(row["output"]) != expected_outputs.get(row.get("producer"), set()):
+            raise Failure("invalid pre-threshold output schema")
+        for key, relative in row["output"].items():
+            if key.endswith("_sha256") or key in {"expected_csv_rows", "csv_row_count", "measurement_output"}:
+                continue
+            target = values.get("phase2/runtime/pre-threshold/" + str(relative))
+            if target is None or target.sha256 != row["output"].get(key + "_sha256"):
+                raise Failure("invalid pre-threshold artifact digest")
     validate_record_counts_capture(blobs)
     return values["phase2/runtime/pre-threshold/manifest.json"].sha256
 

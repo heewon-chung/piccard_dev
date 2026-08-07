@@ -371,9 +371,13 @@ class Work7ReviewPacketTests(unittest.TestCase):
         raw = json.dumps(value).encode()
         blobs["phase2/runtime/pre-threshold/manifest.json"] = CapturedBlob(raw, hashlib.sha256(raw).hexdigest(), len(raw), "0644")
         blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
+        baseline = tuple((path, blob) for path, blob in dict(capture.packet_members).items()
+                         if path.startswith("phase2/runtime/pre-threshold/")) + tuple(("@build/" + name, blob) for name, blob in capture.build_binaries)
+        argv = tuple(json.loads(dict(capture.packet_members)["phase2/runtime/commands/pre-threshold.json"].raw)["argv"])
+        validate_prethreshold_capture(baseline, capture.commit, argv, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
+        blobs = {path: blob for path, blob in blobs.items() if path.startswith("phase2/runtime/pre-threshold/") or path.startswith("@build/")}
         with self.assertRaises(Failure):
-            validate_prethreshold_capture(tuple(blobs.items()), capture.commit,
-                                          tuple(json.loads(dict(capture.packet_members)["phase2/runtime/commands/pre-threshold.json"].raw)["argv"]),
+            validate_prethreshold_capture(tuple(blobs.items()), capture.commit, argv,
                                           str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
 
     def test_captured_real_validator_rejects_missing_root_artifact_cell_and_digest_bindings(self):
@@ -393,6 +397,10 @@ class Work7ReviewPacketTests(unittest.TestCase):
         status = b"key\tvalue\nschema_version\tpiccard-real-verification-v1\nrun_metadata_sha256\t" + digest.encode() + b"\nstatus\tVERIFIED\n"
         blobs["phase2/runtime/real-datasets/verification_status.tsv"] = CapturedBlob(status, hashlib.sha256(status).hexdigest(), len(status), "0644")
         blobs.update({"@build/" + name: blob for name, blob in capture.build_binaries})
+        baseline = tuple((path, blob) for path, blob in dict(capture.packet_members).items()
+                         if path.startswith("phase2/runtime/real-datasets/")) + tuple(("@build/" + name, blob) for name, blob in capture.build_binaries)
+        validate_real_capture(baseline, capture.commit, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
+        blobs = {path: blob for path, blob in blobs.items() if path.startswith("phase2/runtime/real-datasets/") or path.startswith("@build/")}
         with self.assertRaises(Failure):
             validate_real_capture(tuple(blobs.items()), capture.commit, str(self.source), str(self.temporary / "builds" / ("build-" + self.commit)))
 
