@@ -166,6 +166,103 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertFalse((self.session / "phase5/members").exists())
         return result[0]
 
+    def _phase5_snapshot(self) -> tuple[tuple[str, str, int, bytes], ...]:
+        phase5 = self.session / "phase5"
+        if not phase5.exists():
+            return ()
+        result = []
+        for path in sorted(phase5.rglob("*")):
+            info = path.lstat()
+            if path.is_file() and not path.is_symlink():
+                result.append((path.relative_to(phase5).as_posix(), "file", info.st_mode & 0o777, path.read_bytes()))
+            elif path.is_dir() and not path.is_symlink():
+                result.append((path.relative_to(phase5).as_posix(), "directory", info.st_mode & 0o777, b""))
+            else:
+                result.append((path.relative_to(phase5).as_posix(), "other", info.st_mode & 0o777, b""))
+        return tuple(result)
+
+    def _prepare_final_with_member_collision(self, relative: str) -> subprocess.CompletedProcess[bytes]:
+        """Create a real packet-member collision only after publication starts."""
+        packet = self.prepare_work()
+        seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        root = self.session / "phase5/members"
+        target = root / relative
+        injected = threading.Event()
+
+        def collide() -> None:
+            for _ in range(5000):
+                if root.is_dir():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"collision sentinel\n")
+                    injected.set()
+                    return
+                threading.Event().wait(0.001)
+
+        worker = threading.Thread(target=collide)
+        worker.start()
+        result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                              "--work-review-seal", str(seal), "--output", str(self.session / "phase5/final-packet.json"))
+        worker.join(timeout=10)
+        self.assertTrue(injected.is_set(), "collision worker did not synchronize with publication")
+        return result
+
+    def test_prepare_final_rolls_back_ordinary_member_collision_after_publication_starts(self):
+        """A late ordinary-member collision leaves Phase 5 exactly as it was."""
+        before = self._phase5_snapshot()
+        result = self._prepare_final_with_member_collision("session/phase2/static-report.json")
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertEqual(self._phase5_snapshot(), before)
+
+    def test_prepare_final_rolls_back_generated_member_collision_after_ordinary_members(self):
+        """A generated-member collision removes all previously published members."""
+        before = self._phase5_snapshot()
+        result = self._prepare_final_with_member_collision("generated/works1-6-source-test-map.json")
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertEqual(self._phase5_snapshot(), before)
+
+    def test_capture_phase04_seal_swap_fails_second_capture_without_phase5_output(self):
+        """A transient prerequisite-seal replacement cannot enter a later capture."""
+        from scripts.work7_review_packet import Failure, capture_phase04, validate_phase2_runtime_capture
+
+        packet = self.prepare_work()
+        work = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work)).returncode, 0)
+        first = capture_phase04(self.session, self.source)
+        seal = self.session / "phase2/runtime-seal.json"
+        original, mode = seal.read_bytes(), seal.stat().st_mode & 0o777
+        foreign = seal.with_name("runtime-seal.foreign")
+        foreign.write_bytes(b'{"foreign":true}\n')
+        os.chmod(foreign, mode)
+        os.replace(foreign, seal)
+        with self.assertRaises(Failure):
+            capture_phase04(self.session, self.source)
+        # Runtime validation consumes only first's retained blobs while the
+        # live predecessor path remains foreign.
+        self.assertEqual(validate_phase2_runtime_capture(first).focused_pass_count, 28)
+        restore = seal.with_name("runtime-seal.restore")
+        restore.write_bytes(original)
+        os.chmod(restore, mode)
+        os.replace(restore, seal)
+        self.assertFalse((self.session / "phase5/members").exists())
+
+    def test_prepare_final_preserves_preexisting_output_collision_sentinel(self):
+        """An existing packet target is never overwritten or removed by cleanup."""
+        packet = self.prepare_work()
+        seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(seal)).returncode, 0)
+        output = self.session / "phase5/final-packet.json"
+        output.parent.mkdir(exist_ok=True)
+        output.write_bytes(b"pre-existing packet sentinel\n")
+        before = self._phase5_snapshot()
+        result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                              "--work-review-seal", str(seal), "--output", str(output))
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertEqual(self._phase5_snapshot(), before)
+
     def test_runtime_semantics_use_captured_producer_bytes_while_live_member_is_foreign(self):
         """A live producer replacement must not affect byte-only semantic validation."""
         from scripts.work7_review_packet import RuntimeSummary

@@ -298,10 +298,14 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     build = validate_canonical_build_root(state["build"].get("root"), commit,
                                           (source, recorded_paper, recorded_threshold, session), state["build"].get("root"))
 
+    try:
+        runtime_seal = capture_tree_seal(session / "phase2/runtime-seal.json", phase0.blob.sha256,
+                                         "phase2-runtime-artifacts", session / "phase2/runtime")
+    except (OSError, ValueError) as error:
+        raise Failure("invalid or tampered prerequisite seal") from error
     order = (
         ("phase0/seal.json", phase0),
-        ("phase2/runtime-seal.json", capture_tree_seal(session / "phase2/runtime-seal.json", phase0.blob.sha256,
-                                                         "phase2-runtime-artifacts", session / "phase2/runtime")),
+        ("phase2/runtime-seal.json", runtime_seal),
         ("phase2/closure-seal.json", None),
         ("phase3/candidate-seal.json", None),
         ("phase3/closure-seal.json", None),
@@ -993,6 +997,7 @@ def prepare_final(args: argparse.Namespace) -> None:
         raise Failure("Phase 0--4 evidence changed during final packet preparation")
     members: list[dict] = []
     created_root = False
+    created_output = False
     try:
         root.mkdir(parents=True, mode=0o700)
         created_root = True
@@ -1005,8 +1010,9 @@ def prepare_final(args: argparse.Namespace) -> None:
             elif label == "external/current-threshold-state.json":
                 members[-1]["label"] = "current-threshold-state"
         _atomic_create(output, packet_bytes("final", capture.commit, seals, members))
+        created_output = True
     except Exception:
-        if output.exists() and output.is_file():
+        if created_output and output.exists() and output.is_file():
             output.unlink()
         if created_root:
             shutil.rmtree(root, ignore_errors=True)

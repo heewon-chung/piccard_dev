@@ -126,3 +126,43 @@ at `09f90a3` and never committed:
 The seal-member regression checks the fixed captured predecessor blobs and
 their final packet entries directly.  A dedicated concurrent live-seal swap
 stress case remains for the later rollback/fault-matrix unit.
+
+## Unit B — seal race and fail-atomic publication
+
+Added filesystem-race regressions with exact recursive Phase 5 snapshots:
+
+* An ordinary `session/phase2/static-report.json` collision is created by a
+  polling worker only after `phase5/members` exists.  `prepare-final` exits 2
+  and removes every member it created.
+* A later generated-member collision at
+  `generated/works1-6-source-test-map.json` likewise exits 2 and restores the
+  exact pre-call path/type/mode/byte snapshot.
+* A live `phase2/runtime-seal.json` replacement makes a subsequent complete
+  capture fail while validation of the already captured graph still succeeds;
+  the foreign seal never enters Phase 5.
+* A pre-existing output collision sentinel survives an attempted prepare-final
+  unchanged, including its bytes and file mode.
+
+The seal-swap regression exposed a production gap: the initial runtime-seal
+capture was evaluated outside the normal error translation and leaked
+`ValueError`.  `capture_phase04` now converts it to the single fail-closed
+`Failure` used by the CLI and callers.
+
+Serial GREEN command:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_ordinary_member_collision_after_publication_starts \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_rolls_back_generated_member_collision_after_ordinary_members \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_capture_phase04_seal_swap_fails_second_capture_without_phase5_output \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_prepare_final_preserves_preexisting_output_collision_sentinel -v
+```
+
+Observed output: four `ok`; `Ran 4 tests in 29.251s`; `OK`.
+
+Remaining Unit B scope not yet demonstrated: a deterministic packet-creation
+failure after member publication and a direct `prepare-final` second-capture
+mismatch after all prospective bytes are assembled.  The production path has
+the second-capture compare and exclusive creation ledger, but those two
+specific real-filesystem fault injections need a non-mock synchronization
+point to be fully observable.
