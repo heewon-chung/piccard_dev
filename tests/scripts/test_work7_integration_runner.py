@@ -267,7 +267,12 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
                 q=b/'bench_real_datasets'; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
                 for name in ('bench_review_comparison','bench_piccard','bench_dynamic'):
                     q=b/name; q.write_text('#!/bin/sh\\nexit 0\\n'); q.chmod(0o755)
-                print('OpenFHE GMP GTest' if __import__('os').environ.get('FAKE_FAULT') == 'dependency' else 'OpenFHE GMP GTest Python3')
+                fault=__import__('os').environ.get('FAKE_FAULT')
+                if fault == 'dependency': print('GMP GTest Python3')
+                elif fault == 'dependency-gmp': print('OpenFHE GTest Python3')
+                elif fault == 'dependency-gtest': print('OpenFHE GMP Python3')
+                elif fault == 'configure-no-python': print('OpenFHE GMP GTest')
+                else: print('OpenFHE GMP GTest Python3')
                 if os.environ.get('FAKE_FAULT') == 'configure-fail': raise SystemExit(9)
         """)
         self.write(fakebin / "ctest", """
@@ -500,8 +505,19 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertEqual((session / "foreign-sentinel.txt").read_text(encoding="utf-8"), "do not delete\\n")
 
     def test_fake_tool_hard_failures(self):
-        cases = ("existing-build", "existing-session", "dirty", "dependency", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification", "pre-argv", "pre-output", "pre-digest", "pre-escape", "real-argv", "real-root")
+        cases = ("existing-build", "existing-session", "dirty", "missing", "skip", "count2", "warmup", "unlabelled", "actual", "malformed", "foreign", "tamper", "drift", "threshold-drift", "stale-verification", "pre-argv", "pre-output", "pre-digest", "pre-escape", "real-argv", "real-root")
         for fault in cases:
+            with self.subTest(fault=fault):
+                result, _, _ = self.invoke_fake_runner(fault)
+                self.assertEqual(result.returncode, 2, result.stderr.decode())
+
+    def test_configure_dependencies_do_not_require_python_log_output(self):
+        """CMake discovery evidence is complete without a Python status line."""
+        result, _, _ = self.invoke_fake_runner("configure-no-python")
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_configure_rejects_missing_required_cmake_dependencies(self):
+        for fault in ("dependency", "dependency-gmp", "dependency-gtest"):
             with self.subTest(fault=fault):
                 result, _, _ = self.invoke_fake_runner(fault)
                 self.assertEqual(result.returncode, 2, result.stderr.decode())

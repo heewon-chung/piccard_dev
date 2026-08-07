@@ -691,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
                      "-DBUILD_TESTS=ON", "-DBUILD_BENCHMARKS=ON")
         configure_log = checked_command(configure, source, commands, "configure")
         text = configure_log.read_text(errors="replace").lower()
-        if any(name not in text for name in ("openfhe", "gmp", "gtest", "python")):
+        if any(name not in text for name in ("openfhe", "gmp", "gtest")):
             raise Failure("configure evidence missing required dependency")
         checked_command(("cmake", "--build", str(build), "--parallel", "2"), source, commands, "build")
         inventory = checked_command(("ctest", "--test-dir", str(build), "-N"), source, commands, "ctest-inventory")
