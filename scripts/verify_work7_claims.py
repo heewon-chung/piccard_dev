@@ -265,7 +265,7 @@ def _terminal_imports():
                                                  captured_generated_member_bytes, expected_member_paths,
                                                  expected_member_tuples, parse_review_bytes,
                                                  validate_phase2_runtime_capture, DESIGNS, PLAN,
-                                                 PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
+                                                 PHASE0_SEAL_MEMBERS, _runtime_expected_members,
                                                  PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
                                                  PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
                                                  SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
@@ -276,7 +276,7 @@ def _terminal_imports():
                                          captured_generated_member_bytes, expected_member_paths,
                                          expected_member_tuples, parse_review_bytes,
                                          validate_phase2_runtime_capture, DESIGNS, PLAN,
-                                         PHASE0_SEAL_MEMBERS, PHASE2_RUNTIME_SEAL_MEMBERS,
+                                         PHASE0_SEAL_MEMBERS, _runtime_expected_members,
                                          PHASE2_CLOSURE_SEAL_MEMBERS, PHASE3_CANDIDATE_SEAL_MEMBERS,
                                          PHASE3_CLOSURE_SEAL_MEMBERS, PHASE4_SEAL_MEMBERS,
                                          SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
@@ -285,7 +285,7 @@ def _terminal_imports():
             _validate_captured_contract_sources, captured_generated_member_bytes,
             expected_member_paths, expected_member_tuples, parse_review_bytes,
             validate_phase2_runtime_capture, DESIGNS, PLAN, PHASE0_SEAL_MEMBERS,
-            PHASE2_RUNTIME_SEAL_MEMBERS, PHASE2_CLOSURE_SEAL_MEMBERS,
+            _runtime_expected_members, PHASE2_CLOSURE_SEAL_MEMBERS,
             PHASE3_CANDIDATE_SEAL_MEMBERS, PHASE3_CLOSURE_SEAL_MEMBERS,
             PHASE4_SEAL_MEMBERS, SOURCE_PACKET_MEMBERS, WORK_SESSION_MEMBERS,
             _PUBLIC_SOURCE_PREFIX, _PUBLIC_DIFF_MEMBER)
@@ -335,6 +335,10 @@ def terminal_report_bytes(inputs: TerminalInputs) -> bytes:
     previous = None
     expected_kinds = ("phase0", "phase2-runtime-artifacts", "phase2-closure", "phase3-candidate-artifacts",
                       "phase3-closure", "phase4-work-review")
+    try:
+        runtime_members_expected = runtime_members_expected(seals["phase2/runtime-seal.json"].members)
+    except ValueError as error:
+        raise Failure("captured runtime seal has no complete production member set") from error
     expected_seal_members = (phase0_members, runtime_members_expected, closure_members,
                              candidate_members, claim7_members, phase4_members_expected)
     phase0_root = Path(seals["phase0/seal.json"].artifact_root)

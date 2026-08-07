@@ -1264,6 +1264,68 @@ assert verify_work7_claims.CapturedBlob is package_blob
                     with self.assertRaises(Failure):
                         capture_phase04(trial, self.source)
 
+    def test_capture_phase04_accepts_production_named_runtime_members_and_rejects_member_drift(self):
+        """Runtime membership is derived from sealed producer records, not fixture toy names."""
+        from scripts.work7_evidence import create_tree_seal, sha256_file
+        from scripts.work7_review_packet import Failure, capture_phase04
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+
+        def reseal_chain(session: Path) -> None:
+            for seal_relative, root_relative, kind, previous_relative in (
+                ("phase0/seal.json", "phase0/artifacts", "phase0", None),
+                ("phase2/runtime-seal.json", "phase2/runtime", "phase2-runtime-artifacts", "phase0/seal.json"),
+                ("phase2/closure-seal.json", "phase2/closure-artifacts", "phase2-closure", "phase2/runtime-seal.json"),
+                ("phase3/candidate-seal.json", "phase3/candidate-artifacts", "phase3-candidate-artifacts", "phase2/closure-seal.json"),
+                ("phase3/closure-seal.json", "phase3/closure-artifacts", "phase3-closure", "phase3/candidate-seal.json"),
+                ("phase4/work-review-seal.json", "phase4/work-review-artifacts", "phase4-work-review", "phase3/closure-seal.json"),
+            ):
+                seal = session / seal_relative
+                seal.unlink()
+                previous = None if previous_relative is None else sha256_file(session / previous_relative)
+                create_tree_seal(session / root_relative, seal, previous, kind)
+
+        runtime = self.session / "phase2/runtime"
+        manifest_path = runtime / "pre-threshold/manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        for cell in manifest["cells"]:
+            producer, digest = cell["producer"], cell["parameter_sha256"]
+            for field, directory, suffix in (("csv", "csv", ".csv"), ("log", "logs", ".log"),
+                                             ("workload", "workloads", ".manifest.tsv"), ("trace", "traces", ".bin")):
+                if field not in cell["output"]:
+                    continue
+                old = runtime / "pre-threshold" / cell["output"][field]
+                relative = f"{directory}/toy-smoke/{producer}/{digest}{suffix}"
+                new = runtime / "pre-threshold" / relative
+                new.parent.mkdir(parents=True, exist_ok=True)
+                old.rename(new)
+                cell["output"][field] = relative
+        manifest_path.write_bytes((json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        # The old fixture's aggregate timing.csv is not a producer artifact.
+        stale_timing = runtime / "pre-threshold/timing.csv"
+        if stale_timing.exists():
+            stale_timing.unlink()
+        reseal_chain(self.session)
+
+        # This was rejected by the obsolete PHASE2_RUNTIME_SEAL_MEMBERS fixture set.
+        capture_phase04(self.session, self.source)
+        production_member = next((runtime / "pre-threshold/csv").rglob("*.csv"))
+        for mutation in ("extra", "missing"):
+            with self.subTest(mutation=mutation):
+                trial = self.temporary / f"production-runtime-{mutation}"
+                shutil.copytree(self.session, trial)
+                trial_runtime = trial / "phase2/runtime"
+                if mutation == "extra":
+                    (trial_runtime / "pre-threshold/csv/toy-smoke/bench_piccard/foreign.csv").write_bytes(b"foreign\n")
+                else:
+                    (trial_runtime / "pre-threshold" / production_member.relative_to(runtime / "pre-threshold")).unlink()
+                reseal_chain(trial)
+                with self.assertRaises(Failure):
+                    capture_phase04(trial, self.source)
+
     def test_prepare_final_never_publishes_transient_source_packet_bytes(self):
         """A restored source file cannot replace the first captured source packet bytes."""
         from scripts import work7_review_packet

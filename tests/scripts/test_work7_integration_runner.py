@@ -160,25 +160,24 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
             elif os.environ.get('FAKE_FAULT') == 'warmup': (root/'timing.csv').write_text('warmup,trials\\n2,1\\n')
             elif os.environ.get('FAKE_FAULT') == 'unlabelled': (root/'timing.csv').write_text('warmup,trials\\nmaybe,1\\n')
             elif os.environ.get('FAKE_FAULT') == 'actual': (root/'actual-data.csv').write_text('trials\\n1\\n')
-            else: (root/'timing.csv').write_text('trials,warmup\\n1,discarded\\n')
             import hashlib
             cells=[]
             specs=[('bench_review_comparison',['--suite=toy-smoke','--profile=toy-smoke','--k=16','--m=16','--set-size=10','--universe=64','--target-jaccard=0.5','--trials=1','--accuracy-trials=1','--seed=7','--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16','--sj16-key-bits=1024','--allow-unmatched-security']),('bench_piccard',['--profile=toy-smoke','--security=TOY','--mode=timing','--evidence_point','--k=16','--m=16','--set_size=10','--target-jaccard=0.5','--trials=1','--seed=7']),('bench_dynamic',['--scenario=refresh','--refresh_updates=1','--profile=toy-smoke','--security=TOY','--mode=timing','--evidence_point','--k=16','--m=16','--set_size=100','--target-jaccard=0.5','--depth=5','--trials=1','--seed=7'])]
             for i,(name,args) in enumerate(specs):
-                cid='toy-'+str(i); (root/'csv').mkdir(exist_ok=True); (root/'logs').mkdir(exist_ok=True); p=root/'csv'/(cid+'.csv'); q=root/'logs'/(cid+'.log'); p.write_text('trials\\n' + ('1\\n'*10 if i==0 else '1\\n')); q.write_text('log')
+                d=hashlib.sha256(b'piccard-benchmark-cell-v1\\0')
+                for v in [name,'toy-smoke',*args,'OMP_DYNAMIC=FALSE','OMP_NUM_THREADS=2']:
+                    b=v.encode(); d.update(len(b).to_bytes(4,'big')); d.update(b)
+                digest=d.hexdigest(); base=root/'csv'/'toy-smoke'/name; base.mkdir(parents=True,exist_ok=True); p=base/(digest+'.csv'); q=root/'logs'/'toy-smoke'/name/(digest+'.log'); q.parent.mkdir(parents=True,exist_ok=True); p.write_text('trials\\n' + ('1\\n'*10 if i==0 else '1\\n')); q.write_text('log')
                 out={'csv':str(p.relative_to(root)),'csv_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'log':str(q.relative_to(root)),'log_sha256':hashlib.sha256(q.read_bytes()).hexdigest(),'expected_csv_rows':10 if i==0 else 1,'csv_row_count':10 if i==0 else 1,'measurement_output':'measured-csv'}
                 if i==0:
-                    (root/'workloads').mkdir(exist_ok=True); (root/'traces').mkdir(exist_ok=True); w=root/'workloads'/(cid+'.bin'); t=root/'traces'/(cid+'.bin'); w.write_text('w'); t.write_text('t'); out.update({'workload':str(w.relative_to(root)),'workload_sha256':hashlib.sha256(w.read_bytes()).hexdigest(),'trace':str(t.relative_to(root)),'trace_sha256':hashlib.sha256(t.read_bytes()).hexdigest()}); args += [f'--manifest-out={w}',f'--execution-trace-out={t}']
+                    w=root/'workloads'/'toy-smoke'/name/(digest+'.manifest.tsv'); t=root/'traces'/'toy-smoke'/name/(digest+'.bin'); w.parent.mkdir(parents=True,exist_ok=True); t.parent.mkdir(parents=True,exist_ok=True); w.write_text('w'); t.write_text('t'); out.update({'workload':str(w.relative_to(root)),'workload_sha256':hashlib.sha256(w.read_bytes()).hexdigest(),'trace':str(t.relative_to(root)),'trace_sha256':hashlib.sha256(t.read_bytes()).hexdigest()}); args += [f'--manifest-out={w}',f'--execution-trace-out={t}']
                 if os.environ.get('FAKE_FAULT') == 'pre-argv' and i==0: args[0]='--suite=bad'
                 if os.environ.get('FAKE_FAULT') == 'pre-output' and i==0: out['measurement_output']='bad'
                 if os.environ.get('FAKE_FAULT') == 'pre-digest' and i==0: out['csv_sha256']='0'*64
                 if os.environ.get('FAKE_FAULT') == 'pre-escape' and i==0: out['csv']='../escape.csv'
                 if os.environ.get('FAKE_FAULT') == 'pre-symlink' and i==0:
                     outside=root.parent/'outside.csv'; outside.write_text('trials\\n1\\n'); link=root/'escape-link.csv'; link.symlink_to(outside); out['csv']='escape-link.csv'; out['csv_sha256']=hashlib.sha256(outside.read_bytes()).hexdigest()
-                argv=[name,*args]; d=hashlib.sha256(b'piccard-benchmark-cell-v1\\0')
-                for v in [name,'toy-smoke',*[x for x in argv[1:] if not x.startswith('--manifest-out=') and not x.startswith('--execution-trace-out=')],'OMP_DYNAMIC=FALSE','OMP_NUM_THREADS=2']:
-                    b=v.encode(); d.update(len(b).to_bytes(4,'big')); d.update(b)
-                digest=d.hexdigest(); cid='toy-smoke/'+name+'/'+digest
+                argv=[name,*args]; cid='toy-smoke/'+name+'/'+digest
                 cells.append({'cell_id':cid,'profile_id':'toy-smoke','parameter_sha256':digest,'producer':name,'environment':{'OMP_DYNAMIC':'FALSE','OMP_NUM_THREADS':'2'},'status':'MEASURED','reason_code':'NONE','required_bits':'','available_bits':'','shortfall_bits':'','argv':argv,'output':out})
             if os.environ.get('FAKE_FAULT') == 'pre-extra-key': cells[0]['unexpected']='tamper'
             terminal='schema_version\\tcell_id\\tprofile_id\\tproducer\\tparameter_sha256\\tstatus\\treason_code\\trequired_bits\\tavailable_bits\\tshortfall_bits\\tlog_sha256\\n' + ''.join('piccard-benchmark-terminal-cell-v1\\t'+c['cell_id']+'\\ttoy-smoke\\t'+c['producer']+'\\t'+c['parameter_sha256']+'\\tMEASURED\\tNONE\\t\\t\\t\\t'+c['output']['log_sha256']+'\\n' for c in sorted(cells,key=lambda c:c['cell_id']))
@@ -465,7 +464,7 @@ class Work7IntegrationRunnerTests(unittest.TestCase):
         self.assertTrue(all(row["performance_state"] == "PERFORMANCE_PENDING" for row in terminal_value["claims"]))
 
         with self.subTest("measured_count_two"):
-            trial_path = "phase2/runtime/pre-threshold/csv/toy-1.csv"
+            trial_path = "phase2/runtime/pre-threshold/" + pre_manifest["cells"][1]["output"]["csv"]
             mutated = captured(members[trial_path].raw.replace(b"trials\n1\n", b"trials\n2\n", 1))
             with self.assertRaisesRegex(Failure, "measured count must equal 1"):
                 validate_record_counts_capture(((trial_path, mutated),))

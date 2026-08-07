@@ -51,31 +51,6 @@ WORK_SESSION_MEMBERS = (
     "phase0/artifacts/state.json",
 )
 PHASE0_SEAL_MEMBERS = frozenset({"state.json"})
-PHASE2_RUNTIME_SEAL_MEMBERS = frozenset({
-    "commands/build.json", "commands/build.stderr.txt", "commands/build.stdout.txt",
-    "commands/configure.json", "commands/configure.stderr.txt", "commands/configure.stdout.txt",
-    "commands/ctest-focused.json", "commands/ctest-focused.stderr.txt", "commands/ctest-focused.stdout.txt",
-    "commands/ctest-inventory.json", "commands/ctest-inventory.stderr.txt", "commands/ctest-inventory.stdout.txt",
-    "commands/deletion-survival.json", "commands/deletion-survival.stderr.txt", "commands/deletion-survival.stdout.txt",
-    "commands/phase0-guard.json", "commands/phase0-guard.stderr.txt", "commands/phase0-guard.stdout.txt",
-    "commands/pre-threshold.json", "commands/pre-threshold.stderr.txt", "commands/pre-threshold.stdout.txt",
-    "commands/real-datasets.json", "commands/real-datasets.stderr.txt", "commands/real-datasets.stdout.txt",
-    "commands/static.json", "commands/static.stderr.txt", "commands/static.stdout.txt",
-    "commands/verify-real-datasets.json", "commands/verify-real-datasets.stderr.txt", "commands/verify-real-datasets.stdout.txt",
-    "evidence-index.json", "pre-threshold/csv/toy-0.csv", "pre-threshold/csv/toy-1.csv",
-    "pre-threshold/csv/toy-2.csv", "pre-threshold/logs/toy-0.log", "pre-threshold/logs/toy-1.log",
-    "pre-threshold/logs/toy-2.log", "pre-threshold/manifest.json", "pre-threshold/terminal-cells.tsv",
-    "pre-threshold/timing.csv", "pre-threshold/traces/toy-0.bin", "pre-threshold/workloads/toy-0.bin",
-    "real-datasets/csv/real_accuracy_dblp_acm_u65536.csv",
-    "real-datasets/csv/real_accuracy_summary_dblp_acm_u65536.csv",
-    "real-datasets/csv/real_timing_dblp_acm_u65536_toy-smoke.csv",
-    "real-datasets/input_manifests/dblp_acm_u65536/dataset.manifest.tsv",
-    "real-datasets/input_manifests/dblp_acm_u65536/source.manifest.tsv", "real-datasets/run.log",
-    "real-datasets/run_metadata.tsv", "real-datasets/system_info.txt", "real-datasets/verification_status.tsv",
-    "real-datasets/workloads/accuracy_dblp_acm_u65536.manifest.tsv",
-    "real-datasets/workloads/accuracy_dblp_acm_u65536.rows.tsv",
-    "real-datasets/workloads/timing_dblp_acm_u65536_toy-smoke.manifest.tsv", "static-report.json",
-})
 PHASE2_CLOSURE_SEAL_MEMBERS = frozenset({
     "evidence-bound-report.json", "commands/evidence-bound.json", "commands/evidence-bound.stderr.txt",
     "commands/evidence-bound.stdout.txt",
@@ -98,6 +73,82 @@ _PRIVATE_SOURCE_PREFIX = "@source/"
 
 class Failure(ValueError):
     pass
+
+
+_RUNTIME_COMMANDS = (
+    "build", "configure", "ctest-focused", "ctest-inventory", "deletion-survival",
+    "phase0-guard", "pre-threshold", "real-datasets", "static", "verify-real-datasets",
+)
+_PRETHRESHOLD_OUTPUT_FIELDS = {
+    "bench_review_comparison": {"csv", "log", "workload", "trace"},
+    "bench_piccard": {"csv", "log"},
+    "bench_dynamic": {"csv", "log"},
+}
+_PRETHRESHOLD_OUTPUT_KEYS = {
+    producer: fields | {field + "_sha256" for field in fields} |
+    {"expected_csv_rows", "csv_row_count", "measurement_output"}
+    for producer, fields in _PRETHRESHOLD_OUTPUT_FIELDS.items()
+}
+
+
+def _runtime_expected_members(members: tuple[tuple[str, CapturedBlob], ...]) -> frozenset[str]:
+    """Derive the complete runtime member set from already captured producer bytes.
+
+    This is deliberately byte-only: callers must use it immediately after a
+    stable ``capture_tree_seal(..., None)`` and before exposing that capture.
+    The pre-threshold and real-data producers are the authorities for their
+    dynamic path names; command records and singleton reports are frozen.
+    """
+    values = dict(members)
+    if len(values) != len(members):
+        raise ValueError("runtime seal contains duplicate members")
+    expected = {"evidence-index.json", "static-report.json", "pre-threshold/manifest.json",
+                "pre-threshold/terminal-cells.tsv", "real-datasets/run_metadata.tsv",
+                "real-datasets/verification_status.tsv"}
+    for label in _RUNTIME_COMMANDS:
+        expected.update({f"commands/{label}.json", f"commands/{label}.stdout.txt", f"commands/{label}.stderr.txt"})
+    try:
+        manifest_blob = values["pre-threshold/manifest.json"]
+        manifest = json.loads(manifest_blob.raw)
+        cells = manifest["cells"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("pre-threshold manifest cannot determine runtime members") from error
+    if (not isinstance(cells, list) or len(cells) != len(_PRETHRESHOLD_OUTPUT_FIELDS) or
+            any(not isinstance(row, dict) or not isinstance(row.get("producer"), str) for row in cells) or
+            {row["producer"] for row in cells} != set(_PRETHRESHOLD_OUTPUT_FIELDS)):
+        raise ValueError("pre-threshold manifest has no complete producer set")
+    for row in cells:
+        output = row.get("output")
+        producer = row["producer"]
+        if not isinstance(output, dict) or set(output) != _PRETHRESHOLD_OUTPUT_KEYS[producer]:
+            raise ValueError("pre-threshold manifest has incomplete producer outputs")
+        for field in _PRETHRESHOLD_OUTPUT_FIELDS[producer]:
+            relative = output[field]
+            path = Path(relative) if isinstance(relative, str) else Path()
+            if not isinstance(relative, str) or not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
+                raise ValueError("pre-threshold manifest has noncanonical producer output")
+            expected.add("pre-threshold/" + relative)
+    try:
+        metadata_lines = values["real-datasets/run_metadata.tsv"].raw.decode("utf-8", "strict").splitlines()
+    except (KeyError, UnicodeError) as error:
+        raise ValueError("real-data metadata cannot determine runtime members") from error
+    metadata: dict[str, str] = {}
+    for line in metadata_lines:
+        try:
+            key, value = line.split("\t")
+        except ValueError as error:
+            raise ValueError("real-data metadata is not key-value TSV") from error
+        if not key or key in metadata:
+            raise ValueError("real-data metadata has duplicate keys")
+        metadata[key] = value
+    for key, relative in metadata.items():
+        if not (key.endswith(".path") and (key.startswith("artifact.") or ".output." in key)):
+            continue
+        path = Path(relative)
+        if not relative or path.is_absolute() or ".." in path.parts or path.as_posix() != relative:
+            raise ValueError("real-data metadata has noncanonical artifact path")
+        expected.add("real-datasets/" + relative)
+    return frozenset(expected)
 
 
 @dataclass(frozen=True)
@@ -464,7 +515,9 @@ def capture_phase04(session: Path, source: Path, paper: Path | None = None,
     try:
         runtime_seal = capture_tree_seal(session / "phase2/runtime-seal.json", phase0.blob.sha256,
                                          "phase2-runtime-artifacts", session / "phase2/runtime",
-                                         PHASE2_RUNTIME_SEAL_MEMBERS)
+                                         None)
+        if {relative for relative, _ in runtime_seal.members} != _runtime_expected_members(runtime_seal.members):
+            raise ValueError("runtime tree seal member manifest is not exact")
     except (OSError, ValueError) as error:
         raise Failure("invalid or tampered prerequisite seal") from error
     order = (
