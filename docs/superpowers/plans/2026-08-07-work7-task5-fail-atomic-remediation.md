@@ -81,7 +81,8 @@ def capture_tree_seal(path: Path, expected_previous: str | None,
                       expected_members: set[str] | None = None) -> CapturedTreeSeal: ...
 
 def validate_canonical_build_root(raw: object, commit: str,
-                                  guarded: tuple[Path, ...]) -> Path: ...
+                                  guarded: tuple[Path, ...],
+                                  expected: Path) -> Path: ...
 
 @dataclass(frozen=True)
 class Phase04Capture:
@@ -188,7 +189,8 @@ path that a later consumer is expected to reopen.
 - Test: `tests/scripts/test_work7_review_packet.py`
 
 **Consumes:** Phase 0 source/Paper/threshold roots, session root, source commit,
-and the captured configure command record.
+the exact sealed Phase 0 `build.root`, and the captured configure command
+record.
 
 **Produces:** `validate_canonical_build_root(...) -> Path`; every expected
 configure/build/CTest/producer/deletion argv is derived from this returned path.
@@ -206,6 +208,12 @@ configure/build/CTest/producer/deletion argv is derived from this returned path.
   digest; and the relocated fake binary files before resealing.  Assert exit
   `2`, exactly one `FAIL` line containing `noncanonical build root`, and absence
   of the final packet and every newly created Phase 5 member.
+
+  Add a Phase 0 state-guard RED proving the current state does not bind the
+  accepted build root. The GREEN state schema is exactly
+  `piccard-work7-phase0-state-v2` with one additional key
+  `"build": {"root": str(canonical_build_root)}`. Update every exact Phase 0
+  parser and hermetic fixture to require that same shape.
 
 - [ ] **Step 2: Prove RED.**
 
@@ -229,8 +237,9 @@ configure/build/CTest/producer/deletion argv is derived from this returned path.
   directory named exactly `build-<commit>`; use
   `assert_output_roots_outside` plus explicit bidirectional `relative_to`
   checks so the build is neither an ancestor nor descendant of any guarded
-  root.  Return the canonical path and use its exact string for all expected
-  argv and producer validators.
+  root. Require it to equal the strictly canonical `expected` path loaded from
+  the sealed Phase 0 v2 state. Return the canonical path and use its exact
+  string for all expected argv and producer validators.
 
   Add ordinary symlink and `/tmp` versus `/private/tmp` alias subtests so reuse
   of the more permissive general `_reject_symlink_components` cannot pass R0.
@@ -255,8 +264,8 @@ configure/build/CTest/producer/deletion argv is derived from this returned path.
   ```
 
 **R0 success:** every valid runtime command uses one canonical
-`build-<commit>` outside guarded trees, and hostile roots fail before Phase 5
-output.
+`build-<commit>` outside guarded trees that exactly equals Phase 0 `build.root`,
+and hostile roots fail before Phase 5 output.
 
 **R0 failure:** a caller-controlled path reaches a producer validator, a valid
 fresh root is rejected, or any Paper/threshold/source/session byte changes.

@@ -100,17 +100,24 @@ scope and must be fail-atomic.
 
 ### 2.4 Canonical build-root binding
 
+Phase 0 state uses schema `piccard-work7-phase0-state-v2` and adds the exact
+field `"build": {"root": "<canonical-absolute-build-root>"}`. The state guard
+writes this value only after its guarded-root checks, and the Phase 0 seal makes
+the value immutable for the remainder of the run.
+
 The configure record's `-B` value must:
 
 - be an absolute path containing no symlink component;
 - resolve strictly to an existing directory;
 - have basename exactly `build-<source-commit>`;
 - be represented by its canonical resolved string in configure, build, CTest,
-  producer, provenance, and deletion records; and
+  producer, provenance, and deletion records;
+- equal the exact canonical build-root string sealed in Phase 0 state; and
 - be outside and neither an ancestor nor descendant of the source, Paper,
   threshold, and session roots.
 
-A validly resealed runtime graph pointing to any other build root fails before
+A validly resealed runtime graph pointing to any other build root, including a
+different otherwise-valid `build-<source-commit>` directory, fails before
 `prepare-final` creates Phase 5 members or a packet.
 
 ### 2.5 Failure lifecycle and rerun policy
