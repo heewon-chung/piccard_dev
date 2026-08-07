@@ -78,3 +78,51 @@ second-capture, and packet-creation failures.  The comprehensive
 matrix was still executing when this report was written.  Do not treat this
 task as fully verified until those tests are added/run serially and the full
 `test_work7_state_guard.py` plus `prepare-final` suite are green.
+
+## Unit A — byte-only semantic and seal-binding regressions
+
+Added four real-filesystem regressions in
+`tests/scripts/test_work7_review_packet.py`:
+
+* `test_runtime_semantics_use_captured_producer_bytes_while_live_member_is_foreign`
+  atomically replaces `pre-threshold/manifest.json` with foreign bytes while a
+  synchronized worker runs `validate_phase2_runtime_capture`; the captured
+  graph validates and Phase 5 remains absent.
+* `test_runtime_semantics_use_captured_build_binary_while_live_binary_is_foreign`
+  does the same to the R0-bound `bench_deletion_survival` executable.  The
+  runtime summary retains the digest framed from the original captured argv.
+* `test_capture_phase04_rejects_phase2_static_copy_that_differs_from_runtime_sealed_twin`
+  changes only the standalone static report and verifies CLI exit 2, one
+  failure reason containing `sealed runtime copy`, and no final packet/members.
+* `test_final_packet_seal_members_equal_the_predecessor_bound_captured_seal_blobs`
+  checks all six Phase 0--4 seal members in the final packet against their
+  captured blobs, including size, SHA-256, and predecessor chain ordering.
+
+Serial GREEN command:
+
+```text
+python3 -m unittest \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_runtime_semantics_use_captured_producer_bytes_while_live_member_is_foreign \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_runtime_semantics_use_captured_build_binary_while_live_binary_is_foreign \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_capture_phase04_rejects_phase2_static_copy_that_differs_from_runtime_sealed_twin \
+  tests.scripts.test_work7_review_packet.Work7ReviewPacketTests.test_final_packet_seal_members_equal_the_predecessor_bound_captured_seal_blobs -v
+```
+
+Observed output: four `ok`; `Ran 4 tests in 28.989s`; `OK`.
+
+Because the producer, build-binary, and seal assertions pass on the R1
+implementation, discriminating REDs were run in disposable detached worktrees
+at `09f90a3` and never committed:
+
+* a temporary `validate_phase2_runtime_capture` mutant that read the live
+  producer manifest failed with `Failure: mutant reopened live pre-threshold
+  manifest` while the foreign bytes were installed;
+* a corresponding build-binary reopen mutant failed with `Failure: mutant
+  reopened live build binary`;
+* removing both the static-twin equality check and the standalone static
+  semantic check allowed a foreign static report through `prepare-final` with
+  output `0`.
+
+The seal-member regression checks the fixed captured predecessor blobs and
+their final packet entries directly.  A dedicated concurrent live-seal swap
+stress case remains for the later rollback/fault-matrix unit.

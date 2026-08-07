@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -123,6 +124,106 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr.decode())
         self.assertFalse(output.exists())
         self.assertFalse((self.session / "phase5/members").exists())
+
+    def _validate_while_path_is_atomically_replaced(self, target: Path, foreign: bytes) -> object:
+        """Run byte-only validation while a live Phase 0--3 path is foreign."""
+        from scripts.work7_review_packet import capture_phase04, validate_phase2_runtime_capture
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        capture = capture_phase04(self.session, self.source)
+        original = target.read_bytes()
+        original_mode = target.stat().st_mode & 0o777
+        replacement = target.with_name(target.name + ".foreign")
+        restore = target.with_name(target.name + ".restore")
+        replacement.write_bytes(foreign)
+        os.chmod(replacement, original_mode)
+        os.replace(replacement, target)
+        barrier = threading.Barrier(2)
+        result: list[object] = []
+        errors: list[BaseException] = []
+
+        def consume_captured_graph() -> None:
+            try:
+                barrier.wait(timeout=5)
+                result.append(validate_phase2_runtime_capture(capture))
+            except BaseException as error:  # Preserve worker errors for the test.
+                errors.append(error)
+
+        worker = threading.Thread(target=consume_captured_graph)
+        worker.start()
+        barrier.wait(timeout=5)
+        worker.join(timeout=15)
+        restore.write_bytes(original)
+        os.chmod(restore, original_mode)
+        os.replace(restore, target)
+        if worker.is_alive():
+            self.fail("captured runtime validation did not complete")
+        if errors:
+            raise errors[0]
+        self.assertFalse((self.session / "phase5/members").exists())
+        return result[0]
+
+    def test_runtime_semantics_use_captured_producer_bytes_while_live_member_is_foreign(self):
+        """A live producer replacement must not affect byte-only semantic validation."""
+        from scripts.work7_review_packet import RuntimeSummary
+
+        target = self.session / "phase2/runtime/pre-threshold/manifest.json"
+        summary = self._validate_while_path_is_atomically_replaced(target, b'{"foreign":true}\n')
+        self.assertIsInstance(summary, RuntimeSummary)
+        self.assertEqual(summary.focused_pass_count, 28)
+
+    def test_runtime_semantics_use_captured_build_binary_while_live_binary_is_foreign(self):
+        """R0-bound build executable bytes must not be reopened during semantic validation."""
+        from scripts.work7_review_packet import RuntimeSummary
+
+        target = self.temporary / "builds" / ("build-" + self.commit) / "bench_deletion_survival"
+        summary = self._validate_while_path_is_atomically_replaced(target, b"#!/bin/sh\nexit 99\n")
+        self.assertIsInstance(summary, RuntimeSummary)
+        self.assertEqual(summary.deletion_survival, hashlib.sha256(
+            (json.dumps([str(target), "--n=64", "--d=3", "--k=8", "--required_survival=0.99",
+                        "--r_values=1,4,8", "--trials=1", "--seed=7"], sort_keys=True,
+                       separators=(",", ":"), ensure_ascii=True) + "\n").encode()).hexdigest())
+
+    def test_capture_phase04_rejects_phase2_static_copy_that_differs_from_runtime_sealed_twin(self):
+        """A standalone static copy must be byte-identical to its sealed runtime twin."""
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_work()
+        work_seal = self.session / "phase4/work-review-seal.json"
+        self.assertEqual(self.command("close-work", "--packet", str(packet), "--raw-review", str(self.work_review(packet)),
+                                      "--session-root", str(self.session), "--output-seal", str(work_seal)).returncode, 0)
+        static = self.session / "phase2/static-report.json"
+        static.write_bytes(b'{"foreign":true}\n')
+        output = self.session / "phase5/final-packet.json"
+        result = self.command("prepare-final", "--source-root", str(self.source), "--session-root", str(self.session),
+                              "--work-review-seal", str(work_seal),
+                              "--output", str(output))
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertIn("sealed runtime copy", result.stderr.decode())
+        self.assertFalse(output.exists())
+        self.assertFalse((self.session / "phase5/members").exists())
+        with self.assertRaisesRegex(Exception, "sealed runtime copy"):
+            capture_phase04(self.session, self.source)
+
+    def test_final_packet_seal_members_equal_the_predecessor_bound_captured_seal_blobs(self):
+        """Every packet seal member must be the exact blob captured from its chain edge."""
+        from scripts.work7_review_packet import capture_phase04
+
+        packet = self.prepare_final_packet()
+        capture = capture_phase04(self.session, self.source)
+        value = json.loads(packet.read_bytes())
+        members = {item["path"]: item for item in value["members"]}
+        previous = None
+        for relative, seal in capture.seals:
+            self.assertEqual(seal.previous_seal_sha256, previous)
+            packet_member = members[f"phase5/members/session/{relative}"]
+            self.assertEqual((self.session / packet_member["path"]).read_bytes(), seal.blob.raw)
+            self.assertEqual(packet_member["size"], seal.blob.size)
+            self.assertEqual(packet_member["sha256"], seal.blob.sha256)
+            previous = seal.blob.sha256
 
     def test_prepare_final_rejects_noncanonical_build_roots_before_output(self):
         """A resealed runtime must not redirect validation to any other build tree."""
