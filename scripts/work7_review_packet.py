@@ -1399,6 +1399,77 @@ def _terminal_inputs_capture(session: Path, packet: Path, claude: Path, sol: Pat
     return TerminalInputs(capture, final_packet, tuple(members), normalized_claude, normalized_sol)
 
 
+def publish_phase5(session: Path, terminal_report: Path, output_seal: Path,
+                   packet_raw: bytes, claude_raw: bytes, sol_raw: bytes,
+                   report_raw: bytes, previous_seal_sha256: str) -> str:
+    """Publish the already-validated terminal byte graph or remove only this call's work.
+
+    The terminal core deliberately runs before this function.  This boundary
+    therefore has no authority to derive evidence: it exclusively creates,
+    stable-reads, and validates the exact byte group supplied by its caller.
+    """
+    session = required(session, "session root", directory=True)
+    terminal_report = session_path(session, terminal_report, "terminal report", exists=False)
+    output_seal = session_path(session, output_seal, "output seal", exists=False)
+    if (not isinstance(previous_seal_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", previous_seal_sha256) is None):
+        raise Failure("terminal predecessor seal digest is invalid")
+    if any(not isinstance(raw, bytes) for raw in (packet_raw, claude_raw, sol_raw, report_raw)):
+        raise Failure("terminal publication bytes are invalid")
+
+    root = session / "phase5/terminal-artifacts"
+    members = (("final-packet.json", packet_raw), ("claude-review.txt", claude_raw),
+               ("sol-review.txt", sol_raw), ("terminal-report.json", report_raw))
+    # The member files are exclusively created with 0600 by _atomic_create.
+    # Build the exact canonical seal and pointer before changing Phase 5.
+    seal_value = {
+        "schema": "piccard-work7-tree-seal-v1",
+        "kind": "phase5-terminal",
+        "artifact_root": str(root),
+        "previous_seal_sha256": previous_seal_sha256,
+        "entries": [{"path": name, "size": len(raw), "mode": "0600",
+                     "sha256": hashlib.sha256(raw).hexdigest()}
+                    for name, raw in sorted(members)],
+    }
+    seal_raw = canonical_json_bytes(seal_value)
+    seal_digest = hashlib.sha256(seal_raw).hexdigest()
+    pointer = output_seal.with_name("terminal-seal.sha256")
+    pointer_raw = (seal_digest + "\n").encode("ascii")
+    ledger = _PublicationLedger([])
+    try:
+        _ledger_directories(ledger, session, terminal_report.parent)
+        _atomic_create(terminal_report, report_raw)
+        ledger.record(terminal_report)
+        _ledger_directories(ledger, session, root.parent)
+        _ledger_directory(ledger, root, allow_existing=False)
+        for name, raw in members:
+            target = root / name
+            _atomic_create(target, raw)
+            ledger.record(target)
+        _ledger_directories(ledger, session, output_seal.parent)
+        _atomic_create(output_seal, seal_raw)
+        ledger.record(output_seal)
+        _ledger_directories(ledger, session, pointer.parent)
+        _atomic_create(pointer, pointer_raw)
+        ledger.record(pointer)
+
+        # Re-capture all output bytes and the seal graph after publication.
+        if _captured_file(terminal_report, "published terminal report").raw != report_raw:
+            raise Failure("published terminal report differs from captured bytes")
+        published = capture_tree_seal(output_seal, previous_seal_sha256, "phase5-terminal", root,
+                                      {name for name, _ in members})
+        if published.blob.raw != seal_raw or published.blob.sha256 != seal_digest:
+            raise Failure("published terminal seal differs from prospective seal")
+        if {name: blob.raw for name, blob in published.members} != dict(members):
+            raise Failure("published terminal artifacts differ from captured bytes")
+        if _captured_file(pointer, "terminal seal pointer").raw != pointer_raw:
+            raise Failure("terminal seal pointer mismatch")
+    except (Failure, OSError, ValueError, FileExistsError):
+        ledger.rollback()
+        raise
+    return seal_digest
+
+
 def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | None = None) -> None:
     session = required(args.session_root, "session root", directory=True)
     packet, claude, sol = (session_path(session, args.packet, "packet"), required(args.claude_review, "claude review"), required(args.sol_review, "sol review"))
@@ -1424,26 +1495,10 @@ def close_final(args: argparse.Namespace, synchronize: Callable[[str], None] | N
     terminal_raw = terminal_report_bytes(inputs)
     if synchronize is not None:
         synchronize("after_terminal_core")
-    _atomic_create(terminal_report, terminal_raw)
     seals = {relative: seal.blob.sha256 for relative, seal in capture.seals}
     packet_raw, claude_raw, sol_raw = inputs.final_packet.raw, inputs.claude_review.raw, inputs.sol_review.raw
-    root = session / "phase5/terminal-artifacts"
-    if root.exists(): raise Failure("terminal artifacts collision")
-    root.mkdir(parents=True, mode=0o700)
-    for data, label in ((packet_raw, "final-packet.json"), (claude_raw, "claude-review.txt"),
-                        (sol_raw, "sol-review.txt"), (terminal_raw, "terminal-report.json")):
-        _atomic_create(root / label, data)
-    create_tree_seal(root, output, seals["phase4/work-review-seal.json"], "phase5-terminal")
-    try:
-        final_seal = verify_tree_seal(output, seals["phase4/work-review-seal.json"])
-    except (OSError, ValueError) as error:
-        raise Failure("new terminal seal did not verify") from error
-    if final_seal["kind"] != "phase5-terminal" or Path(final_seal["artifact_root"]) != root:
-        raise Failure("new terminal seal is foreign")
-    digest = sha256_file(output); pointer = output.with_name("terminal-seal.sha256")
-    _atomic_create(pointer, (digest + "\n").encode("ascii"))
-    if pointer.read_bytes() != (sha256_file(output) + "\n").encode("ascii"):
-        raise Failure("terminal seal pointer mismatch")
+    digest = publish_phase5(session, terminal_report, output, packet_raw, claude_raw, sol_raw,
+                            terminal_raw, seals["phase4/work-review-seal.json"])
     print(f"WORK7_TERMINAL_SEAL_SHA256={digest}")
 
 

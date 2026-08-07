@@ -855,6 +855,44 @@ class Work7ReviewPacketTests(unittest.TestCase):
         self.assertEqual((self.session / "phase5/terminal-seal.sha256").read_text(), sha256_file(seal) + "\n")
         self.assertEqual(verify_tree_seal(seal, sha256_file(self.session / "phase4/work-review-seal.json"))["kind"], "phase5-terminal")
 
+    def test_close_final_rolls_back_every_caught_phase5_publication_failure(self):
+        """Real Phase 5 collisions restore the complete pre-call byte graph."""
+        from scripts import work7_review_packet
+
+        packet = self.prepare_final_packet()
+        claude, sol = self.final_review(packet, "anthropic"), self.final_review(packet, "openai")
+        capture = work7_review_packet.capture_phase04(self.session, self.source, self.paper, self.threshold)
+        inputs = work7_review_packet._terminal_inputs_capture(self.session, packet, claude, sol, capture)
+        try:
+            from scripts.verify_work7_claims import terminal_report_bytes
+        except ModuleNotFoundError:
+            from verify_work7_claims import terminal_report_bytes
+        report_raw = terminal_report_bytes(inputs)
+        phase5_baseline = self.temporary / "phase5-publication-baseline"
+        shutil.copytree(self.session / "phase5", phase5_baseline)
+        predecessor = hashlib.sha256((self.session / "phase4/work-review-seal.json").read_bytes()).hexdigest()
+
+        def restore_phase5() -> None:
+            shutil.rmtree(self.session / "phase5")
+            shutil.copytree(phase5_baseline, self.session / "phase5")
+
+        for name, prepare in (
+                ("report", lambda report, seal: report.write_bytes(b"report sentinel\n")),
+                ("artifacts-after-report", lambda report, seal: (report.parent / "terminal-artifacts").mkdir()),
+                ("pointer-after-seal", lambda report, seal: seal.with_name("terminal-seal.sha256").write_bytes(b"pointer sentinel\n")),
+        ):
+            with self.subTest(boundary=name):
+                restore_phase5()
+                report = self.session / "phase5/terminal-report.json"
+                seal = self.session / "phase5/terminal-seal.json"
+                prepare(report, seal)
+                before = self._phase5_snapshot()
+                with self.assertRaises((work7_review_packet.Failure, OSError, ValueError, FileExistsError)):
+                    work7_review_packet.publish_phase5(
+                        self.session, report, seal, inputs.final_packet.raw, inputs.claude_review.raw,
+                        inputs.sol_review.raw, report_raw, predecessor)
+                self.assertEqual(self._phase5_snapshot(), before)
+
     def test_terminal_core_matches_cli_report_from_identical_captured_bytes(self):
         """The standalone terminal CLI is only a capture/publish wrapper around the core."""
         from scripts.verify_work7_claims import TerminalInputs, terminal_report_bytes
