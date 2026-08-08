@@ -1128,7 +1128,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
 
     headers = ["Label", "Tri", "k", "m", "n", "N", "tau", "Depth",
                "MinHash", "Encode", "Encrypt", "Multiply",
-               "RotSum", "Mask", "PolyEval", "Decrypt",
+               "RotSum", "Mask", "PolyEval", "Flood", "Decrypt",
                "Total (ms)", "CT Size"]
     rows = []
     for r in rows_data:
@@ -1148,6 +1148,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
             fmt_disp(r, "phase_mask_ms", ci=ci),
             fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+            fmt_disp(r, "phase_flood_ms", ci=ci),
             fmt_disp(r, "phase_decrypt_ms", ci=ci),
             fmt_disp(r, "total_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
@@ -1161,7 +1162,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
         param_label = param_map.get(scenario, "Param")
         lh = [param_label, "$n$", "$N$", "Trials", "$\\tau$", "Depth",
               "MinHash", "Encode", "Encrypt", "Multiply",
-              "RotSum", "Mask", "PolyEval", "Decrypt",
+              "RotSum", "Mask", "PolyEval", "Flood", "Decrypt",
               "Total (ms)", "CT Size"]
         lr = []
         for r in rows_data:
@@ -1178,6 +1179,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
                 fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
                 fmt_disp(r, "phase_mask_ms", ci=ci),
                 fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+                fmt_disp(r, "phase_flood_ms", ci=ci),
                 fmt_disp(r, "phase_decrypt_ms", ci=ci),
                 fmt_disp(r, "total_ms", ci=ci),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
