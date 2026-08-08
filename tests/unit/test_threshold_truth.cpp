@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/threshold_truth.h"
+#include "core/onehot_encoder.h"
+#include "util/params.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +47,63 @@ TEST(ThresholdTruth, BucketMatchCountMirrorsOneHotEncoding) {
     }
     EXPECT_EQ(expected, 4);
     EXPECT_EQ(BucketMatchCount(sx, sy, m), expected);
+}
+
+// BucketMatchCount is a plaintext stand-in for the encrypted inner product
+// the server evaluates on real OneHotEncoder::Encode output. The two
+// implementations are independent code paths that must agree; runtime
+// fhe_agrees only compares match_count >= tau decisions, so a bucketing
+// divergence that stays on the same side of tau would pass silently while
+// still corrupting jaccard_computed / jaccard_error / jaccard_rel_error.
+// Pin BucketMatchCount to the real encoder directly, without any FHE.
+TEST(ThresholdTruth, BucketMatchCountMatchesRealOneHotEncoder) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    OneHotEncoder encoder(params);
+    const uint32_t k = params.k;
+    const uint32_t m = params.m;
+
+    auto InnerProduct = [&](const std::vector<uint64_t>& sig_x,
+                             const std::vector<uint64_t>& sig_y) -> int64_t {
+        std::vector<int64_t> fx = encoder.Encode(sig_x);
+        std::vector<int64_t> fy = encoder.Encode(sig_y);
+        int64_t dot = 0;
+        for (size_t i = 0; i < fx.size(); i++) dot += fx[i] * fy[i];
+        return dot;
+    };
+
+    // Identical signature pair: every slot's bucket matches itself.
+    std::vector<uint64_t> sig_a(k);
+    for (uint32_t i = 0; i < k; i++) sig_a[i] = i * 3 + 1;
+
+    // Fully-disjoint-bucket pair: shift every value by 1 so
+    // sig_b[i] % m == (sig_a[i] % m + 1) % m never equals sig_a[i] % m.
+    std::vector<uint64_t> sig_b(k);
+    for (uint32_t i = 0; i < k; i++) sig_b[i] = sig_a[i] + 1;
+
+    // Partial-overlap pair: even slots share sig_a's bucket, odd slots are
+    // shifted by 3 (not a multiple of m=8) into a different bucket.
+    std::vector<uint64_t> sig_c(k);
+    for (uint32_t i = 0; i < k; i++) {
+        sig_c[i] = (i % 2 == 0) ? sig_a[i] : sig_a[i] + 3;
+    }
+
+    int64_t dot_aa = InnerProduct(sig_a, sig_a);
+    int64_t dot_ab = InnerProduct(sig_a, sig_b);
+    int64_t dot_ac = InnerProduct(sig_a, sig_c);
+
+    // Sanity-check the pairs actually exercise the intended overlap shape.
+    EXPECT_EQ(dot_aa, static_cast<int64_t>(k));
+    EXPECT_EQ(dot_ab, 0);
+    EXPECT_EQ(dot_ac, static_cast<int64_t>(k / 2));
+
+    EXPECT_EQ(BucketMatchCount(sig_a, sig_a, m), dot_aa);
+    EXPECT_EQ(BucketMatchCount(sig_a, sig_b, m), dot_ab);
+    EXPECT_EQ(BucketMatchCount(sig_a, sig_c, m), dot_ac);
 }
 
 TEST(ThresholdTruth, BucketMatchCountIdenticalAndDisjoint) {
