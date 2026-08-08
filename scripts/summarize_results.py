@@ -1355,17 +1355,23 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
             cell[0] += 1; cell[1] += dec; cell[2] += j; cell[3] += th
 
         n_neg, n_pos = fp + tn, tp + fn
-        fp_rate = fp / n_neg if n_neg else 0.0
-        fn_rate = fn / n_pos if n_pos else 0.0
-        fp_lo, fp_hi = _wilson(fp_rate, n_neg)
-        fn_lo, fn_hi = _wilson(fn_rate, n_pos)
-        prec = tp / (tp + fp) if (tp + fp) else float("nan")
-        rec = tp / (tp + fn) if (tp + fn) else float("nan")
+        if n_neg:
+            fp_rate = fp / n_neg
+            fp_lo, fp_hi = _wilson(fp_rate, n_neg)
+            fp_cell = f"{fp_rate:.4f} [{fp_lo:.4f},{fp_hi:.4f}]"
+        else:
+            fp_cell = "N/A"
+        if n_pos:
+            fn_rate = fn / n_pos
+            fn_lo, fn_hi = _wilson(fn_rate, n_pos)
+            fn_cell = f"{fn_rate:.4f} [{fn_lo:.4f},{fn_hi:.4f}]"
+        else:
+            fn_cell = "N/A"
+        prec_cell = f"{tp / (tp + fp):.4f}" if (tp + fp) else "N/A"
+        rec_cell = f"{tp / (tp + fn):.4f}" if (tp + fn) else "N/A"
         sum_rows.append([
             str(k), str(tau), f"{j_tau:.4f}", f"{sigma:.4f}", str(len(rows)),
-            f"{fp_rate:.4f} [{fp_lo:.4f},{fp_hi:.4f}]",
-            f"{fn_rate:.4f} [{fn_lo:.4f},{fn_hi:.4f}]",
-            f"{prec:.4f}", f"{rec:.4f}",
+            fp_cell, fn_cell, prec_cell, rec_cell,
             f"{th_fp_sum / n_neg:.4f}" if n_neg else "N/A",
             f"{th_fn_sum / n_pos:.4f}" if n_pos else "N/A",
         ])
