@@ -229,3 +229,20 @@ TEST_F(ThresholdEngineTest, SymmetryOfThreshold) {
 
     EXPECT_EQ(result_ab, result_ba) << "Threshold should be symmetric";
 }
+
+TEST_F(ThresholdEngineTest, SetHashSeedChangesFamilyKeepsCorrectness) {
+    SetUpWithTau(10);
+
+    std::vector<uint64_t> set;
+    for (uint64_t i = 0; i < 50; i++) set.push_back(i);
+
+    auto sig_before = engine->GetPiccard().ComputeSignature(set);
+    engine->SetHashSeed(0xC0FFEEULL);
+    auto sig_after = engine->GetPiccard().ComputeSignature(set);
+
+    // A different CRS must give a different hash family (hence signature)...
+    EXPECT_NE(sig_before, sig_after);
+    // ...while identical sets still exceed tau (match_count = k = 16 > 10),
+    // proving BFV keys and the threshold polynomial survived the reseed.
+    EXPECT_TRUE(engine->Run(set, set));
+}
