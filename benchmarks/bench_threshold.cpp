@@ -3,6 +3,7 @@
 #include "protocol/threshold_piccard.h"
 #include "protocol/piccard.h"
 #include "core/threshold_truth.h"
+#include "core/threshold_poly.h"
 #include "core/minhash.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
@@ -1145,6 +1146,77 @@ static void BenchFpfnVaryK(const BenchmarkConfig& config,
 }
 
 // ============================================================================
+// u_tau construction & evaluation parameter dump (R3-4 paper table)
+// ============================================================================
+
+static void BenchSpecDump(const BenchmarkConfig& config) {
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
+        {16, 32, 64, 128, 256, 512}, config.security_level);
+
+    std::cout << "k,tau,degree,ps_baby_s,ps_num_chunks,baby_depth,giant_mults,"
+              << "natural_mult_depth,mult_depth,scaling_mod_size,ring_dim,"
+              << "plaintext_mod,log2_q,eval_noise_bits,flood_noise_bits,"
+              << "ct_bytes,poly_build_ms,status,note\n";
+
+    for (uint32_t k : k_values) {
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
+
+        // Paterson-Stockmeyer shape for degree k -- mirrors
+        // PiccardParams::DeriveWithoutFlooding / BFVContext::EvalPolyBFV.
+        uint32_t s = 1;
+        while (s * s < k + 1) s++;
+        uint32_t baby_depth = 0;
+        for (uint32_t v = s; v > 1;) {
+            baby_depth++;
+            if (v % 2 == 1) v--; else v /= 2;
+        }
+        uint32_t num_chunks = (k + s) / s;
+        uint32_t giant_mults = num_chunks - 1;
+
+        PiccardParams params;
+        std::string error;
+        auto engine = TryCreateThresholdEngine(k, config.m, tau,
+                                               config.security_level,
+                                               params, error);
+        if (!engine) {
+            std::cout << k << "," << tau << "," << k << "," << s << ","
+                      << num_chunks << "," << baby_depth << "," << giant_mults
+                      << "," << params.natural_mult_depth << ",-1,-1,-1,-1,-1,"
+                      << "-1,-1,-1,-1,SKIPPED," << SanitizeNote(error) << "\n";
+            std::cerr << "  k=" << k << " SKIPPED: " << error << "\n";
+            continue;
+        }
+
+        const auto& P = engine->GetParams();
+        Timer timer;
+        timer.Start();
+        auto poly = BuildThresholdPoly(tau, k, P.plaintext_mod);
+        double poly_ms = timer.ElapsedMs();
+
+        auto log2_q = engine->GetBFVContext().GetCryptoContext()
+                          ->GetCryptoParameters()->GetElementParams()
+                          ->GetModulus().GetMSB();
+
+        std::vector<uint64_t> probe(100);
+        for (uint64_t i = 0; i < 100; i++) probe[i] = i;
+        auto ct = engine->Encrypt(probe);
+        size_t ct_bytes = CiphertextSizer::GetSerializedSize(ct);
+
+        std::cout << k << "," << tau << "," << (poly.size() - 1) << "," << s
+                  << "," << num_chunks << "," << baby_depth << ","
+                  << giant_mults << "," << P.natural_mult_depth << ","
+                  << P.mult_depth << "," << P.scaling_mod_size << ","
+                  << P.ring_dim << "," << P.plaintext_mod << "," << log2_q
+                  << "," << P.eval_noise_bits << "," << P.FloodNoiseBits()
+                  << "," << ct_bytes << "," << std::fixed
+                  << std::setprecision(1) << poly_ms << ",ok,\n";
+        std::cerr << "  k=" << k << " depth=" << P.natural_mult_depth << "->"
+                  << P.mult_depth << " N=" << P.ring_dim
+                  << " log2q=" << log2_q << "\n";
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -1165,7 +1237,9 @@ int main(int argc, char** argv) {
     config.Print();
 
     ThresholdCSVWriter csv;
-    csv.WriteHeader();
+    if (config.mode != "spec") {
+        csv.WriteHeader();
+    }
 
     if (config.mode == "timing") {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";
@@ -1189,6 +1263,9 @@ int main(int argc, char** argv) {
         std::cerr << "\n=== Boundary FP/FN vs k (" << config.trials
                   << " trials/point, plaintext MinHash) ===\n";
         BenchFpfnVaryK(config, csv);
+    } else if (config.mode == "spec") {
+        std::cerr << "\n=== u_tau spec dump ===\n";
+        BenchSpecDump(config);
     }
 
     return 0;
