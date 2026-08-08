@@ -1295,6 +1295,9 @@ def _wilson(p_hat, n, z=1.96):
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+_FPFN_POINT_RE = re.compile(r"^fpfn_k\d+_p(\d+)_t\d+$")
+
+
 def table_threshold_fpfn(data, tnum, title, latex=False):
     """FP/FN vs true Jaccard near the boundary, with an idealized binomial
     theory overlay (exact only under ideal minwise hashing; the SHA-256
@@ -1319,9 +1322,9 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
     for r in rows_in:
         by_k[int(r["k"])].append(r)
 
-    sum_headers = ["k", "tau", "J_tau", "sigma_J", "Trials",
+    sum_headers = ["k", "tau", "J_tau", "sigma_J", "Total n", "Trials/pt",
                    "FP rate [95% CI]", "FN rate [95% CI]",
-                   "Prec", "Rec", "Th.FP", "Th.FN"]
+                   "Prec", "Rec", "Idz.FP", "Idz.FN"]
     sum_rows = []
     curve_blocks = []
 
@@ -1369,8 +1372,25 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
             fn_cell = "N/A"
         prec_cell = f"{tp / (tp + fp):.4f}" if (tp + fp) else "N/A"
         rec_cell = f"{tp / (tp + fn):.4f}" if (tp + fn) else "N/A"
+
+        # Per-point trial count: labels are fpfn_k{k}_p{p}_t{t}, so group by
+        # the point id (p) the same way the trial id (t) split is used
+        # elsewhere. len(rows) is the *total* n across all points for this
+        # k (Trials/pt x number of points), which is easy to mistake for the
+        # per-point sample size the R3-4 commitment is expressed against.
+        pt_counts = defaultdict(int)
+        for r in rows:
+            pm = _FPFN_POINT_RE.match(r.get("label", ""))
+            if pm:
+                pt_counts[pm.group(1)] += 1
+        distinct_counts = set(pt_counts.values())
+        if len(distinct_counts) == 1:
+            trials_per_pt = str(distinct_counts.pop())
+        else:
+            trials_per_pt = "varies"
+
         sum_rows.append([
-            str(k), str(tau), f"{j_tau:.4f}", f"{sigma:.4f}", str(len(rows)),
+            str(k), str(tau), f"{j_tau:.4f}", f"{sigma:.4f}", str(len(rows)), trials_per_pt,
             fp_cell, fn_cell, prec_cell, rec_cell,
             f"{th_fp_sum / n_neg:.4f}" if n_neg else "N/A",
             f"{th_fn_sum / n_pos:.4f}" if n_pos else "N/A",
@@ -1396,14 +1416,14 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
     print_table(sum_headers, sum_rows)
     for k, c_rows in curve_blocks:
         print(f"\n  Decision curve, k={k} (z = (J - J_tau)/sigma):")
-        print_table(["z bin", "n", "mean J", "emp P(dec=1)", "theory", "|diff|"],
+        print_table(["z bin", "n", "mean J", "emp P(dec=1)", "idz. theory", "|diff|"],
                     c_rows)
 
     if latex:
         print()
-        lh = ["$k$", r"$\tau$", r"$J_\tau$", r"$\sigma_J$", "Trials",
+        lh = ["$k$", r"$\tau$", r"$J_\tau$", r"$\sigma_J$", "Total $n$", "Trials/pt",
               "FP rate", "FN rate", "Prec.", "Rec.",
-              "FP (theory)", "FN (theory)"]
+              "FP (idealized)", "FN (idealized)"]
         print_latex_table(title, "tab:threshold-fpfn", lh, sum_rows)
 
 
@@ -1641,7 +1661,8 @@ def main():
         # ── T27: Threshold boundary FP/FN ─────────────────────────
         run_and_save(table_threshold_fpfn, sp("T27_threshold_fpfn_boundary"),
                      threshold_fpfn, 27,
-                     "Threshold FP/FN near the true-Jaccard boundary",
+                     "Threshold FP/FN near the true-Jaccard boundary "
+                     "(empirical vs idealized binomial overlay)",
                      latex=lx)
 
         # ── T28: u_tau spec ───────────────────────────────────────

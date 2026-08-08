@@ -43,15 +43,23 @@
    - **C (rejected): re-tune the guard only** — pointless while `Validate()`
      still throws for the missing cell.
    Decision belongs to the integrator + paper author; all tasks above assume A.
-2. **flooding × threshold worst case measured**: k=128 natural depth 15,
-   provisioned depth 16, limb 45, log2 q 630, N = 32768, flood bits 603.
-   k=512 (depth 30) remains impossible at STD128 (p=65537
-   caps N at 32768).
+2. **flooding × threshold worst-case provisioned parameters** (selected from
+   calibration, NOT measured by an executed STD128 threshold evaluation):
+   k=128 natural depth 15, provisioned depth 16, limb 45, log2 q 630,
+   N = 32768, flood bits 603. `--mode=spec` performs KeyGen and a single
+   encryption per k; it does not run a threshold evaluation and does not
+   perform or measure flooding. The eval-noise value shown comes from the
+   calibration table, and the flood bits are derived/provisioned from that
+   same table, not observed at runtime. k=512 (depth 30) remains impossible
+   at STD128 (p=65537 caps N at 32768).
 3. **Paper text anchors** (external Draft/V4 snapshot, not in the repo — see
    the anchor-pinning note): piccard.tex:2203 "100% threshold accuracy" must be
    replaced by the T24 (true-J acc + BFV agree) and T27 (boundary FP/FN vs
-   binomial theory) results; piccard.tex:1285-1302 u_tau paragraph gets the
-   T28 numbers (degree, PS shape, depth, modulus, flooding).
+   an idealized binomial overlay — exact only under ideal minwise hashing;
+   the live SHA-256 rank-hashing family only approximates that, so the
+   overlay is empirically consistent, not exact SHA-256 minwise theory)
+   results; piccard.tex:1285-1302 u_tau paragraph gets the T28 numbers
+   (degree, PS shape, depth, modulus, flooding).
 4. `MakeRandomSetsWithOverlap`'s alpha is NOT Jaccard (J = alpha/(2-alpha));
    now documented implicitly by the fpfn J-grid code. Other benches using the
    11-point alpha grid for "coverage" inherit the same skew — flag to whoever
