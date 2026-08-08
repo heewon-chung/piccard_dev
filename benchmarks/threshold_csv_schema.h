@@ -25,7 +25,10 @@ inline std::string ThresholdCSVHeader() {
         "phase_mask_ms_sd,phase_mask_ms_median,"
         "phase_poly_eval_ms_sd,phase_poly_eval_ms_median,"
         "phase_decrypt_ms_sd,phase_decrypt_ms_median,"
-        "rel_error_eligible_n\n";
+        "rel_error_eligible_n,"
+        // true-Jaccard truth columns (R3-4, additive)
+        "j_tau,match_count,matchcount_expected,fhe_agrees,outcome,"
+        "hash_randomness,hash_seed,hash_root_seed,accuracy_trials\n";
 }
 
 }  // namespace benchmark

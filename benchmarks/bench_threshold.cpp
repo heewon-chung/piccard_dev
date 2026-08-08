@@ -2,6 +2,7 @@
 #include "threshold_csv_schema.h"
 #include "protocol/threshold_piccard.h"
 #include "protocol/piccard.h"
+#include "core/threshold_truth.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -55,6 +56,45 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction) {
 }
 
 // ============================================================================
+// True-Jaccard truth context (R3-4)
+//
+// The ground truth for a threshold decision is ExactJaccard >= J_tau, NOT the
+// MinHash match count: comparing the protocol's decision against the match
+// count only re-verifies that BFV evaluation is exact (that check is kept,
+// separately, as fhe_agrees).
+// ============================================================================
+
+struct TruthContext {
+    double j_true = -1.0;          // ExactJaccard(sa, sb)
+    double j_tau = -1.0;           // JaccardThreshold(tau, k, m)
+    int64_t match_count = -1;      // plaintext bucket match count
+    int matchcount_expected = -1;  // match_count >= tau  (old "expected")
+    int truth = -1;                // j_true >= j_tau     (new "expected")
+};
+
+static TruthContext MakeTruthContext(const ThresholdPiccard& engine,
+                                     const std::vector<uint64_t>& sx,
+                                     const std::vector<uint64_t>& sy) {
+    const auto& P = engine.GetParams();
+    TruthContext tc;
+    tc.j_true = ExactJaccard(sx, sy);
+    tc.j_tau = JaccardThreshold(P.threshold_tau, P.k, P.m);
+    auto sig_x = engine.GetPiccard().ComputeSignature(sx);
+    auto sig_y = engine.GetPiccard().ComputeSignature(sy);
+    tc.match_count = BucketMatchCount(sig_x, sig_y, P.m);
+    tc.matchcount_expected =
+        (tc.match_count >= static_cast<int64_t>(P.threshold_tau)) ? 1 : 0;
+    tc.truth = (tc.j_true >= tc.j_tau) ? 1 : 0;
+    return tc;
+}
+
+// TP/FP/TN/FN of a decision against the true-Jaccard truth.
+static const char* OutcomeName(int truth, int decision) {
+    if (truth == 1) return decision == 1 ? "TP" : "FN";
+    return decision == 1 ? "FP" : "TN";
+}
+
+// ============================================================================
 // Threshold result struct & CSV writer
 // ============================================================================
 
@@ -103,6 +143,19 @@ struct ThresholdResult {
     double phase_poly_eval_ms_sd = -1.0; double phase_poly_eval_ms_median = 0.0;
     double phase_decrypt_ms_sd = -1.0;   double phase_decrypt_ms_median = 0.0;
     size_t rel_error_eligible_n = 0;
+
+    // True-Jaccard truth columns (R3-4, additive)
+    double j_tau = -1.0;            // Jaccard threshold for (tau, k, m)
+    int64_t match_count = -1;       // plaintext bucket match count
+    int matchcount_expected = -1;   // match_count >= tau (pre-R3-4 "expected")
+    int fhe_agrees = -1;            // FHE decision == matchcount_expected; -1 = no FHE run
+    std::string outcome;            // TP/FP/TN/FN vs true-Jaccard truth; "" = n/a
+    // Hash provenance (plan 9 four-column schema, ComparisonCSVWriter precedent)
+    std::string hash_randomness;    // "resampled"/"fixed"; "" = n/a (e.g. SKIPPED)
+    uint64_t hash_seed = 0;         // actual CRS this row was measured under
+    uint64_t hash_root_seed = 0;    // resampled: derivation root (config.seed);
+                                    // fixed: the CRS actually used (or documented 0)
+    size_t accuracy_trials = 0;     // accuracy samples in this row (1 per-trial, 0 timing)
 };
 
 class ThresholdCSVWriter {
@@ -143,7 +196,12 @@ public:
               << r.phase_mask_ms_sd << "," << r.phase_mask_ms_median << ","
               << r.phase_poly_eval_ms_sd << "," << r.phase_poly_eval_ms_median << ","
               << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << "\n";
+              << r.rel_error_eligible_n << ","
+              << std::fixed << std::setprecision(6) << r.j_tau << ","
+              << r.match_count << "," << r.matchcount_expected << ","
+              << r.fhe_agrees << "," << r.outcome << ","
+              << r.hash_randomness << "," << r.hash_seed << ","
+              << r.hash_root_seed << "," << r.accuracy_trials << "\n";
     }
 };
 
