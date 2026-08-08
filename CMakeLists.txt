@@ -553,6 +553,10 @@ if(BUILD_TESTS)
         target_link_libraries(test_threshold_poly piccard_core test_main)
         add_test(NAME ThresholdPoly COMMAND test_threshold_poly)
 
+        add_executable(test_threshold_truth tests/unit/test_threshold_truth.cpp)
+        target_link_libraries(test_threshold_truth piccard_core test_main)
+        add_test(NAME ThresholdTruth COMMAND test_threshold_truth)
+
         # Paillier AHE primitive test (GMP-only, no OpenFHE dependency)
         if(TARGET piccard_paillier)
             add_executable(test_paillier tests/unit/test_paillier.cpp)
