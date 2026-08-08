@@ -1210,9 +1210,8 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
     if not groups:
         return
 
-    headers = [param_name, "Trials", "Thresh Acc",
-               "Mean |J err|", "Max |J err|", "RMSE J",
-               "Mean Rel Err"]
+    headers = [param_name, "Trials", "True-J Acc", "FP", "FN", "BFV Agree",
+               "Mean |J err|", "Max |J err|", "RMSE J", "Mean Rel Err"]
     rows = []
     for pval in sorted(groups.keys(), key=lambda s: float(s)):
         trials = groups[pval]
@@ -1221,6 +1220,22 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         # Threshold correctness
         correct = sum(1 for r in trials if r.get("threshold_correct", "0") == "1")
         thresh_acc = f"{correct / n:.3f}" if n > 0 else "N/A"
+
+        # New-format columns (R3-4). Old CSVs lack them: fall back to N/A so
+        # historical results still render.
+        n_fp = sum(1 for r in trials if r.get("outcome") == "FP")
+        n_fn = sum(1 for r in trials if r.get("outcome") == "FN")
+        agrees = [int(r["fhe_agrees"]) for r in trials
+                  if r.get("fhe_agrees", "") not in ("", "-1")]
+        bfv_agree = f"{sum(agrees) / len(agrees):.3f}" if agrees else "N/A"
+        has_outcome = any(r.get("outcome") for r in trials)
+        fp_s = str(n_fp) if has_outcome else "N/A"
+        fn_s = str(n_fn) if has_outcome else "N/A"
+        if not has_outcome:
+            # Old CSVs: threshold_correct is the *tautological* match-count
+            # accuracy — the very number R3-4 rejects. Never present it
+            # under the True-J Acc header.
+            thresh_acc = "N/A"
 
         # Jaccard error stats
         errors = [abs(float(r.get("jaccard_error", "0"))) for r in trials]
@@ -1233,7 +1248,7 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         mean_rel = f"{sum(valid_rel) / len(valid_rel):.4f}" if valid_rel else "N/A"
 
         rows.append([
-            pval, str(n), thresh_acc,
+            pval, str(n), thresh_acc, fp_s, fn_s, bfv_agree,
             f"{mean_err:.4f}", f"{max_err:.4f}",
             f"{rmse:.4f}", mean_rel,
         ])
@@ -1244,7 +1259,7 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         print()
         pn = f"${param_name}$" if len(param_name) <= 2 else param_name
         tab_id = param_prefix.replace("accuracy_", "")
-        lh = [pn, "Trials", "Thresh Acc",
+        lh = [pn, "Trials", "True-$J$ Acc", "FP", "FN", "BFV Agr.",
               "Mean $|\\epsilon_J|$", "Max $|\\epsilon_J|$", "RMSE",
               "Mean Rel Err"]
         print_latex_table(title, f"tab:threshold-accuracy-{tab_id}", lh, rows)
