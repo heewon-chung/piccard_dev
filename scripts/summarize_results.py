@@ -1401,6 +1401,45 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
         print_latex_table(title, "tab:threshold-fpfn", lh, sum_rows)
 
 
+# ── T28: u_tau construction & evaluation parameters ─────────────────
+
+def table_threshold_spec(data, tnum, title, latex=False):
+    """Per-k u_tau spec: degree, Paterson-Stockmeyer shape, depth, modulus,
+    noise/flooding budget. SKIPPED rows carry the infeasibility reason."""
+    if not data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    headers = ["k", "tau", "deg", "PS s", "chunks", "depth(nat)", "depth(prov)",
+               "limb", "N", "p", "log2 q", "eval noise", "flood bits",
+               "ct KB", "status"]
+    rows = []
+    for r in sorted(data, key=lambda r: int(r["k"])):
+        if r.get("status") == "SKIPPED":
+            rows.append([r["k"], r["tau"], r["degree"], r["ps_baby_s"],
+                         r["ps_num_chunks"], r["natural_mult_depth"], "-", "-",
+                         "-", "-", "-", "-", "-", "-",
+                         f"SKIPPED: {r.get('note', '')[:40]}"])
+            continue
+        ct_kb = f"{int(r['ct_bytes']) / 1024:.0f}"
+        rows.append([r["k"], r["tau"], r["degree"], r["ps_baby_s"],
+                     r["ps_num_chunks"], r["natural_mult_depth"],
+                     r["mult_depth"], r["scaling_mod_size"], r["ring_dim"],
+                     r["plaintext_mod"], r["log2_q"], r["eval_noise_bits"],
+                     r["flood_noise_bits"], ct_kb, "ok"])
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        lh = ["$k$", r"$\tau$", r"$\deg u_\tau$", "$s$", "chunks",
+              "depth", "prov.", "limb", "$N$", "$p$", r"$\log_2 q$",
+              "noise", "flood", "ct KB", "status"]
+        print_latex_table(title, "tab:threshold-spec", lh, rows)
+
+
 # ── Save helper ──────────────────────────────────────────────────────
 
 def run_and_save(func, save_path, *args, **kwargs):
@@ -1598,6 +1637,12 @@ def main():
                      threshold_fpfn, 27,
                      "Threshold FP/FN near the true-Jaccard boundary",
                      latex=lx)
+
+        # ── T28: u_tau spec ───────────────────────────────────────
+        run_and_save(table_threshold_spec, sp("T28_threshold_spec"),
+                     threshold_spec, 28,
+                     "Threshold polynomial u_tau: construction and "
+                     "evaluation parameters", latex=lx)
 
     if sd:
         saved = [f.name for f in sorted(sd.glob("T*.txt"))]
