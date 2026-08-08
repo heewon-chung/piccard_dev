@@ -1295,7 +1295,7 @@ def _wilson(p_hat, n, z=1.96):
     return (max(0.0, center - half), min(1.0, center + half))
 
 
-_FPFN_POINT_RE = re.compile(r"^fpfn_k\d+_p(\d+)_t\d+$")
+_FPFN_POINT_RE = re.compile(r"^fpfn_k(\d+)_p(\d+)_t\d+$")
 
 
 def table_threshold_fpfn(data, tnum, title, latex=False):
@@ -1378,13 +1378,23 @@ def table_threshold_fpfn(data, tnum, title, latex=False):
         # elsewhere. len(rows) is the *total* n across all points for this
         # k (Trials/pt x number of points), which is easy to mistake for the
         # per-point sample size the R3-4 commitment is expressed against.
+        # A row whose label fails to parse, or whose label-k disagrees with
+        # this group's k, means the data isn't what it claims to be; either
+        # case must force "varies" rather than silently reporting a
+        # possibly-understated uniform count.
         pt_counts = defaultdict(int)
+        all_matched = True
+        k_agrees = True
         for r in rows:
             pm = _FPFN_POINT_RE.match(r.get("label", ""))
             if pm:
-                pt_counts[pm.group(1)] += 1
+                if int(pm.group(1)) != k:
+                    k_agrees = False
+                pt_counts[pm.group(2)] += 1
+            else:
+                all_matched = False
         distinct_counts = set(pt_counts.values())
-        if len(distinct_counts) == 1:
+        if all_matched and k_agrees and len(distinct_counts) == 1:
             trials_per_pt = str(distinct_counts.pop())
         else:
             trials_per_pt = "varies"
