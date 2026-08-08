@@ -3,6 +3,7 @@
 #include "protocol/threshold_piccard.h"
 #include "protocol/piccard.h"
 #include "core/threshold_truth.h"
+#include "core/minhash.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -1042,6 +1043,108 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
 }
 
 // ============================================================================
+// FP/FN boundary sweep (R3-4) -- Layer A: plaintext-only statistics
+//
+// The FP/FN behaviour of the threshold decision is a property of the MinHash
+// estimator, not of BFV (Layer B certifies fhe_agrees == 1 separately). So
+// this sweep runs entirely on plaintext signatures, which makes thousands of
+// trials per grid point affordable, densely sampled inside J_tau +/- 3 sigma
+// where the decision error actually lives.
+// ============================================================================
+
+static void BenchFpfnVaryK(const BenchmarkConfig& config,
+                           ThresholdCSVWriter& csv) {
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
+        {16, 32, 64, 128, 256, 512}, config.security_level);
+    const uint32_t m = config.m;
+    const int kPoints = 21;
+
+    for (uint32_t k : k_values) {
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
+        const double j_tau = JaccardThreshold(tau, k, m);
+        const double sigma = JaccardEstimatorSigma(j_tau, k, m);
+
+        size_t n_fp = 0, n_fn = 0, n_neg = 0, n_pos = 0;
+
+        for (int p = 0; p < kPoints; p++) {
+            // Evenly spaced on [J_tau - 3 sigma, J_tau + 3 sigma]
+            double z = 3.0 * (2.0 * p / (kPoints - 1) - 1.0);
+            double j_target = j_tau + z * sigma;
+            j_target = std::max(0.02, std::min(0.98, j_target));
+            double alpha = 2.0 * j_target / (1.0 + j_target);
+
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, alpha));
+                auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                    config.set_size, alpha, rng);
+                double j_true = ExactJaccard(sa, sb);
+
+                const uint64_t crs =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, alpha)
+                        : config.seed;
+                MinHasher hasher(k, UINT64_MAX, crs);
+                auto sig_x = hasher.ComputeSignature(sa);
+                auto sig_y = hasher.ComputeSignature(sb);
+
+                int64_t mc = BucketMatchCount(sig_x, sig_y, m);
+                int decision = (mc >= static_cast<int64_t>(tau)) ? 1 : 0;
+                int truth = (j_true >= j_tau) ? 1 : 0;
+
+                if (truth) { n_pos++; if (!decision) n_fn++; }
+                else       { n_neg++; if (decision)  n_fp++; }
+
+                double raw_ratio = static_cast<double>(mc) / k;
+                double j_hat = (raw_ratio - 1.0 / m) / (1.0 - 1.0 / m);
+                j_hat = std::max(0.0, std::min(1.0, j_hat));
+
+                ThresholdResult tr;
+                tr.label = "fpfn_k" + std::to_string(k) +
+                           "_p" + std::to_string(p) +
+                           "_t" + std::to_string(t);
+                tr.k = k;
+                tr.m = m;
+                tr.set_size = config.set_size;
+                tr.ring_dim = 0;              // plaintext: no FHE instance
+                tr.tau = tau;
+                tr.mult_depth = 0;
+                tr.threshold_result = decision;
+                tr.threshold_expected = truth;
+                tr.threshold_correct = (decision == truth) ? 1 : 0;
+                tr.jaccard_computed = j_hat;
+                tr.jaccard_expected = j_true;
+                tr.jaccard_error = std::abs(j_hat - j_true);
+                tr.jaccard_rel_error =
+                    (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                tr.j_tau = j_tau;
+                tr.match_count = mc;
+                tr.matchcount_expected = decision;  // identical by construction
+                tr.fhe_agrees = -1;                 // no FHE in this mode
+                tr.outcome = OutcomeName(truth, decision);
+                tr.hash_randomness = HashRandomnessName(config.hash_randomness);
+                tr.hash_seed = crs;
+                // Both modes: config.seed is true provenance here. Resampled:
+                // it is the derivation root of HashTrialSeed. Fixed: the
+                // hasher above is constructed with config.seed directly, so
+                // it IS the actual CRS (no engine default in this mode).
+                tr.hash_root_seed = config.seed;
+                tr.accuracy_trials = 1;
+                // Flood fields keep their defaults (means/constants 0, sd -1):
+                // plaintext-only mode, no sized params — FloodNoiseBits()
+                // must not be called here (Task 5b Step 4).
+                csv.WriteRow(tr);
+            }
+        }
+
+        std::cerr << "  k=" << k << " tau=" << tau
+                  << std::fixed << std::setprecision(4)
+                  << " J_tau=" << j_tau << " sigma=" << sigma
+                  << " FP=" << n_fp << "/" << n_neg
+                  << " FN=" << n_fn << "/" << n_pos << "\n";
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -1053,7 +1156,7 @@ int main(int argc, char** argv) {
                   << "  --m=N              One-hot bucket size (default: 64)\n"
                   << "  --set_size=N       Size of each party's set (default: 100)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
-                  << "  --mode=MODE        'accuracy' or 'timing' (default: timing)\n"
+                  << "  --mode=MODE        'accuracy', 'timing', 'fpfn', or 'spec' (default: timing)\n"
                   << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
         return 0;
     }
@@ -1082,6 +1185,10 @@ int main(int argc, char** argv) {
 
         std::cerr << "\n=== Accuracy vs set size ===\n";
         BenchAccuracyVarySetSize(config, csv);
+    } else if (config.mode == "fpfn") {
+        std::cerr << "\n=== Boundary FP/FN vs k (" << config.trials
+                  << " trials/point, plaintext MinHash) ===\n";
+        BenchFpfnVaryK(config, csv);
     }
 
     return 0;

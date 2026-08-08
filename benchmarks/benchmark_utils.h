@@ -332,7 +332,9 @@ struct BenchmarkConfig {
                 config.trials = std::stoull(arg.substr(9));
             } else if (arg.find("--mode=") == 0) {
                 config.mode = arg.substr(7);
-                if (config.mode != "accuracy" && config.mode != "timing" && config.mode != "combined") {
+                if (config.mode != "accuracy" && config.mode != "timing" &&
+                    config.mode != "combined" && config.mode != "fpfn" &&
+                    config.mode != "spec") {
                     throw std::invalid_argument("Invalid mode: " + config.mode);
                 }
             } else if (arg.find("--security=") == 0) {
