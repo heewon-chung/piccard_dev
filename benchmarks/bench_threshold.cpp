@@ -171,6 +171,16 @@ struct ThresholdResult {
     uint64_t hash_root_seed = 0;    // resampled: derivation root (config.seed);
                                     // fixed: the CRS actually used (or documented 0)
     size_t accuracy_trials = 0;     // accuracy samples in this row (1 per-trial, 0 timing)
+
+    // Flooding columns (plan 8 schema, additive)
+    double phase_flood_ms = 0.0;
+    double phase_flood_ms_sd = -1.0;
+    double phase_flood_ms_median = 0.0;
+    uint32_t flood_lambda_stat = 0;
+    uint32_t flood_eval_noise_bits = 0;
+    uint32_t flood_margin_bits = 0;
+    uint32_t flood_noise_bits = 0;
+    uint32_t scaling_mod_size = 0;
 };
 
 class ThresholdCSVWriter {
@@ -216,7 +226,13 @@ public:
               << r.match_count << "," << r.matchcount_expected << ","
               << r.fhe_agrees << "," << r.outcome << ","
               << r.hash_randomness << "," << r.hash_seed << ","
-              << r.hash_root_seed << "," << r.accuracy_trials << "\n";
+              << r.hash_root_seed << "," << r.accuracy_trials << ","
+              << std::fixed << std::setprecision(3)
+              << r.phase_flood_ms << "," << r.phase_flood_ms_sd << ","
+              << r.phase_flood_ms_median << ","
+              << r.flood_lambda_stat << "," << r.flood_eval_noise_bits << ","
+              << r.flood_margin_bits << "," << r.flood_noise_bits << ","
+              << r.scaling_mod_size << "\n";
     }
 };
 
@@ -330,6 +346,12 @@ static ThresholdResult RunTimedThreshold(
     result = bfv.EvalPolyBFV(result, engine.GetThresholdPoly());
     tr.phase_poly_eval_ms = timer.ElapsedMs();
 
+    // Phase 7.5: Noise flooding (cloud) — mirrors ThresholdPiccard::Evaluate
+    // exit (threshold_piccard.cpp:49): after EvalPolyBFV, NOT rotate-and-sum.
+    timer.Start();
+    result = bfv.Flood(result);
+    tr.phase_flood_ms = timer.ElapsedMs();
+
     // Phase 8: Decrypt
     timer.Start();
     auto values = bfv.Decrypt(result);
@@ -338,7 +360,15 @@ static ThresholdResult RunTimedThreshold(
 
     tr.total_ms = tr.phase_minhash_ms + tr.phase_encode_ms + tr.phase_encrypt_ms +
                   tr.phase_multiply_ms + tr.phase_rotate_sum_ms + tr.phase_mask_ms +
-                  tr.phase_poly_eval_ms + tr.phase_decrypt_ms;
+                  tr.phase_poly_eval_ms + tr.phase_flood_ms + tr.phase_decrypt_ms;
+
+    // flood_lambda_stat keeps plan 8's historical CSV column name; the value
+    // comes from the post-rework compatibility bridge (lambda_stat is gone).
+    tr.flood_lambda_stat = engine.GetParams().LegacyFloodCoefficientBits();
+    tr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    tr.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    tr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    tr.scaling_mod_size = engine.GetParams().scaling_mod_size;
     tr.memory_bytes = MemoryTracker::GetPeakRSS();
     tr.threshold_result = decision ? 1 : 0;
     tr.threshold_expected = tc.truth;
@@ -376,7 +406,7 @@ static ThresholdResult RunMultiTrialThreshold(
     RunTimedThreshold(engine, set_x, set_y, tc, "warmup");
 
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-    std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_decrypt;
+    std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_flood, v_decrypt;
     size_t ct_size = 0;
     int last_result = 0, last_expected = 0, last_correct = 0;
 
@@ -390,6 +420,7 @@ static ThresholdResult RunMultiTrialThreshold(
         v_rotate.push_back(tr.phase_rotate_sum_ms);
         v_mask.push_back(tr.phase_mask_ms);
         v_poly.push_back(tr.phase_poly_eval_ms);
+        v_flood.push_back(tr.phase_flood_ms);
         v_decrypt.push_back(tr.phase_decrypt_ms);
         ct_size = tr.ct_size_bytes;
         last_result = tr.threshold_result;
@@ -405,6 +436,7 @@ static ThresholdResult RunMultiTrialThreshold(
     auto d_rot = ComputeDispersion(v_rotate);
     auto d_msk = ComputeDispersion(v_mask);
     auto d_pol = ComputeDispersion(v_poly);
+    auto d_fld = ComputeDispersion(v_flood);
     auto d_dec = ComputeDispersion(v_decrypt);
 
     ThresholdResult result;
@@ -423,6 +455,7 @@ static ThresholdResult RunMultiTrialThreshold(
     result.phase_rotate_sum_ms = d_rot.mean; result.phase_rotate_sum_ms_sd = d_rot.sd; result.phase_rotate_sum_ms_median = d_rot.median;
     result.phase_mask_ms      = d_msk.mean; result.phase_mask_ms_sd      = d_msk.sd; result.phase_mask_ms_median      = d_msk.median;
     result.phase_poly_eval_ms = d_pol.mean; result.phase_poly_eval_ms_sd = d_pol.sd; result.phase_poly_eval_ms_median = d_pol.median;
+    result.phase_flood_ms     = d_fld.mean; result.phase_flood_ms_sd     = d_fld.sd; result.phase_flood_ms_median     = d_fld.median;
     result.phase_decrypt_ms   = d_dec.mean; result.phase_decrypt_ms_sd   = d_dec.sd; result.phase_decrypt_ms_median   = d_dec.median;
     result.memory_bytes = MemoryTracker::GetPeakRSS();
     result.ct_size_bytes = ct_size;
@@ -443,6 +476,14 @@ static ThresholdResult RunMultiTrialThreshold(
     result.hash_randomness = "fixed";
     result.hash_seed = engine.GetParams().hash_seed;
     result.hash_root_seed = engine.GetParams().hash_seed;
+
+    // flood_lambda_stat keeps plan 8's historical CSV column name; the value
+    // comes from the post-rework compatibility bridge (lambda_stat is gone).
+    result.flood_lambda_stat = engine.GetParams().LegacyFloodCoefficientBits();
+    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     return result;
 }
@@ -755,6 +796,13 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
                         ? config.seed
                         : trial_hash_seed;
                 tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
@@ -860,6 +908,13 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config,
                         ? config.seed
                         : trial_hash_seed;
                 tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
@@ -964,6 +1019,13 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
                         ? config.seed
                         : trial_hash_seed;
                 tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
