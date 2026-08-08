@@ -268,7 +268,7 @@ static ThresholdResult RunTimedThreshold(
     const ThresholdPiccard& engine,
     const std::vector<uint64_t>& set_x,
     const std::vector<uint64_t>& set_y,
-    bool expected_decision,
+    const TruthContext& tc,
     const std::string& label)
 {
     Timer timer;
@@ -341,8 +341,21 @@ static ThresholdResult RunTimedThreshold(
                   tr.phase_poly_eval_ms + tr.phase_decrypt_ms;
     tr.memory_bytes = MemoryTracker::GetPeakRSS();
     tr.threshold_result = decision ? 1 : 0;
-    tr.threshold_expected = expected_decision ? 1 : 0;
-    tr.threshold_correct = (decision == expected_decision) ? 1 : 0;
+    tr.threshold_expected = tc.truth;
+    tr.threshold_correct = ((decision ? 1 : 0) == tc.truth) ? 1 : 0;
+    tr.jaccard_expected = tc.j_true;
+    tr.j_tau = tc.j_tau;
+    tr.match_count = tc.match_count;
+    tr.matchcount_expected = tc.matchcount_expected;
+    tr.fhe_agrees = ((decision ? 1 : 0) == tc.matchcount_expected) ? 1 : 0;
+    tr.outcome = OutcomeName(tc.truth, decision ? 1 : 0);
+    // Timing provenance (plan 9-2 convention): timing sweeps run on the
+    // engine's fixed CRS. Record it honestly in BOTH seed fields — the engine
+    // default is 42 regardless of --seed, so config.seed here would be false
+    // provenance. accuracy_trials stays 0 (timing rows claim no accuracy).
+    tr.hash_randomness = "fixed";
+    tr.hash_seed = engine.GetParams().hash_seed;
+    tr.hash_root_seed = engine.GetParams().hash_seed;
 
     return tr;
 }
@@ -355,12 +368,12 @@ static ThresholdResult RunMultiTrialThreshold(
     const ThresholdPiccard& engine,
     const std::vector<uint64_t>& set_x,
     const std::vector<uint64_t>& set_y,
-    bool expected_decision,
+    const TruthContext& tc,
     const std::string& label,
     size_t trials)
 {
     // Warmup (discarded)
-    RunTimedThreshold(engine, set_x, set_y, expected_decision, "warmup");
+    RunTimedThreshold(engine, set_x, set_y, tc, "warmup");
 
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
     std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_decrypt;
@@ -368,7 +381,7 @@ static ThresholdResult RunMultiTrialThreshold(
     int last_result = 0, last_expected = 0, last_correct = 0;
 
     for (size_t t = 0; t < trials; t++) {
-        auto tr = RunTimedThreshold(engine, set_x, set_y, expected_decision, label);
+        auto tr = RunTimedThreshold(engine, set_x, set_y, tc, label);
         v_total.push_back(tr.total_ms);
         v_minhash.push_back(tr.phase_minhash_ms);
         v_encode.push_back(tr.phase_encode_ms);
@@ -419,6 +432,17 @@ static ThresholdResult RunMultiTrialThreshold(
     result.threshold_correct = last_correct;
     // threshold benchmark has no per-trial jaccard fields in timing mode
     result.rel_error_eligible_n = 0;
+
+    result.threshold_expected = tc.truth;
+    result.jaccard_expected = tc.j_true;
+    result.j_tau = tc.j_tau;
+    result.match_count = tc.match_count;
+    result.matchcount_expected = tc.matchcount_expected;
+    result.outcome = OutcomeName(tc.truth, last_result);
+    result.fhe_agrees = (last_result == tc.matchcount_expected) ? 1 : 0;
+    result.hash_randomness = "fixed";
+    result.hash_seed = engine.GetParams().hash_seed;
+    result.hash_root_seed = engine.GetParams().hash_seed;
 
     return result;
 }
@@ -494,7 +518,6 @@ static void BenchVaryK(const BenchmarkConfig& config,
                        ThresholdCSVWriter& csv) {
     std::vector<uint32_t> all_k = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(sa, sb);
 
     for (uint32_t k : all_k) {
         uint32_t tau = static_cast<uint32_t>(0.6 * k);
@@ -513,12 +536,11 @@ static void BenchVaryK(const BenchmarkConfig& config,
         }
 
         try {
-            // Compute expected threshold using basic protocol
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_k_" + std::to_string(k);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
@@ -552,7 +574,6 @@ static void BenchVaryM(const BenchmarkConfig& config,
     std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(sa, sb);
 
     for (uint32_t m : m_values) {
         PiccardParams params;
@@ -570,11 +591,11 @@ static void BenchVaryM(const BenchmarkConfig& config,
         }
 
         try {
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_m_" + std::to_string(m);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
@@ -619,14 +640,13 @@ static void BenchVarySetSize(const BenchmarkConfig& config,
 
     for (size_t sz : sizes) {
         auto [sa, sb] = MakeSetsWithOverlap(sz, 0.5);
-        double j_true = ExactJaccard(sa, sb);
 
         try {
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_size_" + std::to_string(sz);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
