@@ -231,18 +231,37 @@ TEST_F(ThresholdEngineTest, SymmetryOfThreshold) {
 }
 
 TEST_F(ThresholdEngineTest, SetHashSeedChangesFamilyKeepsCorrectness) {
+    // Encrypting only AFTER the reseed would pass even if SetHashSeed
+    // silently regenerated the BFV keys or the precomputed threshold
+    // polynomial -- exactly what this test claims to rule out. So encrypt
+    // BEFORE reseeding, and evaluate/decrypt those same ciphertexts AFTER:
+    // that is what actually proves the keys and u_tau survived.
     SetUpWithTau(10);
 
     std::vector<uint64_t> set;
     for (uint64_t i = 0; i < 50; i++) set.push_back(i);
 
+    auto ct_x = engine->Encrypt(set);
+    auto ct_y = engine->Encrypt(set);
     auto sig_before = engine->GetPiccard().ComputeSignature(set);
-    engine->SetHashSeed(0xC0FFEEULL);
-    auto sig_after = engine->GetPiccard().ComputeSignature(set);
 
+    // Above UINT32_MAX, to catch a forwarder that truncates the seed to
+    // 32 bits. Later trial seeds use the full 64-bit range.
+    const uint64_t kReseed = 0x1'0000'C0FFEEULL;
+    engine->SetHashSeed(kReseed);
+
+    // Pin the 64-bit forwarding: the engine must report the exact seed set.
+    EXPECT_EQ(engine->GetParams().hash_seed, kReseed);
+
+    auto sig_after = engine->GetPiccard().ComputeSignature(set);
     // A different CRS must give a different hash family (hence signature)...
     EXPECT_NE(sig_before, sig_after);
-    // ...while identical sets still exceed tau (match_count = k = 16 > 10),
-    // proving BFV keys and the threshold polynomial survived the reseed.
-    EXPECT_TRUE(engine->Run(set, set));
+
+    // ...while the PRE-reseed ciphertexts still decrypt to the correct
+    // decision post-reseed (identical sets: match_count = k = 16 > tau = 10).
+    // This only holds if the BFV keys and threshold polynomial were left
+    // untouched by the reseed.
+    bool decision = engine->Decrypt(engine->Evaluate(ct_x, ct_y));
+    EXPECT_TRUE(decision) << "pre-reseed ciphertexts must still decrypt "
+                             "correctly after SetHashSeed";
 }

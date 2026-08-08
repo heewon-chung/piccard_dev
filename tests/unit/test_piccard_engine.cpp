@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "core/threshold_truth.h"
 #include "protocol/dynamic_piccard.h"
 #include "protocol/piccard.h"
 
@@ -205,6 +206,60 @@ TEST_F(PiccardEngineTest, BiasCorrection) {
     RecordProperty("output_expected_from_formula", std::to_string(expected_j));
 
     EXPECT_DOUBLE_EQ(result.jaccard_estimate, expected_j);
+}
+
+TEST_F(PiccardEngineTest, JaccardThresholdInvertsProductionDecrypt) {
+    // The R3-4 ground truth rests on JaccardThreshold(v, k, m) being the exact
+    // inverse of the bias correction Decrypt applies to a real recovered
+    // match count v. Pin that against the PRODUCTION Decrypt path (not just
+    // the header's own arithmetic, which the other threshold_truth tests
+    // already cover).
+    RecordProperty("input_k", static_cast<int>(params.k));
+    RecordProperty("input_m", static_cast<int>(params.m));
+    RecordProperty("formula", "JaccardThreshold(v, k, m) == Decrypt's jaccard_estimate at match_count = v");
+
+    double k = static_cast<double>(params.k);
+    double m = static_cast<double>(params.m);
+
+    // Case 1: identical sets -- match_count = k, unclamped ratio lands
+    // exactly at the 1.0 boundary (still inside [0,1], not clamped).
+    std::vector<uint64_t> set;
+    for (uint64_t i = 0; i < 50; i++) set.push_back(i);
+    auto result_identical = engine->Run(set, set);
+
+    double raw_identical = (static_cast<double>(result_identical.match_count) / k - 1.0 / m) /
+                           (1.0 - 1.0 / m);
+    RecordProperty("case1_match_count", std::to_string(result_identical.match_count));
+    RecordProperty("case1_raw_unclamped", std::to_string(raw_identical));
+    ASSERT_GE(raw_identical, 0.0) << "case would clamp -- pick different sets";
+    ASSERT_LE(raw_identical, 1.0) << "case would clamp -- pick different sets";
+
+    EXPECT_DOUBLE_EQ(
+        JaccardThreshold(static_cast<uint32_t>(result_identical.match_count),
+                         params.k, params.m),
+        result_identical.jaccard_estimate);
+
+    // Case 2: partial overlap (two 200-element sets sharing 120 elements,
+    // J_true = 120/280) -- unclamped ratio is strictly interior to [0,1].
+    std::vector<uint64_t> set_a, set_b;
+    for (uint64_t i = 0; i < 200; i++) set_a.push_back(i);
+    for (uint64_t i = 0; i < 120; i++) set_b.push_back(i);
+    for (uint64_t i = 200; i < 280; i++) set_b.push_back(i);
+    ASSERT_EQ(set_b.size(), 200u);
+
+    auto result_partial = engine->Run(set_a, set_b);
+
+    double raw_partial = (static_cast<double>(result_partial.match_count) / k - 1.0 / m) /
+                         (1.0 - 1.0 / m);
+    RecordProperty("case2_match_count", std::to_string(result_partial.match_count));
+    RecordProperty("case2_raw_unclamped", std::to_string(raw_partial));
+    ASSERT_GT(raw_partial, 0.0) << "case would clamp -- pick different sets";
+    ASSERT_LT(raw_partial, 1.0) << "case would clamp -- pick different sets";
+
+    EXPECT_DOUBLE_EQ(
+        JaccardThreshold(static_cast<uint32_t>(result_partial.match_count),
+                         params.k, params.m),
+        result_partial.jaccard_estimate);
 }
 
 TEST_F(PiccardEngineTest, JaccardClampedToZero) {

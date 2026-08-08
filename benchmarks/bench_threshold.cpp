@@ -16,6 +16,8 @@
 #include <iomanip>
 #include <memory>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace piccard;
@@ -81,6 +83,19 @@ static TruthContext MakeTruthContext(const ThresholdPiccard& engine,
     tc.j_tau = JaccardThreshold(P.threshold_tau, P.k, P.m);
     auto sig_x = engine.GetPiccard().ComputeSignature(sx);
     auto sig_y = engine.GetPiccard().ComputeSignature(sy);
+    // BucketMatchCount takes std::min of the two lengths and would silently
+    // truncate a mismatch (the header keeps that behavior deliberately; see
+    // core/threshold_truth.h). OneHotEncoder::Encode rejects any signature
+    // whose length isn't k, so a length mismatch here is a wiring bug --
+    // fail loudly instead of turning it into plausible-looking benchmark
+    // data. NDEBUG strips assert() in this Release build, so this must be a
+    // real runtime check.
+    if (sig_x.size() != P.k || sig_y.size() != P.k) {
+        throw std::runtime_error(
+            "MakeTruthContext: signature length mismatch (sig_x.size()=" +
+            std::to_string(sig_x.size()) + ", sig_y.size()=" +
+            std::to_string(sig_y.size()) + ", k=" + std::to_string(P.k) + ")");
+    }
     tc.match_count = BucketMatchCount(sig_x, sig_y, P.m);
     tc.matchcount_expected =
         (tc.match_count >= static_cast<int64_t>(P.threshold_tau)) ? 1 : 0;

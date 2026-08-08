@@ -62,3 +62,25 @@ TEST(ThresholdTruth, SigmaMatchesHalfInvSqrtKApproximation) {
     EXPECT_NEAR(JaccardEstimatorSigma(j_tau, 128, 64),
                 1.0 / (2.0 * std::sqrt(128.0)), 2e-3);
 }
+
+// The loose approximation above admits a wrong implementation: substituting
+// j for q = j + (1-j)/m differs by only ~1.07e-4 at k=128,m=64,J=J_tau --
+// comfortably inside the 5e-4 tolerance above. Pin the exact formula
+// (sigma_J = sqrt(q(1-q)/k) / (1 - 1/m)) at a tight tolerance, computing q
+// independently in the test, across several j and several m -- including
+// small m (4, 8), where the j-vs-q gap is largest and a substitution bug is
+// easiest to catch.
+TEST(ThresholdTruth, SigmaMatchesExactQFormula) {
+    for (uint32_t m : {4u, 8u, 16u, 64u}) {
+        for (double j : {0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0}) {
+            for (uint32_t k : {16u, 64u, 128u, 512u}) {
+                double q = j + (1.0 - j) / static_cast<double>(m);
+                double expected =
+                    std::sqrt(q * (1.0 - q) / static_cast<double>(k)) /
+                    (1.0 - 1.0 / static_cast<double>(m));
+                EXPECT_NEAR(JaccardEstimatorSigma(j, k, m), expected, 1e-12)
+                    << "j=" << j << " k=" << k << " m=" << m;
+            }
+        }
+    }
+}
