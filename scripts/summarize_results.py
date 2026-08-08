@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-summarize_results.py — Parse benchmark CSVs and produce 26 comparison tables.
+summarize_results.py — Parse benchmark CSVs and produce 28 comparison tables.
 
 Usage:
     python3 scripts/summarize_results.py results/<dir>/csv
@@ -16,6 +16,7 @@ import math
 import re
 import sys
 from collections import defaultdict
+from math import comb, sqrt
 from pathlib import Path
 
 
@@ -1249,6 +1250,140 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         print_latex_table(title, f"tab:threshold-accuracy-{tab_id}", lh, rows)
 
 
+# ── T27: Threshold FP/FN near the true-Jaccard boundary ─────────────
+
+def _binom_sf(tau, k, q):
+    """P[Binom(k, q) >= tau]; stdlib only (no scipy on the bench machines)."""
+    if q <= 0.0:
+        return 1.0 if tau <= 0 else 0.0
+    if q >= 1.0:
+        return 1.0
+    return sum(comb(k, i) * (q ** i) * ((1.0 - q) ** (k - i))
+               for i in range(tau, k + 1))
+
+
+def _decide_prob_theory(j, k, tau, m):
+    """P(protocol decides 1 | true Jaccard j): match_count ~ Binom(k, q(j))."""
+    q = j + (1.0 - j) / m
+    return _binom_sf(tau, k, q)
+
+
+def _wilson(p_hat, n, z=1.96):
+    """Wilson score interval for a binomial proportion."""
+    if n == 0:
+        return (0.0, 1.0)
+    denom = 1.0 + z * z / n
+    center = (p_hat + z * z / (2 * n)) / denom
+    half = z * sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def table_threshold_fpfn(data, tnum, title, latex=False):
+    """FP/FN vs true Jaccard near the boundary, with an idealized binomial
+    theory overlay (exact only under ideal minwise hashing; the SHA-256
+    rank-hashing family approximates it).
+
+    Summary per k: FP rate over true negatives, FN rate over true positives
+    (each with a Wilson 95% CI), precision, recall, and the same rates
+    predicted by match_count ~ Binom(k, q(J)) on the *sampled* J values.
+    Curve per k: 0.5-sigma bins of z = (J - J_tau)/sigma_J with empirical and
+    theoretical P(decide = 1). The two edge bins absorb clamped |z| >= 2.5
+    outliers (including the z = +3 endpoint) and are labeled open-ended.
+    """
+    rows_in = [r for r in data if r.get("label", "").startswith("fpfn_")]
+    if not rows_in:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    by_k = defaultdict(list)
+    for r in rows_in:
+        by_k[int(r["k"])].append(r)
+
+    sum_headers = ["k", "tau", "J_tau", "sigma_J", "Trials",
+                   "FP rate [95% CI]", "FN rate [95% CI]",
+                   "Prec", "Rec", "Th.FP", "Th.FN"]
+    sum_rows = []
+    curve_blocks = []
+
+    for k in sorted(by_k):
+        rows = by_k[k]
+        tau = int(rows[0]["tau"])
+        m = int(rows[0]["m"])
+        j_tau = float(rows[0]["j_tau"])
+        q_tau = j_tau + (1.0 - j_tau) / m
+        sigma = sqrt(q_tau * (1.0 - q_tau) / k) / (1.0 - 1.0 / m)
+
+        tp = fp = tn = fn = 0
+        th_fp_sum = th_fn_sum = 0.0
+        bins = defaultdict(lambda: [0, 0, 0.0, 0.0])  # z-bin -> [n, dec1, sumJ, sumTh]
+        for r in rows:
+            j = float(r["jaccard_expected"])
+            dec = int(r["threshold_result"])
+            truth = int(r["threshold_expected"])
+            th = _decide_prob_theory(j, k, tau, m)
+            if truth == 1:
+                th_fn_sum += 1.0 - th
+                if dec == 1: tp += 1
+                else: fn += 1
+            else:
+                th_fp_sum += th
+                if dec == 1: fp += 1
+                else: tn += 1
+            z = (j - j_tau) / sigma if sigma > 0 else 0.0
+            b = max(-6, min(5, int(math.floor(z / 0.5))))  # 12 bins over [-3, 3)
+            cell = bins[b]
+            cell[0] += 1; cell[1] += dec; cell[2] += j; cell[3] += th
+
+        n_neg, n_pos = fp + tn, tp + fn
+        fp_rate = fp / n_neg if n_neg else 0.0
+        fn_rate = fn / n_pos if n_pos else 0.0
+        fp_lo, fp_hi = _wilson(fp_rate, n_neg)
+        fn_lo, fn_hi = _wilson(fn_rate, n_pos)
+        prec = tp / (tp + fp) if (tp + fp) else float("nan")
+        rec = tp / (tp + fn) if (tp + fn) else float("nan")
+        sum_rows.append([
+            str(k), str(tau), f"{j_tau:.4f}", f"{sigma:.4f}", str(len(rows)),
+            f"{fp_rate:.4f} [{fp_lo:.4f},{fp_hi:.4f}]",
+            f"{fn_rate:.4f} [{fn_lo:.4f},{fn_hi:.4f}]",
+            f"{prec:.4f}", f"{rec:.4f}",
+            f"{th_fp_sum / n_neg:.4f}" if n_neg else "N/A",
+            f"{th_fn_sum / n_pos:.4f}" if n_pos else "N/A",
+        ])
+
+        c_rows = []
+        for b in sorted(bins):
+            n, d1, sj, sth = bins[b]
+            # The clamp above folds z <= -3 into bin -6 and z >= +3 (incl. the
+            # exact +3 endpoint) into bin 5; a half-open [+2.5,+3.0) label
+            # would misdescribe those rows, so the edge bins are open-ended.
+            if b == -6:
+                zlab = "(-inf,-2.5)"
+            elif b == 5:
+                zlab = "[+2.5,+inf)"
+            else:
+                zlab = f"[{b * 0.5:+.1f},{(b + 1) * 0.5:+.1f})"
+            c_rows.append([zlab, str(n),
+                           f"{sj / n:.4f}", f"{d1 / n:.4f}", f"{sth / n:.4f}",
+                           f"{abs(d1 / n - sth / n):.4f}"])
+        curve_blocks.append((k, c_rows))
+
+    print_table(sum_headers, sum_rows)
+    for k, c_rows in curve_blocks:
+        print(f"\n  Decision curve, k={k} (z = (J - J_tau)/sigma):")
+        print_table(["z bin", "n", "mean J", "emp P(dec=1)", "theory", "|diff|"],
+                    c_rows)
+
+    if latex:
+        print()
+        lh = ["$k$", r"$\tau$", r"$J_\tau$", r"$\sigma_J$", "Trials",
+              "FP rate", "FN rate", "Prec.", "Rec.",
+              "FP (theory)", "FN (theory)"]
+        print_latex_table(title, "tab:threshold-fpfn", lh, sum_rows)
+
+
 # ── Save helper ──────────────────────────────────────────────────────
 
 def run_and_save(func, save_path, *args, **kwargs):
@@ -1270,7 +1405,7 @@ def run_and_save(func, save_path, *args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Summarize Piccard benchmark results (26 tables).")
+        description="Summarize Piccard benchmark results (28 tables).")
     parser.add_argument("results_dir",
                         help="Path to CSV results directory")
     parser.add_argument("--latex", action="store_true",
@@ -1335,6 +1470,8 @@ def main():
         dynamic_accuracy = read_csv(d / f"dynamic_accuracy{suffix}.csv")
         threshold_timing = read_csv(d / f"threshold_timing{suffix}.csv")
         threshold_accuracy = read_csv(d / f"threshold_accuracy{suffix}.csv")
+        threshold_fpfn = read_csv(d / f"threshold_fpfn{suffix}.csv")
+        threshold_spec = read_csv(d / f"threshold_spec{suffix}.csv")
 
         fs = suffix  # file suffix for saved tables
         lx = args.latex
@@ -1438,6 +1575,12 @@ def main():
         run_and_save(table_threshold_accuracy, sp("T26_threshold_accuracy_vary_n"),
                      threshold_accuracy, "accuracy_size", "n", 26,
                      "Threshold Accuracy — Varying n", latex=lx)
+
+        # ── T27: Threshold boundary FP/FN ─────────────────────────
+        run_and_save(table_threshold_fpfn, sp("T27_threshold_fpfn_boundary"),
+                     threshold_fpfn, 27,
+                     "Threshold FP/FN near the true-Jaccard boundary",
+                     latex=lx)
 
     if sd:
         saved = [f.name for f in sorted(sd.glob("T*.txt"))]
