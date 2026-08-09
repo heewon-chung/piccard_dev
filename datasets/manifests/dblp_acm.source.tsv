@@ -1,0 +1,19 @@
+key	value
+schema_version	piccard-real-source-v1
+dataset	dblp_acm
+dataset_version	OpenICPSR E100843 V2 (2017-07-21)
+source_url	https://doi.org/10.3886/E100843V2
+citation	Rahm, Erhard, Köpcke, Hanna, and Thor, Andreas. DBLP ACM Dataset. Ann Arbor, MI: Inter-university Consortium for Political and Social Research [distributor], 2017-07-21. https://doi.org/10.3886/E100843V2
+license_or_terms_url	https://www.icpsr.umich.edu/sites/icpsr/about/policies/terms-of-use
+acquisition_note	Downloaded from OpenICPSR project E100843 V2; ACM.csv and DBLP-ACM_perfectMapping.csv are retained as distributed; DBLP2.csv was transcoded from ISO-8859-1 to UTF-8 without changing CSV fields.
+parsing_schema	dblp-acm-csv-v1
+preprocessing_profile	dblp-acm-trigram-v1
+input.0.role	dblp_records
+input.0.path	DBLP2.csv
+input.0.sha256	32863e8b4e7e18e5254c3e0e05cbc282af2e1e6e9d58e124605ebcbaa178ae7f
+input.1.role	acm_records
+input.1.path	ACM.csv
+input.1.sha256	32055f1dfa619a4fdca33e7de729c66686a2fb3c71589921a6a3bd3af389120e
+input.2.role	dblp_acm_mapping
+input.2.path	DBLP-ACM_perfectMapping.csv
+input.2.sha256	d9d7c9feaba3d19a2e73ba8bd6ae08407d8b16082881f6e55abc2d703682d53a
