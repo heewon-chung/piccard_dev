@@ -93,6 +93,48 @@ TEST(BenchmarkProfile, ResolvesAllSevenExactProfiles) {
     }
 }
 
+TEST(BenchmarkProfile, Work5SingleTrialProfilesAreExactSmokeEvidence) {
+    struct Expected {
+        const char* id;
+        SecurityLevel security;
+        uint32_t target_security_bits;
+    };
+    const std::array<Expected, 2> expected = {{
+        {"work5-std128-t40-single-trial", SecurityLevel::STD128, 128},
+        {"work5-std192-t40-single-trial", SecurityLevel::STD192, 192},
+    }};
+
+    for (const auto& want : expected) {
+        const auto& profile = ResolveBenchmarkProfile(want.id);
+        EXPECT_EQ(profile.id, want.id);
+        EXPECT_EQ(profile.security, want.security);
+        EXPECT_EQ(profile.target_security_bits, want.target_security_bits);
+        EXPECT_EQ(profile.transcript_stat_bits, 40u);
+        EXPECT_EQ(profile.max_queries, UINT64_C(1) << 20);
+        EXPECT_EQ(profile.query_adjustment_bits, 20u);
+        EXPECT_EQ(profile.run_class, BenchmarkRunClass::Smoke);
+        EXPECT_TRUE(profile.failure_is_blocking);
+        EXPECT_FALSE(profile.comparison_eligible);
+    }
+
+    const auto& std128_primary =
+        ResolveBenchmarkProfile("std128-t40-primary");
+    const auto& std192_primary =
+        ResolveBenchmarkProfile("std192-t40-primary");
+    const auto& std128_work5 =
+        ResolveBenchmarkProfile("work5-std128-t40-single-trial");
+    const auto& std192_work5 =
+        ResolveBenchmarkProfile("work5-std192-t40-single-trial");
+    EXPECT_EQ(std128_work5.security, std128_primary.security);
+    EXPECT_EQ(std128_work5.transcript_stat_bits,
+              std128_primary.transcript_stat_bits);
+    EXPECT_EQ(std128_work5.max_queries, std128_primary.max_queries);
+    EXPECT_EQ(std192_work5.security, std192_primary.security);
+    EXPECT_EQ(std192_work5.transcript_stat_bits,
+              std192_primary.transcript_stat_bits);
+    EXPECT_EQ(std192_work5.max_queries, std192_primary.max_queries);
+}
+
 TEST(BenchmarkProfile, FeasibilityProfilesCannotBecomePrimary) {
     for (const char* id : {"std128-t128-feasibility",
                            "std192-t128-feasibility"}) {

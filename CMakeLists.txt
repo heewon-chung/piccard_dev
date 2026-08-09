@@ -1068,6 +1068,14 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_std_security_evidence
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RunWork5Benchmarks
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_work5_benchmarks
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME VerifyWork5Benchmarks
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_work5_benchmarks
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME SummarizeStdSecurityEvidence
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_summarize_std_security_evidence

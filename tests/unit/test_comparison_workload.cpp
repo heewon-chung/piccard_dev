@@ -110,6 +110,97 @@ std::vector<std::string> CsvCells(const std::string& line) {
     return cells;
 }
 
+void AppendWork5U32(std::vector<uint8_t>* out, uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        out->push_back(static_cast<uint8_t>(value >> shift));
+    }
+}
+
+void AppendWork5U64(std::vector<uint8_t>* out, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out->push_back(static_cast<uint8_t>(value >> shift));
+    }
+}
+
+void AppendWork5Vector(std::vector<uint8_t>* out,
+                       const std::vector<uint64_t>& values) {
+    AppendWork5U64(out, values.size());
+    for (uint64_t value : values) AppendWork5U64(out, value);
+}
+
+// This oracle intentionally serializes only canonical ComparisonTrial fields.
+// A Work #5 group may differ in method list and suite name, but not in its
+// shared trial payload.
+std::string Work5TrialPayloadSha256(const ComparisonWorkload& workload) {
+    std::vector<uint8_t> bytes;
+    constexpr char kDomain[] = "piccard-work5-trial-payload-v1";
+    bytes.insert(bytes.end(), kDomain, kDomain + sizeof(kDomain));
+    for (const auto& record : workload.Records()) {
+        bytes.push_back(static_cast<uint8_t>(record.kind));
+        AppendWork5U32(&bytes, record.index);
+        AppendWork5U64(&bytes, record.trial_seed);
+        AppendWork5U64(&bytes, record.hash_seed);
+        AppendWork5Vector(&bytes, record.set_a);
+        AppendWork5Vector(&bytes, record.set_b);
+        AppendWork5U64(&bytes, record.exact_intersection);
+        AppendWork5U64(&bytes, record.exact_union);
+        AppendWork5U64(&bytes, record.exact_jaccard.numerator);
+        AppendWork5U64(&bytes, record.exact_jaccard.denominator);
+    }
+    return Sha256Hex(bytes);
+}
+
+WorkloadSpec Work5Spec(const std::string& suite,
+                       const std::string& profile_id,
+                       std::vector<std::string> methods,
+                       uint64_t k = 128,
+                       uint64_t m = 64,
+                       uint64_t set_size = 1000,
+                       uint64_t universe = 16384) {
+    WorkloadSpec spec;
+    spec.suite = suite;
+    spec.profile_id = profile_id;
+    spec.root_seed = 7;
+    spec.k = k;
+    spec.m = m;
+    spec.set_size = set_size;
+    spec.universe = universe;
+    spec.target_jaccard = ParseExactDecimal("0.5");
+    spec.methods = std::move(methods);
+    spec.timing_trials = 1;
+    spec.accuracy_trials = 1;
+    return spec;
+}
+
+struct Work5Suite {
+    const char* suite;
+    const char* profile;
+    std::vector<std::string> methods;
+    size_t planned_cells;
+};
+
+const std::vector<Work5Suite>& Work5Suites() {
+    static const std::vector<Work5Suite> suites = {
+        {"work5-std128-piccard", "work5-std128-t40-single-trial",
+         {"piccard", "piccard_sqrt"}, 14},
+        {"work5-std128-fhe-ind", "work5-std128-t40-single-trial",
+         {"fhe_ind"}, 5},
+        {"work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
+         {"bcg12_mh_ec", "bcg12_mh_ff"}, 9},
+        {"work5-std128-bcg12-exact", "work5-std128-t40-single-trial",
+         {"bcg12_exact_ec", "bcg12_exact_ff"}, 4},
+        {"work5-std128-sj16", "work5-std128-t40-single-trial",
+         {"sj16"}, 5},
+        {"work5-std192-piccard", "work5-std192-t40-single-trial",
+         {"piccard", "piccard_sqrt"}, 14},
+        {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
+         {"fhe_ind"}, 5},
+        {"work5-std192-sj16", "work5-std192-t40-single-trial",
+         {"sj16"}, 5},
+    };
+    return suites;
+}
+
 }  // namespace
 
 TEST(ComparisonWorkload, DeterministicBinaryDigestAndCanonicalRecords) {
@@ -364,6 +455,86 @@ TEST(ComparisonWorkload, ToySmokeAcceptsOneAccuracyTrialAndRejectsTwo) {
     auto two_accuracy_trials = ToySpec();
     two_accuracy_trials.accuracy_trials = 2;
     EXPECT_THROW(ComparisonWorkload::Generate(two_accuracy_trials),
+                 std::invalid_argument);
+}
+
+TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
+#ifdef PICCARD_SOURCE_DIR
+    std::ifstream implementation(
+        std::string(PICCARD_SOURCE_DIR) + "/benchmarks/comparison_workload.cpp");
+    ASSERT_TRUE(implementation.is_open());
+    std::ostringstream implementation_text;
+    implementation_text << implementation.rdbuf();
+    EXPECT_NE(implementation_text.str().find("TrialPayloadSha256"),
+              std::string::npos);
+#endif
+
+    size_t std128_cells = 0;
+    size_t std192_cells = 0;
+    std::vector<ComparisonWorkload> generated;
+    for (const auto& suite : Work5Suites()) {
+        SCOPED_TRACE(suite.suite);
+        const auto workload = ComparisonWorkload::Generate(
+            Work5Spec(suite.suite, suite.profile, suite.methods));
+        EXPECT_EQ(workload.Spec().suite, suite.suite);
+        EXPECT_EQ(workload.Spec().profile_id, suite.profile);
+        EXPECT_EQ(workload.Spec().methods, suite.methods);
+        EXPECT_EQ(workload.Spec().timing_trials, 1u);
+        EXPECT_EQ(workload.Spec().accuracy_trials, 1u);
+        ASSERT_EQ(workload.Records().size(), 3u);
+        EXPECT_EQ(workload.Records()[0].kind, TrialKind::Warmup);
+        EXPECT_EQ(workload.Records()[1].kind, TrialKind::Timing);
+        EXPECT_EQ(workload.Records()[2].kind, TrialKind::Accuracy);
+        EXPECT_EQ(workload.Records()[1].exact_intersection, 667u);
+        EXPECT_EQ(workload.Records()[1].exact_union, 1333u);
+        EXPECT_EQ(workload.Records()[1].exact_jaccard,
+                  (ExactRational{667, 1333}));
+        generated.push_back(workload);
+
+        if (std::string(suite.profile).find("std128") != std::string::npos) {
+            std128_cells += suite.planned_cells;
+        } else {
+            std192_cells += suite.planned_cells;
+            for (const auto& method : suite.methods) {
+                EXPECT_EQ(method.find("bcg12"), std::string::npos);
+            }
+        }
+        for (const auto& method : suite.methods) {
+            EXPECT_EQ(method.find("threshold"), std::string::npos);
+        }
+    }
+    EXPECT_EQ(std128_cells, 37u);
+    EXPECT_EQ(std192_cells, 24u);
+
+    const auto& piccard = generated[0];
+    const auto& fhe_ind = generated[1];
+    EXPECT_NE(piccard.ManifestSha256Hex(), fhe_ind.ManifestSha256Hex());
+    EXPECT_EQ(Work5TrialPayloadSha256(piccard),
+              Work5TrialPayloadSha256(fhe_ind));
+
+    auto wrong_order = Work5Spec(
+        "work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
+        {"bcg12_mh_ff", "bcg12_mh_ec"});
+    EXPECT_THROW(ComparisonWorkload::Generate(wrong_order),
+                 std::invalid_argument);
+
+    auto threshold = Work5Spec(
+        "work5-std128-piccard", "work5-std128-t40-single-trial",
+        {"piccard", "piccard_sqrt", "threshold"});
+    EXPECT_THROW(ComparisonWorkload::Generate(threshold),
+                 std::invalid_argument);
+
+    auto std192_bcg12 = Work5Spec(
+        "work5-std192-piccard", "work5-std192-t40-single-trial",
+        {"piccard", "piccard_sqrt", "bcg12_mh_ec"});
+    EXPECT_THROW(ComparisonWorkload::Generate(std192_bcg12),
+                 std::invalid_argument);
+
+    auto two_trials = Work5Spec(
+        "work5-std128-piccard", "work5-std128-t40-single-trial",
+        {"piccard", "piccard_sqrt"});
+    two_trials.timing_trials = 2;
+    EXPECT_THROW(ComparisonWorkload::Generate(two_trials),
                  std::invalid_argument);
 }
 
