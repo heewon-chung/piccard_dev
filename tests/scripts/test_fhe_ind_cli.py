@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Subprocess contract tests for the planned ``bench_fhe_ind`` CLI.
-
-The Phase-1 contract is intentionally executable against the strict fake FHE
-fixture.  The production binary is not part of this phase; passing its path
-therefore produces a small, explicit RED result until the later adapter phase
-lands.
-"""
+"""Subprocess contract tests for the live ``bench_fhe_ind`` CLI."""
 
 from __future__ import annotations
 
@@ -37,6 +31,9 @@ def _command(*args: str) -> list[str]:
     return [str(BINARY), *args]
 
 
+IS_FIXTURE = BINARY.suffix == ".py"
+
+
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         _command(*args), text=True, capture_output=True, check=False
@@ -62,6 +59,17 @@ def _single_json(stdout: str) -> dict:
 
 def _workload(root: pathlib.Path) -> pathlib.Path:
     path = root / "workload.json"
+    producer = BINARY.with_name("bench_std_security_evidence")
+    if producer.is_file() and producer.stat().st_mode & 0o111:
+        generated = subprocess.run(
+            [str(producer), "--mode=workload", "--output=" + str(path)],
+            text=True, capture_output=True, check=False,
+        )
+        if generated.returncode != 0:
+            raise AssertionError(
+                f"bench_std_security_evidence workload failed: {generated.stderr!r}"
+            )
+        return path
     path.write_text(
         json.dumps(
             {
@@ -157,8 +165,15 @@ class FheIndCliContractTest(unittest.TestCase):
         self.assertGreater(preflight["realized_ring_dim"], 0)
         self.assertEqual(preflight["sanitizer_profile"], "not-applicable")
         self.assertEqual(preflight["calibration_origin"], "not-applicable")
-        self.assertEqual(preflight["openfhe_version"], "fake-openfhe-1")
-        self.assertEqual(preflight["ordered_rns_moduli"], ["1000000007", "1000000009"])
+        self.assertTrue(preflight["openfhe_version"])
+        self.assertTrue(preflight["ordered_rns_moduli"])
+        if IS_FIXTURE:
+            self.assertEqual(preflight["openfhe_version"], "fake-openfhe-1")
+            self.assertEqual(preflight["ordered_rns_moduli"],
+                             ["1000000007", "1000000009"])
+        else:
+            self.assertTrue(all(value.isdigit() for value in
+                                preflight["ordered_rns_moduli"]))
 
     def test_e2e_emits_one_csv_row_with_bound_timing_and_correctness(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,8 +232,11 @@ class FheIndCliContractTest(unittest.TestCase):
         self.assertEqual(row["reason"], "")
         self.assertEqual(row["sanitizer_profile"], "not-applicable")
         self.assertEqual(row["calibration_origin"], "not-applicable")
-        self.assertEqual(row["workload_id"], "phase1-fhe-ind-toy")
-        self.assertEqual(row["workload_manifest_sha256"], "a" * 64)
+        self.assertTrue(row["workload_id"])
+        self.assertEqual(len(row["workload_manifest_sha256"]), 64)
+        if IS_FIXTURE:
+            self.assertEqual(row["workload_id"], "phase1-fhe-ind-toy")
+            self.assertEqual(row["workload_manifest_sha256"], "a" * 64)
 
         for key in (
             "setup_context_ms",
@@ -230,16 +248,19 @@ class FheIndCliContractTest(unittest.TestCase):
             "online_e2e_ms",
             "full_e2e_ms",
         ):
-            self.assertGreater(int(row[key]), 0, key)
-        self.assertEqual(
-            sum(int(row[key]) for key in ("phase_encode_ms", "phase_encrypt_ms", "phase_evaluate_ms", "phase_decrypt_ms")),
-            int(row["online_e2e_ms"]),
+            self.assertGreater(float(row[key]), 0.0, key)
+        self.assertAlmostEqual(
+            sum(float(row[key]) for key in ("phase_encode_ms", "phase_encrypt_ms",
+                                             "phase_evaluate_ms", "phase_decrypt_ms")),
+            float(row["online_e2e_ms"]),
+            places=9,
         )
-        self.assertEqual(
-            int(row["setup_context_ms"])
-            + int(row["setup_keygen_ms"])
-            + int(row["online_e2e_ms"]),
-            int(row["full_e2e_ms"]),
+        self.assertAlmostEqual(
+            float(row["setup_context_ms"])
+            + float(row["setup_keygen_ms"])
+            + float(row["online_e2e_ms"]),
+            float(row["full_e2e_ms"]),
+            places=9,
         )
 
 

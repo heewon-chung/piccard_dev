@@ -296,7 +296,7 @@ def workload(args: argparse.Namespace) -> None:
         "accuracy_trials": 1,
         "bytes_hex": "00",
         "manifest_sha256": hashlib.sha256(b"\x00").hexdigest(),
-        "methods": ["piccard", "piccard_sqrt", "bcg12_mh_ec",
+        "methods": ["piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
                     "bcg12_exact_ec", "sj16"],
         "profile_id": "toy-smoke",
         "root_seed": 7,

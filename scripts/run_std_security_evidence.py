@@ -659,8 +659,8 @@ def validate_workload(path: Path) -> dict[str, Any]:
        workload.get("set_size") != 10 or workload.get("universe") != 64 or \
        workload.get("target_jaccard_numerator") != 1 or \
        workload.get("target_jaccard_denominator") != 2 or \
-       workload.get("methods") != ["piccard", "piccard_sqrt", "bcg12_mh_ec",
-                                    "bcg12_exact_ec", "sj16"]:
+       workload.get("methods") != ["piccard", "piccard_sqrt", "fhe_ind",
+                                    "bcg12_mh_ec", "bcg12_exact_ec", "sj16"]:
         raise RunnerError("workload metadata is not the frozen toy-smoke manifest")
     if workload.get("timing_trials") != 1 or workload.get("accuracy_trials") != 1:
         raise RunnerError("workload trial counts are not frozen at one")

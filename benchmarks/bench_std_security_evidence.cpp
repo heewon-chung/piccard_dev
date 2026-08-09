@@ -367,7 +367,7 @@ workload::ComparisonWorkload MakeToyWorkload() {
     spec.set_size = 10;
     spec.universe = 64;
     spec.target_jaccard = {1, 2};
-    spec.methods = {"piccard", "piccard_sqrt", "bcg12_mh_ec",
+    spec.methods = {"piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
                     "bcg12_exact_ec", "sj16"};
     spec.timing_trials = 1;
     spec.accuracy_trials = 1;

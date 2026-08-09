@@ -1330,6 +1330,34 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         bench_std_security_evidence
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
     )
+
+    # Dedicated FHE-IND diagnostic path.  This binary intentionally does not
+    # reuse bench_std_security_evidence's Piccard sanitizer/calibration entry
+    # point: it owns only the local-universe BFV indicator comparator and its
+    # context-only preflight plus one-run e2e contract.
+    add_executable(bench_fhe_ind benchmarks/bench_fhe_ind.cpp)
+    add_dependencies(bench_fhe_ind bench_std_security_evidence)
+    target_link_libraries(
+        bench_fhe_ind
+        PRIVATE
+            piccard_fhe
+            piccard_benchmark_serializers
+            piccard_comparison_workload
+            piccard_std_security_evidence_schema
+    )
+    target_include_directories(
+        bench_fhe_ind
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    if(BUILD_TESTS)
+        add_test(
+            NAME FheIndCli
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_fhe_ind_cli.py
+                    $<TARGET_FILE:bench_fhe_ind>
+        )
+        set_tests_properties(FheIndCli PROPERTIES TIMEOUT 600)
+    endif()
     if(BUILD_TESTS)
         if(TARGET test_main)
             add_executable(

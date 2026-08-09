@@ -126,7 +126,8 @@ TEST(StdSecurityEvidenceE2E, SharedTimingWorkloadAndSingleRunCsv) {
 
     const auto generated = piccard::benchmark::ComparisonWorkload::Generate({
         "toy-smoke", "toy-smoke", 7, 16, 16, 10, 64, {1, 2},
-        {"piccard", "piccard_sqrt", "bcg12_mh_ec", "bcg12_exact_ec", "sj16"},
+        {"piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+         "bcg12_exact_ec", "sj16"},
         1, 1});
     EXPECT_FALSE(generated.ManifestSha256Hex().empty());
     ASSERT_EQ(generated.Records().size(), 3u);
