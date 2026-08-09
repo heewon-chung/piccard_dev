@@ -221,14 +221,17 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
     std::string line;
     ASSERT_TRUE(std::getline(input, line));
     const auto header = CsvCells(line);
-    ASSERT_EQ(header.size(), 66u);
+    ASSERT_EQ(header.size(), 73u);
     std::map<std::string, size_t> column;
     for (size_t i = 0; i < header.size(); ++i) column.emplace(header[i], i);
     for (const char* name : {"method", "measurement_kind", "evidence_arm",
                              "comparison_eligible", "workload_id",
                              "workload_manifest_sha256", "execution_trace_sha256",
                              "k", "m", "hash_randomness", "hash_seed",
-                             "total_ms_sd", "measurement_status"}) {
+                             "total_ms_sd", "measurement_status",
+                             "intersection_count", "phase_encode_ms",
+                             "phase_encrypt_ms", "phase_compute_ms",
+                             "phase_decrypt_ms", "ct_size_bytes", "comm_bytes"}) {
         ASSERT_TRUE(column.find(name) != column.end()) << name;
     }
     const std::string expected_digest =

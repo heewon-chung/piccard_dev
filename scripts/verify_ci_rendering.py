@@ -45,7 +45,7 @@ def scen_of(layout, label, row):
 
 # 검사할 열: (헤더명) -> (CSV 필드, side, primary 행의 출처)
 COLS = {"Piccard (ms)":    ("total_ms",       "piccard",    "piccard"),
-        "Comparator (ms)": ("total_ms",       "comparator", "baseline"),
+        "Comparator (ms)": ("total_ms",       "comparator", "fhe_ind"),
         "Flood":           ("phase_flood_ms", "shared",     "piccard")}
 
 lo_seen = hi_seen = changed = expect_changed = 0

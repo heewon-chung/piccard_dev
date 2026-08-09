@@ -80,7 +80,7 @@ class Cell:
         if self.review:
             suite = next(arg.split("=", 1)[1] for arg in self.args
                          if arg.startswith("--suite="))
-            return {"primary-review": 14, "toy-smoke": 10,
+            return {"primary-review": 14, "toy-smoke": 12,
                     "sj16-precompute-sensitivity": 2}[suite]
         if "--evidence_point" in self.args:
             return 2 if self.producer == "bench_onehot_sqrt" else 1
@@ -189,7 +189,7 @@ def matrix(suite: str, seed: int) -> list[Cell]:
             "--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16",
             "--set-size=10", "--universe=64", "--target-jaccard=0.5",
             "--trials=1", "--accuracy-trials=1", f"--seed={seed}",
-            "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16",
+            "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16",
             "--sj16-key-bits=1024", "--allow-unmatched-security",
             "--manifest-out=<workload>", "--execution-trace-out=<trace>",
         )

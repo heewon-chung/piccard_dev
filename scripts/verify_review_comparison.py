@@ -48,6 +48,11 @@ REVIEW_REQUIRED_COLUMNS = REQUIRED_COLUMNS | {
     "realized_jaccard", "timing_trials", "accuracy_trials", "trials",
     "hash_randomness", "hash_seed",
 }
+REVIEW_DETAIL_COLUMNS = {
+    "intersection_count", "phase_encode_ms", "phase_encrypt_ms",
+    "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes", "comm_bytes",
+}
+TOY_REVIEW_COLUMNS = REVIEW_REQUIRED_COLUMNS | REVIEW_DETAIL_COLUMNS
 
 
 class Reader:
@@ -271,6 +276,10 @@ def expected_kind(method: str, arm: str) -> str:
 
 
 def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: str):
+    if workload.suite == "toy-smoke":
+        require(set(rows[0]) == TOY_REVIEW_COLUMNS and len(rows[0]) == 73,
+                "canonical toy reviewer CSV must use the 73-column schema"
+                " including FHE-IND detail fields")
     expected_pairs = {(method, "timing") for method in workload.methods}
     if workload.accuracy_trials:
         expected_pairs |= {(method, "accuracy") for method in workload.methods}
@@ -358,34 +367,34 @@ def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: st
                              rel_tol=0.0, abs_tol=5e-6),
                 f"row {row_number}: expected Jaccard is not workload-bound")
 
-        # New reviewer producers may expose the detailed FHE-IND query seam in
-        # the compact row schema. Keep this optional for older persisted
-        # artifacts, but validate it completely whenever the columns exist.
-        detail_columns = {
-            "intersection_count", "phase_encode_ms", "phase_encrypt_ms",
-            "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes",
-            "comm_bytes",
-        }
-        if detail_columns.issubset(row):
-            if method == "fhe_ind":
-                observed = _parse_int(row, "intersection_count", row_number)
-                require(observed == first.intersection,
-                        f"row {row_number}: FHE-IND intersection is not workload-bound")
-                phases = [
-                    _finite(row[column], column, row_number)
-                    for column in ("phase_encode_ms", "phase_encrypt_ms",
-                                   "phase_compute_ms", "phase_decrypt_ms")
-                ]
-                require(all(value >= 0.0 for value in phases),
-                        f"row {row_number}: FHE-IND phases must be nonnegative")
-                require(math.isclose(sum(phases), float(row["total_ms"]),
-                                     rel_tol=0.0, abs_tol=5e-5),
-                        f"row {row_number}: FHE-IND phase total mismatch")
-                _parse_int(row, "ct_size_bytes", row_number, positive=True)
-                _parse_int(row, "comm_bytes", row_number, positive=True)
-            else:
-                require(all(row[column] == "" for column in detail_columns),
-                        f"row {row_number}: non-FHE row fabricates FHE detail fields")
+        if method == "fhe_ind":
+            observed = _parse_int(row, "intersection_count", row_number)
+            require(observed == first.intersection,
+                    f"row {row_number}: FHE-IND intersection is not workload-bound")
+            computed = _finite(row["jaccard_computed"], "jaccard_computed", row_number)
+            expected = _finite(row["jaccard_expected"], "jaccard_expected", row_number)
+            error = _finite(row["jaccard_error"], "jaccard_error", row_number)
+            require(math.isclose(computed, float(realized), rel_tol=0.0, abs_tol=5e-6),
+                    f"row {row_number}: FHE-IND computed Jaccard is not workload-bound")
+            require(math.isclose(expected, float(realized), rel_tol=0.0, abs_tol=5e-6),
+                    f"row {row_number}: FHE-IND expected Jaccard is not workload-bound")
+            require(error == 0.0,
+                    f"row {row_number}: FHE-IND reported nonzero Jaccard error")
+            phases = [
+                _finite(row[column], column, row_number)
+                for column in ("phase_encode_ms", "phase_encrypt_ms",
+                               "phase_compute_ms", "phase_decrypt_ms")
+            ]
+            require(all(value >= 0.0 for value in phases),
+                    f"row {row_number}: FHE-IND phases must be nonnegative")
+            require(math.isclose(sum(phases), float(row["total_ms"]),
+                                 rel_tol=0.0, abs_tol=5e-5),
+                    f"row {row_number}: FHE-IND phase total mismatch")
+            _parse_int(row, "ct_size_bytes", row_number, positive=True)
+            _parse_int(row, "comm_bytes", row_number, positive=True)
+        else:
+            require(all(row[column] == "" for column in REVIEW_DETAIL_COLUMNS),
+                    f"row {row_number}: non-FHE row fabricates FHE detail fields")
 
         if workload.suite == "primary-review":
             require(row["security_match"] == "true" and row["comparison_eligible"] == "true",

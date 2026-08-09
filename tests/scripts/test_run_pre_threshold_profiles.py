@@ -160,7 +160,7 @@ class PreThresholdRunnerTest(unittest.TestCase):
         smoke_runs = [line for line in smoke.stdout.splitlines()
                       if line.startswith("RUN ")]
         self.assertEqual(smoke_runs, [
-            "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_review_comparison --suite=toy-smoke --profile=toy-smoke --k=16 --m=16 --set-size=10 --universe=64 --target-jaccard=0.5 --trials=1 --accuracy-trials=1 --seed=7 --methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16 --sj16-key-bits=1024 --allow-unmatched-security --manifest-out=<results-root>/workloads/<cell_id>.bin --execution-trace-out=<results-root>/traces/<cell_id>.bin",
+            "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_review_comparison --suite=toy-smoke --profile=toy-smoke --k=16 --m=16 --set-size=10 --universe=64 --target-jaccard=0.5 --trials=1 --accuracy-trials=1 --seed=7 --methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16 --sj16-key-bits=1024 --allow-unmatched-security --manifest-out=<results-root>/workloads/<cell_id>.bin --execution-trace-out=<results-root>/traces/<cell_id>.bin",
             "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_piccard --profile=toy-smoke --security=TOY --mode=timing --evidence_point --k=16 --m=16 --set_size=10 --target-jaccard=0.5 --trials=1 --seed=7",
             "RUN OMP_NUM_THREADS=2 OMP_DYNAMIC=FALSE bench_dynamic --scenario=refresh --refresh_updates=1 --profile=toy-smoke --security=TOY --mode=timing --evidence_point --k=16 --m=16 --set_size=100 --target-jaccard=0.5 --depth=5 --trials=1 --seed=7",
         ])
@@ -333,11 +333,11 @@ class PreThresholdRunnerTest(unittest.TestCase):
                             for cell in manifest["cells"]))
         self.assertEqual(
             [cell["output"]["expected_csv_rows"] for cell in manifest["cells"]],
-            [10, 1, 1],
+            [12, 1, 1],
         )
         self.assertEqual(
             [cell["output"]["csv_row_count"] for cell in manifest["cells"]],
-            [10, 1, 1],
+            [12, 1, 1],
         )
         self.assertIn("cpu", manifest["machine"])
         self.assertIn("ram", manifest["machine"])

@@ -1,4 +1,4 @@
 csv_rows_including_header=13
 csv_data_rows=12
-csv_columns=66
+csv_columns=73
 row_shape_check=PASS

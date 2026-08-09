@@ -35,7 +35,7 @@ fi
 
 # method is column 2 -- bench_comparison.cpp:192 header is
 # "scenario,method,security_class,...".
-REQUIRED=(piccard piccard_sqrt baseline bcg12_mh_ff bcg12_mh_ec bcg12_exact_ec bcg12_exact_ff sj16)
+REQUIRED=(piccard piccard_sqrt fhe_ind bcg12_mh_ff bcg12_mh_ec bcg12_exact_ec bcg12_exact_ff sj16)
 
 present="$(awk -F',' 'NR>1 {print $2}' "$csv" | sort -u)"
 

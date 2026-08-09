@@ -79,6 +79,47 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
         self.assertIn('"verdict": "PASS"', result.stdout)
         self.assertIn('"rows": 12', result.stdout)
 
+    def test_toy_artifact_requires_the_complete_73_column_detail_schema(self):
+        fields, rows = self.read_rows()
+        detail_columns = (
+            "intersection_count", "phase_encode_ms", "phase_encrypt_ms",
+            "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes",
+            "comm_bytes",
+        )
+        self.assertEqual(len(fields), 73)
+        for column in detail_columns:
+            with self.subTest(column=column):
+                reduced_fields = [field for field in fields if field != column]
+                reduced_rows = [
+                    {field: row[field] for field in reduced_fields}
+                    for row in rows
+                ]
+                self.write_rows(reduced_fields, reduced_rows)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("73-column", result.stderr)
+        self.write_rows(fields, rows)
+
+    def test_fhe_ind_jaccard_and_error_are_manifest_bound(self):
+        fields, rows = self.read_rows()
+        fhe_index = next(
+            index for index, row in enumerate(rows)
+            if row["method"] == "fhe_ind"
+        )
+        for column, value, cause in (
+                ("jaccard_computed", "0.500000", "FHE-IND computed Jaccard"),
+                ("jaccard_expected", "0.500000", "expected Jaccard"),
+                ("jaccard_error", "0.100000", "FHE-IND reported nonzero Jaccard error"),
+        ):
+            with self.subTest(column=column):
+                mutated = [dict(row) for row in rows]
+                mutated[fhe_index][column] = value
+                self.write_rows(fields, mutated)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+        self.write_rows(fields, rows)
+
     def test_canonical_toy_fixture_contains_one_diagnostic_fhe_ind_pair(self):
         rows = self.write_canonical_toy_fixture()
         self.assertEqual(

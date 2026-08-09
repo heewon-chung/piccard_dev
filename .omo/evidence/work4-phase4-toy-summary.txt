@@ -1,9 +1,9 @@
 review_toy_artifact_check=PASS
 csv_rows_including_header=13
 csv_data_rows=12
-csv_columns=66
+csv_columns=73
 row_shape_check=PASS
-csv_sha256=9da8694a679f6a8259f794420ac266279d0bdea1b77ccbfb4f0d07f44f92cf2e
+csv_sha256=93e9dc78134249902d69349df5e45ed3179956f5dcde83ace5ab74ea7a46f3e0
 workload_bytes=843
 workload_sha256=00211dec55e8f1163451e34662bc7c48cb0af44a98e7fe8c1d8ba73b335e950a
 trace_bytes=353

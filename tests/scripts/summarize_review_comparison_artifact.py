@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and summarize one persisted Phase-4 TOY producer result."""
+"""Validate and summarize one persisted canonical TOY reviewer result."""
 
 import argparse
 import csv
@@ -12,6 +12,8 @@ EXPECTED_ROWS = [
     ("piccard", "fhe-accuracy", "accuracy", "16", "16", "resampled", ""),
     ("piccard_sqrt", "fhe-timing", "timing", "16", "16", "fixed", "15329580584519071531"),
     ("piccard_sqrt", "fhe-accuracy", "accuracy", "16", "16", "resampled", ""),
+    ("fhe_ind", "diagnostic", "timing", "", "", "not-applicable", ""),
+    ("fhe_ind", "diagnostic", "accuracy", "", "", "not-applicable", ""),
     ("bcg12_mh_ec", "psi-timing", "timing", "16", "", "fixed", "15329580584519071531"),
     ("bcg12_mh_ec", "psi-accuracy", "accuracy", "16", "", "resampled", ""),
     ("bcg12_exact_ec", "psi-timing", "timing", "", "", "not-applicable", ""),
@@ -20,10 +22,10 @@ EXPECTED_ROWS = [
     ("sj16", "ahe-accuracy", "accuracy", "", "", "not-applicable", ""),
 ]
 EXPECTED_WORKLOAD_SHA256 = (
-    "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa"
+    "00211dec55e8f1163451e34662bc7c48cb0af44a98e7fe8c1d8ba73b335e950a"
 )
 EXPECTED_TRACE_SHA256 = (
-    "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec"
+    "2707d649854269ceaecfc7a57d9f501210a8303017d97a029cd68650856a121b"
 )
 
 
@@ -50,9 +52,9 @@ def main() -> int:
         rows = list(csv.reader(stream))
     require(rows, "CSV is empty")
     header = rows[0]
-    require(len(header) == 66, f"CSV header has {len(header)} columns, expected 66")
+    require(len(header) == 73, f"CSV header has {len(header)} columns, expected 73")
     data = rows[1:]
-    require(len(data) == 10, f"CSV has {len(data)} data rows, expected 10")
+    require(len(data) == 12, f"CSV has {len(data)} data rows, expected 12")
     columns = {name: index for index, name in enumerate(header)}
     required_columns = {
         "method",
@@ -68,6 +70,13 @@ def main() -> int:
         "hash_seed",
         "total_ms_sd",
         "measurement_status",
+        "intersection_count",
+        "phase_encode_ms",
+        "phase_encrypt_ms",
+        "phase_compute_ms",
+        "phase_decrypt_ms",
+        "ct_size_bytes",
+        "comm_bytes",
     }
     require(required_columns <= columns.keys(), "required CSV column is missing")
 
@@ -80,12 +89,26 @@ def main() -> int:
         ):
             require(row[columns[name]] == value, f"row {index} {name} mismatch")
         require(row[columns["comparison_eligible"]] == "false", f"row {index} eligibility")
-        require(row[columns["workload_id"]] == "review-64-669d54d779bc31e4", f"row {index} workload id")
+        require(row[columns["workload_id"]] == "review-64-00211dec55e8f116", f"row {index} workload id")
         require(row[columns["workload_manifest_sha256"]] == EXPECTED_WORKLOAD_SHA256, f"row {index} workload hash")
         require(row[columns["execution_trace_sha256"]] == EXPECTED_TRACE_SHA256, f"row {index} trace hash")
         require(row[columns["measurement_status"]] == "measured", f"row {index} status")
         sd = row[columns["total_ms_sd"]]
         require(sd == "", f"row {index} one-trial SD is not empty")
+        detail_names = (
+            "intersection_count", "phase_encode_ms", "phase_encrypt_ms",
+            "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes",
+            "comm_bytes",
+        )
+        detail = {name: row[columns[name]] for name in detail_names}
+        if expected[0] == "fhe_ind":
+            require(detail["intersection_count"] == "7",
+                    f"row {index} FHE-IND intersection count")
+            require(all(detail[name] != "" for name in detail_names[1:]),
+                    f"row {index} FHE-IND detail is incomplete")
+        else:
+            require(all(value == "" for value in detail.values()),
+                    f"row {index} non-FHE detail field is populated")
 
     workload_hash = sha256(args.workload)
     trace_hash = sha256(args.trace)

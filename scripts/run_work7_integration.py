@@ -274,8 +274,8 @@ def validate_prethreshold(root: Path, commit: str, command: tuple[str, ...], sou
     cell_keys = {"cell_id", "profile_id", "producer", "parameter_sha256", "argv", "environment", "output", "status", "reason_code", "required_bits", "available_bits", "shortfall_bits"}
     if any(not isinstance(row, dict) or set(row) != cell_keys for row in cells):
         raise Failure("invalid pre-threshold cell schema")
-    expected={"bench_review_comparison":["--suite=toy-smoke","--profile=toy-smoke","--k=16","--m=16","--set-size=10","--universe=64","--target-jaccard=0.5","--trials=1","--accuracy-trials=1","--seed=7","--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16","--sj16-key-bits=1024","--allow-unmatched-security"], "bench_piccard":["--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=10","--target-jaccard=0.5","--trials=1","--seed=7"], "bench_dynamic":["--scenario=refresh","--refresh_updates=1","--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=100","--target-jaccard=0.5","--depth=5","--trials=1","--seed=7"]}
-    expected_rows={"bench_review_comparison":10,"bench_piccard":1,"bench_dynamic":1}
+    expected={"bench_review_comparison":["--suite=toy-smoke","--profile=toy-smoke","--k=16","--m=16","--set-size=10","--universe=64","--target-jaccard=0.5","--trials=1","--accuracy-trials=1","--seed=7","--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16","--sj16-key-bits=1024","--allow-unmatched-security"], "bench_piccard":["--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=10","--target-jaccard=0.5","--trials=1","--seed=7"], "bench_dynamic":["--scenario=refresh","--refresh_updates=1","--profile=toy-smoke","--security=TOY","--mode=timing","--evidence_point","--k=16","--m=16","--set_size=100","--target-jaccard=0.5","--depth=5","--trials=1","--seed=7"]}
+    expected_rows={"bench_review_comparison":12,"bench_piccard":1,"bench_dynamic":1}
     for row in cells:
         argv=row.get("argv")
         sampling=[x for x in argv if isinstance(x,str) and (x.startswith("--trials=") or x.startswith("--accuracy-trials=") or x.startswith("--refresh_updates="))] if isinstance(argv,list) else []
@@ -564,10 +564,10 @@ def validate_prethreshold_capture(blobs: tuple[tuple[str, CapturedBlob], ...], c
     expected_outputs = {"bench_review_comparison": {"csv", "csv_sha256", "log", "log_sha256", "workload", "workload_sha256", "trace", "trace_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
                         "bench_piccard": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"},
                         "bench_dynamic": {"csv", "csv_sha256", "log", "log_sha256", "expected_csv_rows", "csv_row_count", "measurement_output"}}
-    expected_args = {"bench_review_comparison": ["--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16", "--set-size=10", "--universe=64", "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1", "--seed=7", "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16", "--sj16-key-bits=1024", "--allow-unmatched-security"],
+    expected_args = {"bench_review_comparison": ["--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16", "--set-size=10", "--universe=64", "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1", "--seed=7", "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16", "--sj16-key-bits=1024", "--allow-unmatched-security"],
                      "bench_piccard": ["--profile=toy-smoke", "--security=TOY", "--mode=timing", "--evidence_point", "--k=16", "--m=16", "--set_size=10", "--target-jaccard=0.5", "--trials=1", "--seed=7"],
                      "bench_dynamic": ["--scenario=refresh", "--refresh_updates=1", "--profile=toy-smoke", "--security=TOY", "--mode=timing", "--evidence_point", "--k=16", "--m=16", "--set_size=100", "--target-jaccard=0.5", "--depth=5", "--trials=1", "--seed=7"]}
-    expected_rows = {"bench_review_comparison": 10, "bench_piccard": 1, "bench_dynamic": 1}
+    expected_rows = {"bench_review_comparison": 12, "bench_piccard": 1, "bench_dynamic": 1}
     expected_paths = {"phase2/runtime/pre-threshold/manifest.json", "phase2/runtime/pre-threshold/terminal-cells.tsv", *("@build/" + name for name in expected_binary_names)}
     for row in manifest["cells"]:
         producer, output, argv = row["producer"], row.get("output"), row.get("argv")

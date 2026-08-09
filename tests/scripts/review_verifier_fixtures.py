@@ -8,6 +8,7 @@ import struct
 WORKLOAD_DOMAIN = b"piccard-review-workload-v1\0"
 TRACE_DOMAIN = b"piccard-review-execution-trace-v1\0"
 TRIAL_DOMAIN = b"piccard-review-trial-v1\0"
+SET_DOMAIN = b"piccard-review-set-v1\0"
 HASH_DOMAINS = {
     0: b"piccard-review-hash-warmup-v1\0",
     1: b"piccard-review-hash-timing-v1\0",
@@ -71,6 +72,28 @@ def _trial_seed(root_seed, kind, index):
 def _hash_seed(root_seed, kind, index):
     suffix = _be32(index) if kind == 2 else b""
     return _first8(HASH_DOMAINS[kind] + _be64(root_seed) + suffix)
+
+
+def _realized_intersection(set_size, target_numerator, target_denominator):
+    numerator = 2 * set_size * target_numerator
+    denominator = target_denominator + target_numerator
+    quotient, remainder = divmod(numerator, denominator)
+    return quotient + (1 if 2 * remainder > denominator else 0)
+
+
+def _regenerate_sets(universe, set_size, intersection, seed):
+    only = set_size - intersection
+    ranked = sorted(
+        range(universe),
+        key=lambda value: (
+            hashlib.sha256(SET_DOMAIN + _be64(seed) + _be64(value)).digest(),
+            value,
+        ),
+    )
+    shared = ranked[:intersection]
+    set_a = tuple(sorted(shared + ranked[intersection:intersection + only]))
+    set_b = tuple(sorted(shared + ranked[intersection + only:intersection + 2 * only]))
+    return set_a, set_b
 
 
 def _method_metadata(method, primary, target_security_bits):
@@ -213,9 +236,30 @@ def _method_metadata(method, primary, target_security_bits):
 
 def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
                          methods=None):
-    """Write a canonical empty-set fixture without invoking a benchmark."""
+    """Write a verifier fixture without invoking a benchmark.
+
+    The toy fixture uses the same U=64, set-size=10, target=1/2 workload as
+    the persisted reviewer artifact, so FHE-IND detail cells are bound to its
+    manifest-derived 7/13 result. The larger review fixtures remain compact
+    empty-set fixtures because their tests exercise taxonomy, not workload
+    scale.
+    """
     spec = SUITES[suite]
     methods = tuple(spec["methods"] if methods is None else methods)
+    toy = suite == "toy-smoke"
+    workload_k = 16 if toy else 1
+    workload_m = 16 if toy else 1
+    workload_set_size = 10 if toy else 0
+    workload_universe = 64 if toy else 1
+    target_numerator = 1
+    target_denominator = 2 if toy else 1
+    expected_intersection = _realized_intersection(
+        workload_set_size, target_numerator, target_denominator)
+    expected_union = 2 * workload_set_size - expected_intersection
+    expected_jaccard = (
+        1.0 if expected_union == 0
+        else expected_intersection / expected_union
+    )
     records = [(0, 0)]
     records.extend((1, index) for index in range(spec["timing"]))
     records.extend((2, index) for index in range(spec["accuracy"]))
@@ -224,8 +268,9 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
     workload.extend(_string(suite))
     workload.extend(_string(spec["profile"]))
     workload.extend(_be64(spec["seed"]))
-    workload.extend(_be64(1) + _be64(1) + _be64(0) + _be64(1))
-    workload.extend(_be64(1) + _be64(1))
+    workload.extend(_be64(workload_k) + _be64(workload_m) +
+                    _be64(workload_set_size) + _be64(workload_universe))
+    workload.extend(_be64(target_numerator) + _be64(target_denominator))
     workload.extend(_be32(len(methods)))
     for method in methods:
         workload.extend(_string(method))
@@ -238,8 +283,19 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
         hash_value = _hash_seed(spec["seed"], kind, index)
         encoded_records.append((kind, index, seed, hash_value))
         workload.extend(bytes([kind]) + _be32(index) + _be64(seed) + _be64(hash_value))
-        workload.extend(_be64(0) + _be64(0))  # two empty VEC64 values
-        workload.extend(_be64(0) + _be64(0))  # exact intersection and union
+        if toy:
+            set_a, set_b = _regenerate_sets(
+                workload_universe, workload_set_size, expected_intersection, seed)
+        else:
+            set_a, set_b = (), ()
+        workload.extend(_be64(len(set_a)))
+        for value in set_a:
+            workload.extend(_be64(value))
+        workload.extend(_be64(len(set_b)))
+        for value in set_b:
+            workload.extend(_be64(value))
+        workload.extend(_be64(expected_intersection if toy else 0) +
+                        _be64(expected_union if toy else 0))
     workload_bytes = bytes(workload)
     workload_path.write_bytes(workload_bytes)
     workload_digest = hashlib.sha256(workload_bytes).digest()
@@ -268,7 +324,7 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
             row = {field: "" for field in fields}
             row.update({
                 "suite": suite,
-                "scenario": "review-1",
+                "scenario": f"review-{workload_universe}",
                 "method": method,
                 "profile_id": spec["profile"],
                 "run_class": spec["run_class"],
@@ -283,23 +339,23 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
                     else f"ahe-{arm}"
                 ),
                 "evidence_arm": arm,
-                "workload_id": f"review-1-{digest_hex[:16]}",
+                "workload_id": f"review-{workload_universe}-{digest_hex[:16]}",
                 "workload_manifest_sha256": digest_hex,
                 "execution_trace_sha256": trace_hex,
                 "root_seed": str(spec["seed"]),
                 "omp_threads": "2",
                 "omp_dynamic": "false",
-                "k": "1" if method in {"piccard", "piccard_sqrt", "bcg12_mh_ff", "bcg12_mh_ec"} else "",
-                "m": "1" if method in {"piccard", "piccard_sqrt"} else "",
-                "set_size": "0",
-                "universe_size": "1",
+                "k": str(workload_k) if method in {"piccard", "piccard_sqrt", "bcg12_mh_ff", "bcg12_mh_ec"} else "",
+                "m": str(workload_m) if method in {"piccard", "piccard_sqrt"} else "",
+                "set_size": str(workload_set_size),
+                "universe_size": str(workload_universe),
                 "target_semantics": "jaccard",
-                "target_jaccard_numerator": "1",
-                "target_jaccard_denominator": "1",
-                "target_jaccard": "1.000000000000",
-                "realized_intersection": "0",
-                "realized_union": "0",
-                "realized_jaccard": "1.000000000000",
+                "target_jaccard_numerator": str(target_numerator),
+                "target_jaccard_denominator": str(target_denominator),
+                "target_jaccard": f"{target_numerator / target_denominator:.12f}",
+                "realized_intersection": str(expected_intersection if toy else 0),
+                "realized_union": str(expected_union if toy else 0),
+                "realized_jaccard": f"{expected_jaccard:.12f}",
                 "timing_trials": str(spec["timing"]),
                 "accuracy_trials": str(spec["accuracy"]),
                 "trials": str(spec["timing"] if arm == "timing" else spec["accuracy"]),
@@ -312,12 +368,21 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
                 "total_ms": "1.000000",
                 "total_ms_sd": "",
                 "total_ms_median": "1.000000",
-                "jaccard_computed": "1.000000",
-                "jaccard_expected": "1.000000",
+                "jaccard_computed": f"{expected_jaccard:.6f}",
+                "jaccard_expected": f"{expected_jaccard:.6f}",
                 "jaccard_error": "0.000000",
                 "measurement_status": "measured",
             })
             row.update(_method_metadata(method, primary, target_security_bits))
+            row.update({
+                "intersection_count": str(expected_intersection) if method == "fhe_ind" else "",
+                "phase_encode_ms": "0.100000" if method == "fhe_ind" else "",
+                "phase_encrypt_ms": "0.200000" if method == "fhe_ind" else "",
+                "phase_compute_ms": "0.300000" if method == "fhe_ind" else "",
+                "phase_decrypt_ms": "0.400000" if method == "fhe_ind" else "",
+                "ct_size_bytes": "1" if method == "fhe_ind" else "",
+                "comm_bytes": "2" if method == "fhe_ind" else "",
+            })
             rows.append(row)
 
     with csv_path.open("w", newline="") as stream:

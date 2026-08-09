@@ -62,13 +62,9 @@ static BaselineMethod Sj16Method(uint32_t key_bits) {
         "SJ16 key size must be exactly 1024, 2048, or 3072 bits");
 }
 
-// NOTE (task 10-2, FHE-IND relabel): the std::cerr progress lines below print
-// the lowercase method key "baseline" as shorthand for the FHE-IND comparator
-// (baseline_engine.h) — this is developer-facing stderr progress output, not
-// a reporting surface (verify_reporting_gaps.py does not capture it), so it
-// is intentionally left unchanged. CSV/table/CLI-help text uses the FHE-IND
-// capability label exclusively; see FHE_IND_DISCLOSURE in
-// scripts/summarize_results.py and PrintUsage() below.
+// The comparison runner keeps its internal adapter implementation in
+// baseline_engine.h, but all emitted method labels use the canonical FHE-IND
+// key. This includes the developer-facing progress lines below.
 
 // ============================================================================
 // Shared helpers
@@ -1117,7 +1113,7 @@ static void BenchVaryK(const ComparisonConfig& cfg,
         br_copy.scenario = scenario;
         csv.WriteRow(br_copy);
 
-        std::cerr << " | baseline: N=" << br_copy.ring_dim.value_or(0)
+        std::cerr << " | fhe_ind: N=" << br_copy.ring_dim.value_or(0)
                   << " total=" << br_copy.total_ms << "ms\n";
     }
 }
@@ -1198,7 +1194,7 @@ static void BenchVaryM(const ComparisonConfig& cfg,
         br_copy.scenario = scenario;
         csv.WriteRow(br_copy);
 
-        std::cerr << " | baseline: N=" << br_copy.ring_dim.value_or(0)
+        std::cerr << " | fhe_ind: N=" << br_copy.ring_dim.value_or(0)
                   << " total=" << br_copy.total_ms << "ms\n";
     }
 }
@@ -1639,7 +1635,7 @@ static void BenchVaryUniverse(const ComparisonConfig& cfg,
             csv.WriteRow(br);
 
             std::cerr << "  U=" << u
-                      << " baseline: N=" << br.ring_dim.value_or(0)
+                      << " fhe_ind: N=" << br.ring_dim.value_or(0)
                       << " cts=" << br.num_cts
                       << " total=" << br.total_ms << "ms"
                       << " comm=" << (br.comm_bytes / 1024) << "KB"
@@ -1791,7 +1787,7 @@ static void BenchVarySetSize(const ComparisonConfig& cfg,
         csv.WriteRow(br);
 
         std::cerr << "  size=" << sz
-                  << " baseline: total=" << br.total_ms << "ms"
+                  << " fhe_ind: total=" << br.total_ms << "ms"
                   << " comm=" << (br.comm_bytes / 1024) << "KB"
                   << " err=" << br.jaccard_error << "\n";
 
