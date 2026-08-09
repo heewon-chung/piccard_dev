@@ -120,6 +120,34 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
                 self.assertIn(cause, result.stderr)
         self.write_rows(fields, rows)
 
+    def test_fhe_ind_taxonomy_and_phase_binding_fail_closed(self):
+        fields, rows = self.read_rows()
+        fhe_index = next(
+            index for index, row in enumerate(rows)
+            if row["method"] == "fhe_ind" and row["evidence_arm"] == "timing"
+        )
+        cases = (
+            ("comparison_eligible", "true",
+             "diagnostic suite cannot be comparison eligible"),
+            ("k", "16", "k mismatch"),
+            ("m", "16", "m mismatch"),
+            ("sanitizer_model", "phase-smudging-enc0-poc-v1",
+             "sanitizer_model"),
+            ("secure_division_included", "true", "secure_division_included"),
+            ("workload_manifest_sha256", "0" * 64,
+             "workload_manifest_sha256 mismatch"),
+            ("phase_compute_ms", "0.100000", "phase total mismatch"),
+        )
+        for column, value, cause in cases:
+            with self.subTest(column=column):
+                mutated = [dict(row) for row in rows]
+                mutated[fhe_index][column] = value
+                self.write_rows(fields, mutated)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+        self.write_rows(fields, rows)
+
     def test_canonical_toy_fixture_contains_one_diagnostic_fhe_ind_pair(self):
         rows = self.write_canonical_toy_fixture()
         self.assertEqual(
