@@ -185,6 +185,10 @@ class Work5ContractFixtureTest(unittest.TestCase):
         # its lower-bound comparison scope.  Phase 1 must not rewrite Work #4.
         self.assertEqual(contract["hard_exclusions"]["sj16_cost_scope"],
                          "full-query-excluding-one-time-setup")
+        self.assertEqual(
+            contract["taxonomy"]["fhe_ind"]["protocol_model"],
+            contract["hard_exclusions"]["fhe_ind_protocol_model"],
+        )
         lifecycle = contract["lifecycle"]
         self.assertEqual({key: lifecycle[key] for key in (
             "preflight_before_keygen", "timeout_status", "timeout_reason_code",
