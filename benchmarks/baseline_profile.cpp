@@ -107,7 +107,7 @@ BaselineCapability ResolveBaselineCapability(
         capability.protocol_model =
             ProtocolModel::LocalUniverseSizedBfvComparator;
         capability.output_semantics =
-            OutputSemantics::IntersectionIndicatorVector;
+            OutputSemantics::ScalarIntersectionPlaintextJaccard;
         capability.assurance_scope = AssuranceScope::LiveBfvPrimitiveOnly;
         capability.security_basis =
             SecurityBasis::OpenFheHeseaStandardLiveContext;
@@ -297,8 +297,8 @@ const char* OutputSemanticsName(OutputSemantics semantics) {
     switch (semantics) {
         case OutputSemantics::BiasCorrectedJaccardEstimate:
             return "bias-corrected-jaccard-estimate";
-        case OutputSemantics::IntersectionIndicatorVector:
-            return "intersection-indicator-vector";
+        case OutputSemantics::ScalarIntersectionPlaintextJaccard:
+            return "scalar-intersection-plaintext-jaccard";
         case OutputSemantics::MinHashCollisionJaccardEstimate:
             return "minhash-collision-jaccard-estimate";
         case OutputSemantics::HarnessReconstructedExactJaccard:

@@ -51,7 +51,7 @@ enum class ProtocolModel {
 
 enum class OutputSemantics {
     BiasCorrectedJaccardEstimate,
-    IntersectionIndicatorVector,
+    ScalarIntersectionPlaintextJaccard,
     MinHashCollisionJaccardEstimate,
     HarnessReconstructedExactJaccard,
     HarnessReconstructedJaccardPlaintextUnion,
@@ -108,7 +108,7 @@ struct BaselineCapability {
     ProtocolModel protocol_model =
         ProtocolModel::LocalUniverseSizedBfvComparator;
     OutputSemantics output_semantics =
-        OutputSemantics::IntersectionIndicatorVector;
+        OutputSemantics::ScalarIntersectionPlaintextJaccard;
     AssuranceScope assurance_scope = AssuranceScope::LiveBfvPrimitiveOnly;
     SecurityBasis security_basis =
         SecurityBasis::OpenFheHeseaStandardLiveContext;

@@ -335,7 +335,7 @@ def validate_comparison_taxonomy(rows):
                 "comparison_scope": "diagnostic-only",
                 "primitive": "bfv-indicator-comparison",
                 "protocol_model": "local-universe-sized-BFV-comparator",
-                "output_semantics": "intersection-indicator-vector",
+                "output_semantics": "scalar-intersection-plaintext-jaccard",
                 "assurance_scope": "live-bfv-primitive-only",
                 "security_basis": "openfhe-hesea-standard-live-context",
                 "cost_scope": "primitive-only",

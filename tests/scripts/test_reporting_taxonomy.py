@@ -105,7 +105,7 @@ def fhe_ind_row(evidence_arm="timing"):
         "comparison_scope": "diagnostic-only",
         "primitive": "bfv-indicator-comparison",
         "protocol_model": "local-universe-sized-BFV-comparator",
-        "output_semantics": "intersection-indicator-vector",
+        "output_semantics": "scalar-intersection-plaintext-jaccard",
         "assurance_scope": "live-bfv-primitive-only",
         "security_basis": "openfhe-hesea-standard-live-context",
         "cost_scope": "primitive-only",
@@ -258,8 +258,7 @@ class ReportingTaxonomyTest(unittest.TestCase):
 
     def test_old_fhe_ind_taxonomy_is_rejected_by_both_programs(self):
         old = fhe_ind_row()
-        old["protocol_model"] = "3-party-outsourced"
-        old["assurance_scope"] = "KPA/leakage"
+        old["output_semantics"] = "intersection-indicator-vector"
         summary, verify = self.run_programs([piccard_row(), old])
         self.assertNotEqual(summary.returncode, 0)
         self.assertNotEqual(verify.returncode, 0)

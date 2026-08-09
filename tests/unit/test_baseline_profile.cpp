@@ -231,7 +231,7 @@ TEST(BaselineProfile, FheIndIsOnlyTheLocalBfvDiagnosticPrimitive) {
         EXPECT_EQ(fhe_ind.protocol_model,
                   ProtocolModel::LocalUniverseSizedBfvComparator);
         EXPECT_EQ(fhe_ind.output_semantics,
-                  OutputSemantics::IntersectionIndicatorVector);
+                  OutputSemantics::ScalarIntersectionPlaintextJaccard);
         EXPECT_EQ(fhe_ind.assurance_scope,
                   AssuranceScope::LiveBfvPrimitiveOnly);
         EXPECT_EQ(fhe_ind.comparison_scope, ComparisonScope::DiagnosticOnly);
@@ -310,7 +310,8 @@ TEST(BaselineProfile, SerializerEmitsTypedFheIndTaxonomyAndLiveProvenance) {
     EXPECT_EQ(value("primitive"), "bfv-indicator-comparison");
     EXPECT_EQ(value("protocol_model"),
               "local-universe-sized-BFV-comparator");
-    EXPECT_EQ(value("output_semantics"), "intersection-indicator-vector");
+    EXPECT_EQ(value("output_semantics"),
+              "scalar-intersection-plaintext-jaccard");
     EXPECT_EQ(value("assurance_scope"), "live-bfv-primitive-only");
     EXPECT_EQ(value("security_basis"),
               "openfhe-hesea-standard-live-context");
