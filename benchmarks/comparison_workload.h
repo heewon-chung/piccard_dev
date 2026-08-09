@@ -105,6 +105,15 @@ private:
     std::string workload_id_;
 };
 
+/**
+ * @brief SHA-256 of only the canonical ordered ComparisonTrial payload.
+ *
+ * This is deliberately separate from the piccard-review-workload-v1 manifest
+ * digest: Work #5 method groups have distinct suite metadata and method lists,
+ * while equal trial records must remain joinable across those groups.
+ */
+std::string TrialPayloadSha256(const ComparisonWorkload& workload);
+
 /** @brief Minimal group identity used by Phase-4 strict aggregate validation. */
 struct AggregateIdentity {
     std::string method;

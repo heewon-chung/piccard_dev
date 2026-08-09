@@ -71,7 +71,7 @@ struct BenchmarkGridPoint {
     std::string Key() const;
 };
 
-/** @brief Resolve one of the seven exact named profiles, or fail closed. */
+/** @brief Resolve one of the nine exact named profiles, or fail closed. */
 const BenchmarkProfile& ResolveBenchmarkProfile(std::string_view profile_id);
 
 /** @brief Explicit provenance used only by pre-profile legacy invocations. */

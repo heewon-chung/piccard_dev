@@ -626,8 +626,8 @@ std::string SerializeAggregate(const Options& options,
         decrypt_stats = Summarize(std::move(decrypt));
     }
     const auto& realized = workload.Records().front();
-    const bool suite_diagnostic = options.suite != "primary-review";
-    const bool eligible = !suite_diagnostic && cap.comparison_eligible;
+    const bool eligible = profile.comparison_eligible &&
+                          cap.comparison_eligible;
     const std::string arm = aggregate.kind == TrialKind::Timing
         ? "timing" : "accuracy";
     const auto row_policy = ResolveReviewMethodRowPolicy(

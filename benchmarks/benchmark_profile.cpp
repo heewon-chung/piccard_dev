@@ -11,7 +11,7 @@ namespace {
 
 constexpr uint64_t kProfileMaxQueries = UINT64_C(1) << 20;
 
-const std::array<BenchmarkProfile, 7> kProfiles = {{
+const std::array<BenchmarkProfile, 9> kProfiles = {{
     {"std128-t40-primary", SecurityLevel::STD128, 128, 40,
      kProfileMaxQueries, 20, BenchmarkRunClass::Primary, true, true},
     {"std192-t40-primary", SecurityLevel::STD192, 192, 40,
@@ -25,6 +25,10 @@ const std::array<BenchmarkProfile, 7> kProfiles = {{
     {"std192-t128-feasibility", SecurityLevel::STD192, 192, 128,
      kProfileMaxQueries, 20, BenchmarkRunClass::Feasibility, false, false},
     {"toy-smoke", SecurityLevel::TOY, 0, 40,
+     kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false},
+    {"work5-std128-t40-single-trial", SecurityLevel::STD128, 128, 40,
+     kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false},
+    {"work5-std192-t40-single-trial", SecurityLevel::STD192, 192, 40,
      kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false},
 }};
 

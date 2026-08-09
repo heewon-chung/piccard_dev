@@ -30,6 +30,7 @@ constexpr char kWarmupHashDomain[] = "piccard-review-hash-warmup-v1";
 constexpr char kTimingHashDomain[] = "piccard-review-hash-timing-v1";
 constexpr char kAccuracyHashDomain[] = "piccard-review-hash-accuracy-v1";
 constexpr char kTraceDomain[] = "piccard-review-execution-trace-v1";
+constexpr char kTrialPayloadDomain[] = "piccard-work5-trial-payload-v1";
 
 using Bytes = std::vector<uint8_t>;
 
@@ -136,6 +137,41 @@ const std::vector<std::string>& SensitivityMethods() {
     return methods;
 }
 
+struct FrozenSuite {
+    const char* suite;
+    const char* profile;
+    std::vector<std::string> methods;
+};
+
+const std::array<FrozenSuite, 8>& Work5Suites() {
+    static const std::array<FrozenSuite, 8> suites = {{
+        {"work5-std128-piccard", "work5-std128-t40-single-trial",
+         {"piccard", "piccard_sqrt"}},
+        {"work5-std128-fhe-ind", "work5-std128-t40-single-trial",
+         {"fhe_ind"}},
+        {"work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
+         {"bcg12_mh_ec", "bcg12_mh_ff"}},
+        {"work5-std128-bcg12-exact", "work5-std128-t40-single-trial",
+         {"bcg12_exact_ec", "bcg12_exact_ff"}},
+        {"work5-std128-sj16", "work5-std128-t40-single-trial",
+         {"sj16"}},
+        {"work5-std192-piccard", "work5-std192-t40-single-trial",
+         {"piccard", "piccard_sqrt"}},
+        {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
+         {"fhe_ind"}},
+        {"work5-std192-sj16", "work5-std192-t40-single-trial",
+         {"sj16"}},
+    }};
+    return suites;
+}
+
+const FrozenSuite* FindWork5Suite(const std::string& suite) {
+    for (const auto& frozen : Work5Suites()) {
+        if (suite == frozen.suite) return &frozen;
+    }
+    return nullptr;
+}
+
 void ValidateSuite(const WorkloadSpec& spec) {
     const std::vector<std::string>* expected = nullptr;
     const char* profile = nullptr;
@@ -156,6 +192,11 @@ void ValidateSuite(const WorkloadSpec& spec) {
         profile = "std128-t64-sensitivity";
         timing = 3;
         accuracy = 0;
+    } else if (const FrozenSuite* work5 = FindWork5Suite(spec.suite)) {
+        expected = &work5->methods;
+        profile = work5->profile;
+        timing = 1;
+        accuracy = 1;
     } else {
         throw std::invalid_argument("unknown frozen comparison suite: " +
                                     spec.suite);
@@ -165,6 +206,24 @@ void ValidateSuite(const WorkloadSpec& spec) {
         throw std::invalid_argument(
             "suite profile, ordered methods, or trial counts do not match the frozen policy");
     }
+}
+
+Bytes SerializeTrialPayload(const std::vector<ComparisonTrial>& records) {
+    Bytes out;
+    AppendDomain(out, kTrialPayloadDomain);
+    for (const auto& record : records) {
+        AppendU8(out, static_cast<uint8_t>(record.kind));
+        AppendBE32(out, record.index);
+        AppendBE64(out, record.trial_seed);
+        AppendBE64(out, record.hash_seed);
+        AppendVector(out, record.set_a);
+        AppendVector(out, record.set_b);
+        AppendBE64(out, record.exact_intersection);
+        AppendBE64(out, record.exact_union);
+        AppendBE64(out, record.exact_jaccard.numerator);
+        AppendBE64(out, record.exact_jaccard.denominator);
+    }
+    return out;
 }
 
 void ValidateSpec(const WorkloadSpec& spec) {
@@ -903,6 +962,10 @@ std::array<uint8_t, 32> Sha256(const Bytes& bytes) {
 }
 
 std::string Sha256Hex(const Bytes& bytes) { return Hex(Sha256(bytes)); }
+
+std::string TrialPayloadSha256(const ComparisonWorkload& workload) {
+    return Sha256Hex(SerializeTrialPayload(workload.Records()));
+}
 
 }  // namespace benchmark
 }  // namespace piccard
