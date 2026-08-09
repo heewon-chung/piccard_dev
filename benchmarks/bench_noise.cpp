@@ -45,6 +45,7 @@
 
 #include "benchmark_utils.h"
 #include "noise_calibration_schema.h"
+#include "noise_calibration_probe.h"
 #include "util/noise_profile_matrix.h"
 #include "openfhe.h"
 
@@ -76,6 +77,7 @@
 #include <vector>
 
 using namespace piccard;
+namespace calibration_probe = piccard::std_evidence::calibration;
 
 // ============================================================================
 // Noise measurement
@@ -87,36 +89,7 @@ static double NoiseBits(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
                         const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>& sk,
                         const lbcrypto::BigInteger& Q,
                         uint64_t t) {
-    lbcrypto::DCRTPoly s = sk->GetPrivateElement();
-    const auto& c = ct->GetElements();
-
-    // b = c0 + c1*s + c2*s^2 + ... (all our outputs are relinearized 2-element
-    // ciphertexts, but the loop keeps this honest if that ever changes).
-    lbcrypto::DCRTPoly b = c[0];
-    lbcrypto::DCRTPoly s_pow = s;
-    for (size_t i = 1; i < c.size(); i++) {
-        b += c[i] * s_pow;
-        s_pow *= s;
-    }
-
-    b.SetFormat(Format::COEFFICIENT);
-    auto big = b.CRTInterpolate();
-
-    const lbcrypto::BigInteger delta = Q / lbcrypto::BigInteger(t);
-    const lbcrypto::BigInteger q_half = Q >> 1;
-    const lbcrypto::BigInteger delta_half = delta >> 1;
-
-    double worst = 0.0;
-    for (uint32_t j = 0; j < big.GetLength(); j++) {
-        lbcrypto::BigInteger v = big[j];
-        // Center mod q, then take the distance to the nearest multiple of Delta.
-        lbcrypto::BigInteger abs_v = (v > q_half) ? (Q - v) : v;
-        lbcrypto::BigInteger r = abs_v % delta;
-        lbcrypto::BigInteger d = (r > delta_half) ? (delta - r) : r;
-        double dd = d.ConvertToDouble();
-        if (dd > worst) worst = dd;
-    }
-    return worst > 0.0 ? std::log2(worst) : 0.0;
+    return calibration_probe::MeasureDecryptionPhaseNoise(ct, sk, Q, t);
 }
 
 // ============================================================================
@@ -173,18 +146,9 @@ static const char* PatternName(Pattern p) {
 /// which needs that to be reproducible.
 static uint64_t CellSeed(uint64_t root, const char* circuit, uint32_t ring_dim,
                          uint32_t depth, uint32_t sms, int pattern) {
-    uint64_t x = root;
-    for (const char* c = circuit; *c; c++) {
-        x = x * 0x100000001B3ULL + static_cast<unsigned char>(*c);
-    }
-    x ^= 0x9E3779B97F4A7C15ULL * ring_dim;
-    x ^= 0xD1B54A32D192ED03ULL * depth;
-    x ^= 0xA5A5A5A5A5A5A5A5ULL * sms;
-    x ^= 0xBF58476D1CE4E5B9ULL * static_cast<uint64_t>(pattern + 1);
-    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ULL;
-    x ^= x >> 27; x *= 0x94D049BB133111EBULL;
-    x ^= x >> 31;
-    return x;
+    return calibration_probe::DerivePatternSeed(
+        root, circuit, ring_dim, depth, sms,
+        static_cast<calibration_probe::Pattern>(pattern));
 }
 
 /// Synthetic MinHash signatures with an exactly known match count. Both
@@ -192,36 +156,14 @@ static uint64_t CellSeed(uint64_t root, const char* circuit, uint32_t ring_dim,
 /// over the plaintext the circuit sees without involving the hash family.
 static std::pair<std::vector<uint64_t>, std::vector<uint64_t>>
 MakeSignatures(Pattern p, uint32_t k, uint32_t m, std::mt19937_64& rng) {
-    std::vector<uint64_t> sx(k), sy(k);
-    std::uniform_int_distribution<uint64_t> dist(0, m - 1);
-
-    for (uint32_t i = 0; i < k; i++) {
-        switch (p) {
-            case Pattern::AllMatch:
-                sx[i] = dist(rng);
-                sy[i] = sx[i];
-                break;
-            case Pattern::NoMatch:
-                sx[i] = dist(rng);
-                sy[i] = (sx[i] + 1) % m;   // m >= 2 is enforced by Validate()
-                break;
-            case Pattern::Random:
-                sx[i] = dist(rng);
-                sy[i] = dist(rng);
-                break;
-        }
-    }
-    return {sx, sy};
+    return calibration_probe::MakeSignatures(
+        static_cast<calibration_probe::Pattern>(p), k, m, rng);
 }
 
 static int64_t ExpectedMatches(const std::vector<uint64_t>& sx,
                                const std::vector<uint64_t>& sy,
                                uint32_t m) {
-    int64_t n = 0;
-    for (size_t i = 0; i < sx.size(); i++) {
-        if (sx[i] % m == sy[i] % m) n++;
-    }
-    return n;
+    return calibration_probe::ExpectedMatches(sx, sy, m);
 }
 
 // ============================================================================

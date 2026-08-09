@@ -14,11 +14,19 @@ class PublicCiphertextCodec;
 
 /** @brief Parameters read from the realized OpenFHE BFV context. */
 struct BFVRuntimeMetadata {
+    uint32_t natural_ring_dim = 0;
+    uint32_t requested_ring_dim = 0;
     uint32_t actual_ring_dim = 0;
+    uint32_t natural_depth = 0;
+    uint32_t provisioned_depth = 0;
+    uint32_t scaling_mod_size = 0;
     double log_q_bits = 0.0;
     uint64_t plaintext_modulus = 0;
     uint32_t num_limbs = 0;
+    SecurityLevel security = SecurityLevel::STD128;
+    std::vector<std::string> ordered_rns_moduli;
     std::string openfhe_version;
+    std::string context_fingerprint;
 };
 
 class BFVContext {
@@ -31,6 +39,9 @@ public:
      * This calibration-only seam performs no encryption or file I/O.
      */
     void InitializeContextOnly();
+
+    /** @brief Generate secret/evaluation/rotation keys for an initialized context. */
+    void InitializeKeys();
 
     void Initialize();
 
@@ -97,6 +108,9 @@ public:
 
     /** @brief Returns live modulus-chain, plaintext, ring, and build metadata. */
     BFVRuntimeMetadata GetRuntimeMetadata() const;
+
+    /** @brief Returns the stable fingerprint of the initialized public context. */
+    std::string ContextFingerprintHex() const;
 
     /** @brief Returns the context's verified private parameter copy. */
     const PiccardParams& GetParams() const { return params_; }

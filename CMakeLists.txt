@@ -80,6 +80,50 @@ if(OpenFHE_FOUND)
     else()
         set(PICCARD_CONFIGURED_BUILD_DIRTY 1)
     endif()
+
+    # A commit plus a dirty bit is not a sufficient identity for a diagnostic
+    # artifact: two different dirty trees can share both values.  Bind the
+    # generated executable to a deterministic digest of the source inputs
+    # visible to Git at configure time.  Generated build/result trees and
+    # review handoffs are deliberately excluded because they are not compile
+    # inputs and would make a rebuild depend on its own output.
+    execute_process(
+        COMMAND git ls-files --cached --others --exclude-standard
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE PICCARD_BUILD_FILES_RESULT
+        OUTPUT_VARIABLE PICCARD_BUILD_FILES_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT PICCARD_BUILD_FILES_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot enumerate evidence build inputs")
+    endif()
+    string(REPLACE "\n" ";" PICCARD_BUILD_INPUTS
+           "${PICCARD_BUILD_FILES_OUTPUT}")
+    set(PICCARD_BUILD_INPUT_MANIFEST
+        "commit=${PICCARD_CONFIGURED_BUILD_COMMIT}\nopenfhe=${PICCARD_CONFIGURED_OPENFHE_VERSION}\nbuild_type=${CMAKE_BUILD_TYPE}\n")
+    foreach(PICCARD_BUILD_INPUT IN LISTS PICCARD_BUILD_INPUTS)
+        if(PICCARD_BUILD_INPUT STREQUAL "" OR
+           PICCARD_BUILD_INPUT MATCHES "^(build[^/]*/|\\.om[co]/|results/|scripts/results/|#recycle/)")
+            continue()
+        endif()
+        set(PICCARD_BUILD_INPUT_PATH
+            "${CMAKE_SOURCE_DIR}/${PICCARD_BUILD_INPUT}")
+        if(IS_DIRECTORY "${PICCARD_BUILD_INPUT_PATH}")
+            continue()
+        endif()
+        if(EXISTS "${PICCARD_BUILD_INPUT_PATH}")
+            file(SHA256 "${PICCARD_BUILD_INPUT_PATH}" PICCARD_BUILD_INPUT_SHA256)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                         "${PICCARD_BUILD_INPUT_PATH}")
+        else()
+            set(PICCARD_BUILD_INPUT_SHA256 "MISSING")
+        endif()
+        string(APPEND PICCARD_BUILD_INPUT_MANIFEST
+               "${PICCARD_BUILD_INPUT}\n${PICCARD_BUILD_INPUT_SHA256}\n")
+    endforeach()
+    string(SHA256 PICCARD_CONFIGURED_BUILD_ID
+           "${PICCARD_BUILD_INPUT_MANIFEST}")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
     configure_file(
         "${CMAKE_SOURCE_DIR}/cmake/build_info.h.in"
@@ -214,6 +258,22 @@ target_include_directories(
 )
 target_link_libraries(
     piccard_comparison_workload
+    PUBLIC OpenSSL::Crypto
+)
+
+# Frozen STD128/STD192 diagnostic evidence schema.  This stays independent of
+# OpenFHE so the matrix, tuple framing, and fail-closed status rules are
+# testable before a crypto context is constructed.
+add_library(
+    piccard_std_security_evidence_schema
+    benchmarks/std_security_evidence_schema.cpp
+)
+target_include_directories(
+    piccard_std_security_evidence_schema
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(
+    piccard_std_security_evidence_schema
     PUBLIC OpenSSL::Crypto
 )
 
@@ -358,6 +418,22 @@ if(OpenFHE_FOUND)
     )
     set(HAVE_PICCARD_FHE TRUE)
     target_link_libraries(piccard_benchmark_serializers PUBLIC piccard_fhe)
+
+    # Core-only diagnostic helpers shared by the legacy noise harness and the
+    # frozen STD128/STD192 evidence executable. Threshold remains outside this
+    # API and is retained only in bench_noise's legacy path.
+    add_library(
+        piccard_noise_calibration_probe
+        benchmarks/noise_calibration_probe.cpp
+    )
+    target_include_directories(
+        piccard_noise_calibration_probe
+        PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    target_link_libraries(
+        piccard_noise_calibration_probe
+        PUBLIC piccard_fhe
+    )
 else()
     set(HAVE_PICCARD_FHE FALSE)
 endif()
@@ -581,6 +657,22 @@ if(BUILD_TESTS)
             add_executable(test_bfv_context tests/unit/test_bfv_context.cpp)
             target_link_libraries(test_bfv_context piccard_fhe test_main)
             add_test(NAME BFVContext COMMAND test_bfv_context)
+
+            add_executable(
+                test_noise_calibration_probe
+                tests/unit/test_noise_calibration_probe.cpp
+            )
+            target_link_libraries(
+                test_noise_calibration_probe
+                piccard_noise_calibration_probe
+                test_main
+            )
+            target_include_directories(
+                test_noise_calibration_probe
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME NoiseCalibrationProbe
+                     COMMAND test_noise_calibration_probe)
 
             add_executable(
                 test_public_ciphertext_codec
@@ -856,6 +948,21 @@ if(BUILD_TESTS)
                 add_test(NAME Bcg12 COMMAND test_bcg12)  # BCG12
             endif()
         endif()
+
+        # Pure schema test: it intentionally does not require OpenFHE.
+        add_executable(
+            test_std_security_evidence_schema
+            tests/unit/test_std_security_evidence_schema.cpp
+        )
+        target_link_libraries(
+            test_std_security_evidence_schema
+            piccard_std_security_evidence_schema
+            test_main
+        )
+        add_test(
+            NAME StdSecurityEvidenceSchema
+            COMMAND test_std_security_evidence_schema
+        )
     else()
         message(STATUS "GTest not found, skipping tests")
     endif()
@@ -938,6 +1045,14 @@ if(BUILD_TESTS)
     add_test(NAME PreThresholdProfileRunner
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_pre_threshold_profiles
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RunStdSecurityEvidence
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_std_security_evidence
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SummarizeStdSecurityEvidence
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_summarize_std_security_evidence
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME VerifyReviewComparison
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
@@ -1177,10 +1292,54 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     target_link_libraries(
         bench_noise
         piccard_fhe
+        piccard_noise_calibration_probe
         piccard_noise_calibration_schema
     )
     target_include_directories(bench_noise PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+
+    add_executable(
+        bench_std_security_evidence
+        benchmarks/bench_std_security_evidence.cpp
+    )
+    target_link_libraries(
+        bench_std_security_evidence
+        piccard_fhe
+        piccard_noise_calibration_probe
+        piccard_std_security_evidence_schema
+        piccard_comparison_workload
+    )
+    target_include_directories(
+        bench_std_security_evidence
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
     if(BUILD_TESTS)
+        if(TARGET test_main)
+            add_executable(
+                test_std_security_evidence_e2e
+                tests/integration/test_std_security_evidence_e2e.cpp
+            )
+            target_link_libraries(
+                test_std_security_evidence_e2e
+                PRIVATE piccard_comparison_workload test_main
+            )
+            target_include_directories(
+                test_std_security_evidence_e2e
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_std_security_evidence_e2e
+                PRIVATE
+                    PICCARD_STD_EVIDENCE_BINARY="$<TARGET_FILE:bench_std_security_evidence>"
+            )
+            add_test(
+                NAME StdSecurityEvidenceE2E
+                COMMAND test_std_security_evidence_e2e
+            )
+            set_tests_properties(
+                StdSecurityEvidenceE2E
+                PROPERTIES TIMEOUT 300
+            )
+        endif()
         add_test(
             NAME NoiseStrictMeasurementCleanup
             COMMAND bench_noise --strict_cleanup_probe

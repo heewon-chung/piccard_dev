@@ -1,10 +1,23 @@
 #include "protocol/piccard.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace piccard {
 
 Piccard::Piccard(const PiccardParams& params) : params_(params) {}
+
+void Piccard::InitializeContextOnly() {
+    if (bfv_) {
+        throw std::logic_error("Piccard context was already initialized");
+    }
+    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                          params_.hash_seed);
+    bfv_ = std::make_unique<BFVContext>(params_);
+    bfv_->InitializeContextOnly();
+    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
+    encoder_ = std::make_unique<OneHotEncoder>(params_);
+}
 
 void Piccard::SetHashSeed(uint64_t seed) {
     params_.hash_seed = seed;
@@ -15,19 +28,8 @@ void Piccard::SetHashSeed(uint64_t seed) {
 }
 
 void Piccard::KeyGen() {
-    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
-                                          params_.hash_seed);
-
-    // Initialize BFV first: OpenFHE may select a different ring_dim than
-    // what PiccardParams::Validate() computed (e.g. a smaller ring_dim
-    // that still satisfies the requested security level).
-    bfv_ = std::make_unique<BFVContext>(params_);
-    bfv_->Initialize();
-    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
-
-    // Create encoder AFTER BFV init so it uses the actual ring_dim
-    // for output vector sizing.
-    encoder_ = std::make_unique<OneHotEncoder>(params_);
+    if (!bfv_) InitializeContextOnly();
+    bfv_->InitializeKeys();
 }
 
 std::vector<uint64_t>

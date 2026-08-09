@@ -58,7 +58,7 @@ std::string Sha256Hex(const std::vector<uint8_t>& bytes) {
     return hex;
 }
 
-std::string ContextFingerprintHex(const BFVContext& context) {
+std::string ComputeContextFingerprintHex(const BFVContext& context) {
     static constexpr char kDomain[] = "piccard-bfv-context-v1";
     std::vector<uint8_t> bytes(kDomain, kDomain + sizeof(kDomain));
     const auto crypto_params = context.GetCryptoContext()->GetCryptoParameters();
@@ -226,7 +226,7 @@ BFVContext::ExportPublicCiphertextCodec() const {
     }
     return std::shared_ptr<const PublicCiphertextCodec>(
         new PublicCiphertextCodec(
-            cc_, key_pair_.publicKey, ContextFingerprintHex(*this),
+            cc_, key_pair_.publicKey, ContextFingerprintHex(),
             PublicKeyFingerprintHex(key_pair_.publicKey), key_tag));
 }
 
@@ -262,12 +262,39 @@ BFVRuntimeMetadata BFVContext::GetRuntimeMetadata() const {
     }
     const auto crypto_params = cc_->GetCryptoParameters();
     const auto element_params = crypto_params->GetElementParams();
+    const auto rns_params =
+        std::dynamic_pointer_cast<lbcrypto::CryptoParametersRNS>(
+            crypto_params);
+    if (!rns_params) {
+        throw std::runtime_error(
+            "realized BFV context did not expose RNS runtime parameters");
+    }
     BFVRuntimeMetadata metadata;
+    metadata.natural_ring_dim = params_.ring_dim_natural != 0
+                                    ? params_.ring_dim_natural
+                                    : params_.ring_dim;
+    metadata.requested_ring_dim = params_.RequestedRingDim() != 0
+                                      ? params_.RequestedRingDim()
+                                      : params_.ring_dim;
     metadata.actual_ring_dim = cc_->GetRingDimension();
+    metadata.natural_depth = params_.natural_mult_depth != 0
+                                 ? params_.natural_mult_depth
+                                 : params_.mult_depth;
+    metadata.provisioned_depth = rns_params->GetMultiplicativeDepth();
+    metadata.scaling_mod_size = params_.scaling_mod_size;
     metadata.log_q_bits = TowerSumLogQBits(element_params);
     metadata.plaintext_modulus = crypto_params->GetPlaintextModulus();
-    metadata.num_limbs =
-        static_cast<uint32_t>(element_params->GetParams().size());
+    const auto& towers = element_params->GetParams();
+    metadata.num_limbs = static_cast<uint32_t>(towers.size());
+    metadata.security = params_.security;
+    metadata.ordered_rns_moduli.reserve(towers.size());
+    for (const auto& tower : towers) {
+        metadata.ordered_rns_moduli.push_back(
+            tower->GetModulus().ToString());
+    }
+    if (metadata.scaling_mod_size == 0 && !towers.empty()) {
+        metadata.scaling_mod_size = towers.front()->GetModulus().GetMSB();
+    }
     metadata.openfhe_version = PICCARD_BUILD_OPENFHE_VERSION;
     const std::string linked_version = GetOPENFHEVersion();
     if (metadata.openfhe_version.empty() ||
@@ -276,7 +303,16 @@ BFVRuntimeMetadata BFVContext::GetRuntimeMetadata() const {
         throw std::runtime_error(
             "configured OpenFHE version does not match linked OpenFHE");
     }
+    metadata.context_fingerprint = ComputeContextFingerprintHex(*this);
     return metadata;
+}
+
+std::string BFVContext::ContextFingerprintHex() const {
+    if (!cc_) {
+        throw std::logic_error(
+            "context fingerprint requires an initialized context");
+    }
+    return ComputeContextFingerprintHex(*this);
 }
 
 void BFVContext::InitializeContextOnly() {
@@ -419,6 +455,17 @@ void BFVContext::InitializeContextOnly() {
 
 void BFVContext::Initialize() {
     InitializeContextOnly();
+
+    InitializeKeys();
+}
+
+void BFVContext::InitializeKeys() {
+    if (!cc_) {
+        throw std::logic_error("key generation requires an initialized BFV context");
+    }
+    if (key_pair_.good()) {
+        throw std::logic_error("BFV keys were already generated");
+    }
 
     cc_->Enable(lbcrypto::PKE);
     cc_->Enable(lbcrypto::KEYSWITCH);

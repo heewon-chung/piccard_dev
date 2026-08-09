@@ -13,6 +13,9 @@ class SqrtPiccard {
 public:
     explicit SqrtPiccard(const PiccardParams& params);
 
+    // Build the context and encoding machinery without generating keys.
+    void InitializeContextOnly();
+
     void KeyGen();
 
     // High-level protocol API (same shape as Piccard)
