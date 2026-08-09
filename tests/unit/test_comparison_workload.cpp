@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -131,7 +132,8 @@ void AppendWork5Vector(std::vector<uint8_t>* out,
 // This oracle intentionally serializes only canonical ComparisonTrial fields.
 // A Work #5 group may differ in method list and suite name, but not in its
 // shared trial payload.
-std::string Work5TrialPayloadSha256(const ComparisonWorkload& workload) {
+std::string IndependentWork5TrialPayloadSha256(
+    const ComparisonWorkload& workload) {
     std::vector<uint8_t> bytes;
     constexpr char kDomain[] = "piccard-work5-trial-payload-v1";
     bytes.insert(bytes.end(), kDomain, kDomain + sizeof(kDomain));
@@ -149,6 +151,26 @@ std::string Work5TrialPayloadSha256(const ComparisonWorkload& workload) {
     }
     return Sha256Hex(bytes);
 }
+
+// The ellipsis fallback intentionally lets this test binary compile before
+// Phase 2 declares piccard::benchmark::TrialPayloadSha256.  Once that public
+// API is declared, ADL selects the production overload for ComparisonWorkload;
+// the runtime test below then compares that real result with an independent
+// oracle and a fixed digest.  A name-only source scan cannot satisfy this.
+namespace work5_trial_payload_probe {
+struct MissingProductionTrialPayloadSha256 {
+    operator std::string() const {
+        return "<missing-production-TrialPayloadSha256>";
+    }
+};
+
+MissingProductionTrialPayloadSha256 TrialPayloadSha256(...);
+
+template <typename Workload>
+auto Invoke(const Workload& workload) -> decltype(TrialPayloadSha256(workload)) {
+    return TrialPayloadSha256(workload);
+}
+}  // namespace work5_trial_payload_probe
 
 WorkloadSpec Work5Spec(const std::string& suite,
                        const std::string& profile_id,
@@ -458,17 +480,29 @@ TEST(ComparisonWorkload, ToySmokeAcceptsOneAccuracyTrialAndRejectsTwo) {
                  std::invalid_argument);
 }
 
-TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
-#ifdef PICCARD_SOURCE_DIR
-    std::ifstream implementation(
-        std::string(PICCARD_SOURCE_DIR) + "/benchmarks/comparison_workload.cpp");
-    ASSERT_TRUE(implementation.is_open());
-    std::ostringstream implementation_text;
-    implementation_text << implementation.rdbuf();
-    EXPECT_NE(implementation_text.str().find("TrialPayloadSha256"),
-              std::string::npos);
-#endif
+TEST(ComparisonWorkload,
+     Work5TrialPayloadUsesProductionApiAndIndependentOracle) {
+    const auto toy = ComparisonWorkload::Generate(ToySpec());
+    const std::string independent = IndependentWork5TrialPayloadSha256(toy);
+    using ProductionResult = std::decay_t<decltype(
+        work5_trial_payload_probe::Invoke(toy))>;
 
+    if constexpr (std::is_same_v<
+                      ProductionResult,
+                      work5_trial_payload_probe::MissingProductionTrialPayloadSha256>) {
+        ADD_FAILURE()
+            << "Phase 2 entity absent: public production TrialPayloadSha256("
+               "const ComparisonWorkload&) is not declared; independent toy "
+               "payload digest=" << independent;
+    } else {
+        const std::string actual = work5_trial_payload_probe::Invoke(toy);
+        EXPECT_EQ(actual, independent);
+        EXPECT_EQ(actual,
+                  "a8cbcf063e332b4f8f8bbb2d381abb20817cb4ebf082fea416d86c678fdf1147");
+    }
+}
+
+TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
     size_t std128_cells = 0;
     size_t std192_cells = 0;
     std::vector<ComparisonWorkload> generated;
@@ -509,8 +543,8 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
     const auto& piccard = generated[0];
     const auto& fhe_ind = generated[1];
     EXPECT_NE(piccard.ManifestSha256Hex(), fhe_ind.ManifestSha256Hex());
-    EXPECT_EQ(Work5TrialPayloadSha256(piccard),
-              Work5TrialPayloadSha256(fhe_ind));
+    EXPECT_EQ(IndependentWork5TrialPayloadSha256(piccard),
+              IndependentWork5TrialPayloadSha256(fhe_ind));
 
     auto wrong_order = Work5Spec(
         "work5-std128-bcg12-mh", "work5-std128-t40-single-trial",

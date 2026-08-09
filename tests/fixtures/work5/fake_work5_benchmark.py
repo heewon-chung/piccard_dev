@@ -4,8 +4,9 @@
 This fixture is deliberately not a cryptographic or CSV producer.  It records
 only whether a runner attempted to enter a benchmark command.  A test can
 forbid an argument before key generation (for example ``--set-size=100000``),
-or emulate a process-level timeout by returning the conventional exit code
-124.  Production evidence must never accept this fixture as a measurement.
+or force a real sleeping child process so the runner must handle
+``subprocess.TimeoutExpired``.  Production evidence must never accept this
+fixture as a measurement.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -30,13 +32,23 @@ def main() -> int:
     arguments = sys.argv[1:]
     append_event(arguments)
     forbidden = os.environ.get("PICCARD_WORK5_FAKE_FORBID_ARGUMENT")
-    if forbidden and forbidden in arguments:
+    combination = os.environ.get("PICCARD_WORK5_FAKE_FORBID_COMBINATION")
+    forbidden_combination = (combination is not None and
+                             all(item in arguments
+                                 for item in combination.split("|") if item))
+    if (forbidden and forbidden in arguments) or forbidden_combination:
         sentinel = os.environ.get("PICCARD_WORK5_FAKE_KEYGEN_SENTINEL")
         if sentinel:
             Path(sentinel).write_text("forbidden benchmark command reached\n",
                                       encoding="utf-8")
         return 91
     mode = os.environ.get("PICCARD_WORK5_FAKE_MODE", "measured")
+    if mode == "sleep":
+        # This is intentionally a real child-process sleep.  The lifecycle
+        # contract must obtain subprocess.TimeoutExpired rather than merely
+        # translating a fixture-selected exit code.
+        time.sleep(float(os.environ.get("PICCARD_WORK5_FAKE_SLEEP_SECONDS",
+                                        "1.0")))
     if mode == "timeout":
         # The runner must translate a command timeout / conventional 124 into
         # terminal ERROR/TIMEOUT and never reclassify it as a preflight skip.

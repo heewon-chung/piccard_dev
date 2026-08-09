@@ -1,5 +1,5 @@
 {
-  "schema": "piccard-work5-phase1-contract-v1",
+  "schema": "piccard-work5-phase1-contract-v2",
   "control": {
     "k": 128,
     "m": 64,
@@ -10,6 +10,17 @@
     "timing_trials": 1,
     "accuracy_trials": 1,
     "executed_trials": 3
+  },
+  "control_cell": {
+    "axis": "control",
+    "axis_value": null,
+    "cell_id_format": "{suite}::control"
+  },
+  "parameter_axes": {
+    "k": [16, 32, 64, 128, 256, 512],
+    "m": [16, 32, 64, 128, 256],
+    "n": [100, 1000, 10000, 100000],
+    "U": [16384, 65536]
   },
   "profiles": [
     {
@@ -35,6 +46,7 @@
       "profile": "work5-std128-t40-single-trial",
       "methods": ["piccard", "piccard_sqrt"],
       "applicable_axes": ["k", "m", "n", "U"],
+      "applicability": {"k": true, "m": true, "n": true, "U": true},
       "planned_cells": 14
     },
     {
@@ -42,6 +54,7 @@
       "profile": "work5-std128-t40-single-trial",
       "methods": ["fhe_ind"],
       "applicable_axes": ["n", "U"],
+      "applicability": {"k": false, "m": false, "n": true, "U": true},
       "planned_cells": 5
     },
     {
@@ -49,6 +62,7 @@
       "profile": "work5-std128-t40-single-trial",
       "methods": ["bcg12_mh_ec", "bcg12_mh_ff"],
       "applicable_axes": ["k", "n"],
+      "applicability": {"k": true, "m": false, "n": true, "U": false},
       "planned_cells": 9
     },
     {
@@ -56,6 +70,7 @@
       "profile": "work5-std128-t40-single-trial",
       "methods": ["bcg12_exact_ec", "bcg12_exact_ff"],
       "applicable_axes": ["n"],
+      "applicability": {"k": false, "m": false, "n": true, "U": false},
       "planned_cells": 4
     },
     {
@@ -63,6 +78,7 @@
       "profile": "work5-std128-t40-single-trial",
       "methods": ["sj16"],
       "applicable_axes": ["n", "U"],
+      "applicability": {"k": false, "m": false, "n": true, "U": true},
       "planned_cells": 5
     },
     {
@@ -70,6 +86,7 @@
       "profile": "work5-std192-t40-single-trial",
       "methods": ["piccard", "piccard_sqrt"],
       "applicable_axes": ["k", "m", "n", "U"],
+      "applicability": {"k": true, "m": true, "n": true, "U": true},
       "planned_cells": 14
     },
     {
@@ -77,6 +94,7 @@
       "profile": "work5-std192-t40-single-trial",
       "methods": ["fhe_ind"],
       "applicable_axes": ["n", "U"],
+      "applicability": {"k": false, "m": false, "n": true, "U": true},
       "planned_cells": 5
     },
     {
@@ -84,6 +102,7 @@
       "profile": "work5-std192-t40-single-trial",
       "methods": ["sj16"],
       "applicable_axes": ["n", "U"],
+      "applicability": {"k": false, "m": false, "n": true, "U": true},
       "planned_cells": 5
     }
   ],
@@ -91,71 +110,117 @@
     "STD128": 37,
     "STD192": 24
   },
+  "expected_parameter_cell_key_sha256": "e51edfd36870410c48a0df5d2388c2e25e56b7c6dea65f33d76c213443cb435c",
+  "expected_parameter_cell_keys": [
+    "work5-std128-piccard::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std128-piccard::k=16|k=16,m=64,n=1000,U=16384",
+    "work5-std128-piccard::k=32|k=32,m=64,n=1000,U=16384",
+    "work5-std128-piccard::k=64|k=64,m=64,n=1000,U=16384",
+    "work5-std128-piccard::k=256|k=256,m=64,n=1000,U=16384",
+    "work5-std128-piccard::k=512|k=512,m=64,n=1000,U=16384",
+    "work5-std128-piccard::m=16|k=128,m=16,n=1000,U=16384",
+    "work5-std128-piccard::m=32|k=128,m=32,n=1000,U=16384",
+    "work5-std128-piccard::m=128|k=128,m=128,n=1000,U=16384",
+    "work5-std128-piccard::m=256|k=128,m=256,n=1000,U=16384",
+    "work5-std128-piccard::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std128-piccard::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std128-piccard::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std128-piccard::U=65536|k=128,m=64,n=1000,U=65536",
+    "work5-std128-fhe-ind::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std128-fhe-ind::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std128-fhe-ind::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std128-fhe-ind::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std128-fhe-ind::U=65536|k=128,m=64,n=1000,U=65536",
+    "work5-std128-bcg12-mh::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::k=16|k=16,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::k=32|k=32,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::k=64|k=64,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::k=256|k=256,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::k=512|k=512,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-mh::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std128-bcg12-mh::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std128-bcg12-mh::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std128-bcg12-exact::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std128-bcg12-exact::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std128-bcg12-exact::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std128-bcg12-exact::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std128-sj16::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std128-sj16::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std128-sj16::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std128-sj16::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std128-sj16::U=65536|k=128,m=64,n=1000,U=65536",
+    "work5-std192-piccard::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std192-piccard::k=16|k=16,m=64,n=1000,U=16384",
+    "work5-std192-piccard::k=32|k=32,m=64,n=1000,U=16384",
+    "work5-std192-piccard::k=64|k=64,m=64,n=1000,U=16384",
+    "work5-std192-piccard::k=256|k=256,m=64,n=1000,U=16384",
+    "work5-std192-piccard::k=512|k=512,m=64,n=1000,U=16384",
+    "work5-std192-piccard::m=16|k=128,m=16,n=1000,U=16384",
+    "work5-std192-piccard::m=32|k=128,m=32,n=1000,U=16384",
+    "work5-std192-piccard::m=128|k=128,m=128,n=1000,U=16384",
+    "work5-std192-piccard::m=256|k=128,m=256,n=1000,U=16384",
+    "work5-std192-piccard::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std192-piccard::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std192-piccard::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std192-piccard::U=65536|k=128,m=64,n=1000,U=65536",
+    "work5-std192-fhe-ind::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std192-fhe-ind::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std192-fhe-ind::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std192-fhe-ind::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std192-fhe-ind::U=65536|k=128,m=64,n=1000,U=65536",
+    "work5-std192-sj16::control|null|k=128,m=64,n=1000,U=16384",
+    "work5-std192-sj16::n=100|k=128,m=64,n=100,U=16384",
+    "work5-std192-sj16::n=10000|k=128,m=64,n=10000,U=16384",
+    "work5-std192-sj16::n=100000|k=128,m=64,n=100000,U=16384",
+    "work5-std192-sj16::U=65536|k=128,m=64,n=1000,U=65536"
+  ],
   "allowed_universes": [16384, 65536],
   "excluded_universes": [262144, 1048576],
   "terminal_statuses": ["MEASURED", "SKIPPED_PRECHECK", "ERROR"],
-  "required_precheck_skips": [
-    {
-      "suite": "work5-std128-sj16",
-      "axis": "U",
-      "axis_value": 65536,
-      "reason_code": "PROJECTED_RUNTIME_CAP"
-    },
-    {
-      "suite": "work5-std192-sj16",
-      "axis": "U",
-      "axis_value": 65536,
-      "reason_code": "PROJECTED_RUNTIME_CAP"
-    },
-    {
-      "suite": "work5-std128-piccard",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std128-fhe-ind",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std128-bcg12-mh",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std128-bcg12-exact",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std128-sj16",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std192-piccard",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std192-fhe-ind",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    },
-    {
-      "suite": "work5-std192-sj16",
-      "axis": "n",
-      "axis_value": 100000,
-      "reason_code": "WORKLOAD_GEOMETRY"
-    }
+  "allowed_precheck_reason_codes": [
+    "WORKLOAD_GEOMETRY",
+    "RING_DIM_CAP",
+    "DEPTH_CAP",
+    "LOGQ_CAP",
+    "PROJECTED_RUNTIME_CAP"
   ],
+  "allowed_error_reason_codes": [
+    "TIMEOUT",
+    "SUBPROCESS_EXIT",
+    "VERIFIER_FAILURE",
+    "ARTIFACT_MISMATCH",
+    "EXCEPTION"
+  ],
+  "required_precheck_skips": [
+    {"suite": "work5-std128-sj16", "axis": "U", "axis_value": 65536, "reason_code": "PROJECTED_RUNTIME_CAP"},
+    {"suite": "work5-std192-sj16", "axis": "U", "axis_value": 65536, "reason_code": "PROJECTED_RUNTIME_CAP"},
+    {"suite": "work5-std128-piccard", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std128-fhe-ind", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std128-bcg12-mh", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std128-bcg12-exact", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std128-sj16", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std192-piccard", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std192-fhe-ind", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"},
+    {"suite": "work5-std192-sj16", "axis": "n", "axis_value": 100000, "reason_code": "WORKLOAD_GEOMETRY"}
+  ],
+  "taxonomy": {
+    "piccard": {"primitive": "bfv-onehot-minhash", "protocol_model": "piccard-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "piccard_sqrt": {"primitive": "bfv-sqrt-minhash", "protocol_model": "piccard-sqrt-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "fhe_ind": {"primitive": "bfv-indicator-comparison", "protocol_model": "local-universe-sized-bfv-comparator", "comparison_scope": "diagnostic-only", "cost_scope": "primitive-only", "secure_division_included": false, "semantic_comparison_eligible": false},
+    "bcg12_mh_ec": {"primitive": "bcg12-ec", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "bcg12_mh_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "bcg12_exact_ec": {"primitive": "bcg12-ec", "protocol_model": "bcg12-exact-cardinality", "comparison_scope": "matched-cardinality-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "bcg12_exact_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-exact-cardinality", "comparison_scope": "matched-cardinality-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "sj16": {"primitive": "paillier-3072", "protocol_model": "sj16-intersection-shares", "comparison_scope": "component-lower-bound", "cost_scope": "component-lower-bound", "secure_division_included": false, "semantic_comparison_eligible": {"STD128": true, "STD192": false}}
+  },
+  "profile_comparison_eligible": false,
+  "status_schema": {
+    "required_fields": ["cell_id", "profile", "suite", "security", "axis", "axis_value", "k", "m", "n", "U", "target_jaccard", "seed", "methods", "applicability", "profile_comparison_eligible", "taxonomy", "trial_payload_sha256", "status", "reason_code", "reason_detail", "preflight_started", "workload_started", "context_started", "keygen_started", "measurement_started", "measured_trials", "started_at_utc", "ended_at_utc", "argv", "environment", "exit_code", "command_path", "command_sha256", "stdout_path", "stdout_sha256", "stderr_path", "stderr_sha256", "workload_path", "workload_sha256", "trace_path", "trace_sha256", "csv_path", "csv_sha256"],
+    "artifact_pairs": [["command_path", "command_sha256"], ["stdout_path", "stdout_sha256"], ["stderr_path", "stderr_sha256"], ["workload_path", "workload_sha256"], ["trace_path", "trace_sha256"], ["csv_path", "csv_sha256"]],
+    "measured": {"flags": {"preflight_started": true, "workload_started": true, "context_started": true, "keygen_started": true, "measurement_started": true}, "measured_trials": 1, "exit_code": 0, "reason_code": null, "all_artifacts": "present"},
+    "skipped_precheck": {"flags": {"preflight_started": true, "workload_started": false, "context_started": false, "keygen_started": false, "measurement_started": false}, "measured_trials": 0, "exit_code": null, "command_log_artifacts": "present", "output_artifacts": "null"},
+    "error": {"minimum_flags": {"preflight_started": true, "workload_started": true, "context_started": true, "keygen_started": true, "measurement_started": true}, "measured_trials": 0, "exit_code": "nonzero", "command_log_artifacts": "present", "output_artifacts": "null-or-paired"}
+  },
   "hard_exclusions": {
     "threshold": true,
     "bcg12_std192": true,
