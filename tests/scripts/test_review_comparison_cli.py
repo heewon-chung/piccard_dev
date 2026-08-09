@@ -63,7 +63,7 @@ class ReviewComparisonCliTest(unittest.TestCase):
             "--trials=1",
             "--accuracy-trials=1",
             "--seed=7",
-            "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16",
+            "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16",
             "--sj16-key-bits=1024",
             "--allow-unmatched-security",
             f"--manifest-out={root / 'missing' / 'workload.bin'}",
@@ -123,20 +123,39 @@ class ReviewComparisonCliTest(unittest.TestCase):
             root = pathlib.Path(tmp)
             command = self.base_command(root)
             command[command.index(
-                "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16"
+                "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16"
             )] = "--methods=" + ",".join(CANONICAL_TOY_METHODS)
             command[-2] = f"--manifest-out={root / 'workload.bin'}"
             command[-1] = f"--execution-trace-out={root / 'trace.bin'}"
             result = self.run_cli(command)
 
-            # Workload bytes are durably written before adapter setup.  The
-            # current implementation stops at the frozen-policy gap, so the
-            # missing artifact is the intentional Phase-1 RED signal.
+            # Workload bytes are durably written before adapter setup, and the
+            # completed Phase-3 producer must preserve the canonical method
+            # order in that manifest.
             manifest = root / "workload.bin"
             self.assertTrue(manifest.is_file(), result.stderr)
             self.assertEqual(_workload_methods(manifest),
                              list(CANONICAL_TOY_METHODS))
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_legacy_baseline_method_is_rejected_before_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            command = self.base_command(root)
+            command[command.index(
+                "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16"
+            )] = (
+                "--methods=piccard,piccard_sqrt,baseline,bcg12_mh_ec,"
+                "bcg12_exact_ec,sj16"
+            )
+            command[-2] = f"--manifest-out={root / 'workload.bin'}"
+            command[-1] = f"--execution-trace-out={root / 'trace.bin'}"
+            result = self.run_cli(command)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("frozen policy", result.stderr)
+        self.assertFalse((root / "workload.bin").exists())
+        self.assertFalse((root / "trace.bin").exists())
 
 
 if __name__ == "__main__":

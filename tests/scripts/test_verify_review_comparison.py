@@ -77,7 +77,7 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
         result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"verdict": "PASS"', result.stdout)
-        self.assertIn('"rows": 10', result.stdout)
+        self.assertIn('"rows": 12', result.stdout)
 
     def test_canonical_toy_fixture_contains_one_diagnostic_fhe_ind_pair(self):
         rows = self.write_canonical_toy_fixture()
@@ -239,7 +239,7 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
             (0, "universe_size", "65", "universe_size"),
             (0, "measurement_kind", "fhe-accuracy", "measurement_kind"),
             (0, "trials", "2", "aggregate trial count"),
-            (6, "jaccard_error", "0.1", "exact method"),
+            (8, "jaccard_error", "0.1", "exact method"),
         )
         fields, rows = self.read_rows()
         for index, column, value, cause in cases:

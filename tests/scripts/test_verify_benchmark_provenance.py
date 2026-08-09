@@ -218,6 +218,14 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, check=False,
         )
 
+    def test_legacy_baseline_label_is_rejected(self):
+        rows = [dict(row) for row in self.rows]
+        rows[4]["method"] = "baseline"
+        self.write_rows(rows)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("unknown method", result.stderr)
+
     def assert_rejects(self, rows, cause):
         self.write_rows(rows)
         result = self.run_verifier()
@@ -250,6 +258,10 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
             if row["method"] in {"piccard", "piccard_sqrt"}:
                 row.update(cryptographic_profile="live-BFV-STD128",
                            nominal_security_bits="128")
+            elif row["method"] == "fhe_ind":
+                row.update(cryptographic_profile="live-BFV-STD128",
+                           nominal_security_bits="128",
+                           comparison_eligible="false")
             elif row["method"] == "sj16":
                 row.update(cryptographic_profile="Paillier-3072",
                            nominal_security_bits="128", primitive="paillier-3072",
@@ -265,11 +277,11 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
 
     def test_invalid_ahe_profile_and_unmatched_std192_claim_fail(self):
         rows = [dict(row) for row in self.rows]
-        rows[8]["cryptographic_profile"] = "Paillier-4096"
+        rows[10]["cryptographic_profile"] = "Paillier-4096"
         self.assert_rejects(rows, "AHE profile")
 
         rows = [dict(row) for row in self.rows]
-        rows[8].update(profile_id="std192-t40-primary", run_class="primary",
+        rows[10].update(profile_id="std192-t40-primary", run_class="primary",
                        target_security_bits="192", cryptographic_profile="Paillier-3072",
                        nominal_security_bits="128", primitive="paillier-3072",
                        security_match="true", comparison_eligible="true")
@@ -277,7 +289,7 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
 
     def test_sj16_lower_bound_and_model_markers_are_required(self):
         rows = [dict(row) for row in self.rows]
-        rows[8]["assurance_scope"] = "not-applicable"
+        rows[10]["assurance_scope"] = "not-applicable"
         self.assert_rejects(rows, "lower-bound")
 
         rows = [dict(row) for row in self.rows]

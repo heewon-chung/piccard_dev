@@ -231,7 +231,7 @@ const char* BaselineMethodName(BaselineMethod method) {
     switch (method) {
         case BaselineMethod::Piccard: return "piccard";
         case BaselineMethod::PiccardSqrt: return "piccard_sqrt";
-        case BaselineMethod::FheInd: return "baseline";
+        case BaselineMethod::FheInd: return "fhe_ind";
         case BaselineMethod::Bcg12MinHashFf: return "bcg12_mh_ff";
         case BaselineMethod::Bcg12MinHashEc: return "bcg12_mh_ec";
         case BaselineMethod::Bcg12ExactFf: return "bcg12_exact_ff";

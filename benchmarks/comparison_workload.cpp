@@ -125,8 +125,8 @@ const std::vector<std::string>& PrimaryMethods() {
 
 const std::vector<std::string>& ToyMethods() {
     static const std::vector<std::string> methods = {
-        "piccard", "piccard_sqrt", "bcg12_mh_ec", "bcg12_exact_ec",
-        "sj16"};
+        "piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+        "bcg12_exact_ec", "sj16"};
     return methods;
 }
 
@@ -469,7 +469,7 @@ std::string TimingKind(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "fhe-timing";
     if (method.rfind("bcg12_", 0) == 0) return "psi-timing";
     if (method == "sj16" || method == "sj16_precomputed") return "ahe-timing";
-    if (method == "fhe_ind" || method == "baseline") return "diagnostic";
+    if (method == "fhe_ind") return "diagnostic";
     throw std::invalid_argument("unknown comparison method: " + method);
 }
 
@@ -477,7 +477,7 @@ std::string AccuracyKind(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "fhe-accuracy";
     if (method.rfind("bcg12_", 0) == 0) return "psi-accuracy";
     if (method == "sj16") return "ahe-accuracy";
-    if (method == "fhe_ind" || method == "baseline") return "diagnostic";
+    if (method == "fhe_ind") return "diagnostic";
     throw std::invalid_argument("method has no accuracy arm: " + method);
 }
 
@@ -489,7 +489,7 @@ bool ExactMethod(const std::string& method) {
 std::string Precomputation(const std::string& method) {
     if (method == "sj16") return "randomizer-generation-included";
     if (method == "sj16_precomputed") return "randomizers-precomputed";
-    if (method == "fhe_ind" || method == "baseline") return "not-applicable";
+    if (method == "fhe_ind") return "not-applicable";
     return "crs-and-keys-only";
 }
 
@@ -534,7 +534,9 @@ ReviewMethodRowPolicy ResolveReviewMethodRowPolicy(
     const bool piccard = method == "piccard" || method == "piccard_sqrt";
     const bool minhash = method == "bcg12_mh_ff" || method == "bcg12_mh_ec";
     const bool hash_crs = piccard || minhash;
-    if (!piccard && !minhash && method != "bcg12_exact_ff" &&
+    const bool fhe_ind = method == "fhe_ind";
+    if (!piccard && !minhash && !fhe_ind &&
+        method != "bcg12_exact_ff" &&
         method != "bcg12_exact_ec" && method != "sj16" &&
         method != "sj16_precomputed") {
         throw std::invalid_argument("unknown review row method: " + method);

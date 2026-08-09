@@ -96,7 +96,7 @@ def piccard_row(evidence_arm="timing", sqrt=False):
 
 
 def fhe_ind_row(evidence_arm="timing"):
-    row = base_row("baseline")
+    row = base_row("fhe_ind")
     row.update({
         "cryptographic_profile": "live-BFV-STD128",
         "nominal_security_bits": "128",

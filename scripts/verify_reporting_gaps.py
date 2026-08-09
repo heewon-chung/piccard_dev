@@ -51,7 +51,7 @@ def main():
             fail(f"rendered output contains forbidden token {token!r}")
 
     methods = {row["method"] for row in rows}
-    for method in sorted(methods - {"piccard", "baseline"}):
+    for method in sorted(methods - {"piccard", "fhe_ind"}):
         rendered_method = method.replace("_", "\\_")
         if method not in output and rendered_method not in output:
             fail(f"rendered output silently dropped method {method!r}")

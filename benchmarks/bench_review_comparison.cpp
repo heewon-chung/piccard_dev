@@ -1,3 +1,4 @@
+#include "baseline_engine.h"
 #include "baseline_profile.h"
 #include "benchmark_profile.h"
 #include "benchmark_provenance.h"
@@ -64,6 +65,8 @@ using piccard::benchmark::SecurityBasisName;
 using piccard::benchmark::TrialKind;
 using piccard::benchmark::ValidateAggregateMembership;
 using piccard::benchmark::WorkloadSpec;
+using piccard::baseline::BaselineEngine;
+using piccard::baseline::BaselineParams;
 using piccard::baselines::BCG12;
 using piccard::baselines::Bcg12Backend;
 using piccard::baselines::Bcg12Mode;
@@ -230,6 +233,7 @@ uint32_t SecurityBits(SecurityLevel security) {
 BaselineMethod MethodEnum(const std::string& method, unsigned sj16_key_bits) {
     if (method == "piccard") return BaselineMethod::Piccard;
     if (method == "piccard_sqrt") return BaselineMethod::PiccardSqrt;
+    if (method == "fhe_ind") return BaselineMethod::FheInd;
     if (method == "bcg12_mh_ff") return BaselineMethod::Bcg12MinHashFf;
     if (method == "bcg12_mh_ec") return BaselineMethod::Bcg12MinHashEc;
     if (method == "bcg12_exact_ff") return BaselineMethod::Bcg12ExactFf;
@@ -250,6 +254,9 @@ double RationalDouble(const ExactRational& value) {
 struct Observation {
     QueryCost cost;
     double expected = 0.0;
+    // FHE-IND exposes the decrypted cardinality in addition to the common
+    // Jaccard observation. Other adapters leave this field unset.
+    std::optional<int64_t> intersection_count;
 };
 
 class Adapter {
@@ -346,6 +353,58 @@ public:
 
 private:
     std::unique_ptr<SqrtPiccard> engine_;
+};
+
+class FheIndAdapter final : public Adapter {
+public:
+    FheIndAdapter(const WorkloadSpec& spec, SecurityLevel security,
+                  BaselineCapability capability)
+        : Adapter("fhe_ind", std::move(capability)) {
+        BaselineParams params;
+        params.universe_size = static_cast<uint32_t>(spec.universe);
+        params.security = security;
+        params.Validate();
+        engine_ = std::make_unique<BaselineEngine>(params);
+        // Context and keys are one-time setup. They are intentionally not
+        // regenerated for a trial and are excluded from query timing.
+        engine_->Initialize();
+    }
+
+    Observation Run(const ComparisonTrial& trial) override {
+        // The manifest is the sole source of sets. In particular, the FHE-IND
+        // adapter does not consume hash_seed or derive a method-specific seed.
+        const auto result = engine_->RunQueryPhased(trial.set_a, trial.set_b);
+        if (result.intersection !=
+                static_cast<int64_t>(trial.exact_intersection) ||
+            result.union_size != static_cast<int64_t>(trial.exact_union)) {
+            throw std::runtime_error(
+                "FHE-IND decrypted intersection is not workload-bound");
+        }
+
+        Observation out;
+        out.cost.phase_encode_ms = result.phase_encode_ms;
+        out.cost.phase_encrypt_ms = result.phase_encrypt_ms;
+        out.cost.phase_compute_ms = result.phase_evaluate_ms;
+        out.cost.phase_decrypt_ms = result.phase_decrypt_ms;
+        out.cost.total_ms = result.online_ms;
+        out.cost.ct_size_bytes = result.party_x_ciphertext_bytes;
+        out.cost.comm_bytes = result.communication.total_bytes;
+        out.cost.jaccard_estimate = result.jaccard;
+        out.expected = RationalDouble(trial.exact_jaccard);
+        out.intersection_count = result.intersection;
+        return out;
+    }
+
+    BenchmarkProvenance Provenance() const override {
+        return piccard::benchmark::MakeFheIndBenchmarkProvenance(
+            engine_->GetBFVContext());
+    }
+
+    // FHE-IND has no Piccard k/m or sanitizer parameter map.
+    const PiccardParams* Params() const override { return nullptr; }
+
+private:
+    std::unique_ptr<BaselineEngine> engine_;
 };
 
 class Bcg12Adapter final : public Adapter {
@@ -472,6 +531,8 @@ std::string CsvHeader() {
            "flood_noise_bits,scaling_mod_size,actual_ring_dim,log_q_bits,"
            "plaintext_modulus,num_limbs,openfhe_version,total_ms,total_ms_sd,"
            "total_ms_median,jaccard_computed,jaccard_expected,jaccard_error,"
+           "intersection_count,phase_encode_ms,phase_encrypt_ms,"
+           "phase_compute_ms,phase_decrypt_ms,ct_size_bytes,comm_bytes,"
            "measurement_status\n";
 }
 
@@ -493,6 +554,7 @@ std::string SerializeAggregate(const Options& options,
         aggregate.adapter->Name() == "sj16_precomputed");
     const BenchmarkProvenance provenance = aggregate.adapter->Provenance();
     const PiccardParams* params = aggregate.adapter->Params();
+    const bool fhe_ind = aggregate.adapter->Name() == "fhe_ind";
     std::vector<double> times;
     times.reserve(aggregate.observations.size());
     double estimate = 0.0;
@@ -518,6 +580,51 @@ std::string SerializeAggregate(const Options& options,
         error = 0.0;
     }
     const Stats stats = Summarize(times);
+    Stats encode_stats;
+    Stats encrypt_stats;
+    Stats compute_stats;
+    Stats decrypt_stats;
+    int64_t observed_intersection = 0;
+    size_t observed_ct_size = 0;
+    size_t observed_comm = 0;
+    if (fhe_ind) {
+        std::vector<double> encode;
+        std::vector<double> encrypt;
+        std::vector<double> compute;
+        std::vector<double> decrypt;
+        encode.reserve(aggregate.observations.size());
+        encrypt.reserve(aggregate.observations.size());
+        compute.reserve(aggregate.observations.size());
+        decrypt.reserve(aggregate.observations.size());
+        if (aggregate.observations.empty() ||
+            !aggregate.observations.front().intersection_count.has_value()) {
+            throw std::logic_error(
+                "FHE-IND observation is missing intersection count");
+        }
+        observed_intersection = *aggregate.observations.front().intersection_count;
+        observed_ct_size = aggregate.observations.front().cost.ct_size_bytes;
+        observed_comm = aggregate.observations.front().cost.comm_bytes;
+        for (const auto& observation : aggregate.observations) {
+            if (!observation.intersection_count.has_value()) {
+                throw std::logic_error(
+                    "FHE-IND observation is missing intersection count");
+            }
+            if (*observation.intersection_count != observed_intersection ||
+                observation.cost.ct_size_bytes != observed_ct_size ||
+                observation.cost.comm_bytes != observed_comm) {
+                throw std::logic_error(
+                    "FHE-IND aggregate metadata is not stable across trials");
+            }
+            encode.push_back(observation.cost.phase_encode_ms);
+            encrypt.push_back(observation.cost.phase_encrypt_ms);
+            compute.push_back(observation.cost.phase_compute_ms);
+            decrypt.push_back(observation.cost.phase_decrypt_ms);
+        }
+        encode_stats = Summarize(std::move(encode));
+        encrypt_stats = Summarize(std::move(encrypt));
+        compute_stats = Summarize(std::move(compute));
+        decrypt_stats = Summarize(std::move(decrypt));
+    }
     const auto& realized = workload.Records().front();
     const bool suite_diagnostic = options.suite != "primary-review";
     const bool eligible = !suite_diagnostic && cap.comparison_eligible;
@@ -564,7 +671,8 @@ std::string SerializeAggregate(const Options& options,
         << options.trials << "," << options.accuracy_trials << ","
         << aggregate.observations.size() << "," << row_policy.hash_randomness << ","
         << OptionalU64(row_policy.hash_seed) << ","
-        << (exact ? "not-applicable" : "sha256-random-ranking-poc-v1") << ","
+        << ((exact || fhe_ind) ? "not-applicable"
+                               : "sha256-random-ranking-poc-v1") << ","
         << (params ? "phase-smudging-enc0-poc-v1" : "not-applicable") << ","
         << (params ? "empirical-phase-statistical+ciphertext-computational"
                    : "not-applicable") << ","
@@ -582,7 +690,21 @@ std::string SerializeAggregate(const Options& options,
         << OptionalU32(provenance.num_limbs) << "," << provenance.openfhe_version
         << "," << std::fixed << std::setprecision(6) << stats.mean << ","
         << ReviewNumericCell(stats.sd) << "," << stats.median << "," << estimate << ","
-        << expected << "," << error << ",measured\n";
+        << expected << "," << error;
+    if (fhe_ind) {
+        out << "," << observed_intersection
+            << "," << encode_stats.mean
+            << "," << encrypt_stats.mean
+            << "," << compute_stats.mean
+            << "," << decrypt_stats.mean
+            << "," << observed_ct_size
+            << "," << observed_comm;
+    } else {
+        // These detailed primitive fields are inapplicable to the legacy
+        // adapters in this compact reviewer schema.
+        out << ",,,,,,,";
+    }
+    out << ",measured\n";
     return out.str();
 }
 
@@ -607,6 +729,9 @@ std::vector<std::unique_ptr<Adapter>> SetupAdapters(
         } else if (method == "piccard_sqrt") {
             adapters.push_back(std::make_unique<SqrtAdapter>(
                 workload.Spec(), options.security, profile, std::move(capability)));
+        } else if (method == "fhe_ind") {
+            adapters.push_back(std::make_unique<FheIndAdapter>(
+                workload.Spec(), options.security, std::move(capability)));
         } else if (method.rfind("bcg12_", 0) == 0) {
             adapters.push_back(std::make_unique<Bcg12Adapter>(
                 method, workload.Spec(), std::move(capability)));

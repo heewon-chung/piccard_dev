@@ -73,10 +73,13 @@ def _hash_seed(root_seed, kind, index):
     return _first8(HASH_DOMAINS[kind] + _be64(root_seed) + suffix)
 
 
-def _method_metadata(method, primary):
+def _method_metadata(method, primary, target_security_bits):
+    target_bits = str(target_security_bits)
     if method == "fhe_ind":
-        target_bits = "128" if primary else "0"
-        profile = "live-BFV-STD128" if primary else "live-BFV-TOY"
+        profile = (
+            f"live-BFV-STD{target_security_bits}"
+            if target_security_bits else "live-BFV-TOY"
+        )
         return {
             "cryptographic_profile": profile,
             "nominal_security_bits": target_bits,
@@ -102,9 +105,13 @@ def _method_metadata(method, primary):
 
     if method in {"piccard", "piccard_sqrt"}:
         sqrt = method == "piccard_sqrt"
+        target_bits = str(target_security_bits)
         return {
-            "cryptographic_profile": "live-BFV-STD128",
-            "nominal_security_bits": "128",
+            "cryptographic_profile": (
+                f"live-BFV-STD{target_security_bits}" if target_security_bits
+                else "live-BFV-TOY"
+            ),
+            "nominal_security_bits": target_bits,
             "security_match": "true",
             "comparison_eligible": "true" if primary else "false",
             "comparison_scope": "end-to-end-estimator",
@@ -140,11 +147,12 @@ def _method_metadata(method, primary):
     if method.startswith("bcg12_"):
         ff = method.endswith("_ff")
         exact = method.startswith("bcg12_exact_")
+        match = target_security_bits == 128
         return {
             "cryptographic_profile": "FF-3072/256" if ff else "P-256",
             "nominal_security_bits": "128",
-            "security_match": "true",
-            "comparison_eligible": "true" if primary else "false",
+            "security_match": str(match).lower(),
+            "comparison_eligible": str(match and primary).lower(),
             "comparison_scope": (
                 "matched-cardinality-component" if exact
                 else "matched-estimator-component"
@@ -177,8 +185,10 @@ def _method_metadata(method, primary):
     return {
         "cryptographic_profile": "Paillier-3072",
         "nominal_security_bits": "128",
-        "security_match": "true",
-        "comparison_eligible": "true" if primary and not precomputed else "false",
+        "security_match": str(target_security_bits == 128).lower(),
+        "comparison_eligible": str(
+            target_security_bits == 128 and primary and not precomputed
+        ).lower(),
         "comparison_scope": "component-lower-bound",
         "primitive": "paillier-3072",
         "protocol_model": "sj16-intersection-shares",
@@ -250,6 +260,7 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
     trace_hex = hashlib.sha256(trace_bytes).hexdigest()
     timing_hash_seed = str(encoded_records[1][3])
     primary = suite == "primary-review"
+    target_security_bits = 0 if spec["profile"] == "toy-smoke" else 128
     rows = []
     for method in methods:
         arms = ("timing", "accuracy") if spec["accuracy"] else ("timing",)
@@ -306,7 +317,7 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
                 "jaccard_error": "0.000000",
                 "measurement_status": "measured",
             })
-            row.update(_method_metadata(method, primary))
+            row.update(_method_metadata(method, primary, target_security_bits))
             rows.append(row)
 
     with csv_path.open("w", newline="") as stream:

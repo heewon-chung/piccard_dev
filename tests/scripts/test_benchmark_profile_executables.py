@@ -45,7 +45,7 @@ class NamedComparisonExecutableTest(unittest.TestCase):
         self.assertEqual(row["realized_union"], "21")
         self.assertEqual(row["realized_jaccard"], "0.523810")
 
-    def assert_baseline_is_diagnostic(self, row):
+    def assert_fhe_ind_is_diagnostic(self, row):
         self.assertEqual(row["profile_id"], "legacy")
         self.assertEqual(row["run_class"], "legacy")
         self.assertEqual(row["comparison_eligible"], "false")
@@ -59,21 +59,21 @@ class NamedComparisonExecutableTest(unittest.TestCase):
             [
                 ("piccard", "fhe-timing"),
                 ("piccard_sqrt", "fhe-timing"),
-                ("baseline", "diagnostic"),
+                ("fhe_ind", "diagnostic"),
                 ("piccard", "fhe-accuracy"),
                 ("piccard_sqrt", "fhe-accuracy"),
-                ("baseline", "diagnostic"),
+                ("fhe_ind", "diagnostic"),
             ],
         )
         for row in rows:
             self.assert_toy_workload_provenance(row)
-            if row["method"] == "baseline":
-                self.assert_baseline_is_diagnostic(row)
+            if row["method"] == "fhe_ind":
+                self.assert_fhe_ind_is_diagnostic(row)
             else:
                 self.assertEqual(row["profile_id"], "toy-smoke")
                 self.assertEqual(row["run_class"], "smoke")
                 self.assertEqual(row["comparison_eligible"], "false")
-        for method in ("piccard", "piccard_sqrt", "baseline"):
+        for method in ("piccard", "piccard_sqrt", "fhe_ind"):
             method_rows = [row for row in rows if row["method"] == method]
             self.assertEqual(
                 [(row["trials"], row["accuracy_trials"])

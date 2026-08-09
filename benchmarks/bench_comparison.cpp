@@ -243,7 +243,7 @@ static void BindReviewerRow(
     // FHE-IND is a diagnostic comparator, not a Piccard-family evidence row.
     // Leave its default legacy profile metadata intact instead of applying the
     // primary Piccard profile to the common comparison writer.
-    if (row.method != "baseline") {
+    if (row.capability->method != BaselineMethod::FheInd) {
         ApplyBenchmarkProfile(config, row, measurement_kind);
     }
 }

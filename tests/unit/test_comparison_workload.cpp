@@ -30,7 +30,7 @@ WorkloadSpec ToySpec(uint64_t seed = 7) {
     spec.set_size = 10;
     spec.universe = 64;
     spec.target_jaccard = ParseExactDecimal("0.5");
-    spec.methods = {"piccard", "piccard_sqrt", "bcg12_mh_ec",
+    spec.methods = {"piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
                     "bcg12_exact_ec", "sj16"};
     spec.timing_trials = 1;
     spec.accuracy_trials = 1;
@@ -77,21 +77,24 @@ std::vector<AggregateIdentity> ValidToyRows(
     } cases[] = {
         {"piccard", "fhe-timing", "fhe-accuracy", false},
         {"piccard_sqrt", "fhe-timing", "fhe-accuracy", false},
+        {"fhe_ind", "diagnostic", "diagnostic", false},
         {"bcg12_mh_ec", "psi-timing", "psi-accuracy", false},
         {"bcg12_exact_ec", "psi-timing", "psi-accuracy", true},
         {"sj16", "ahe-timing", "ahe-accuracy", true},
     };
     for (const auto& c : cases) {
+        const std::string precomputation =
+            c.method == std::string("sj16")
+                ? "randomizer-generation-included"
+                : c.method == std::string("fhe_ind")
+                    ? "not-applicable"
+                    : "crs-and-keys-only";
         auto timing = Row(workload, c.method, c.timing_kind, "timing", 1,
-                          c.method == std::string("sj16")
-                              ? "randomizer-generation-included"
-                              : "crs-and-keys-only");
+                          precomputation);
         timing.exact_estimator = c.exact;
         rows.push_back(std::move(timing));
         auto accuracy = Row(workload, c.method, c.accuracy_kind, "accuracy", 1,
-                            c.method == std::string("sj16")
-                                ? "randomizer-generation-included"
-                                : "crs-and-keys-only");
+                            precomputation);
         accuracy.exact_estimator = c.exact;
         accuracy.estimator_error = c.exact ? 0.0 : 0.125;
         rows.push_back(std::move(accuracy));
@@ -112,10 +115,10 @@ std::vector<std::string> CsvCells(const std::string& line) {
 TEST(ComparisonWorkload, DeterministicBinaryDigestAndCanonicalRecords) {
     const ComparisonWorkload workload = ComparisonWorkload::Generate(ToySpec());
 
-    EXPECT_EQ(workload.Bytes().size(), 832u);
+    EXPECT_EQ(workload.Bytes().size(), 843u);
     EXPECT_EQ(workload.ManifestSha256Hex(),
-              "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa");
-    EXPECT_EQ(workload.WorkloadId(), "review-64-669d54d779bc31e4");
+              "00211dec55e8f1163451e34662bc7c48cb0af44a98e7fe8c1d8ba73b335e950a");
+    EXPECT_EQ(workload.WorkloadId(), "review-64-00211dec55e8f116");
     ASSERT_EQ(workload.Records().size(), 3u);
 
     const auto& warmup = workload.Records()[0];
@@ -131,7 +134,7 @@ TEST(ComparisonWorkload, DeterministicBinaryDigestAndCanonicalRecords) {
 
     EXPECT_EQ(workload.ExecutionOrder(warmup),
               (std::vector<std::string>{"bcg12_exact_ec", "sj16", "piccard",
-                                        "piccard_sqrt", "bcg12_mh_ec"}));
+                                        "piccard_sqrt", "fhe_ind", "bcg12_mh_ec"}));
     EXPECT_EQ(ComparisonWorkload::ParseAndVerify(workload.Bytes()).Bytes(),
               workload.Bytes());
 }
@@ -192,6 +195,16 @@ TEST(ComparisonWorkload, ExactCardinalityJaccardAndCrsRules) {
     EXPECT_EQ(exact_policy.hash_seed, std::nullopt);
     EXPECT_EQ(exact_policy.hash_randomness, "not-applicable");
 
+    const auto fhe_ind_policy = ResolveReviewMethodRowPolicy(
+        "fhe_ind", TrialKind::Timing, 16, 16, timing_hash_seed);
+    EXPECT_EQ(fhe_ind_policy.k, std::nullopt);
+    EXPECT_EQ(fhe_ind_policy.m, std::nullopt);
+    EXPECT_EQ(fhe_ind_policy.hash_seed, std::nullopt);
+    EXPECT_EQ(fhe_ind_policy.hash_randomness, "not-applicable");
+    EXPECT_THROW(ResolveReviewMethodRowPolicy(
+                     "baseline", TrialKind::Timing, 16, 16, timing_hash_seed),
+                 std::invalid_argument);
+
     const auto accuracy_policy = ResolveReviewMethodRowPolicy(
         "piccard", TrialKind::Accuracy, 16, 16, timing_hash_seed);
     EXPECT_EQ(accuracy_policy.hash_seed, std::nullopt);
@@ -219,9 +232,9 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         ASSERT_TRUE(column.find(name) != column.end()) << name;
     }
     const std::string expected_digest =
-        "669d54d779bc31e46a57b92c0e46153b657f1c039158c46987c7cf2f9ad3ccaa";
+        "00211dec55e8f1163451e34662bc7c48cb0af44a98e7fe8c1d8ba73b335e950a";
     const std::string expected_trace =
-        "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec";
+        "2707d649854269ceaecfc7a57d9f501210a8303017d97a029cd68650856a121b";
     const struct {
         const char* method;
         const char* kind;
@@ -237,6 +250,8 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         {"piccard_sqrt", "fhe-timing", "timing", "16", "16", "fixed",
          "15329580584519071531"},
         {"piccard_sqrt", "fhe-accuracy", "accuracy", "16", "16", "resampled", ""},
+        {"fhe_ind", "diagnostic", "timing", "", "", "not-applicable", ""},
+        {"fhe_ind", "diagnostic", "accuracy", "", "", "not-applicable", ""},
         {"bcg12_mh_ec", "psi-timing", "timing", "16", "", "fixed",
          "15329580584519071531"},
         {"bcg12_mh_ec", "psi-accuracy", "accuracy", "16", "", "resampled", ""},
@@ -260,7 +275,7 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         EXPECT_EQ(cells[column.at("hash_seed")], expected.hash_seed);
         EXPECT_EQ(cells[column.at("comparison_eligible")], "false");
         EXPECT_EQ(cells[column.at("workload_id")],
-                  "review-64-669d54d779bc31e4");
+                  "review-64-00211dec55e8f116");
         EXPECT_EQ(cells[column.at("workload_manifest_sha256")], expected_digest);
         EXPECT_EQ(cells[column.at("execution_trace_sha256")], expected_trace);
         EXPECT_EQ(cells[column.at("measurement_status")], "measured");
@@ -268,7 +283,7 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         EXPECT_TRUE(sd.empty());
         ++rows;
     }
-    EXPECT_EQ(rows, 10u);
+    EXPECT_EQ(rows, 12u);
 #else
     GTEST_SKIP() << "PICCARD_SOURCE_DIR is not defined";
 #endif
@@ -335,7 +350,7 @@ TEST(ComparisonWorkload, FrozenSuitesEnforceExactRowsAndTrials) {
     EXPECT_THROW(ValidateAggregateMembership(toy, wrong_params),
                  std::invalid_argument);
     auto nonzero_exact_error = rows;
-    nonzero_exact_error[7].estimator_error = 0.01;
+    nonzero_exact_error[9].estimator_error = 0.01;
     EXPECT_THROW(ValidateAggregateMembership(toy, nonzero_exact_error),
                  std::invalid_argument);
 }
@@ -406,9 +421,9 @@ TEST(ComparisonWorkload, ExecutionTraceBindsManifestAndCanonicalDispatchOrder) {
         trace.CompleteRecord();
     }
     const auto bytes = trace.SerializeAndVerify();
-    EXPECT_EQ(bytes.size(), 320u);
+    EXPECT_EQ(bytes.size(), 353u);
     EXPECT_EQ(Sha256Hex(bytes),
-              "a15f85b1b64255c7a317daeea589c1626b76faa6787e8901e5c2bf0643f4f0ec");
+              "2707d649854269ceaecfc7a57d9f501210a8303017d97a029cd68650856a121b");
     EXPECT_NO_THROW(VerifyExecutionTrace(bytes, workload));
 
     auto reordered = bytes;

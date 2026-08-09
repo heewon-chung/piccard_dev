@@ -16,7 +16,7 @@ from pathlib import Path
 
 from verify_benchmark_provenance import (
     REQUIRED_COLUMNS, VerificationError, load_csv, require, validate_rows,
-    validate_measured_metrics,
+    validate_measured_metrics, _parse_int, _finite,
 )
 
 
@@ -34,7 +34,8 @@ SUITES = {
         "piccard", "piccard_sqrt", "bcg12_mh_ff", "bcg12_mh_ec",
         "bcg12_exact_ff", "bcg12_exact_ec", "sj16"], 30, 50),
     "toy-smoke": ("toy-smoke", [
-        "piccard", "piccard_sqrt", "bcg12_mh_ec", "bcg12_exact_ec", "sj16"], 1, 1),
+        "piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+        "bcg12_exact_ec", "sj16"], 1, 1),
     "sj16-precompute-sensitivity": ("std128-t64-sensitivity", [
         "sj16", "sj16_precomputed"], 3, 0),
 }
@@ -260,6 +261,8 @@ def verify_trace(path: Path, workload: Workload) -> str:
 def expected_kind(method: str, arm: str) -> str:
     if method in {"piccard", "piccard_sqrt"}:
         return f"fhe-{arm}"
+    if method == "fhe_ind":
+        return "diagnostic"
     if method.startswith("bcg12_"):
         return f"psi-{arm}"
     if method in {"sj16", "sj16_precomputed"}:
@@ -274,6 +277,8 @@ def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: st
     actual_pairs = []
     for row in rows:
         pair = (row["method"], row["evidence_arm"])
+        require(row["method"] != "baseline",
+                "unexpected method-kind: legacy baseline label is not accepted; use fhe_ind")
         if pair in actual_pairs:
             raise VerificationError(f"duplicate method-kind pair {pair}")
         actual_pairs.append(pair)
@@ -352,6 +357,35 @@ def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: st
         require(math.isclose(float(row["jaccard_expected"]), float(realized),
                              rel_tol=0.0, abs_tol=5e-6),
                 f"row {row_number}: expected Jaccard is not workload-bound")
+
+        # New reviewer producers may expose the detailed FHE-IND query seam in
+        # the compact row schema. Keep this optional for older persisted
+        # artifacts, but validate it completely whenever the columns exist.
+        detail_columns = {
+            "intersection_count", "phase_encode_ms", "phase_encrypt_ms",
+            "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes",
+            "comm_bytes",
+        }
+        if detail_columns.issubset(row):
+            if method == "fhe_ind":
+                observed = _parse_int(row, "intersection_count", row_number)
+                require(observed == first.intersection,
+                        f"row {row_number}: FHE-IND intersection is not workload-bound")
+                phases = [
+                    _finite(row[column], column, row_number)
+                    for column in ("phase_encode_ms", "phase_encrypt_ms",
+                                   "phase_compute_ms", "phase_decrypt_ms")
+                ]
+                require(all(value >= 0.0 for value in phases),
+                        f"row {row_number}: FHE-IND phases must be nonnegative")
+                require(math.isclose(sum(phases), float(row["total_ms"]),
+                                     rel_tol=0.0, abs_tol=5e-5),
+                        f"row {row_number}: FHE-IND phase total mismatch")
+                _parse_int(row, "ct_size_bytes", row_number, positive=True)
+                _parse_int(row, "comm_bytes", row_number, positive=True)
+            else:
+                require(all(row[column] == "" for column in detail_columns),
+                        f"row {row_number}: non-FHE row fabricates FHE detail fields")
 
         if workload.suite == "primary-review":
             require(row["security_match"] == "true" and row["comparison_eligible"] == "true",

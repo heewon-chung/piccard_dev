@@ -44,12 +44,14 @@ INTEGER_COLUMNS = {
     "max_queries", "query_stat_bits", "coefficient_stat_bits",
     "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
     "scaling_mod_size", "actual_ring_dim", "plaintext_modulus", "num_limbs",
+    "intersection_count", "ct_size_bytes", "comm_bytes",
 }
 FLOAT_COLUMNS = {
     "target_jaccard", "realized_jaccard", "log_q_bits", "total_ms",
     "total_ms_sd", "total_ms_median", "jaccard_computed",
     "jaccard_expected", "jaccard_error", "phase_encode_ms",
-    "phase_intersect_ms", "phase_aggregate_ms", "phase_decrypt_ms",
+    "phase_encrypt_ms", "phase_compute_ms", "phase_intersect_ms",
+    "phase_aggregate_ms", "phase_decrypt_ms",
     "extrapolation_alpha", "time_ms", "time_ms_sd", "time_ms_median",
 }
 BOOLEAN_COLUMNS = {
@@ -275,7 +277,7 @@ def _validate_models(row: dict[str, str], row_number: int, family: str) -> None:
                 f"row {row_number}: sanitizer_assurance must be not-applicable")
         for column in SANITIZER_NUMERIC:
             require(row[column] == "",
-                    f"row {row_number}: baseline sanitizer field {column} must be empty")
+                    f"row {row_number}: non-Piccard sanitizer field {column} must be empty")
 
 
 def _validate_fhe(row: dict[str, str], row_number: int, live_fhe: bool) -> None:
@@ -326,7 +328,7 @@ def _validate_method(row: dict[str, str], row_number: int,
         _validate_models(row, row_number, "piccard")
         return
 
-    if method in {"baseline", "fhe_ind"}:
+    if method == "fhe_ind":
         _exact(row, row_number, {
             "cryptographic_profile": "live-BFV-TOY" if target == 0 else f"live-BFV-STD{target}",
             "nominal_security_bits": str(target), "security_match": "true",

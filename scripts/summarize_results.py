@@ -191,7 +191,7 @@ def filter_rows(data, key, prefix):
 
 # ── Comparison-table extra methods ───────────────────────────────────
 # The comparison timing/comm tables render Piccard vs the FHE-IND comparator
-# ("baseline" CSV key, see FHE_IND_DISCLOSURE below) side by side. These
+# ("fhe_ind" CSV key, see FHE_IND_DISCLOSURE below) side by side. These
 # additional methods (when present in the CSV) are emitted as their own
 # supplementary rows so they are no longer silently dropped — notably `sj16`.
 COMPARISON_EXTRA_METHODS = (
@@ -225,10 +225,10 @@ SJ16_LOWER_BOUND_NOTE = (
 )
 
 # Printed in the Method column of every primary (Piccard-vs-comparator) row.
-# The CSV method key stays "baseline" for internal compatibility. Its typed
-# capability identifies only the local universe-sized BFV primitive and marks
-# it diagnostic-only and comparison-ineligible; no external protocol or
-# security theorem is attributed to this implementation.
+# The CSV method key is the canonical "fhe_ind" label. Its typed capability
+# identifies only the local universe-sized BFV primitive and marks it
+# diagnostic-only and comparison-ineligible; no external protocol or security
+# theorem is attributed to this implementation.
 FHE_IND_DISCLOSURE = (
     "FHE-IND [local-universe-sized-BFV-comparator; diagnostic-only]"
 )
@@ -324,7 +324,7 @@ def validate_comparison_taxonomy(rows):
             _require_positive_numeric(
                 row, ("actual_ring_dim", "log_q_bits", "plaintext_modulus",
                       "num_limbs"))
-        elif method == "baseline":
+        elif method == "fhe_ind":
             _expect_taxonomy(row, {
                 "cryptographic_profile": (
                     "live-BFV-TOY" if target == "0" else f"live-BFV-STD{target}"
@@ -821,7 +821,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
     for scen in order:
         methods = groups[scen]
         p = methods.get("piccard", {})
-        b = methods.get("baseline", {})
+        b = methods.get("fhe_ind", {})
 
         p_time = float(p.get("total_ms", "0"))
         b_time = float(b.get("total_ms", "0"))
@@ -901,7 +901,7 @@ def table_comparison_timing(data, scenario, tnum, title, latex=False, ci=False):
         for scen in order:
             methods = groups[scen]
             p = methods.get("piccard", {})
-            b = methods.get("baseline", {})
+            b = methods.get("fhe_ind", {})
             pval = scen.split("_")[-1]
             if scenario in ("vary_size_", "vary_universe_"):
                 pval = f"{int(pval):,}"
@@ -983,7 +983,7 @@ def table_communication_cost(data, tnum, latex=False):
     for scen in order:
         methods = groups[scen]
         p = methods.get("piccard", {})
-        b = methods.get("baseline", {})
+        b = methods.get("fhe_ind", {})
 
         p_comm = int(p.get("comm_bytes", "0"))
         b_comm = int(b.get("comm_bytes", "0"))
