@@ -1031,8 +1031,9 @@ if(BUILD_BENCHMARKS)
     if(BUILD_TESTS)
         add_test(
             NAME RealDatasetPipeline
-            COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                    tests.scripts.test_real_dataset_pipeline
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_real_dataset_pipeline.py
+                    $<TARGET_FILE:bench_real_datasets>
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         )
     endif()

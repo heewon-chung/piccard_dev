@@ -32,7 +32,13 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[2]
-BINARY = REPO / "build" / "bench_real_datasets"
+# CTest passes its configured target explicitly so out-of-tree builds exercise
+# the binary that belongs to that build tree.  Keep the historical default for
+# direct ``python -m unittest`` runs from the repository root.
+if __name__ == "__main__" and len(sys.argv) == 2:
+    BINARY = Path(sys.argv.pop())
+else:
+    BINARY = REPO / "build" / "bench_real_datasets"
 DRIVER_SOURCE = REPO / "benchmarks" / "real_accuracy_driver.cpp"
 SUMMARIZE_SCRIPT = REPO / "scripts" / "summarize_real_datasets.py"
 QUICK_FIXTURE_MANIFEST = (

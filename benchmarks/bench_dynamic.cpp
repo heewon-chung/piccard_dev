@@ -102,7 +102,7 @@ static DynamicResult RunTimedDynamic(
     auto bottom_y = engine.InitSet(set_y);
     dr.phase_init_ms = timer.ElapsedMs();
 
-    // Phase 2: Insert throughput — batch of 100 inserts (plaintext only).
+    // Phase 2: Insert throughput — batch of inserts (plaintext only).
     // Probes run on a scratch copy: the d-depth bottom structure discards
     // evicted originals permanently, so probing the signature-bearing
     // structure can empty it once the probes are deleted again (and, on a
@@ -110,7 +110,11 @@ static DynamicResult RunTimedDynamic(
     // timed region; its rows start at capacity==size, so the first
     // displacing insert costs one reallocation per hash function.
     BottomStructure probe_structure = *bottom_x;
-    const size_t num_ops = 100;
+    // The TOY profile is a correctness smoke, not a throughput measurement.
+    // A single round trip exercises Insert/Delete without exhausting a small
+    // depth-d scratch structure. Paper/legacy profiles keep the 100-op batch.
+    const size_t num_ops =
+        engine.GetParams().security == SecurityLevel::TOY ? 1 : 100;
     timer.Start();
     for (size_t i = 0; i < num_ops; i++) {
         probe_structure.Insert(3000000 + i);

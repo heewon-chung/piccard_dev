@@ -403,7 +403,10 @@ TEST(NoiseEvidenceParser, ValidatesTheCompleteManifestBoundLogicalKey) {
 
     const std::vector<std::function<void(nc::EvidenceIdentity&)>> mutations = {
         [](nc::EvidenceIdentity& value) { value.key_id += "x"; },
-        [](nc::EvidenceIdentity& value) { value.source_commit[0] = '0'; },
+        [](nc::EvidenceIdentity& value) {
+            value.source_commit[0] =
+                value.source_commit[0] == '0' ? '1' : '0';
+        },
         [](nc::EvidenceIdentity& value) {
             value.openfhe_version = "stale";
         },

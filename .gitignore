@@ -14,7 +14,6 @@ build
 results
 docs
 
-*.md
 
 .DS_Store
 .agent
