@@ -15,6 +15,7 @@ import json
 import math
 import os
 import platform
+import stat
 import subprocess
 import sys
 import tempfile
@@ -461,6 +462,50 @@ def run_process(command: list[str], env: dict[str, str]) -> subprocess.Completed
                           capture_output=True, text=True, check=False)
 
 
+def immutable_fhe_snapshot(binary: Path) -> tuple[object, Path, str]:
+    """Copy one opened producer inode into a private executable snapshot.
+
+    The runner must never invoke the user-supplied pathname after readiness.
+    Opening the source once before copying also makes a pathname replacement
+    during the copy harmless: the descriptor continues to refer to the inode
+    that was selected for this run.  The private directory is kept alive by
+    the returned ``TemporaryDirectory`` object until ``process`` returns.
+    """
+
+    guard = tempfile.TemporaryDirectory(prefix="piccard-fhe-ind-")
+    source_fd: int | None = None
+    destination_fd: int | None = None
+    try:
+        source_fd = os.open(
+            str(binary), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise OSError("producer is not a regular file")
+        destination_fd, destination_name = tempfile.mkstemp(
+            prefix="producer-", dir=guard.name)
+        destination_path = Path(destination_name)
+        with os.fdopen(source_fd, "rb", closefd=True) as source:
+            source_fd = None
+            with os.fdopen(destination_fd, "wb", closefd=True) as destination:
+                destination_fd = None
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+        os.chmod(destination_path, stat.S_IMODE(source_stat.st_mode))
+        return guard, destination_path, sha256_file(destination_path)
+    except Exception:
+        if source_fd is not None:
+            os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+        guard.cleanup()
+        raise
+
+
 def _decode_single_json_object(text: str, label: str) -> dict[str, Any]:
     """Decode exactly one JSON object, rejecting stdout protocol smuggling."""
 
@@ -562,6 +607,7 @@ def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
             "reason": "readiness capability_missing: --fhe-ind-binary was not provided",
             "binary": None,
             "binary_sha256": None,
+            "snapshot_sha256": None,
             "capabilities_sha256": None,
         }
     if not binary.is_absolute():
@@ -572,63 +618,68 @@ def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
             "reason": "readiness executable_missing: explicit FHE-IND binary is not executable",
             "binary": str(binary.resolve()),
             "binary_sha256": None,
+            "snapshot_sha256": None,
             "capabilities_sha256": None,
         }
-    binary_hash = sha256_file(binary)
-    completed = run_process([str(binary), "--capabilities", "--format=json"], env)
+    source_binary = str(binary.resolve())
     try:
-        after_probe_hash = sha256_file(binary)
+        snapshot_guard, execution_binary, binary_hash = immutable_fhe_snapshot(binary)
     except OSError as exc:
         return {
             "ready": False,
-            "reason": f"readiness probe_failed: cannot rehash binary: {exc}",
-            "binary": str(binary.resolve()),
-            "binary_sha256": binary_hash,
+            "reason": f"readiness snapshot_failed: cannot snapshot binary: {exc}",
+            "binary": source_binary,
+            "binary_sha256": None,
+            "snapshot_sha256": None,
             "capabilities_sha256": None,
         }
+
+    def failed(reason: str, *, capabilities_hash: str | None = None,
+               observed_hash: str | None = binary_hash) -> dict[str, Any]:
+        return {
+            "ready": False,
+            "reason": reason,
+            "binary": source_binary,
+            "execution_binary": str(execution_binary),
+            "binary_sha256": observed_hash,
+            "snapshot_sha256": binary_hash,
+            "capabilities_sha256": capabilities_hash,
+            "_snapshot_guard": snapshot_guard,
+        }
+
+    completed = run_process(
+        [str(execution_binary), "--capabilities", "--format=json"], env)
+    try:
+        after_probe_hash = sha256_file(execution_binary)
+    except OSError as exc:
+        return failed(
+            f"readiness probe_failed: cannot rehash snapshot: {exc}")
     if after_probe_hash != binary_hash:
-        return {
-            "ready": False,
-            "reason": "readiness probe_failed: binary changed during capability probe",
-            "binary": str(binary.resolve()),
-            "binary_sha256": after_probe_hash,
-            "capabilities_sha256": None,
-        }
+        return failed(
+            "readiness probe_failed: private producer snapshot changed during capability probe",
+            observed_hash=after_probe_hash)
     if completed.returncode != 0:
-        return {
-            "ready": False,
-            "reason": "readiness probe_failed: capability command returned nonzero",
-            "binary": str(binary.resolve()),
-            "binary_sha256": binary_hash,
-            "capabilities_sha256": None,
-        }
+        return failed(
+            "readiness probe_failed: capability command returned nonzero")
     if completed.stderr.strip():
-        return {
-            "ready": False,
-            "reason": "readiness probe_failed: capability command wrote stderr",
-            "binary": str(binary.resolve()),
-            "binary_sha256": binary_hash,
-            "capabilities_sha256": None,
-        }
+        return failed(
+            "readiness probe_failed: capability command wrote stderr")
     try:
         payload = _decode_single_json_object(completed.stdout,
                                              "FHE-IND capabilities")
         validate_fhe_ind_capabilities(payload, binary_hash)
     except RunnerError as exc:
-        return {
-            "ready": False,
-            "reason": f"readiness capability_invalid: {exc}",
-            "binary": str(binary.resolve()),
-            "binary_sha256": binary_hash,
-            "capabilities_sha256": None,
-        }
+        return failed(f"readiness capability_invalid: {exc}")
     return {
         "ready": True,
         "reason": "readiness verified",
-        "binary": str(binary.resolve()),
+        "binary": source_binary,
+        "execution_binary": str(execution_binary),
         "binary_sha256": binary_hash,
+        "snapshot_sha256": binary_hash,
         "capabilities_sha256": capabilities_sha256(payload),
         "capabilities": payload,
+        "_snapshot_guard": snapshot_guard,
     }
 
 
@@ -1368,7 +1419,10 @@ def fhe_measurement_path(results_root: Path, cell_id: str) -> Path:
 
 
 def assert_fhe_binary_stable(readiness: dict[str, Any], phase: str) -> None:
-    binary_value = readiness.get("binary")
+    # All FHE-IND subprocesses run from the private snapshot made during the
+    # capability probe.  The original pathname is retained only as source
+    # provenance and is never consulted for execution or stability checks.
+    binary_value = readiness.get("execution_binary")
     expected = readiness.get("binary_sha256")
     if not isinstance(binary_value, str) or not is_sha256_hex(expected):
         raise RunnerError(f"{phase} producer identity is incomplete")
@@ -1378,7 +1432,7 @@ def assert_fhe_binary_stable(readiness: dict[str, Any], phase: str) -> None:
         raise RunnerError(f"{phase} producer binary cannot be rehashed: {exc}") \
             from exc
     if observed != expected:
-        raise RunnerError(f"{phase} producer binary changed after readiness probe")
+        raise RunnerError(f"{phase} producer snapshot changed after readiness probe")
 
 
 def invoke_fhe_preflight(readiness: dict[str, Any], results_root: Path,
@@ -1386,7 +1440,7 @@ def invoke_fhe_preflight(readiness: dict[str, Any], results_root: Path,
                          env: dict[str, str], log: list[str], *,
                          resume: bool) -> tuple[Path, dict[str, Any]]:
     path = fhe_preflight_path(results_root, cell["cell_id"])
-    command_base = [str(readiness["binary"]), "--mode=preflight",
+    command_base = [str(readiness["execution_binary"]), "--mode=preflight",
                     "--method=fhe_ind", "--circuit=fhe_ind",
                     f"--security={cell['security']}",
                     "--shape-id=fhe-indicator-v1", f"--cell-id={cell['cell_id']}",
@@ -1445,7 +1499,7 @@ def measure_fhe_cell(readiness: dict[str, Any], results_root: Path,
     if path.exists():
         raise RunnerError(f"refusing to overwrite FHE-IND measurement artifact: {path}")
     assert_fhe_binary_stable(readiness, "FHE-IND e2e before invocation")
-    command = [str(readiness["binary"]), "--mode=e2e", "--method=fhe_ind",
+    command = [str(readiness["execution_binary"]), "--mode=e2e", "--method=fhe_ind",
                "--circuit=fhe_ind", f"--security={cell['security']}",
                "--shape-id=fhe-indicator-v1", f"--cell-id={cell['cell_id']}",
                "--universe=64", "--set-size=10",
@@ -1964,6 +2018,7 @@ def fhe_gate_identity(include_fhe: str, readiness: dict[str, Any]) -> dict[str, 
         "reason": readiness.get("reason"),
         "binary": readiness.get("binary"),
         "binary_sha256": readiness.get("binary_sha256"),
+        "snapshot_sha256": readiness.get("snapshot_sha256"),
         "capabilities_sha256": readiness.get("capabilities_sha256"),
     }
 
@@ -1984,7 +2039,7 @@ def dry_run(binary: Path | None, results_root: Path | None,
         "include_fhe_ind": include_fhe,
         "fhe_ind_readiness": {
             key: value for key, value in readiness.items()
-            if key != "capabilities"
+            if key not in ("capabilities", "execution_binary", "_snapshot_guard")
         },
         "fhe_ind_cells": [cell_dict(cell) for cell in FHE_IND_CELLS]
         if include_fhe != "off" else [],
@@ -2020,6 +2075,7 @@ def process(args: argparse.Namespace) -> int:
             "reason": "readiness disabled: FHE-IND inclusion is off",
             "binary": None,
             "binary_sha256": None,
+            "snapshot_sha256": None,
             "capabilities_sha256": None,
         }
     else:

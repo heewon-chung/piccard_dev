@@ -328,6 +328,10 @@ def _validate_fhe_cells(manifest: dict[str, Any], root: Path,
         if not binary.is_file() or not os.access(binary, os.X_OK) or \
            gate.get("binary_sha256") != runner.sha256_file(binary):
             fail("summary FHE-IND binary provenance hash mismatch")
+        if gate.get("snapshot_sha256") != gate.get("binary_sha256") or \
+           not isinstance(gate.get("snapshot_sha256"), str) or \
+           not runner.is_sha256_hex(gate.get("snapshot_sha256")):
+            fail("summary FHE-IND producer snapshot binding is malformed")
         capabilities_hash = gate.get("capabilities_sha256")
         if not isinstance(capabilities_hash, str) or len(capabilities_hash) != 64 or \
            any(character not in "0123456789abcdef" for character in capabilities_hash):
@@ -337,6 +341,7 @@ def _validate_fhe_cells(manifest: dict[str, Any], root: Path,
     readiness = {
         "ready": gate.get("ready") is True,
         "binary_sha256": gate.get("binary_sha256"),
+        "snapshot_sha256": gate.get("snapshot_sha256"),
         "capabilities_sha256": gate.get("capabilities_sha256"),
         "binary": gate.get("binary"),
     }

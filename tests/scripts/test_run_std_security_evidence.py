@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import csv
+import hashlib
 import json
 import os
 import pathlib
@@ -173,6 +174,54 @@ class StdSecurityEvidenceRunnerTest(unittest.TestCase):
         self.assertEqual(row["m"], "N/A")
         self.assertEqual(row["sanitizer_profile"], "not-applicable")
         self.assertEqual(row["calibration_origin"], "not-applicable")
+
+    def test_fhe_ind_uses_private_snapshot_across_source_path_swap(self):
+        """A capability-time A→B→A swap cannot change the producer run."""
+
+        producer_a = self.tmp / "fhe-ind-a"
+        producer_a.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, sys\n"
+            "source = pathlib.Path(os.environ['FAKE_SWAP_SOURCE'])\n"
+            "replacement = pathlib.Path(os.environ['FAKE_SWAP_REPLACEMENT'])\n"
+            "marker = pathlib.Path(os.environ['FAKE_SWAP_MARKER'])\n"
+            "if '--capabilities' in sys.argv and not marker.exists():\n"
+            "    marker.write_text('swapped')\n"
+            "    os.replace(replacement, source)\n"
+            "elif '--mode=preflight' in sys.argv and marker.exists():\n"
+            "    source.write_bytes(pathlib.Path(__file__).read_bytes())\n"
+            "    marker.unlink()\n"
+            "exec(compile(pathlib.Path(os.environ['FAKE_SWAP_IMPL']).read_bytes(),\n"
+            "             __file__, 'exec'), globals())\n",
+            encoding="utf-8")
+        producer_a.chmod(producer_a.stat().st_mode | stat.S_IXUSR)
+        original_a = producer_a.read_bytes()
+        producer_b = self.tmp / "fhe-ind-b"
+        producer_b.write_bytes(original_a + b"\n# producer B\n")
+        producer_b.chmod(producer_b.stat().st_mode | stat.S_IXUSR)
+        marker = self.tmp / "swap-marker"
+        results = self.tmp / "results"
+        expected_hash = hashlib.sha256(producer_a.read_bytes()).hexdigest()
+        run = self.run_runner(
+            "--results-root", str(results), "--include-fhe-ind", "require",
+            "--fhe-ind-binary", str(producer_a),
+            env={
+                "FAKE_SWAP_SOURCE": str(producer_a),
+                "FAKE_SWAP_REPLACEMENT": str(producer_b),
+                "FAKE_SWAP_MARKER": str(marker),
+                "FAKE_SWAP_IMPL": str(FAKE_FHE),
+            })
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(producer_a.read_bytes(), original_a)
+        manifest = json.loads((results / "manifest.json").read_text())
+        gate = manifest["identity"]["fhe_ind"]
+        self.assertEqual(gate["binary_sha256"], expected_hash)
+        self.assertEqual(gate["snapshot_sha256"], expected_hash)
+        with (results / "measurements" / "fhe-ind-std128.csv").open(
+                newline="", encoding="utf-8") as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(row["fhe_ind_binary_sha256"], expected_hash)
 
     def test_oversize_fhe_preflight_skips_before_e2e(self):
         fhe_binary = self.tmp / "fhe-ind"
