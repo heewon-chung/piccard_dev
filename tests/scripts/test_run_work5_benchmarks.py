@@ -45,6 +45,12 @@ def target_value(record: dict[str, Any]) -> Any:
 
 
 AXES = ("k", "m", "n", "U")
+STAGE_ORDER = ("preflight_started", "context_started", "workload_started",
+               "keygen_started", "measurement_started")
+
+
+def stage_flags(*started: bool) -> dict[str, bool]:
+    return dict(zip(STAGE_ORDER, started))
 
 
 def parameter_cell_key(cell: dict[str, Any]) -> str:
@@ -169,16 +175,67 @@ class Work5ContractFixtureTest(unittest.TestCase):
             "threshold": True,
             "bcg12_std192": True,
             "fhe_ind_comparison_eligible": False,
-            "sj16_cost_scope": "component-lower-bound",
+            "fhe_ind_protocol_model": "local-universe-sized-BFV-comparator",
+            "fhe_ind_comparison_scope": "diagnostic-only",
+            "sj16_cost_scope": "full-query-excluding-one-time-setup",
+            "sj16_comparison_scope": "component-lower-bound",
             "sj16_secure_division_included": False,
         })
-        self.assertEqual(contract["lifecycle"], {
+        # The producer keeps SJ16's full-query timing boundary while retaining
+        # its lower-bound comparison scope.  Phase 1 must not rewrite Work #4.
+        self.assertEqual(contract["hard_exclusions"]["sj16_cost_scope"],
+                         "full-query-excluding-one-time-setup")
+        lifecycle = contract["lifecycle"]
+        self.assertEqual({key: lifecycle[key] for key in (
+            "preflight_before_keygen", "timeout_status", "timeout_reason_code",
+            "refuse_existing_results_root", "resume_rejects_hash_mismatch",
+            "terminal_cells_never_rerun",
+        )}, {
             "preflight_before_keygen": True,
             "timeout_status": "ERROR",
             "timeout_reason_code": "TIMEOUT",
             "refuse_existing_results_root": True,
             "resume_rejects_hash_mismatch": True,
             "terminal_cells_never_rerun": True,
+        })
+        self.assertEqual(lifecycle["stage_order"], list(STAGE_ORDER))
+        self.assertEqual(lifecycle["error_scenarios"], {
+            "timeout_after_admission": {
+                "reason_code": "TIMEOUT",
+                "flags": stage_flags(True, True, True, True, True),
+            },
+            "pre_setup": {
+                "reason_code": "EXCEPTION",
+                "flags": stage_flags(True, True, False, False, False),
+            },
+            "setup": {
+                "reason_code": "EXCEPTION",
+                "flags": stage_flags(True, True, True, True, False),
+            },
+        })
+        self.assertEqual(lifecycle["test_hooks"], {
+            "force_precheck_reason": "PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON",
+            "force_precheck_cell": "PICCARD_WORK5_TEST_FORCE_PRECHECK_CELL",
+            "force_error_stage": "PICCARD_WORK5_TEST_FORCE_ERROR_STAGE",
+            "force_error_cell": "PICCARD_WORK5_TEST_FORCE_ERROR_CELL",
+        })
+        schema = contract["status_schema"]
+        self.assertEqual(schema["measured"]["flags"],
+                         stage_flags(True, True, True, True, True))
+        self.assertEqual(schema["skipped_precheck"]["stage_flags_by_reason"], {
+            "WORKLOAD_GEOMETRY": stage_flags(True, False, False, False, False),
+            "PROJECTED_RUNTIME_CAP": stage_flags(True, False, False, False, False),
+            "RING_DIM_CAP": stage_flags(True, True, False, False, False),
+            "DEPTH_CAP": stage_flags(True, True, False, False, False),
+            "LOGQ_CAP": stage_flags(True, True, False, False, False),
+        })
+        self.assertEqual(schema["error"], {
+            "requires_preflight_started": True,
+            "monotonic_stage_flags": True,
+            "measured_trials": 0,
+            "exit_code": "nonzero",
+            "command_log_artifacts": "present",
+            "output_artifacts": "null-or-paired",
         })
 
 
@@ -281,9 +338,20 @@ class Work5RunnerContractTest(unittest.TestCase):
                     record["taxonomy"]["fhe_ind"]["semantic_comparison_eligible"],
                     contract["hard_exclusions"]["fhe_ind_comparison_eligible"],
                 )
+                self.assertEqual(
+                    record["taxonomy"]["fhe_ind"]["protocol_model"],
+                    contract["hard_exclusions"]["fhe_ind_protocol_model"],
+                )
+                self.assertEqual(
+                    record["taxonomy"]["fhe_ind"]["comparison_scope"],
+                    contract["hard_exclusions"]["fhe_ind_comparison_scope"],
+                )
                 self.assertFalse(record["taxonomy"]["fhe_ind"]
                                  ["secure_division_included"])
             if "sj16" in record["methods"]:
+                self.assertEqual(record["taxonomy"]["sj16"]["comparison_scope"],
+                                 contract["hard_exclusions"]
+                                 ["sj16_comparison_scope"])
                 self.assertEqual(record["taxonomy"]["sj16"]["cost_scope"],
                                  contract["hard_exclusions"]["sj16_cost_scope"])
                 self.assertEqual(record["taxonomy"]["sj16"]
@@ -318,6 +386,12 @@ class Work5RunnerContractTest(unittest.TestCase):
             self.assertIsNone(record["workload_path"])
             self.assertIsNone(record["workload_sha256"])
         self.assertEqual(set(observed_required), set(required))
+        self.assertEqual(
+            sum(record["reason_code"] == "WORKLOAD_GEOMETRY"
+                for record in observed_required.values()), 8)
+        self.assertEqual(
+            sum(record["reason_code"] == "PROJECTED_RUNTIME_CAP"
+                for record in observed_required.values()), 2)
 
         payloads: dict[tuple[Any, ...], set[str]] = defaultdict(set)
         for record in records:
@@ -336,19 +410,35 @@ class Work5RunnerContractTest(unittest.TestCase):
                 self.assertEqual(len(digests), 1, key)
         return records
 
+    def assert_stage_flags(self, record: dict[str, Any],
+                           expected: dict[str, bool]) -> None:
+        self.assertEqual({flag: record[flag] for flag in STAGE_ORDER}, expected)
+
+    def assert_monotonic_stage_flags(self, record: dict[str, Any]) -> None:
+        seen_not_started = False
+        for flag in STAGE_ORDER:
+            self.assertIsInstance(record[flag], bool)
+            if not record[flag]:
+                seen_not_started = True
+            else:
+                self.assertFalse(
+                    seen_not_started,
+                    f"{flag} started after a later-stage predecessor was absent",
+                )
+
     def assert_record_status_schema(self, record: dict[str, Any],
                                     contract: dict[str, Any]) -> None:
         schema = contract["status_schema"]
         for field in schema["required_fields"]:
             self.assertIn(field, record, field)
+        self.assertIn(record["status"], contract["terminal_statuses"])
         self.assertIsInstance(record["argv"], list)
         self.assertIsInstance(record["environment"], dict)
         self.assertIsInstance(record["started_at_utc"], str)
         self.assertIsInstance(record["ended_at_utc"], str)
         self.assertRegex(record["trial_payload_sha256"], r"^[0-9a-f]{64}$")
-        for flag in ("preflight_started", "workload_started", "context_started",
-                     "keygen_started", "measurement_started"):
-            self.assertIsInstance(record[flag], bool)
+        self.assert_monotonic_stage_flags(record)
+        self.assertTrue(record["preflight_started"])
         for path_field, hash_field in schema["artifact_pairs"]:
             path, digest = record[path_field], record[hash_field]
             self.assertEqual(path is None, digest is None,
@@ -362,24 +452,25 @@ class Work5RunnerContractTest(unittest.TestCase):
         status = record["status"]
         if status == "MEASURED":
             expected = schema["measured"]
-            self.assertEqual({name: record[name] for name in expected["flags"]},
-                             expected["flags"])
+            self.assert_stage_flags(record, expected["flags"])
             self.assertEqual(record["exit_code"], expected["exit_code"])
             self.assertEqual(record["measured_trials"], expected["measured_trials"])
             self.assertEqual(record["reason_code"], expected["reason_code"])
             self.assertIsNone(record["reason_detail"])
-            self.assertTrue(expected["all_artifacts"] == "present")
+            self.assertEqual(expected["all_artifacts"], "present")
             for path_field, hash_field in schema["artifact_pairs"]:
                 self.assertIsNotNone(record[path_field])
                 self.assertIsNotNone(record[hash_field])
         elif status == "SKIPPED_PRECHECK":
             expected = schema["skipped_precheck"]
-            self.assertEqual({name: record[name] for name in expected["flags"]},
-                             expected["flags"])
             self.assertEqual(record["exit_code"], expected["exit_code"])
             self.assertEqual(record["measured_trials"], expected["measured_trials"])
             self.assertIn(record["reason_code"],
                           contract["allowed_precheck_reason_codes"])
+            self.assertIn(record["reason_code"],
+                          expected["stage_flags_by_reason"])
+            self.assert_stage_flags(
+                record, expected["stage_flags_by_reason"][record["reason_code"]])
             self.assertIsInstance(record["reason_detail"], str)
             self.assertTrue(record["reason_detail"])
             self.assertEqual(expected["command_log_artifacts"], "present")
@@ -392,9 +483,8 @@ class Work5RunnerContractTest(unittest.TestCase):
                 self.assertIsNone(record[hash_field])
         else:
             expected = schema["error"]
-            self.assertEqual({name: record[name]
-                              for name in expected["minimum_flags"]},
-                             expected["minimum_flags"])
+            self.assertTrue(expected["requires_preflight_started"])
+            self.assertTrue(expected["monotonic_stage_flags"])
             self.assertEqual(record["measured_trials"], expected["measured_trials"])
             self.assertEqual(expected["exit_code"], "nonzero")
             self.assertIsInstance(record["exit_code"], int)
@@ -429,7 +519,17 @@ class Work5RunnerContractTest(unittest.TestCase):
         )
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(sentinel.exists())
-        self.assert_parameter_matrix(results)
+        records = self.assert_parameter_matrix(results)
+        self.assertEqual(sum(
+            record["status"] == "SKIPPED_PRECHECK" and
+            record["reason_code"] == "WORKLOAD_GEOMETRY"
+            for record in records
+        ), 8)
+        self.assertEqual(sum(
+            record["status"] == "SKIPPED_PRECHECK" and
+            record["reason_code"] == "PROJECTED_RUNTIME_CAP"
+            for record in records
+        ), 2)
         events = read_jsonl(self.events)
         self.assertFalse(any("--set-size=100000" in event["argv"]
                              for event in events))
@@ -440,10 +540,35 @@ class Work5RunnerContractTest(unittest.TestCase):
         ))
         self.assertTrue(load_contract()["lifecycle"]["preflight_before_keygen"])
 
+    def test_context_only_bfv_cap_skips_before_workload_or_keygen(self) -> None:
+        contract = load_contract()
+        lifecycle = contract["lifecycle"]
+        results = self.tmp / "work5-context-cap"
+        run = self.run_runner(
+            "parameters", results,
+            env={
+                lifecycle["test_hooks"]["force_precheck_reason"]: "RING_DIM_CAP",
+                lifecycle["test_hooks"]["force_precheck_cell"]:
+                    "work5-std128-piccard::control",
+            },
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        records = self.assert_parameter_matrix(results)
+        record = next(item for item in records
+                      if item["cell_id"] == "work5-std128-piccard::control")
+        self.assertEqual(record["status"], "SKIPPED_PRECHECK")
+        self.assertEqual(record["reason_code"], "RING_DIM_CAP")
+        self.assert_record_status_schema(record, contract)
+        self.assert_stage_flags(
+            record,
+            contract["status_schema"]["skipped_precheck"]
+            ["stage_flags_by_reason"]["RING_DIM_CAP"],
+        )
+
     def test_timeout_is_terminal_error_not_a_precheck_skip(self) -> None:
         results = self.tmp / "work5-timeout"
         started = time.monotonic()
-        run = self.run_runner("toy", results,
+        run = self.run_runner("parameters", results,
                               env={
                                   "PICCARD_WORK5_FAKE_MODE": "sleep",
                                   "PICCARD_WORK5_FAKE_SLEEP_SECONDS": "1.0",
@@ -455,15 +580,48 @@ class Work5RunnerContractTest(unittest.TestCase):
                         "runner did not exercise subprocess timeout handling")
         records = read_jsonl(results / "cells.jsonl")
         self.assertTrue(records)
-        lifecycle = load_contract()["lifecycle"]
-        self.assertTrue(any(record["status"] == "ERROR" and
-                            record["reason_code"] == lifecycle["timeout_reason_code"]
-                            for record in records))
+        contract = load_contract()
+        lifecycle = contract["lifecycle"]
+        timeout = next(record for record in records
+                       if record["status"] == lifecycle["timeout_status"] and
+                       record["reason_code"] == lifecycle["timeout_reason_code"])
+        self.assert_record_status_schema(timeout, contract)
+        self.assert_stage_flags(
+            timeout,
+            lifecycle["error_scenarios"]["timeout_after_admission"]["flags"],
+        )
         self.assertFalse(any(record["status"] == "SKIPPED_PRECHECK" and
                              record["reason_code"] == lifecycle["timeout_reason_code"]
                              for record in records))
         self.assertTrue(any(event["argv"] for event in read_jsonl(self.events)))
         self.assertEqual(lifecycle["timeout_status"], "ERROR")
+
+    def test_pre_setup_and_setup_errors_have_stage_specific_terminal_flags(self) -> None:
+        contract = load_contract()
+        lifecycle = contract["lifecycle"]
+        for stage in ("pre_setup", "setup"):
+            with self.subTest(stage=stage):
+                results = self.tmp / f"work5-{stage}-error"
+                run = self.run_runner(
+                    "parameters", results,
+                    env={
+                        lifecycle["test_hooks"]["force_error_stage"]: stage,
+                        lifecycle["test_hooks"]["force_error_cell"]:
+                            "work5-std128-piccard::control",
+                    },
+                )
+                self.assertNotEqual(run.returncode, 0)
+                records = read_jsonl(results / "cells.jsonl")
+                error = next(record for record in records
+                             if record["status"] == "ERROR")
+                self.assertEqual(error["reason_code"],
+                                 lifecycle["error_scenarios"][stage]
+                                 ["reason_code"])
+                self.assert_record_status_schema(error, contract)
+                self.assert_stage_flags(
+                    error, lifecycle["error_scenarios"][stage]["flags"])
+                self.assertFalse(any(record["status"] == "SKIPPED_PRECHECK"
+                                     for record in records))
 
     def test_existing_results_are_never_overwritten_without_resume(self) -> None:
         results = self.tmp / "preexisting"

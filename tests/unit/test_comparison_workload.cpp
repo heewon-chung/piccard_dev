@@ -9,6 +9,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -172,6 +173,31 @@ auto Invoke(const Workload& workload) -> decltype(TrialPayloadSha256(workload)) 
 }
 }  // namespace work5_trial_payload_probe
 
+constexpr char kWork5ControlTrialPayloadSha256[] =
+    "b7646b6932934e95c843b07a2cd37736fba573661a593bbf0c68eec8517e6836";
+
+std::string ProductionWork5TrialPayloadSha256OrFail(
+    const ComparisonWorkload& workload,
+    const char* label) {
+    const std::string independent = IndependentWork5TrialPayloadSha256(workload);
+    using ProductionResult = std::decay_t<decltype(
+        work5_trial_payload_probe::Invoke(workload))>;
+    if constexpr (std::is_same_v<
+                      ProductionResult,
+                      work5_trial_payload_probe::MissingProductionTrialPayloadSha256>) {
+        ADD_FAILURE()
+            << "Phase 2 entity absent: public production TrialPayloadSha256("
+               "const ComparisonWorkload&) is not declared; " << label
+            << " independent payload digest=" << independent;
+        return independent;
+    } else {
+        const std::string actual = work5_trial_payload_probe::Invoke(workload);
+        EXPECT_EQ(actual, independent) << label;
+        EXPECT_EQ(actual, kWork5ControlTrialPayloadSha256) << label;
+        return actual;
+    }
+}
+
 WorkloadSpec Work5Spec(const std::string& suite,
                        const std::string& profile_id,
                        std::vector<std::string> methods,
@@ -191,6 +217,19 @@ WorkloadSpec Work5Spec(const std::string& suite,
     spec.methods = std::move(methods);
     spec.timing_trials = 1;
     spec.accuracy_trials = 1;
+    return spec;
+}
+
+// The trial generator deliberately excludes suite/profile/method metadata.
+// This legal existing toy-suite reference has the Work #5 control geometry,
+// so it independently freezes the shared 3-record payload before Phase 2
+// makes all eight named Work #5 suites constructible.
+WorkloadSpec Work5PayloadReferenceSpec() {
+    auto spec = ToySpec();
+    spec.k = 128;
+    spec.m = 64;
+    spec.set_size = 1000;
+    spec.universe = 16384;
     return spec;
 }
 
@@ -341,6 +380,8 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
                              "comparison_eligible", "workload_id",
                              "workload_manifest_sha256", "execution_trace_sha256",
                              "k", "m", "hash_randomness", "hash_seed",
+                             "comparison_scope", "protocol_model", "cost_scope",
+                             "secure_division_included",
                              "total_ms_sd", "measurement_status",
                              "intersection_count", "phase_encode_ms",
                              "phase_encrypt_ms", "phase_compute_ms",
@@ -395,6 +436,19 @@ TEST(ComparisonWorkload, ToyProducerCsvBindsSerializerContract) {
         EXPECT_EQ(cells[column.at("workload_manifest_sha256")], expected_digest);
         EXPECT_EQ(cells[column.at("execution_trace_sha256")], expected_trace);
         EXPECT_EQ(cells[column.at("measurement_status")], "measured");
+        if (cells[column.at("method")] == "fhe_ind") {
+            EXPECT_EQ(cells[column.at("comparison_scope")], "diagnostic-only");
+            EXPECT_EQ(cells[column.at("protocol_model")],
+                      "local-universe-sized-BFV-comparator");
+            EXPECT_EQ(cells[column.at("secure_division_included")], "false");
+        }
+        if (cells[column.at("method")] == "sj16") {
+            EXPECT_EQ(cells[column.at("comparison_scope")],
+                      "component-lower-bound");
+            EXPECT_EQ(cells[column.at("cost_scope")],
+                      "full-query-excluding-one-time-setup");
+            EXPECT_EQ(cells[column.at("secure_division_included")], "false");
+        }
         const std::string& sd = cells[column.at("total_ms_sd")];
         EXPECT_TRUE(sd.empty());
         ++rows;
@@ -482,30 +536,20 @@ TEST(ComparisonWorkload, ToySmokeAcceptsOneAccuracyTrialAndRejectsTwo) {
 
 TEST(ComparisonWorkload,
      Work5TrialPayloadUsesProductionApiAndIndependentOracle) {
-    const auto toy = ComparisonWorkload::Generate(ToySpec());
-    const std::string independent = IndependentWork5TrialPayloadSha256(toy);
-    using ProductionResult = std::decay_t<decltype(
-        work5_trial_payload_probe::Invoke(toy))>;
-
-    if constexpr (std::is_same_v<
-                      ProductionResult,
-                      work5_trial_payload_probe::MissingProductionTrialPayloadSha256>) {
-        ADD_FAILURE()
-            << "Phase 2 entity absent: public production TrialPayloadSha256("
-               "const ComparisonWorkload&) is not declared; independent toy "
-               "payload digest=" << independent;
-    } else {
-        const std::string actual = work5_trial_payload_probe::Invoke(toy);
-        EXPECT_EQ(actual, independent);
-        EXPECT_EQ(actual,
-                  "a8cbcf063e332b4f8f8bbb2d381abb20817cb4ebf082fea416d86c678fdf1147");
-    }
+    const auto reference = ComparisonWorkload::Generate(Work5PayloadReferenceSpec());
+    EXPECT_EQ(IndependentWork5TrialPayloadSha256(reference),
+              kWork5ControlTrialPayloadSha256);
+    EXPECT_EQ(ProductionWork5TrialPayloadSha256OrFail(
+                  reference, "work5 control reference"),
+              kWork5ControlTrialPayloadSha256);
 }
 
 TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
     size_t std128_cells = 0;
     size_t std192_cells = 0;
     std::vector<ComparisonWorkload> generated;
+    std::set<std::string> manifest_digests;
+    std::set<std::string> production_payload_digests;
     for (const auto& suite : Work5Suites()) {
         SCOPED_TRACE(suite.suite);
         const auto workload = ComparisonWorkload::Generate(
@@ -523,6 +567,11 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
         EXPECT_EQ(workload.Records()[1].exact_union, 1333u);
         EXPECT_EQ(workload.Records()[1].exact_jaccard,
                   (ExactRational{667, 1333}));
+        EXPECT_EQ(IndependentWork5TrialPayloadSha256(workload),
+                  kWork5ControlTrialPayloadSha256);
+        production_payload_digests.insert(
+            ProductionWork5TrialPayloadSha256OrFail(workload, suite.suite));
+        manifest_digests.insert(workload.ManifestSha256Hex());
         generated.push_back(workload);
 
         if (std::string(suite.profile).find("std128") != std::string::npos) {
@@ -539,6 +588,9 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
     }
     EXPECT_EQ(std128_cells, 37u);
     EXPECT_EQ(std192_cells, 24u);
+    EXPECT_EQ(manifest_digests.size(), Work5Suites().size());
+    EXPECT_EQ(production_payload_digests,
+              (std::set<std::string>{kWork5ControlTrialPayloadSha256}));
 
     const auto& piccard = generated[0];
     const auto& fhe_ind = generated[1];

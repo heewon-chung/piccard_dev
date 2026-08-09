@@ -211,22 +211,25 @@
     "bcg12_mh_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
     "bcg12_exact_ec": {"primitive": "bcg12-ec", "protocol_model": "bcg12-exact-cardinality", "comparison_scope": "matched-cardinality-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
     "bcg12_exact_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-exact-cardinality", "comparison_scope": "matched-cardinality-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
-    "sj16": {"primitive": "paillier-3072", "protocol_model": "sj16-intersection-shares", "comparison_scope": "component-lower-bound", "cost_scope": "component-lower-bound", "secure_division_included": false, "semantic_comparison_eligible": {"STD128": true, "STD192": false}}
+    "sj16": {"primitive": "paillier-3072", "protocol_model": "sj16-intersection-shares", "comparison_scope": "component-lower-bound", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": {"STD128": true, "STD192": false}}
   },
   "profile_comparison_eligible": false,
   "status_schema": {
     "required_fields": ["cell_id", "profile", "suite", "security", "axis", "axis_value", "k", "m", "n", "U", "target_jaccard", "seed", "methods", "applicability", "profile_comparison_eligible", "taxonomy", "trial_payload_sha256", "status", "reason_code", "reason_detail", "preflight_started", "workload_started", "context_started", "keygen_started", "measurement_started", "measured_trials", "started_at_utc", "ended_at_utc", "argv", "environment", "exit_code", "command_path", "command_sha256", "stdout_path", "stdout_sha256", "stderr_path", "stderr_sha256", "workload_path", "workload_sha256", "trace_path", "trace_sha256", "csv_path", "csv_sha256"],
     "artifact_pairs": [["command_path", "command_sha256"], ["stdout_path", "stdout_sha256"], ["stderr_path", "stderr_sha256"], ["workload_path", "workload_sha256"], ["trace_path", "trace_sha256"], ["csv_path", "csv_sha256"]],
     "measured": {"flags": {"preflight_started": true, "workload_started": true, "context_started": true, "keygen_started": true, "measurement_started": true}, "measured_trials": 1, "exit_code": 0, "reason_code": null, "all_artifacts": "present"},
-    "skipped_precheck": {"flags": {"preflight_started": true, "workload_started": false, "context_started": false, "keygen_started": false, "measurement_started": false}, "measured_trials": 0, "exit_code": null, "command_log_artifacts": "present", "output_artifacts": "null"},
-    "error": {"minimum_flags": {"preflight_started": true, "workload_started": true, "context_started": true, "keygen_started": true, "measurement_started": true}, "measured_trials": 0, "exit_code": "nonzero", "command_log_artifacts": "present", "output_artifacts": "null-or-paired"}
+    "skipped_precheck": {"stage_flags_by_reason": {"WORKLOAD_GEOMETRY": {"preflight_started": true, "context_started": false, "workload_started": false, "keygen_started": false, "measurement_started": false}, "PROJECTED_RUNTIME_CAP": {"preflight_started": true, "context_started": false, "workload_started": false, "keygen_started": false, "measurement_started": false}, "RING_DIM_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}, "DEPTH_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}, "LOGQ_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}}, "measured_trials": 0, "exit_code": null, "command_log_artifacts": "present", "output_artifacts": "null"},
+    "error": {"requires_preflight_started": true, "monotonic_stage_flags": true, "measured_trials": 0, "exit_code": "nonzero", "command_log_artifacts": "present", "output_artifacts": "null-or-paired"}
   },
   "hard_exclusions": {
     "threshold": true,
     "bcg12_std192": true,
     "fhe_ind_comparison_eligible": false,
+    "fhe_ind_protocol_model": "local-universe-sized-BFV-comparator",
+    "fhe_ind_comparison_scope": "diagnostic-only",
     "sj16_secure_division_included": false,
-    "sj16_cost_scope": "component-lower-bound"
+    "sj16_comparison_scope": "component-lower-bound",
+    "sj16_cost_scope": "full-query-excluding-one-time-setup"
   },
   "lifecycle": {
     "preflight_before_keygen": true,
@@ -234,6 +237,18 @@
     "timeout_reason_code": "TIMEOUT",
     "refuse_existing_results_root": true,
     "resume_rejects_hash_mismatch": true,
-    "terminal_cells_never_rerun": true
+    "terminal_cells_never_rerun": true,
+    "stage_order": ["preflight_started", "context_started", "workload_started", "keygen_started", "measurement_started"],
+    "error_scenarios": {
+      "timeout_after_admission": {"reason_code": "TIMEOUT", "flags": {"preflight_started": true, "context_started": true, "workload_started": true, "keygen_started": true, "measurement_started": true}},
+      "pre_setup": {"reason_code": "EXCEPTION", "flags": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}},
+      "setup": {"reason_code": "EXCEPTION", "flags": {"preflight_started": true, "context_started": true, "workload_started": true, "keygen_started": true, "measurement_started": false}}
+    },
+    "test_hooks": {
+      "force_precheck_reason": "PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON",
+      "force_precheck_cell": "PICCARD_WORK5_TEST_FORCE_PRECHECK_CELL",
+      "force_error_stage": "PICCARD_WORK5_TEST_FORCE_ERROR_STAGE",
+      "force_error_cell": "PICCARD_WORK5_TEST_FORCE_ERROR_CELL"
+    }
   }
 }

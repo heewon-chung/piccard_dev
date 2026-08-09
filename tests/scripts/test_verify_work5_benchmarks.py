@@ -119,13 +119,23 @@ class Work5VerifierContractTest(unittest.TestCase):
             row = next(item for item in rows if item["methods"] == ["fhe_ind"])
             row["taxonomy"]["fhe_ind"]["semantic_comparison_eligible"] = True
 
+        def change_fhe_ind_protocol_model(
+                rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["methods"] == ["fhe_ind"])
+            row["taxonomy"]["fhe_ind"]["protocol_model"] = "made-up-model"
+
         def give_sj16_secure_division(rows: list[dict[str, Any]], _: Path) -> None:
             row = next(item for item in rows if item["methods"] == ["sj16"])
             row["taxonomy"]["sj16"]["secure_division_included"] = True
 
         def change_sj16_cost_scope(rows: list[dict[str, Any]], _: Path) -> None:
             row = next(item for item in rows if item["methods"] == ["sj16"])
-            row["taxonomy"]["sj16"]["cost_scope"] = "full-query"
+            row["taxonomy"]["sj16"]["cost_scope"] = "component-lower-bound"
+
+        def change_sj16_comparison_scope(
+                rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["methods"] == ["sj16"])
+            row["taxonomy"]["sj16"]["comparison_scope"] = "end-to-end-estimator"
 
         def forge_skip_after_keygen(rows: list[dict[str, Any]], _: Path) -> None:
             row = next(item for item in rows
@@ -164,8 +174,10 @@ class Work5VerifierContractTest(unittest.TestCase):
             ("control-axis", change_control_axis),
             ("applicability", change_applicability),
             ("fhe-ind-eligible", make_fhe_ind_comparison_eligible),
+            ("fhe-ind-protocol-model", change_fhe_ind_protocol_model),
             ("sj16-secure-division", give_sj16_secure_division),
             ("sj16-cost-scope", change_sj16_cost_scope),
+            ("sj16-comparison-scope", change_sj16_comparison_scope),
             ("trials2", change_trials),
             ("forged-skip", forge_skip_after_keygen),
             ("skip-output", forge_skip_output),
@@ -188,10 +200,16 @@ class Work5VerifierContractTest(unittest.TestCase):
         self.assertTrue(contract["hard_exclusions"]["bcg12_std192"])
         self.assertFalse(contract["hard_exclusions"]
                          ["fhe_ind_comparison_eligible"])
+        self.assertEqual(contract["hard_exclusions"]["fhe_ind_protocol_model"],
+                         "local-universe-sized-BFV-comparator")
+        self.assertEqual(contract["hard_exclusions"]["fhe_ind_comparison_scope"],
+                         "diagnostic-only")
         self.assertFalse(contract["hard_exclusions"]
                          ["sj16_secure_division_included"])
-        self.assertEqual(contract["hard_exclusions"]["sj16_cost_scope"],
+        self.assertEqual(contract["hard_exclusions"]["sj16_comparison_scope"],
                          "component-lower-bound")
+        self.assertEqual(contract["hard_exclusions"]["sj16_cost_scope"],
+                         "full-query-excluding-one-time-setup")
 
 
 if __name__ == "__main__":
