@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import pathlib
@@ -133,6 +134,16 @@ class FheIndCliContractTest(unittest.TestCase):
         self.assertTrue(capabilities["provenance"]["diagnostic_only"])
         self.assertFalse(capabilities["provenance"]["piccard_sanitizer_applicable"])
         self.assertFalse(capabilities["provenance"]["threshold_enabled"])
+        self.assertRegex(capabilities["fhe_ind_binary_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(capabilities["capabilities_sha256"], r"^[0-9a-f]{64}$")
+        descriptor = dict(capabilities)
+        descriptor.pop("capabilities_sha256")
+        expected_capabilities_sha256 = hashlib.sha256(
+            (json.dumps(descriptor, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        self.assertEqual(capabilities["capabilities_sha256"],
+                         expected_capabilities_sha256)
 
     def test_preflight_is_context_only_and_no_keygen(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -167,6 +178,8 @@ class FheIndCliContractTest(unittest.TestCase):
         self.assertEqual(preflight["calibration_origin"], "not-applicable")
         self.assertTrue(preflight["openfhe_version"])
         self.assertTrue(preflight["ordered_rns_moduli"])
+        self.assertRegex(preflight["fhe_ind_binary_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(preflight["capabilities_sha256"], r"^[0-9a-f]{64}$")
         if IS_FIXTURE:
             self.assertEqual(preflight["openfhe_version"], "fake-openfhe-1")
             self.assertEqual(preflight["ordered_rns_moduli"],
@@ -230,6 +243,8 @@ class FheIndCliContractTest(unittest.TestCase):
         )
         self.assertEqual(row["status"], "MEASURED")
         self.assertEqual(row["reason"], "")
+        self.assertRegex(row["fhe_ind_binary_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(row["capabilities_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(row["sanitizer_profile"], "not-applicable")
         self.assertEqual(row["calibration_origin"], "not-applicable")
         self.assertTrue(row["workload_id"])
@@ -262,6 +277,80 @@ class FheIndCliContractTest(unittest.TestCase):
             float(row["full_e2e_ms"]),
             places=9,
         )
+
+    def test_duplicate_option_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "preflight.json"
+            arguments = _preflight_command(root, output) + ["--mode=preflight"]
+            result = subprocess.run(
+                _command(*arguments), text=True, capture_output=True, check=False
+            )
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_output_overwrite_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "preflight.json"
+            arguments = _preflight_command(root, output)
+            first = subprocess.run(
+                _command(*arguments), text=True, capture_output=True, check=False
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            original = output.read_bytes()
+            second = subprocess.run(
+                _command(*arguments), text=True, capture_output=True, check=False
+            )
+            self.assertNotEqual(second.returncode, 0)
+            self.assertEqual(output.read_bytes(), original)
+
+    @unittest.skipIf(IS_FIXTURE, "fixture does not expose live tuple recomputation")
+    def test_tampered_preflight_skip_decision_is_rejected_before_e2e(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            workload = _workload(root)
+            preflight = root / "preflight.json"
+            first = subprocess.run(
+                _command(*_preflight_command(root, preflight)),
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            value = json.loads(preflight.read_text(encoding="utf-8"))
+            value["skipped"] = True
+            value["reason"] = "tampered"
+            preflight.write_text(json.dumps(value, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+            output = root / "e2e.csv"
+            result = _run(
+                "--mode=e2e", "--method=fhe_ind", "--circuit=fhe_ind",
+                "--shape-id=fhe-indicator-v1", "--security=STD128",
+                "--cell-id=fhe-ind-std128", "--universe=64", "--set-size=10",
+                "--target-jaccard=1/2", "--seed=7", "--trials=1",
+                "--output=" + str(output), "--workload=" + str(workload),
+                "--preflight=" + str(preflight), "--format=csv",
+            )
+        self.assertNotEqual(result.returncode, 0)
+
+    @unittest.skipIf(IS_FIXTURE, "fixture does not parse canonical workload bytes")
+    def test_malformed_workload_is_rejected_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            malformed = root / "malformed-workload.json"
+            malformed.write_text(
+                json.dumps({"schema": "piccard-std-security-workload-v1",
+                            "bytes_hex": "00"}, sort_keys=True) + "\n",
+                encoding="utf-8")
+            output = root / "preflight.json"
+            arguments = _preflight_command(root, output)
+            arguments = [
+                "--workload=" + str(malformed)
+                if argument.startswith("--workload=") else argument
+                for argument in arguments
+            ]
+            result = subprocess.run(
+                _command(*arguments), text=True, capture_output=True, check=False
+            )
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

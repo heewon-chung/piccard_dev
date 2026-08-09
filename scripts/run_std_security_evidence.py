@@ -116,6 +116,7 @@ FHE_MEASUREMENT_COLUMNS = {
     "phase_encrypt_ms", "phase_evaluate_ms", "phase_decrypt_ms",
     "online_e2e_ms", "full_e2e_ms", "match_count", "jaccard_estimate",
     "status", "reason", "method",
+    "fhe_ind_binary_sha256", "capabilities_sha256",
 }
 
 
@@ -206,6 +207,29 @@ def canonical_json(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def capabilities_descriptor(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the hash-domain capabilities object.
+
+    ``capabilities_sha256`` is self-referential if it is included in its own
+    input.  The producer therefore hashes the canonical descriptor with that
+    one derived field removed; the executable hash remains part of the
+    descriptor and binds the declaration to the exact producer.
+    """
+
+    descriptor = dict(payload)
+    descriptor.pop("capabilities_sha256", None)
+    return descriptor
+
+
+def capabilities_sha256(payload: dict[str, Any]) -> str:
+    return sha256_bytes(canonical_json(capabilities_descriptor(payload)))
+
+
+def is_sha256_hex(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and \
+        all(character in "0123456789abcdef" for character in value)
 
 
 def ordered_rns_sha256(moduli: list[str]) -> str:
@@ -470,7 +494,8 @@ def _capability_value(payload: dict[str, Any], key: str) -> Any:
     return None
 
 
-def validate_fhe_ind_capabilities(payload: dict[str, Any]) -> None:
+def validate_fhe_ind_capabilities(payload: dict[str, Any],
+                                  expected_binary_sha256: str) -> None:
     """Validate the explicit FHE-IND readiness proof, fail closed."""
 
     if payload.get("schema") != FHE_IND_CAPABILITIES_SCHEMA:
@@ -518,6 +543,14 @@ def validate_fhe_ind_capabilities(payload: dict[str, Any]) -> None:
        provenance.get("piccard_sanitizer_applicable") is not False or \
        provenance.get("threshold_enabled") is not False:
         raise RunnerError("readiness typed provenance is unsafe")
+    declared_binary_sha256 = payload.get("fhe_ind_binary_sha256")
+    if not is_sha256_hex(declared_binary_sha256) or \
+       declared_binary_sha256 != expected_binary_sha256:
+        raise RunnerError("readiness producer binary hash mismatch")
+    declared_capabilities_sha256 = payload.get("capabilities_sha256")
+    if not is_sha256_hex(declared_capabilities_sha256) or \
+       declared_capabilities_sha256 != capabilities_sha256(payload):
+        raise RunnerError("readiness capabilities hash mismatch")
 
 
 def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
@@ -543,6 +576,24 @@ def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
         }
     binary_hash = sha256_file(binary)
     completed = run_process([str(binary), "--capabilities", "--format=json"], env)
+    try:
+        after_probe_hash = sha256_file(binary)
+    except OSError as exc:
+        return {
+            "ready": False,
+            "reason": f"readiness probe_failed: cannot rehash binary: {exc}",
+            "binary": str(binary.resolve()),
+            "binary_sha256": binary_hash,
+            "capabilities_sha256": None,
+        }
+    if after_probe_hash != binary_hash:
+        return {
+            "ready": False,
+            "reason": "readiness probe_failed: binary changed during capability probe",
+            "binary": str(binary.resolve()),
+            "binary_sha256": after_probe_hash,
+            "capabilities_sha256": None,
+        }
     if completed.returncode != 0:
         return {
             "ready": False,
@@ -562,7 +613,7 @@ def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
     try:
         payload = _decode_single_json_object(completed.stdout,
                                              "FHE-IND capabilities")
-        validate_fhe_ind_capabilities(payload)
+        validate_fhe_ind_capabilities(payload, binary_hash)
     except RunnerError as exc:
         return {
             "ready": False,
@@ -576,7 +627,7 @@ def probe_fhe_ind(binary: Path | None, env: dict[str, str]) -> dict[str, Any]:
         "reason": "readiness verified",
         "binary": str(binary.resolve()),
         "binary_sha256": binary_hash,
-        "capabilities_sha256": sha256_bytes(canonical_json(payload)),
+        "capabilities_sha256": capabilities_sha256(payload),
         "capabilities": payload,
     }
 
@@ -1142,8 +1193,9 @@ def _validate_fhe_context_tuple(data: dict[str, Any], cell: dict[str, Any],
             raise RunnerError(f"FHE-IND tuple provenance is missing: {key}")
     binary_hash = readiness.get("binary_sha256")
     capabilities_hash = readiness.get("capabilities_sha256")
-    if data.get("fhe_ind_binary_sha256") not in (None, binary_hash) or \
-       data.get("capabilities_sha256") not in (None, capabilities_hash):
+    if not is_sha256_hex(binary_hash) or not is_sha256_hex(capabilities_hash) or \
+       data.get("fhe_ind_binary_sha256") != binary_hash or \
+       data.get("capabilities_sha256") != capabilities_hash:
         raise RunnerError("FHE-IND readiness provenance mismatch")
 
 
@@ -1170,9 +1222,8 @@ def validate_fhe_preflight(data: dict[str, Any], cell: dict[str, Any],
     if data.get("table_eligible") is not False or \
        data.get("diagnostic_only") is not True:
         raise RunnerError("FHE-IND preflight provenance is not diagnostic-only")
-    if data.get("workload_id") not in (None, workload.get("workload_id")) or \
-       data.get("workload_manifest_sha256") not in (
-           None, workload.get("manifest_sha256")):
+    if data.get("workload_id") != workload.get("workload_id") or \
+       data.get("workload_manifest_sha256") != workload.get("manifest_sha256"):
         raise RunnerError("FHE-IND preflight workload digest mismatch")
 
 
@@ -1316,6 +1367,20 @@ def fhe_measurement_path(results_root: Path, cell_id: str) -> Path:
     return results_root / "measurements" / f"{cell_id}.csv"
 
 
+def assert_fhe_binary_stable(readiness: dict[str, Any], phase: str) -> None:
+    binary_value = readiness.get("binary")
+    expected = readiness.get("binary_sha256")
+    if not isinstance(binary_value, str) or not is_sha256_hex(expected):
+        raise RunnerError(f"{phase} producer identity is incomplete")
+    try:
+        observed = sha256_file(Path(binary_value))
+    except OSError as exc:
+        raise RunnerError(f"{phase} producer binary cannot be rehashed: {exc}") \
+            from exc
+    if observed != expected:
+        raise RunnerError(f"{phase} producer binary changed after readiness probe")
+
+
 def invoke_fhe_preflight(readiness: dict[str, Any], results_root: Path,
                          cell: dict[str, Any], workload: dict[str, Any],
                          env: dict[str, str], log: list[str], *,
@@ -1335,8 +1400,11 @@ def invoke_fhe_preflight(readiness: dict[str, Any], results_root: Path,
                                                   suffix=".json")
         os.close(descriptor)
         temporary_path = Path(temporary)
+        temporary_path.unlink()
         try:
+            assert_fhe_binary_stable(readiness, "FHE-IND preflight before invocation")
             completed = run_process(command_base + [f"--output={temporary_path}"], env)
+            assert_fhe_binary_stable(readiness, "FHE-IND preflight after invocation")
             if completed.returncode != 0:
                 raise RunnerError("resume FHE-IND preflight derivation failed")
             regenerated = read_canonical_json(temporary_path)
@@ -1354,7 +1422,9 @@ def invoke_fhe_preflight(readiness: dict[str, Any], results_root: Path,
                 pass
     if path.exists():
         raise RunnerError(f"refusing to overwrite FHE-IND preflight artifact: {path}")
+    assert_fhe_binary_stable(readiness, "FHE-IND preflight before invocation")
     completed = run_process(command_base + [f"--output={path}"], env)
+    assert_fhe_binary_stable(readiness, "FHE-IND preflight after invocation")
     log.append("$ " + " ".join(command_base + [f"--output={path}"]))
     if completed.stdout:
         log.append(completed.stdout.rstrip())
@@ -1374,6 +1444,7 @@ def measure_fhe_cell(readiness: dict[str, Any], results_root: Path,
     path = fhe_measurement_path(results_root, cell["cell_id"])
     if path.exists():
         raise RunnerError(f"refusing to overwrite FHE-IND measurement artifact: {path}")
+    assert_fhe_binary_stable(readiness, "FHE-IND e2e before invocation")
     command = [str(readiness["binary"]), "--mode=e2e", "--method=fhe_ind",
                "--circuit=fhe_ind", f"--security={cell['security']}",
                "--shape-id=fhe-indicator-v1", f"--cell-id={cell['cell_id']}",
@@ -1383,6 +1454,7 @@ def measure_fhe_cell(readiness: dict[str, Any], results_root: Path,
                f"--preflight={fhe_preflight_path(results_root, cell['cell_id'])}",
                "--format=csv", f"--output={path}"]
     completed = run_process(command, env)
+    assert_fhe_binary_stable(readiness, "FHE-IND e2e after invocation")
     log.append("$ " + " ".join(command))
     if completed.stdout:
         log.append(completed.stdout.rstrip())

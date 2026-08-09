@@ -33,6 +33,11 @@ CAPABILITIES = {
                    "threshold_enabled": False},
 }
 MODULI = ["1000000007", "1000000009"]
+VALUE_OPTIONS = {
+    "--mode", "--method", "--circuit", "--security", "--shape-id",
+    "--cell-id", "--universe", "--set-size", "--target-jaccard", "--seed",
+    "--trials", "--output", "--workload", "--preflight", "--format",
+}
 
 
 def canonical(value: object) -> bytes:
@@ -41,7 +46,22 @@ def canonical(value: object) -> bytes:
 
 
 def write_json(path: Path, value: dict) -> None:
+    if path.exists():
+        raise SystemExit(2)
     path.write_bytes(canonical(value))
+
+
+def binary_sha256() -> str:
+    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+
+
+def capabilities_payload() -> dict:
+    value = dict(CAPABILITIES)
+    value["fhe_ind_binary_sha256"] = binary_sha256()
+    descriptor = dict(value)
+    descriptor.pop("capabilities_sha256", None)
+    value["capabilities_sha256"] = hashlib.sha256(canonical(descriptor)).hexdigest()
+    return value
 
 
 def ordered_hash() -> str:
@@ -51,6 +71,13 @@ def ordered_hash() -> str:
 
 
 def args() -> argparse.Namespace:
+    seen: set[str] = set()
+    for argument in sys.argv[1:]:
+        option = argument.split("=", 1)[0]
+        if option in VALUE_OPTIONS or option == "--capabilities":
+            if option in seen:
+                raise SystemExit(2)
+            seen.add(option)
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--capabilities", action="store_true")
     parser.add_argument("--mode")
@@ -99,6 +126,8 @@ def context(args: argparse.Namespace) -> dict:
         "context_tuple_sha256": hashlib.sha256(
             f"tuple|{args.security}".encode()).hexdigest(),
         "diagnostic_only": True, "table_eligible": False,
+        "fhe_ind_binary_sha256": binary_sha256(),
+        "capabilities_sha256": capabilities_payload()["capabilities_sha256"],
     }
 
 
@@ -121,19 +150,34 @@ def main() -> int:
     if parsed.capabilities:
         if sys.argv[1:] != ["--capabilities", "--format=json"]:
             return 2
-        print(json.dumps(CAPABILITIES, sort_keys=True, separators=(",", ":")))
+        print(json.dumps(capabilities_payload(), sort_keys=True,
+                         separators=(",", ":")))
         return 0
     if parsed.mode == "preflight":
         validate_request(parsed, "preflight")
         value = context(parsed)
+        try:
+            workload = json.loads(Path(parsed.workload).read_text())
+        except (OSError, json.JSONDecodeError):
+            return 2
+        if workload.get("universe") != 64 or workload.get("set_size") != 10 or \
+           workload.get("target_jaccard_numerator") != 1 or \
+           workload.get("target_jaccard_denominator") != 2 or \
+           workload.get("root_seed") != 7 or workload.get("timing_trials") != 1 or \
+           workload.get("accuracy_trials") != 1:
+            return 2
         skipped = os.environ.get("FAKE_FHE_OVERSIZE") == "1"
         value.update({"schema": "piccard-std-security-fhe-ind-preflight-v1",
                       "mode": "preflight", "cell_id": parsed.cell_id,
+                      "workload_id": workload["workload_id"],
+                      "workload_manifest_sha256": workload["manifest_sha256"],
                       "keygen_started": False, "skipped": skipped,
                       "reason": (
                           "realized_ring_dim bound=32768 observed=65536; "
                           "provisioned_depth bound=4 observed=10"
                       ) if skipped else ""})
+        if Path(parsed.output).exists():
+            return 2
         write_json(Path(parsed.output), value)
         return 0
     if parsed.mode == "e2e":
@@ -144,6 +188,27 @@ def main() -> int:
            workload.get("target_jaccard_denominator") != 2 or \
            workload.get("root_seed") != 7 or workload.get("timing_trials") != 1 or \
            workload.get("accuracy_trials") != 1:
+            return 2
+        try:
+            preflight = json.loads(Path(parsed.preflight).read_text())
+        except (OSError, json.JSONDecodeError):
+            return 2
+        expected_skip = os.environ.get("FAKE_FHE_OVERSIZE") == "1"
+        expected_reason = (
+            "realized_ring_dim bound=32768 observed=65536; "
+            "provisioned_depth bound=4 observed=10"
+        ) if expected_skip else ""
+        if preflight.get("schema") != "piccard-std-security-fhe-ind-preflight-v1" or \
+           preflight.get("mode") != "preflight" or \
+           preflight.get("cell_id") != parsed.cell_id or \
+           preflight.get("keygen_started") is not False or \
+           preflight.get("skipped") is not expected_skip or \
+           preflight.get("reason") != expected_reason or \
+           preflight.get("fhe_ind_binary_sha256") != binary_sha256() or \
+           preflight.get("capabilities_sha256") != \
+           capabilities_payload()["capabilities_sha256"]:
+            return 2
+        if expected_skip:
             return 2
         value = context(parsed)
         header = [
@@ -160,6 +225,7 @@ def main() -> int:
             "phase_encode_ms", "phase_encrypt_ms", "phase_evaluate_ms",
             "phase_decrypt_ms", "online_e2e_ms", "full_e2e_ms", "match_count",
             "jaccard_estimate", "status", "reason", "method",
+            "fhe_ind_binary_sha256", "capabilities_sha256",
         ]
         row = {key: "" for key in header}
         row.update({key: str(value[key]) for key in (
@@ -188,7 +254,11 @@ def main() -> int:
             "online_e2e_ms": "10", "full_e2e_ms": "21",
             "match_count": "7", "jaccard_estimate": "0.53846153846153844",
             "status": "MEASURED", "reason": "",
+            "fhe_ind_binary_sha256": value["fhe_ind_binary_sha256"],
+            "capabilities_sha256": value["capabilities_sha256"],
         })
+        if Path(parsed.output).exists():
+            return 2
         with Path(parsed.output).open("w", newline="", encoding="utf-8") as output:
             writer = csv.DictWriter(output, fieldnames=header, lineterminator="\n")
             writer.writeheader()

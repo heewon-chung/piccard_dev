@@ -25,6 +25,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,12 @@
 #include <vector>
 
 #include <fcntl.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <limits.h>
+#elif defined(__linux__)
+#include <limits.h>
+#endif
 #include <unistd.h>
 
 namespace {
@@ -97,6 +104,11 @@ struct TupleData {
 
 struct WorkloadData {
     benchmark::ComparisonWorkload parsed;
+};
+
+struct ProducerIdentity {
+    std::string fhe_ind_binary_sha256;
+    std::string capabilities_sha256;
 };
 
 std::string JsonEscape(const std::string& value) {
@@ -209,57 +221,81 @@ uint64_t ParseUnsigned(const std::string& value, const char* option) {
     return parsed;
 }
 
+void MarkOption(std::set<std::string>* seen, const char* option) {
+    if (!seen->insert(option).second) {
+        throw std::invalid_argument(std::string("duplicate option: --") +
+                                    option);
+    }
+}
+
 Options ParseOptions(int argc, char** argv) {
     Options options;
     options.format = "json";
+    std::set<std::string> seen_options;
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
         if (argument == "--capabilities") {
+            MarkOption(&seen_options, "capabilities");
             options.capabilities = true;
         } else if (const auto value = OptionValue(argument, "mode");
                    !value.empty()) {
+            MarkOption(&seen_options, "mode");
             options.mode = value;
         } else if (const auto value = OptionValue(argument, "method");
                    !value.empty()) {
+            MarkOption(&seen_options, "method");
             options.method = value;
         } else if (const auto value = OptionValue(argument, "circuit");
                    !value.empty()) {
+            MarkOption(&seen_options, "circuit");
             options.circuit = value;
         } else if (const auto value = OptionValue(argument, "security");
                    !value.empty()) {
+            MarkOption(&seen_options, "security");
             options.security = value;
         } else if (const auto value = OptionValue(argument, "shape-id");
                    !value.empty()) {
+            MarkOption(&seen_options, "shape-id");
             options.shape_id = value;
         } else if (const auto value = OptionValue(argument, "cell-id");
                    !value.empty()) {
+            MarkOption(&seen_options, "cell-id");
             options.cell_id = value;
         } else if (const auto value = OptionValue(argument, "output");
                    !value.empty()) {
+            MarkOption(&seen_options, "output");
             options.output = value;
         } else if (const auto value = OptionValue(argument, "workload");
                    !value.empty()) {
+            MarkOption(&seen_options, "workload");
             options.workload = value;
         } else if (const auto value = OptionValue(argument, "preflight");
                    !value.empty()) {
+            MarkOption(&seen_options, "preflight");
             options.preflight = value;
         } else if (const auto value = OptionValue(argument, "format");
                    !value.empty()) {
+            MarkOption(&seen_options, "format");
             options.format = value;
         } else if (const auto value = OptionValue(argument, "universe");
                    !value.empty()) {
+            MarkOption(&seen_options, "universe");
             options.universe = ParseUnsigned(value, "--universe");
         } else if (const auto value = OptionValue(argument, "set-size");
                    !value.empty()) {
+            MarkOption(&seen_options, "set-size");
             options.set_size = ParseUnsigned(value, "--set-size");
         } else if (const auto value = OptionValue(argument, "target-jaccard");
                    !value.empty()) {
+            MarkOption(&seen_options, "target-jaccard");
             options.target_jaccard = value;
         } else if (const auto value = OptionValue(argument, "seed");
                    !value.empty()) {
+            MarkOption(&seen_options, "seed");
             options.seed = ParseUnsigned(value, "--seed");
         } else if (const auto value = OptionValue(argument, "trials");
                    !value.empty()) {
+            MarkOption(&seen_options, "trials");
             options.trials = ParseUnsigned(value, "--trials");
         } else if (argument == "--help") {
             std::cout
@@ -337,6 +373,37 @@ std::string ReadFile(const std::string& path) {
     if (!input.is_open()) throw std::runtime_error("failed to open " + path);
     return std::string(std::istreambuf_iterator<char>(input),
                        std::istreambuf_iterator<char>());
+}
+
+std::string SelfExecutablePath() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    if (_NSGetExecutablePath(nullptr, &size) != -1 || size == 0) {
+        throw std::runtime_error("failed to query FHE-IND executable path");
+    }
+    std::vector<char> buffer(size + 1, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        throw std::runtime_error("failed to resolve FHE-IND executable path");
+    }
+    return std::filesystem::weakly_canonical(buffer.data()).string();
+#elif defined(__linux__)
+    std::vector<char> buffer(PATH_MAX + 1, '\0');
+    const ssize_t length = ::readlink("/proc/self/exe", buffer.data(),
+                                      buffer.size() - 1);
+    if (length <= 0) {
+        throw std::runtime_error("failed to resolve FHE-IND executable path");
+    }
+    buffer[static_cast<size_t>(length)] = '\0';
+    return std::filesystem::weakly_canonical(buffer.data()).string();
+#else
+    throw std::runtime_error("unsupported platform for FHE-IND executable hash");
+#endif
+}
+
+std::string Sha256File(const std::string& path) {
+    const std::string bytes = ReadFile(path);
+    const std::vector<uint8_t> binary(bytes.begin(), bytes.end());
+    return benchmark::Sha256Hex(binary);
 }
 
 size_t JsonKeyPosition(const std::string& json, const std::string& key) {
@@ -617,6 +684,47 @@ void AddBuild(CanonicalJsonObject* object) {
     object->AddString("source_commit", PICCARD_BUILD_COMMIT);
 }
 
+CanonicalJsonObject CapabilitiesDescriptor(const std::string& binary_sha256) {
+    CanonicalJsonObject object;
+    object.AddString("schema", kCapabilitiesSchema);
+    object.AddString("method", "fhe_ind");
+    object.AddBool("context_only_preflight", true);
+    object.AddBool("exactly_one_run", true);
+    object.AddArray("security_profiles", {"STD128", "STD192"});
+    CanonicalJsonObject workload;
+    workload.AddNumber("universe", kUniverse);
+    workload.AddNumber("set_size", kSetSize);
+    workload.AddString("target_jaccard", "1/2");
+    workload.AddNumber("seed", kSeed);
+    workload.AddNumber("trials", kTrials);
+    object.Add("workload", workload.Serialize());
+    object.AddArray("context_tuple_fields", {
+        "bfv_context_fingerprint", "circuit", "shape_id", "k", "m",
+        "sanitizer_profile", "security", "requested_ring_dim",
+        "natural_ring_dim", "natural_depth", "realized_ring_dim",
+        "plaintext_modulus", "provisioned_depth", "scaling_mod_size",
+        "num_limbs", "ordered_rns_moduli", "openfhe_version", "log_q_bits",
+        "context_tuple_sha256"});
+    CanonicalJsonObject provenance;
+    provenance.AddBool("diagnostic_only", true);
+    provenance.AddBool("piccard_sanitizer_applicable", false);
+    provenance.AddBool("threshold_enabled", false);
+    object.Add("provenance", provenance.Serialize());
+    object.AddString("fhe_ind_binary_sha256", binary_sha256);
+    return object;
+}
+
+ProducerIdentity ProducerIdentityForSelf() {
+    ProducerIdentity identity;
+    identity.fhe_ind_binary_sha256 = Sha256File(SelfExecutablePath());
+    const auto descriptor = CapabilitiesDescriptor(
+        identity.fhe_ind_binary_sha256);
+    const std::string canonical = descriptor.Serialize() + "\n";
+    const std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    identity.capabilities_sha256 = benchmark::Sha256Hex(bytes);
+    return identity;
+}
+
 std::string JoinReasons(const evidence::PreflightDecision& decision) {
     std::ostringstream out;
     for (size_t index = 0; index < decision.reasons.size(); ++index) {
@@ -627,7 +735,8 @@ std::string JoinReasons(const evidence::PreflightDecision& decision) {
 }
 
 std::string PreflightJson(const Options& options, const WorkloadData& workload,
-                          const TupleData& tuple) {
+                          const TupleData& tuple,
+                          const ProducerIdentity& identity) {
     evidence::PreflightCaps caps{tuple.realized_ring_dim,
                                  tuple.provisioned_depth, tuple.log_q_bits};
     const auto decision = evidence::EvaluatePreflight(caps);
@@ -647,6 +756,9 @@ std::string PreflightJson(const Options& options, const WorkloadData& workload,
     object.AddString("workload_id", workload.parsed.WorkloadId());
     object.AddString("workload_manifest_sha256",
                      workload.parsed.ManifestSha256Hex());
+    object.AddString("fhe_ind_binary_sha256",
+                     identity.fhe_ind_binary_sha256);
+    object.AddString("capabilities_sha256", identity.capabilities_sha256);
     object.AddBool("keygen_started", false);
     object.AddBool("skipped", decision.skipped);
     object.AddString("reason", JoinReasons(decision));
@@ -773,8 +885,9 @@ TupleData TupleFromPreflight(const std::string& json) {
     return tuple;
 }
 
-void ValidatePreflight(const Options& options, const WorkloadData& workload,
-                       const TupleData& current) {
+bool ValidatePreflight(const Options& options, const WorkloadData& workload,
+                       const TupleData& current,
+                       const ProducerIdentity& identity) {
     const std::string json = ReadFile(options.preflight);
     if (JsonStringField(json, "schema") != kPreflightSchema ||
         JsonStringField(json, "mode") != "preflight" ||
@@ -793,6 +906,10 @@ void ValidatePreflight(const Options& options, const WorkloadData& workload,
         JsonStringField(json, "workload_id") != workload.parsed.WorkloadId() ||
         JsonStringField(json, "workload_manifest_sha256") !=
             workload.parsed.ManifestSha256Hex() ||
+        JsonStringField(json, "fhe_ind_binary_sha256") !=
+            identity.fhe_ind_binary_sha256 ||
+        JsonStringField(json, "capabilities_sha256") !=
+            identity.capabilities_sha256 ||
         JsonStringField(json, "sanitizer_profile") != "not-applicable" ||
         JsonStringField(json, "calibration_origin") != "not-applicable" ||
         JsonStringField(json, "source_commit") != PICCARD_BUILD_COMMIT ||
@@ -802,13 +919,15 @@ void ValidatePreflight(const Options& options, const WorkloadData& workload,
         throw std::invalid_argument("FHE-IND preflight identity mismatch");
     }
     const std::string build_dirty = JsonScalarField(json, "build_dirty");
+    const std::string skipped = JsonScalarField(json, "skipped");
+    const std::string reason = JsonStringField(json, "reason");
     if (build_dirty != (PICCARD_BUILD_DIRTY != 0 ? "true" : "false") ||
         JsonScalarField(json, "keygen_started") != "false" ||
         JsonScalarField(json, "diagnostic_only") != "true" ||
         JsonScalarField(json, "piccard_sanitizer_applicable") != "false" ||
         JsonScalarField(json, "threshold_enabled") != "false" ||
         JsonScalarField(json, "table_eligible") != "false" ||
-        JsonScalarField(json, "skipped") != "false") {
+        (skipped != "true" && skipped != "false")) {
         throw std::invalid_argument("FHE-IND preflight stage/provenance mismatch");
     }
     const TupleData recorded = TupleFromPreflight(json);
@@ -829,6 +948,14 @@ void ValidatePreflight(const Options& options, const WorkloadData& workload,
         recorded.context_tuple_sha256 != current.context_tuple_sha256) {
         throw std::invalid_argument("FHE-IND preflight context tuple mismatch");
     }
+    evidence::PreflightCaps caps{current.realized_ring_dim,
+                                 current.provisioned_depth, current.log_q_bits};
+    const auto decision = evidence::EvaluatePreflight(caps);
+    if ((skipped == "true") != decision.skipped ||
+        reason != JoinReasons(decision)) {
+        throw std::invalid_argument("FHE-IND preflight cap decision mismatch");
+    }
+    return decision.skipped;
 }
 
 std::string CsvCell(const std::string& value) {
@@ -853,7 +980,8 @@ std::string CsvHeader() {
            "workload_manifest_sha256,timing_hash_seed,setup_context_ms,"
            "setup_keygen_ms,phase_encode_ms,phase_encrypt_ms,phase_evaluate_ms,"
            "phase_decrypt_ms,online_e2e_ms,full_e2e_ms,match_count,"
-           "jaccard_estimate,status,reason,method\n";
+           "jaccard_estimate,status,reason,method,fhe_ind_binary_sha256,"
+           "capabilities_sha256\n";
 }
 
 std::string OrderedRnsJson(const std::vector<std::string>& moduli) {
@@ -867,21 +995,36 @@ std::string OrderedRnsJson(const std::vector<std::string>& moduli) {
     return out.str();
 }
 
-double Positive(double value) {
-    if (!std::isfinite(value) || value <= 0.0) return 1e-9;
+double RequirePositiveTiming(double value, const char* field) {
+    if (!std::isfinite(value) || value <= 0.0) {
+        throw std::runtime_error(std::string("FHE-IND raw timing is not positive: ") +
+                                 field);
+    }
     return value;
 }
 
 std::string E2eCsv(const Options& options, const WorkloadData& workload,
-                   const TupleData& tuple, const baseline::FheIndQueryResult& result) {
-    const double encode = Positive(result.phase_encode_ms);
-    const double encrypt = Positive(result.phase_encrypt_ms);
-    const double evaluate = Positive(result.phase_evaluate_ms);
-    const double decrypt = Positive(result.phase_decrypt_ms);
+                   const TupleData& tuple,
+                   const ProducerIdentity& identity,
+                   const baseline::FheIndQueryResult& result) {
+    const double encode = RequirePositiveTiming(result.phase_encode_ms,
+                                                "phase_encode_ms");
+    const double encrypt = RequirePositiveTiming(result.phase_encrypt_ms,
+                                                 "phase_encrypt_ms");
+    const double evaluate = RequirePositiveTiming(result.phase_evaluate_ms,
+                                                  "phase_evaluate_ms");
+    const double decrypt = RequirePositiveTiming(result.phase_decrypt_ms,
+                                                 "phase_decrypt_ms");
     const double online = encode + encrypt + evaluate + decrypt;
-    const double setup_context = Positive(result.setup_context_ms);
-    const double setup_keygen = Positive(result.setup_keygen_ms);
+    const double setup_context = RequirePositiveTiming(result.setup_context_ms,
+                                                       "setup_context_ms");
+    const double setup_keygen = RequirePositiveTiming(result.setup_keygen_ms,
+                                                      "setup_keygen_ms");
     const double full = setup_context + setup_keygen + online;
+    if (!std::isfinite(online) || online <= 0.0 || !std::isfinite(full) ||
+        full <= 0.0) {
+        throw std::runtime_error("FHE-IND derived timings are not positive");
+    }
     const std::vector<std::string> fields = {
         options.cell_id,
         "fhe_ind",
@@ -929,6 +1072,8 @@ std::string E2eCsv(const Options& options, const WorkloadData& workload,
         "MEASURED",
         "",
         "fhe_ind",
+        identity.fhe_ind_binary_sha256,
+        identity.capabilities_sha256,
     };
     std::ostringstream out;
     out << CsvHeader();
@@ -940,38 +1085,16 @@ std::string E2eCsv(const Options& options, const WorkloadData& workload,
     return out.str();
 }
 
-std::string CapabilitiesJson() {
-    CanonicalJsonObject object;
-    object.AddString("schema", kCapabilitiesSchema);
-    object.AddString("method", "fhe_ind");
-    object.AddBool("context_only_preflight", true);
-    object.AddBool("exactly_one_run", true);
-    object.AddArray("security_profiles", {"STD128", "STD192"});
-    CanonicalJsonObject workload;
-    workload.AddNumber("universe", kUniverse);
-    workload.AddNumber("set_size", kSetSize);
-    workload.AddString("target_jaccard", "1/2");
-    workload.AddNumber("seed", kSeed);
-    workload.AddNumber("trials", kTrials);
-    object.Add("workload", workload.Serialize());
-    object.AddArray("context_tuple_fields", {
-        "bfv_context_fingerprint", "circuit", "shape_id", "k", "m",
-        "sanitizer_profile", "security", "requested_ring_dim",
-        "natural_ring_dim", "natural_depth", "realized_ring_dim",
-        "plaintext_modulus", "provisioned_depth", "scaling_mod_size",
-        "num_limbs", "ordered_rns_moduli", "openfhe_version", "log_q_bits",
-        "context_tuple_sha256"});
-    CanonicalJsonObject provenance;
-    provenance.AddBool("diagnostic_only", true);
-    provenance.AddBool("piccard_sanitizer_applicable", false);
-    provenance.AddBool("threshold_enabled", false);
-    object.Add("provenance", provenance.Serialize());
+std::string CapabilitiesJson(const ProducerIdentity& identity) {
+    auto object = CapabilitiesDescriptor(identity.fhe_ind_binary_sha256);
+    object.AddString("capabilities_sha256", identity.capabilities_sha256);
     return object.Serialize() + "\n";
 }
 
 int Run(const Options& options) {
+    const ProducerIdentity identity = ProducerIdentityForSelf();
     if (options.capabilities) {
-        std::cout << CapabilitiesJson();
+        std::cout << CapabilitiesJson(identity);
         return 0;
     }
     RequireAbsolutePath(options.workload, "--workload");
@@ -991,11 +1114,15 @@ int Run(const Options& options) {
         if (engine.HasGeneratedKeys()) {
             throw std::logic_error("FHE-IND preflight generated keys");
         }
-        WriteNew(options.output, PreflightJson(options, workload, tuple));
+        WriteNew(options.output, PreflightJson(options, workload, tuple,
+                                               identity));
         return 0;
     }
 
-    ValidatePreflight(options, workload, tuple);
+    if (ValidatePreflight(options, workload, tuple, identity)) {
+        throw std::runtime_error(
+            "FHE-IND preflight is SKIPPED_PRECHECK; e2e is not permitted");
+    }
     engine.InitializeKeys();
     const TupleData after_keys = TupleFromContext(engine, options.security);
     if (after_keys.context_tuple_sha256 != tuple.context_tuple_sha256 ||
@@ -1010,7 +1137,7 @@ int Run(const Options& options) {
         result.jaccard != 7.0 / 13.0) {
         throw std::runtime_error("FHE-IND result does not match frozen workload");
     }
-    WriteNew(options.output, E2eCsv(options, workload, tuple, result));
+    WriteNew(options.output, E2eCsv(options, workload, tuple, identity, result));
     return 0;
 }
 
