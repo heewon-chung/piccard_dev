@@ -70,6 +70,26 @@ class ReviewComparisonCliTest(unittest.TestCase):
             f"--execution-trace-out={root / 'missing' / 'trace.bin'}",
         ]
 
+    def work5_std192_sj16_command(self, root: pathlib.Path, policy: str):
+        return [
+            str(self.binary),
+            "--suite=work5-std192-sj16",
+            "--profile=work5-std192-t40-single-trial",
+            "--k=128",
+            "--m=64",
+            "--set-size=10",
+            "--universe=64",
+            "--target-jaccard=0.5",
+            "--trials=1",
+            "--accuracy-trials=1",
+            "--seed=7",
+            "--methods=sj16",
+            "--sj16-key-bits=3072",
+            policy,
+            f"--manifest-out={root / 'workload.bin'}",
+            f"--execution-trace-out={root / 'trace.bin'}",
+        ]
+
     def run_cli(self, command):
         return subprocess.run(command, text=True, capture_output=True, check=False)
 
@@ -137,6 +157,28 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertEqual(_workload_methods(manifest),
                              list(CANONICAL_TOY_METHODS))
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_work5_std192_sj16_requires_literal_allow_unmatched_security(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = self.run_cli(self.work5_std192_sj16_command(
+                root, "--diagnostic-security"))
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("requires literal --allow-unmatched-security",
+                          result.stderr)
+            self.assertFalse((root / "workload.bin").exists())
+            self.assertFalse((root / "trace.bin").exists())
+
+    def test_work5_std192_sj16_accepts_literal_allow_unmatched_security(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = self.run_cli(self.work5_std192_sj16_command(
+                root, "--allow-unmatched-security"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / "workload.bin").is_file())
+            self.assertTrue((root / "trace.bin").is_file())
+            self.assertEqual(len(result.stdout.splitlines()), 3)
 
     def test_legacy_baseline_method_is_rejected_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:

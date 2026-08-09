@@ -551,13 +551,15 @@ std::string SerializeComparisonRow(const ComparisonResult& r,
     RequireMatchingSanitizer(r.sanitizer, r.scaling_mod_size, provenance);
     const BaselineCapability& capability = RequireComparisonCapability(r);
     RequireComparisonParameters(r, capability.method);
+    const bool comparison_eligible = r.profile.comparison_eligible &&
+                                     capability.comparison_eligible;
     std::ostringstream out;
     out << r.scenario << ","
         << r.method << ","
         << capability.cryptographic_profile << ",";
     WriteOptional(out, capability.nominal_security_bits);
     out << "," << (capability.security_match ? "true" : "false")
-        << "," << (capability.comparison_eligible ? "true" : "false")
+        << "," << (comparison_eligible ? "true" : "false")
         << "," << ComparisonScopeName(capability.comparison_scope)
         << "," << PrimitiveName(capability.primitive)
         << "," << ProtocolModelName(capability.protocol_model)

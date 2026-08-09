@@ -67,6 +67,17 @@ ComparisonResult BaseComparisonRow() {
     return row;
 }
 
+ComparisonResult EligibleBcg12ExactRow(const BenchmarkProfile& profile) {
+    ComparisonResult row = BaseComparisonRow();
+    row.profile = MakeBenchmarkProfileMetadata(
+        profile, BenchmarkMeasurementKind::PsiTiming);
+    row.method = "bcg12_exact_ec";
+    row.capability = Capability(BaselineMethod::Bcg12ExactEc,
+                                profile.target_security_bits);
+    row.provenance = MakeAheBenchmarkProvenance();
+    return row;
+}
+
 }  // namespace
 
 TEST(BaselineProfile, Bcg12ParametersAreOnlyNominalStd128Matches) {
@@ -325,6 +336,36 @@ TEST(BaselineProfile, SerializerEmitsTypedFheIndTaxonomyAndLiveProvenance) {
     EXPECT_EQ(value("ring_dim"), "8192");
     EXPECT_EQ(value("actual_ring_dim"), "8192");
     EXPECT_EQ(value("sanitizer_model"), "not-applicable");
+}
+
+TEST(BaselineProfile,
+     ComparisonSerializerConjoinsProfileAndMethodEligibility) {
+    const std::string header = SerializeComparisonHeader();
+    const auto comparison_eligible = [&](const ComparisonResult& row) {
+        const auto cells = CsvCells(
+            SerializeComparisonRow(row, 2, row.provenance));
+        return cells[ColumnIndex(header, "comparison_eligible")];
+    };
+
+    const auto primary = EligibleBcg12ExactRow(
+        ResolveBenchmarkProfile("std128-t40-primary"));
+    EXPECT_EQ(comparison_eligible(primary), "true");
+
+    const auto work5 = EligibleBcg12ExactRow(
+        ResolveBenchmarkProfile("work5-std128-t40-single-trial"));
+    EXPECT_EQ(work5.capability->comparison_eligible, true);
+    EXPECT_EQ(comparison_eligible(work5), "false");
+
+    ComparisonResult diagnostic = BaseComparisonRow();
+    diagnostic.profile = MakeBenchmarkProfileMetadata(
+        ResolveBenchmarkProfile("std128-t40-primary"),
+        BenchmarkMeasurementKind::Diagnostic);
+    diagnostic.method = "fhe_ind";
+    diagnostic.capability = Capability(BaselineMethod::FheInd, 128);
+    diagnostic.ring_dim = 8192;
+    diagnostic.provenance = LiveBfvProvenance();
+    EXPECT_FALSE(diagnostic.capability->comparison_eligible);
+    EXPECT_EQ(comparison_eligible(diagnostic), "false");
 }
 
 TEST(BaselineProfile, SerializerPreservesDiagnosticAccuracyArm) {

@@ -91,7 +91,7 @@ struct Options {
     uint64_t seed = 0;
     std::vector<std::string> methods;
     unsigned sj16_key_bits = 0;
-    enum class SecurityPolicy { Unset, Strict, Diagnostic } policy =
+    enum class SecurityPolicy { Unset, Strict, Diagnostic, AllowUnmatched } policy =
         SecurityPolicy::Unset;
     std::filesystem::path manifest_out;
     std::filesystem::path execution_trace_out;
@@ -163,9 +163,10 @@ Options ParseOptions(int argc, char** argv) {
         else if (key == "--execution-trace-out") { set_once("execution-trace-out"); options.execution_trace_out = value; }
         else if (arg == "--strict-security") {
             set_once("security-policy"); options.policy = Options::SecurityPolicy::Strict;
-        } else if (arg == "--diagnostic-security" ||
-                   arg == "--allow-unmatched-security") {
+        } else if (arg == "--diagnostic-security") {
             set_once("security-policy"); options.policy = Options::SecurityPolicy::Diagnostic;
+        } else if (arg == "--allow-unmatched-security") {
+            set_once("security-policy"); options.policy = Options::SecurityPolicy::AllowUnmatched;
         } else if (arg == "--help" || arg == "-h") {
             std::cout
                 << "Usage: bench_review_comparison --suite=SUITE --profile=ID "
@@ -753,11 +754,18 @@ int Run(int argc, char** argv) {
     } else if (profile.security != options.security) {
         throw std::invalid_argument("--security conflicts with --profile");
     }
+    const bool diagnostic_policy =
+        options.policy == Options::SecurityPolicy::Diagnostic ||
+        options.policy == Options::SecurityPolicy::AllowUnmatched;
     if ((options.suite == "primary-review" &&
          options.policy != Options::SecurityPolicy::Strict) ||
-        (options.suite != "primary-review" &&
-         options.policy != Options::SecurityPolicy::Diagnostic)) {
+        (options.suite != "primary-review" && !diagnostic_policy)) {
         throw std::invalid_argument("security policy does not match frozen suite");
+    }
+    if (options.suite == "work5-std192-sj16" &&
+        options.policy != Options::SecurityPolicy::AllowUnmatched) {
+        throw std::invalid_argument(
+            "work5-std192-sj16 requires literal --allow-unmatched-security");
     }
     if ((options.suite == "toy-smoke" && options.sj16_key_bits != 1024) ||
         (options.suite != "toy-smoke" && options.sj16_key_bits != 3072)) {
