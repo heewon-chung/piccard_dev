@@ -331,6 +331,46 @@ class FheIndCliContractTest(unittest.TestCase):
             )
         self.assertNotEqual(result.returncode, 0)
 
+    @unittest.skipIf(IS_FIXTURE, "fixture does not parse live preflight tuples")
+    def test_preflight_uint32_tuple_overflow_is_rejected_before_e2e(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            workload = _workload(root)
+            original_preflight = root / "preflight.json"
+            first = subprocess.run(
+                _command(*_preflight_command(root, original_preflight)),
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            original = json.loads(original_preflight.read_text(encoding="utf-8"))
+            tuple_fields = (
+                "requested_ring_dim", "natural_ring_dim", "natural_depth",
+                "realized_ring_dim", "provisioned_depth", "scaling_mod_size",
+                "num_limbs",
+            )
+            for field in tuple_fields:
+                with self.subTest(field=field):
+                    value = dict(original)
+                    value[field] = 2**32
+                    preflight = root / ("overflow-" + field + ".json")
+                    preflight.write_text(
+                        json.dumps(value, sort_keys=True,
+                                   separators=(",", ":")) + "\n",
+                        encoding="utf-8",
+                    )
+                    output = root / ("overflow-" + field + ".csv")
+                    result = _run(
+                        "--mode=e2e", "--method=fhe_ind", "--circuit=fhe_ind",
+                        "--shape-id=fhe-indicator-v1", "--security=STD128",
+                        "--cell-id=fhe-ind-std128", "--universe=64",
+                        "--set-size=10", "--target-jaccard=1/2", "--seed=7",
+                        "--trials=1", "--output=" + str(output),
+                        "--workload=" + str(workload),
+                        "--preflight=" + str(preflight), "--format=csv",
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
+
     @unittest.skipIf(IS_FIXTURE, "fixture does not parse canonical workload bytes")
     def test_malformed_workload_is_rejected_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -475,6 +475,15 @@ uint64_t JsonUnsignedField(const std::string& json, const std::string& key) {
     return ParseUnsigned(value, key.c_str());
 }
 
+uint32_t JsonUint32Field(const std::string& json, const std::string& key) {
+    const uint64_t value = JsonUnsignedField(json, key);
+    if (value > std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument("FHE-IND preflight field exceeds uint32_t: " +
+                                    key);
+    }
+    return static_cast<uint32_t>(value);
+}
+
 std::vector<std::string> JsonStringArrayField(const std::string& json,
                                               const std::string& key) {
     size_t position = JsonKeyPosition(json, key);
@@ -830,20 +839,14 @@ TupleData TupleFromPreflight(const std::string& json) {
     }
     tuple.sanitizer_profile = JsonStringField(json, "sanitizer_profile");
     tuple.security = ParseSecurity(JsonStringField(json, "security"));
-    tuple.requested_ring_dim = static_cast<uint32_t>(
-        JsonUnsignedField(json, "requested_ring_dim"));
-    tuple.natural_ring_dim = static_cast<uint32_t>(
-        JsonUnsignedField(json, "natural_ring_dim"));
-    tuple.natural_depth = static_cast<uint32_t>(
-        JsonUnsignedField(json, "natural_depth"));
-    tuple.realized_ring_dim = static_cast<uint32_t>(
-        JsonUnsignedField(json, "realized_ring_dim"));
+    tuple.requested_ring_dim = JsonUint32Field(json, "requested_ring_dim");
+    tuple.natural_ring_dim = JsonUint32Field(json, "natural_ring_dim");
+    tuple.natural_depth = JsonUint32Field(json, "natural_depth");
+    tuple.realized_ring_dim = JsonUint32Field(json, "realized_ring_dim");
     tuple.plaintext_modulus = JsonUnsignedField(json, "plaintext_modulus");
-    tuple.provisioned_depth = static_cast<uint32_t>(
-        JsonUnsignedField(json, "provisioned_depth"));
-    tuple.scaling_mod_size = static_cast<uint32_t>(
-        JsonUnsignedField(json, "scaling_mod_size"));
-    tuple.num_limbs = static_cast<uint32_t>(JsonUnsignedField(json, "num_limbs"));
+    tuple.provisioned_depth = JsonUint32Field(json, "provisioned_depth");
+    tuple.scaling_mod_size = JsonUint32Field(json, "scaling_mod_size");
+    tuple.num_limbs = JsonUint32Field(json, "num_limbs");
     tuple.ordered_rns_moduli = JsonStringArrayField(json, "ordered_rns_moduli");
     tuple.openfhe_version = JsonStringField(json, "openfhe_version");
     const std::string log_q = JsonScalarField(json, "log_q_bits");
