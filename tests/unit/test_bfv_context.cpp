@@ -212,14 +212,75 @@ TEST(BFVContextRuntimeMetadata, ToyRuntimeMetadataMatchesLiveContext) {
     const auto metadata = context.GetRuntimeMetadata();
     const auto& live = context.GetCryptoContext();
     const auto crypto_params = live->GetCryptoParameters();
+    const auto rns_params =
+        std::dynamic_pointer_cast<lbcrypto::CryptoParametersRNS>(
+            crypto_params);
+    ASSERT_TRUE(rns_params);
     EXPECT_EQ(metadata.actual_ring_dim, live->GetRingDimension());
     EXPECT_NEAR(metadata.log_q_bits, TowerSumLogQBits(live), 1e-9);
     EXPECT_EQ(metadata.plaintext_modulus,
               crypto_params->GetPlaintextModulus());
     EXPECT_EQ(metadata.num_limbs,
               crypto_params->GetElementParams()->GetParams().size());
+    EXPECT_EQ(metadata.provisioned_depth,
+              rns_params->GetMultiplicativeDepth());
+    EXPECT_GT(metadata.scaling_mod_size, 0u);
+    EXPECT_EQ(metadata.ordered_rns_moduli.size(), metadata.num_limbs);
+    EXPECT_EQ(metadata.security, SecurityLevel::TOY);
+    EXPECT_EQ(metadata.requested_ring_dim, params.ring_dim);
+    EXPECT_EQ(metadata.natural_depth, params.natural_mult_depth);
     EXPECT_EQ(metadata.openfhe_version, GetOPENFHEVersion());
     EXPECT_NE(metadata.openfhe_version, "unknown");
+    EXPECT_EQ(context.ContextFingerprintHex(), context.ContextFingerprintHex());
+    EXPECT_EQ(metadata.context_fingerprint, context.ContextFingerprintHex());
+    EXPECT_EQ(metadata.context_fingerprint.size(), 64u);
+    EXPECT_FALSE(context.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextRuntimeMetadata, ContextOnlyFingerprintAndLiveTupleFieldsAreStable) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+
+    BFVContext first(params);
+    BFVContext second(params);
+    EXPECT_THROW(first.ContextFingerprintHex(), std::logic_error);
+
+    first.InitializeContextOnly();
+    second.InitializeContextOnly();
+    EXPECT_EQ(first.ContextFingerprintHex(), second.ContextFingerprintHex());
+
+    const auto metadata = first.GetRuntimeMetadata();
+    EXPECT_EQ(metadata.context_fingerprint, first.ContextFingerprintHex());
+    EXPECT_EQ(metadata.context_fingerprint, second.ContextFingerprintHex());
+    ASSERT_EQ(metadata.ordered_rns_moduli.size(), metadata.num_limbs);
+    for (const auto& modulus : metadata.ordered_rns_moduli) {
+        EXPECT_FALSE(modulus.empty());
+    }
+    EXPECT_FALSE(first.HasGeneratedKeysForTesting());
+}
+
+TEST(BFVContextRuntimeMetadata, StandardSecurityContextsNeverShareFingerprint) {
+    PiccardParams std128_params;
+    std128_params.k = 16;
+    std128_params.m = 16;
+    std128_params.security = SecurityLevel::STD128;
+    CalibrationAccess::Derive(std128_params);
+    PiccardParams std192_params = std128_params;
+    std192_params.security = SecurityLevel::STD192;
+    CalibrationAccess::Derive(std192_params);
+
+    BFVContext std128(std128_params);
+    BFVContext std192(std192_params);
+    std128.InitializeContextOnly();
+    std192.InitializeContextOnly();
+    EXPECT_NE(std128.ContextFingerprintHex(), std192.ContextFingerprintHex());
+    EXPECT_EQ(std128.GetRuntimeMetadata().security, SecurityLevel::STD128);
+    EXPECT_EQ(std192.GetRuntimeMetadata().security, SecurityLevel::STD192);
+    EXPECT_FALSE(std128.HasGeneratedKeysForTesting());
+    EXPECT_FALSE(std192.HasGeneratedKeysForTesting());
 }
 
 TEST(BFVContextRuntimeMetadata, CalibratedStd128MetadataMatchesLiveContext) {

@@ -22,6 +22,11 @@ public:
 
     // ── High-level protocol API (paper-aligned) ─────────────────
 
+    // Build the context and encoding machinery without generating keys.
+    // This is used only by the diagnostic evidence runner to time setup
+    // separately from key generation.
+    void InitializeContextOnly();
+
     void KeyGen();
 
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>

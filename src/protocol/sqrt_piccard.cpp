@@ -1,10 +1,23 @@
 #include "protocol/sqrt_piccard.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace piccard {
 
 SqrtPiccard::SqrtPiccard(const PiccardParams& params) : params_(params) {}
+
+void SqrtPiccard::InitializeContextOnly() {
+    if (bfv_) {
+        throw std::logic_error("SqrtPiccard context was already initialized");
+    }
+    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
+                                          params_.hash_seed);
+    bfv_ = std::make_unique<BFVContext>(params_);
+    bfv_->InitializeContextOnly();
+    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
+    encoder_ = std::make_unique<SqrtEncoder>(params_);
+}
 
 void SqrtPiccard::SetHashSeed(uint64_t seed) {
     params_.hash_seed = seed;
@@ -15,14 +28,8 @@ void SqrtPiccard::SetHashSeed(uint64_t seed) {
 }
 
 void SqrtPiccard::KeyGen() {
-    hasher_ = std::make_unique<MinHasher>(params_.k, params_.hash_range,
-                                          params_.hash_seed);
-
-    bfv_ = std::make_unique<BFVContext>(params_);
-    bfv_->Initialize();
-    params_.AdoptVerifiedRuntimeRingDim(bfv_->GetSlotCount());
-
-    encoder_ = std::make_unique<SqrtEncoder>(params_);
+    if (!bfv_) InitializeContextOnly();
+    bfv_->InitializeKeys();
 }
 
 std::vector<uint64_t>
