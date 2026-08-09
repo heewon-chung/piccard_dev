@@ -2,6 +2,9 @@
 #include "threshold_csv_schema.h"
 #include "protocol/threshold_piccard.h"
 #include "protocol/piccard.h"
+#include "core/threshold_truth.h"
+#include "core/threshold_poly.h"
+#include "core/minhash.h"
 
 // OpenFHE serialization registration (required for CiphertextSizer)
 #include "ciphertext-ser.h"
@@ -15,6 +18,8 @@
 #include <iomanip>
 #include <memory>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace piccard;
@@ -52,6 +57,58 @@ MakeSetsWithOverlap(size_t set_size, double overlap_fraction) {
         b.push_back(i + 2000000);
     }
     return {a, b};
+}
+
+// ============================================================================
+// True-Jaccard truth context (R3-4)
+//
+// The ground truth for a threshold decision is ExactJaccard >= J_tau, NOT the
+// MinHash match count: comparing the protocol's decision against the match
+// count only re-verifies that BFV evaluation is exact (that check is kept,
+// separately, as fhe_agrees).
+// ============================================================================
+
+struct TruthContext {
+    double j_true = -1.0;          // ExactJaccard(sa, sb)
+    double j_tau = -1.0;           // JaccardThreshold(tau, k, m)
+    int64_t match_count = -1;      // plaintext bucket match count
+    int matchcount_expected = -1;  // match_count >= tau  (old "expected")
+    int truth = -1;                // j_true >= j_tau     (new "expected")
+};
+
+static TruthContext MakeTruthContext(const ThresholdPiccard& engine,
+                                     const std::vector<uint64_t>& sx,
+                                     const std::vector<uint64_t>& sy) {
+    const auto& P = engine.GetParams();
+    TruthContext tc;
+    tc.j_true = ExactJaccard(sx, sy);
+    tc.j_tau = JaccardThreshold(P.threshold_tau, P.k, P.m);
+    auto sig_x = engine.GetPiccard().ComputeSignature(sx);
+    auto sig_y = engine.GetPiccard().ComputeSignature(sy);
+    // BucketMatchCount takes std::min of the two lengths and would silently
+    // truncate a mismatch (the header keeps that behavior deliberately; see
+    // core/threshold_truth.h). OneHotEncoder::Encode rejects any signature
+    // whose length isn't k, so a length mismatch here is a wiring bug --
+    // fail loudly instead of turning it into plausible-looking benchmark
+    // data. NDEBUG strips assert() in this Release build, so this must be a
+    // real runtime check.
+    if (sig_x.size() != P.k || sig_y.size() != P.k) {
+        throw std::runtime_error(
+            "MakeTruthContext: signature length mismatch (sig_x.size()=" +
+            std::to_string(sig_x.size()) + ", sig_y.size()=" +
+            std::to_string(sig_y.size()) + ", k=" + std::to_string(P.k) + ")");
+    }
+    tc.match_count = BucketMatchCount(sig_x, sig_y, P.m);
+    tc.matchcount_expected =
+        (tc.match_count >= static_cast<int64_t>(P.threshold_tau)) ? 1 : 0;
+    tc.truth = (tc.j_true >= tc.j_tau) ? 1 : 0;
+    return tc;
+}
+
+// TP/FP/TN/FN of a decision against the true-Jaccard truth.
+static const char* OutcomeName(int truth, int decision) {
+    if (truth == 1) return decision == 1 ? "TP" : "FN";
+    return decision == 1 ? "FP" : "TN";
 }
 
 // ============================================================================
@@ -103,6 +160,29 @@ struct ThresholdResult {
     double phase_poly_eval_ms_sd = -1.0; double phase_poly_eval_ms_median = 0.0;
     double phase_decrypt_ms_sd = -1.0;   double phase_decrypt_ms_median = 0.0;
     size_t rel_error_eligible_n = 0;
+
+    // True-Jaccard truth columns (R3-4, additive)
+    double j_tau = -1.0;            // Jaccard threshold for (tau, k, m)
+    int64_t match_count = -1;       // plaintext bucket match count
+    int matchcount_expected = -1;   // match_count >= tau (pre-R3-4 "expected")
+    int fhe_agrees = -1;            // FHE decision == matchcount_expected; -1 = no FHE run
+    std::string outcome;            // TP/FP/TN/FN vs true-Jaccard truth; "" = n/a
+    // Hash provenance (plan 9 four-column schema, ComparisonCSVWriter precedent)
+    std::string hash_randomness;    // "resampled"/"fixed"; "" = n/a (e.g. SKIPPED)
+    uint64_t hash_seed = 0;         // actual CRS this row was measured under
+    uint64_t hash_root_seed = 0;    // resampled: derivation root (config.seed);
+                                    // fixed: the CRS actually used (or documented 0)
+    size_t accuracy_trials = 0;     // accuracy samples in this row (1 per-trial, 0 timing)
+
+    // Flooding columns (plan 8 schema, additive)
+    double phase_flood_ms = 0.0;
+    double phase_flood_ms_sd = -1.0;
+    double phase_flood_ms_median = 0.0;
+    uint32_t flood_lambda_stat = 0;
+    uint32_t flood_eval_noise_bits = 0;
+    uint32_t flood_margin_bits = 0;
+    uint32_t flood_noise_bits = 0;
+    uint32_t scaling_mod_size = 0;
 };
 
 class ThresholdCSVWriter {
@@ -143,7 +223,18 @@ public:
               << r.phase_mask_ms_sd << "," << r.phase_mask_ms_median << ","
               << r.phase_poly_eval_ms_sd << "," << r.phase_poly_eval_ms_median << ","
               << r.phase_decrypt_ms_sd << "," << r.phase_decrypt_ms_median << ","
-              << r.rel_error_eligible_n << "\n";
+              << r.rel_error_eligible_n << ","
+              << std::fixed << std::setprecision(6) << r.j_tau << ","
+              << r.match_count << "," << r.matchcount_expected << ","
+              << r.fhe_agrees << "," << r.outcome << ","
+              << r.hash_randomness << "," << r.hash_seed << ","
+              << r.hash_root_seed << "," << r.accuracy_trials << ","
+              << std::fixed << std::setprecision(3)
+              << r.phase_flood_ms << "," << r.phase_flood_ms_sd << ","
+              << r.phase_flood_ms_median << ","
+              << r.flood_lambda_stat << "," << r.flood_eval_noise_bits << ","
+              << r.flood_margin_bits << "," << r.flood_noise_bits << ","
+              << r.scaling_mod_size << "\n";
     }
 };
 
@@ -195,7 +286,7 @@ static ThresholdResult RunTimedThreshold(
     const ThresholdPiccard& engine,
     const std::vector<uint64_t>& set_x,
     const std::vector<uint64_t>& set_y,
-    bool expected_decision,
+    const TruthContext& tc,
     const std::string& label)
 {
     Timer timer;
@@ -257,6 +348,12 @@ static ThresholdResult RunTimedThreshold(
     result = bfv.EvalPolyBFV(result, engine.GetThresholdPoly());
     tr.phase_poly_eval_ms = timer.ElapsedMs();
 
+    // Phase 7.5: Noise flooding (cloud) — mirrors ThresholdPiccard::Evaluate
+    // exit (threshold_piccard.cpp:49): after EvalPolyBFV, NOT rotate-and-sum.
+    timer.Start();
+    result = bfv.Flood(result);
+    tr.phase_flood_ms = timer.ElapsedMs();
+
     // Phase 8: Decrypt
     timer.Start();
     auto values = bfv.Decrypt(result);
@@ -265,11 +362,32 @@ static ThresholdResult RunTimedThreshold(
 
     tr.total_ms = tr.phase_minhash_ms + tr.phase_encode_ms + tr.phase_encrypt_ms +
                   tr.phase_multiply_ms + tr.phase_rotate_sum_ms + tr.phase_mask_ms +
-                  tr.phase_poly_eval_ms + tr.phase_decrypt_ms;
+                  tr.phase_poly_eval_ms + tr.phase_flood_ms + tr.phase_decrypt_ms;
+
+    // flood_lambda_stat keeps plan 8's historical CSV column name; the value
+    // comes from the post-rework compatibility bridge (lambda_stat is gone).
+    tr.flood_lambda_stat = engine.GetParams().LegacyFloodCoefficientBits();
+    tr.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    tr.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    tr.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    tr.scaling_mod_size = engine.GetParams().scaling_mod_size;
     tr.memory_bytes = MemoryTracker::GetPeakRSS();
     tr.threshold_result = decision ? 1 : 0;
-    tr.threshold_expected = expected_decision ? 1 : 0;
-    tr.threshold_correct = (decision == expected_decision) ? 1 : 0;
+    tr.threshold_expected = tc.truth;
+    tr.threshold_correct = ((decision ? 1 : 0) == tc.truth) ? 1 : 0;
+    tr.jaccard_expected = tc.j_true;
+    tr.j_tau = tc.j_tau;
+    tr.match_count = tc.match_count;
+    tr.matchcount_expected = tc.matchcount_expected;
+    tr.fhe_agrees = ((decision ? 1 : 0) == tc.matchcount_expected) ? 1 : 0;
+    tr.outcome = OutcomeName(tc.truth, decision ? 1 : 0);
+    // Timing provenance (plan 9-2 convention): timing sweeps run on the
+    // engine's fixed CRS. Record it honestly in BOTH seed fields — the engine
+    // default is 42 regardless of --seed, so config.seed here would be false
+    // provenance. accuracy_trials stays 0 (timing rows claim no accuracy).
+    tr.hash_randomness = "fixed";
+    tr.hash_seed = engine.GetParams().hash_seed;
+    tr.hash_root_seed = engine.GetParams().hash_seed;
 
     return tr;
 }
@@ -282,20 +400,20 @@ static ThresholdResult RunMultiTrialThreshold(
     const ThresholdPiccard& engine,
     const std::vector<uint64_t>& set_x,
     const std::vector<uint64_t>& set_y,
-    bool expected_decision,
+    const TruthContext& tc,
     const std::string& label,
     size_t trials)
 {
     // Warmup (discarded)
-    RunTimedThreshold(engine, set_x, set_y, expected_decision, "warmup");
+    RunTimedThreshold(engine, set_x, set_y, tc, "warmup");
 
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
-    std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_decrypt;
+    std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_flood, v_decrypt;
     size_t ct_size = 0;
     int last_result = 0, last_expected = 0, last_correct = 0;
 
     for (size_t t = 0; t < trials; t++) {
-        auto tr = RunTimedThreshold(engine, set_x, set_y, expected_decision, label);
+        auto tr = RunTimedThreshold(engine, set_x, set_y, tc, label);
         v_total.push_back(tr.total_ms);
         v_minhash.push_back(tr.phase_minhash_ms);
         v_encode.push_back(tr.phase_encode_ms);
@@ -304,6 +422,7 @@ static ThresholdResult RunMultiTrialThreshold(
         v_rotate.push_back(tr.phase_rotate_sum_ms);
         v_mask.push_back(tr.phase_mask_ms);
         v_poly.push_back(tr.phase_poly_eval_ms);
+        v_flood.push_back(tr.phase_flood_ms);
         v_decrypt.push_back(tr.phase_decrypt_ms);
         ct_size = tr.ct_size_bytes;
         last_result = tr.threshold_result;
@@ -319,6 +438,7 @@ static ThresholdResult RunMultiTrialThreshold(
     auto d_rot = ComputeDispersion(v_rotate);
     auto d_msk = ComputeDispersion(v_mask);
     auto d_pol = ComputeDispersion(v_poly);
+    auto d_fld = ComputeDispersion(v_flood);
     auto d_dec = ComputeDispersion(v_decrypt);
 
     ThresholdResult result;
@@ -337,6 +457,7 @@ static ThresholdResult RunMultiTrialThreshold(
     result.phase_rotate_sum_ms = d_rot.mean; result.phase_rotate_sum_ms_sd = d_rot.sd; result.phase_rotate_sum_ms_median = d_rot.median;
     result.phase_mask_ms      = d_msk.mean; result.phase_mask_ms_sd      = d_msk.sd; result.phase_mask_ms_median      = d_msk.median;
     result.phase_poly_eval_ms = d_pol.mean; result.phase_poly_eval_ms_sd = d_pol.sd; result.phase_poly_eval_ms_median = d_pol.median;
+    result.phase_flood_ms     = d_fld.mean; result.phase_flood_ms_sd     = d_fld.sd; result.phase_flood_ms_median     = d_fld.median;
     result.phase_decrypt_ms   = d_dec.mean; result.phase_decrypt_ms_sd   = d_dec.sd; result.phase_decrypt_ms_median   = d_dec.median;
     result.memory_bytes = MemoryTracker::GetPeakRSS();
     result.ct_size_bytes = ct_size;
@@ -346,6 +467,25 @@ static ThresholdResult RunMultiTrialThreshold(
     result.threshold_correct = last_correct;
     // threshold benchmark has no per-trial jaccard fields in timing mode
     result.rel_error_eligible_n = 0;
+
+    result.threshold_expected = tc.truth;
+    result.jaccard_expected = tc.j_true;
+    result.j_tau = tc.j_tau;
+    result.match_count = tc.match_count;
+    result.matchcount_expected = tc.matchcount_expected;
+    result.outcome = OutcomeName(tc.truth, last_result);
+    result.fhe_agrees = (last_result == tc.matchcount_expected) ? 1 : 0;
+    result.hash_randomness = "fixed";
+    result.hash_seed = engine.GetParams().hash_seed;
+    result.hash_root_seed = engine.GetParams().hash_seed;
+
+    // flood_lambda_stat keeps plan 8's historical CSV column name; the value
+    // comes from the post-rework compatibility bridge (lambda_stat is gone).
+    result.flood_lambda_stat = engine.GetParams().LegacyFloodCoefficientBits();
+    result.flood_eval_noise_bits = engine.GetParams().eval_noise_bits;
+    result.flood_margin_bits = engine.GetParams().flood_margin_bits;
+    result.flood_noise_bits = engine.GetParams().FloodNoiseBits();
+    result.scaling_mod_size = engine.GetParams().scaling_mod_size;
 
     return result;
 }
@@ -421,7 +561,6 @@ static void BenchVaryK(const BenchmarkConfig& config,
                        ThresholdCSVWriter& csv) {
     std::vector<uint32_t> all_k = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(sa, sb);
 
     for (uint32_t k : all_k) {
         uint32_t tau = static_cast<uint32_t>(0.6 * k);
@@ -440,12 +579,11 @@ static void BenchVaryK(const BenchmarkConfig& config,
         }
 
         try {
-            // Compute expected threshold using basic protocol
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_k_" + std::to_string(k);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
@@ -479,7 +617,6 @@ static void BenchVaryM(const BenchmarkConfig& config,
     std::vector<uint32_t> m_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256}, config.security_level);
     uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
     auto [sa, sb] = MakeSetsWithOverlap(config.set_size, 0.5);
-    double j_true = ExactJaccard(sa, sb);
 
     for (uint32_t m : m_values) {
         PiccardParams params;
@@ -497,11 +634,11 @@ static void BenchVaryM(const BenchmarkConfig& config,
         }
 
         try {
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_m_" + std::to_string(m);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
@@ -546,14 +683,13 @@ static void BenchVarySetSize(const BenchmarkConfig& config,
 
     for (size_t sz : sizes) {
         auto [sa, sb] = MakeSetsWithOverlap(sz, 0.5);
-        double j_true = ExactJaccard(sa, sb);
 
         try {
-            auto basic_result = engine->GetPiccard().Run(sa, sb);
-            bool expected = basic_result.match_count >= static_cast<int64_t>(tau);
+            // Plaintext truth context: no FHE run needed for a reference bit.
+            auto tc = MakeTruthContext(*engine, sa, sb);
 
             std::string label = "vary_size_" + std::to_string(sz);
-            auto tr = RunMultiTrialThreshold(*engine, sa, sb, expected, label,
+            auto tr = RunMultiTrialThreshold(*engine, sa, sb, tc, label,
                                              config.trials);
             csv.WriteRow(tr);
 
@@ -592,22 +728,41 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
 
         size_t total_correct = 0;
         size_t total_count = 0;
+        size_t total_fp = 0, total_fn = 0, total_disagree = 0;
 
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
                 std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
                 auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
                     config.set_size, frac, rng);
-                double j_true = ExactJaccard(sa, sb);
 
-                auto basic = engine->GetPiccard().Run(sa, sb);
-                bool expected = basic.match_count >= static_cast<int64_t>(tau);
-                double j_hat = basic.jaccard_estimate;
+                // Per-trial CRS (hash-seed-crs convention): resampled by
+                // default so trials are independent draws of the hash family;
+                // --hash_randomness=fixed keeps the engine's CRS for audits.
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : engine->GetParams().hash_seed;
+                engine->SetHashSeed(trial_hash_seed);
 
-                bool result = engine->Run(sa, sb);
-                bool correct = (result == expected);
+                // Ground truth from the exact Jaccard; the match count is kept
+                // separately to certify BFV exactness (fhe_agrees).
+                auto tc = MakeTruthContext(*engine, sa, sb);
+
+                bool result = engine->Run(sa, sb);   // FHE decision
+                bool correct = (result ? 1 : 0) == tc.truth;
                 if (correct) total_correct++;
                 total_count++;
+                if (tc.truth == 0 && result) total_fp++;
+                if (tc.truth == 1 && !result) total_fn++;
+                if ((result ? 1 : 0) != tc.matchcount_expected) total_disagree++;
+
+                // Bias-corrected estimate from the plaintext match count
+                // (identical formula to Piccard::Decrypt).
+                double raw_ratio = static_cast<double>(tc.match_count) / k;
+                double j_hat = (raw_ratio - 1.0 / config.m) /
+                               (1.0 - 1.0 / config.m);
+                j_hat = std::max(0.0, std::min(1.0, j_hat));
 
                 ThresholdResult tr;
                 tr.label = "accuracy_k" + std::to_string(k) +
@@ -620,12 +775,36 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
                 tr.tau = tau;
                 tr.mult_depth = engine->GetParams().mult_depth;
                 tr.threshold_result = result ? 1 : 0;
-                tr.threshold_expected = expected ? 1 : 0;
+                tr.threshold_expected = tc.truth;
                 tr.threshold_correct = correct ? 1 : 0;
                 tr.jaccard_computed = j_hat;
-                tr.jaccard_expected = j_true;
-                tr.jaccard_error = std::abs(j_hat - j_true);
-                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                tr.jaccard_expected = tc.j_true;
+                tr.jaccard_error = std::abs(j_hat - tc.j_true);
+                tr.jaccard_rel_error =
+                    (tc.j_true > 0.0) ? (tr.jaccard_error / tc.j_true) : -1.0;
+                tr.j_tau = tc.j_tau;
+                tr.match_count = tc.match_count;
+                tr.matchcount_expected = tc.matchcount_expected;
+                tr.fhe_agrees =
+                    ((result ? 1 : 0) == tc.matchcount_expected) ? 1 : 0;
+                tr.outcome = OutcomeName(tc.truth, result ? 1 : 0);
+                tr.hash_randomness = HashRandomnessName(config.hash_randomness);
+                tr.hash_seed = trial_hash_seed;
+                // Plan 9 convention: root = config.seed when resampled; in
+                // fixed mode record the CRS actually used — here the engine
+                // default (42), which is NOT config.seed in this path.
+                tr.hash_root_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? config.seed
+                        : trial_hash_seed;
+                tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
@@ -633,8 +812,10 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
         double accuracy = (total_count > 0)
             ? 100.0 * total_correct / total_count : 0.0;
         std::cerr << "  k=" << k << " tau=" << tau
-                  << " accuracy=" << std::fixed << std::setprecision(1)
+                  << " trueJ_acc=" << std::fixed << std::setprecision(1)
                   << accuracy << "%"
+                  << " FP=" << total_fp << " FN=" << total_fn
+                  << " bfv_disagree=" << total_disagree
                   << " (" << total_correct << "/" << total_count << ")\n";
     }
 }
@@ -659,22 +840,41 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config,
 
         size_t total_correct = 0;
         size_t total_count = 0;
+        size_t total_fp = 0, total_fn = 0, total_disagree = 0;
 
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
                 std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
                 auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
                     config.set_size, frac, rng);
-                double j_true = ExactJaccard(sa, sb);
 
-                auto basic = engine->GetPiccard().Run(sa, sb);
-                bool expected = basic.match_count >= static_cast<int64_t>(tau);
-                double j_hat = basic.jaccard_estimate;
+                // Per-trial CRS (hash-seed-crs convention): resampled by
+                // default so trials are independent draws of the hash family;
+                // --hash_randomness=fixed keeps the engine's CRS for audits.
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : engine->GetParams().hash_seed;
+                engine->SetHashSeed(trial_hash_seed);
 
-                bool result = engine->Run(sa, sb);
-                bool correct = (result == expected);
+                // Ground truth from the exact Jaccard; the match count is kept
+                // separately to certify BFV exactness (fhe_agrees).
+                auto tc = MakeTruthContext(*engine, sa, sb);
+
+                bool result = engine->Run(sa, sb);   // FHE decision
+                bool correct = (result ? 1 : 0) == tc.truth;
                 if (correct) total_correct++;
                 total_count++;
+                if (tc.truth == 0 && result) total_fp++;
+                if (tc.truth == 1 && !result) total_fn++;
+                if ((result ? 1 : 0) != tc.matchcount_expected) total_disagree++;
+
+                // Bias-corrected estimate from the plaintext match count
+                // (identical formula to Piccard::Decrypt).
+                double raw_ratio = static_cast<double>(tc.match_count) / config.k;
+                double j_hat = (raw_ratio - 1.0 / m) /
+                               (1.0 - 1.0 / m);
+                j_hat = std::max(0.0, std::min(1.0, j_hat));
 
                 ThresholdResult tr;
                 tr.label = "accuracy_m" + std::to_string(m) +
@@ -687,21 +887,47 @@ static void BenchAccuracyVaryM(const BenchmarkConfig& config,
                 tr.tau = tau;
                 tr.mult_depth = engine->GetParams().mult_depth;
                 tr.threshold_result = result ? 1 : 0;
-                tr.threshold_expected = expected ? 1 : 0;
+                tr.threshold_expected = tc.truth;
                 tr.threshold_correct = correct ? 1 : 0;
                 tr.jaccard_computed = j_hat;
-                tr.jaccard_expected = j_true;
-                tr.jaccard_error = std::abs(j_hat - j_true);
-                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                tr.jaccard_expected = tc.j_true;
+                tr.jaccard_error = std::abs(j_hat - tc.j_true);
+                tr.jaccard_rel_error =
+                    (tc.j_true > 0.0) ? (tr.jaccard_error / tc.j_true) : -1.0;
+                tr.j_tau = tc.j_tau;
+                tr.match_count = tc.match_count;
+                tr.matchcount_expected = tc.matchcount_expected;
+                tr.fhe_agrees =
+                    ((result ? 1 : 0) == tc.matchcount_expected) ? 1 : 0;
+                tr.outcome = OutcomeName(tc.truth, result ? 1 : 0);
+                tr.hash_randomness = HashRandomnessName(config.hash_randomness);
+                tr.hash_seed = trial_hash_seed;
+                // Plan 9 convention: root = config.seed when resampled; in
+                // fixed mode record the CRS actually used — here the engine
+                // default (42), which is NOT config.seed in this path.
+                tr.hash_root_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? config.seed
+                        : trial_hash_seed;
+                tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
 
         double accuracy = (total_count > 0)
             ? 100.0 * total_correct / total_count : 0.0;
-        std::cerr << "  m=" << m
-                  << " accuracy=" << std::fixed << std::setprecision(1)
+        std::cerr << "  m=" << m << " tau=" << tau
+                  << " trueJ_acc=" << std::fixed << std::setprecision(1)
                   << accuracy << "%"
+                  << " FP=" << total_fp << " FN=" << total_fn
+                  << " bfv_disagree=" << total_disagree
                   << " (" << total_correct << "/" << total_count << ")\n";
     }
 }
@@ -726,21 +952,40 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
     for (size_t sz : sizes) {
         size_t total_correct = 0;
         size_t total_count = 0;
+        size_t total_fp = 0, total_fn = 0, total_disagree = 0;
 
         for (double frac : overlaps) {
             for (size_t t = 0; t < config.trials; t++) {
                 std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
                 auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(sz, frac, rng);
-                double j_true = ExactJaccard(sa, sb);
 
-                auto basic = engine->GetPiccard().Run(sa, sb);
-                bool expected = basic.match_count >= static_cast<int64_t>(tau);
-                double j_hat = basic.jaccard_estimate;
+                // Per-trial CRS (hash-seed-crs convention): resampled by
+                // default so trials are independent draws of the hash family;
+                // --hash_randomness=fixed keeps the engine's CRS for audits.
+                const uint64_t trial_hash_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, frac)
+                        : engine->GetParams().hash_seed;
+                engine->SetHashSeed(trial_hash_seed);
 
-                bool result = engine->Run(sa, sb);
-                bool correct = (result == expected);
+                // Ground truth from the exact Jaccard; the match count is kept
+                // separately to certify BFV exactness (fhe_agrees).
+                auto tc = MakeTruthContext(*engine, sa, sb);
+
+                bool result = engine->Run(sa, sb);   // FHE decision
+                bool correct = (result ? 1 : 0) == tc.truth;
                 if (correct) total_correct++;
                 total_count++;
+                if (tc.truth == 0 && result) total_fp++;
+                if (tc.truth == 1 && !result) total_fn++;
+                if ((result ? 1 : 0) != tc.matchcount_expected) total_disagree++;
+
+                // Bias-corrected estimate from the plaintext match count
+                // (identical formula to Piccard::Decrypt).
+                double raw_ratio = static_cast<double>(tc.match_count) / config.k;
+                double j_hat = (raw_ratio - 1.0 / config.m) /
+                               (1.0 - 1.0 / config.m);
+                j_hat = std::max(0.0, std::min(1.0, j_hat));
 
                 ThresholdResult tr;
                 tr.label = "accuracy_size" + std::to_string(sz) +
@@ -753,22 +998,221 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config,
                 tr.tau = tau;
                 tr.mult_depth = engine->GetParams().mult_depth;
                 tr.threshold_result = result ? 1 : 0;
-                tr.threshold_expected = expected ? 1 : 0;
+                tr.threshold_expected = tc.truth;
                 tr.threshold_correct = correct ? 1 : 0;
                 tr.jaccard_computed = j_hat;
-                tr.jaccard_expected = j_true;
-                tr.jaccard_error = std::abs(j_hat - j_true);
-                tr.jaccard_rel_error = (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                tr.jaccard_expected = tc.j_true;
+                tr.jaccard_error = std::abs(j_hat - tc.j_true);
+                tr.jaccard_rel_error =
+                    (tc.j_true > 0.0) ? (tr.jaccard_error / tc.j_true) : -1.0;
+                tr.j_tau = tc.j_tau;
+                tr.match_count = tc.match_count;
+                tr.matchcount_expected = tc.matchcount_expected;
+                tr.fhe_agrees =
+                    ((result ? 1 : 0) == tc.matchcount_expected) ? 1 : 0;
+                tr.outcome = OutcomeName(tc.truth, result ? 1 : 0);
+                tr.hash_randomness = HashRandomnessName(config.hash_randomness);
+                tr.hash_seed = trial_hash_seed;
+                // Plan 9 convention: root = config.seed when resampled; in
+                // fixed mode record the CRS actually used — here the engine
+                // default (42), which is NOT config.seed in this path.
+                tr.hash_root_seed =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? config.seed
+                        : trial_hash_seed;
+                tr.accuracy_trials = 1;   // one accuracy sample per row
+                // phase_flood_ms stays 0: the accuracy path floods inside
+                // engine->Run() (library exit) and is not phase-timed.
+                tr.flood_lambda_stat = engine->GetParams().LegacyFloodCoefficientBits();
+                tr.flood_eval_noise_bits = engine->GetParams().eval_noise_bits;
+                tr.flood_margin_bits = engine->GetParams().flood_margin_bits;
+                tr.flood_noise_bits = engine->GetParams().FloodNoiseBits();
+                tr.scaling_mod_size = engine->GetParams().scaling_mod_size;
                 csv.WriteRow(tr);
             }
         }
 
         double accuracy = (total_count > 0)
             ? 100.0 * total_correct / total_count : 0.0;
-        std::cerr << "  size=" << sz
-                  << " accuracy=" << std::fixed << std::setprecision(1)
+        std::cerr << "  size=" << sz << " tau=" << tau
+                  << " trueJ_acc=" << std::fixed << std::setprecision(1)
                   << accuracy << "%"
+                  << " FP=" << total_fp << " FN=" << total_fn
+                  << " bfv_disagree=" << total_disagree
                   << " (" << total_correct << "/" << total_count << ")\n";
+    }
+}
+
+// ============================================================================
+// FP/FN boundary sweep (R3-4) -- Layer A: plaintext-only statistics
+//
+// The FP/FN behaviour of the threshold decision is a property of the MinHash
+// estimator, not of BFV (Layer B certifies fhe_agrees == 1 separately). So
+// this sweep runs entirely on plaintext signatures, which makes thousands of
+// trials per grid point affordable, densely sampled inside J_tau +/- 3 sigma
+// where the decision error actually lives.
+// ============================================================================
+
+static void BenchFpfnVaryK(const BenchmarkConfig& config,
+                           ThresholdCSVWriter& csv) {
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
+        {16, 32, 64, 128, 256, 512}, config.security_level);
+    const uint32_t m = config.m;
+    const int kPoints = 21;
+
+    for (uint32_t k : k_values) {
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
+        const double j_tau = JaccardThreshold(tau, k, m);
+        const double sigma = JaccardEstimatorSigma(j_tau, k, m);
+
+        size_t n_fp = 0, n_fn = 0, n_neg = 0, n_pos = 0;
+
+        for (int p = 0; p < kPoints; p++) {
+            // Evenly spaced on [J_tau - 3 sigma, J_tau + 3 sigma]
+            double z = 3.0 * (2.0 * p / (kPoints - 1) - 1.0);
+            double j_target = j_tau + z * sigma;
+            j_target = std::max(0.02, std::min(0.98, j_target));
+            double alpha = 2.0 * j_target / (1.0 + j_target);
+
+            for (size_t t = 0; t < config.trials; t++) {
+                std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, alpha));
+                auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
+                    config.set_size, alpha, rng);
+                double j_true = ExactJaccard(sa, sb);
+
+                const uint64_t crs =
+                    (config.hash_randomness == HashRandomness::Resampled)
+                        ? HashTrialSeed(config.seed, t, alpha)
+                        : config.seed;
+                MinHasher hasher(k, UINT64_MAX, crs);
+                auto sig_x = hasher.ComputeSignature(sa);
+                auto sig_y = hasher.ComputeSignature(sb);
+
+                int64_t mc = BucketMatchCount(sig_x, sig_y, m);
+                int decision = (mc >= static_cast<int64_t>(tau)) ? 1 : 0;
+                int truth = (j_true >= j_tau) ? 1 : 0;
+
+                if (truth) { n_pos++; if (!decision) n_fn++; }
+                else       { n_neg++; if (decision)  n_fp++; }
+
+                double raw_ratio = static_cast<double>(mc) / k;
+                double j_hat = (raw_ratio - 1.0 / m) / (1.0 - 1.0 / m);
+                j_hat = std::max(0.0, std::min(1.0, j_hat));
+
+                ThresholdResult tr;
+                tr.label = "fpfn_k" + std::to_string(k) +
+                           "_p" + std::to_string(p) +
+                           "_t" + std::to_string(t);
+                tr.k = k;
+                tr.m = m;
+                tr.set_size = config.set_size;
+                tr.ring_dim = 0;              // plaintext: no FHE instance
+                tr.tau = tau;
+                tr.mult_depth = 0;
+                tr.threshold_result = decision;
+                tr.threshold_expected = truth;
+                tr.threshold_correct = (decision == truth) ? 1 : 0;
+                tr.jaccard_computed = j_hat;
+                tr.jaccard_expected = j_true;
+                tr.jaccard_error = std::abs(j_hat - j_true);
+                tr.jaccard_rel_error =
+                    (j_true > 0.0) ? (tr.jaccard_error / j_true) : -1.0;
+                tr.j_tau = j_tau;
+                tr.match_count = mc;
+                tr.matchcount_expected = decision;  // identical by construction
+                tr.fhe_agrees = -1;                 // no FHE in this mode
+                tr.outcome = OutcomeName(truth, decision);
+                tr.hash_randomness = HashRandomnessName(config.hash_randomness);
+                tr.hash_seed = crs;
+                // Both modes: config.seed is true provenance here. Resampled:
+                // it is the derivation root of HashTrialSeed. Fixed: the
+                // hasher above is constructed with config.seed directly, so
+                // it IS the actual CRS (no engine default in this mode).
+                tr.hash_root_seed = config.seed;
+                tr.accuracy_trials = 1;
+                // Flood fields keep their defaults (means/constants 0, sd -1):
+                // plaintext-only mode, no sized params — FloodNoiseBits()
+                // must not be called here (Task 5b Step 4).
+                csv.WriteRow(tr);
+            }
+        }
+
+        std::cerr << "  k=" << k << " tau=" << tau
+                  << std::fixed << std::setprecision(4)
+                  << " J_tau=" << j_tau << " sigma=" << sigma
+                  << " FP=" << n_fp << "/" << n_neg
+                  << " FN=" << n_fn << "/" << n_pos << "\n";
+    }
+}
+
+// ============================================================================
+// u_tau construction & evaluation parameter dump (R3-4 paper table)
+// ============================================================================
+
+static void BenchSpecDump(const BenchmarkConfig& config) {
+    std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
+        {16, 32, 64, 128, 256, 512}, config.security_level);
+
+    std::cout << "k,tau,degree,ps_baby_s,ps_num_chunks,baby_depth,giant_mults,"
+              << "natural_mult_depth,mult_depth,scaling_mod_size,ring_dim,"
+              << "plaintext_mod,log2_q,eval_noise_bits,flood_noise_bits,"
+              << "ct_bytes,poly_build_ms,status,note\n";
+
+    for (uint32_t k : k_values) {
+        uint32_t tau = static_cast<uint32_t>(0.6 * k);
+
+        // Paterson-Stockmeyer shape for degree k -- mirrors
+        // PiccardParams::DeriveWithoutFlooding / BFVContext::EvalPolyBFV.
+        uint32_t s = 1;
+        while (s * s < k + 1) s++;
+        uint32_t baby_depth = 0;
+        for (uint32_t v = s; v > 1;) {
+            baby_depth++;
+            if (v % 2 == 1) v--; else v /= 2;
+        }
+        uint32_t num_chunks = (k + s) / s;
+        uint32_t giant_mults = num_chunks - 1;
+
+        PiccardParams params;
+        std::string error;
+        auto engine = TryCreateThresholdEngine(k, config.m, tau,
+                                               config.security_level,
+                                               params, error);
+        if (!engine) {
+            std::cout << k << "," << tau << "," << k << "," << s << ","
+                      << num_chunks << "," << baby_depth << "," << giant_mults
+                      << "," << params.natural_mult_depth << ",-1,-1,-1,-1,-1,"
+                      << "-1,-1,-1,-1,SKIPPED," << SanitizeNote(error) << "\n";
+            std::cerr << "  k=" << k << " SKIPPED: " << error << "\n";
+            continue;
+        }
+
+        const auto& P = engine->GetParams();
+        Timer timer;
+        timer.Start();
+        auto poly = BuildThresholdPoly(tau, k, P.plaintext_mod);
+        double poly_ms = timer.ElapsedMs();
+
+        auto log2_q = engine->GetBFVContext().GetCryptoContext()
+                          ->GetCryptoParameters()->GetElementParams()
+                          ->GetModulus().GetMSB();
+
+        std::vector<uint64_t> probe(100);
+        for (uint64_t i = 0; i < 100; i++) probe[i] = i;
+        auto ct = engine->Encrypt(probe);
+        size_t ct_bytes = CiphertextSizer::GetSerializedSize(ct);
+
+        std::cout << k << "," << tau << "," << (poly.size() - 1) << "," << s
+                  << "," << num_chunks << "," << baby_depth << ","
+                  << giant_mults << "," << P.natural_mult_depth << ","
+                  << P.mult_depth << "," << P.scaling_mod_size << ","
+                  << P.ring_dim << "," << P.plaintext_mod << "," << log2_q
+                  << "," << P.eval_noise_bits << "," << P.FloodNoiseBits()
+                  << "," << ct_bytes << "," << std::fixed
+                  << std::setprecision(1) << poly_ms << ",ok,\n";
+        std::cerr << "  k=" << k << " depth=" << P.natural_mult_depth << "->"
+                  << P.mult_depth << " N=" << P.ring_dim
+                  << " log2q=" << log2_q << "\n";
     }
 }
 
@@ -784,7 +1228,7 @@ int main(int argc, char** argv) {
                   << "  --m=N              One-hot bucket size (default: 64)\n"
                   << "  --set_size=N       Size of each party's set (default: 100)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
-                  << "  --mode=MODE        'accuracy' or 'timing' (default: timing)\n"
+                  << "  --mode=MODE        'accuracy', 'timing', 'fpfn', or 'spec' (default: timing)\n"
                   << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
         return 0;
     }
@@ -793,7 +1237,9 @@ int main(int argc, char** argv) {
     config.Print();
 
     ThresholdCSVWriter csv;
-    csv.WriteHeader();
+    if (config.mode != "spec") {
+        csv.WriteHeader();
+    }
 
     if (config.mode == "timing") {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";
@@ -813,6 +1259,13 @@ int main(int argc, char** argv) {
 
         std::cerr << "\n=== Accuracy vs set size ===\n";
         BenchAccuracyVarySetSize(config, csv);
+    } else if (config.mode == "fpfn") {
+        std::cerr << "\n=== Boundary FP/FN vs k (" << config.trials
+                  << " trials/point, plaintext MinHash) ===\n";
+        BenchFpfnVaryK(config, csv);
+    } else if (config.mode == "spec") {
+        std::cerr << "\n=== u_tau spec dump ===\n";
+        BenchSpecDump(config);
     }
 
     return 0;

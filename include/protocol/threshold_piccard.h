@@ -15,6 +15,12 @@ public:
 
     void KeyGen();
 
+    // Forwarded CRS reseed (see Piccard::SetHashSeed): rebuilds the MinHasher
+    // only. BFV keys and the threshold polynomial do not depend on the hash
+    // family, so accuracy trials can resample the CRS without re-running
+    // KeyGen or rebuilding u_tau.
+    void SetHashSeed(uint64_t seed) { piccard_.SetHashSeed(seed); }
+
     lbcrypto::Ciphertext<lbcrypto::DCRTPoly>
     Encrypt(const std::vector<uint64_t>& set) const;
 

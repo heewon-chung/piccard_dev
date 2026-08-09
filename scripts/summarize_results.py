@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-summarize_results.py — Parse benchmark CSVs and produce 26 comparison tables.
+summarize_results.py — Parse benchmark CSVs and produce 28 comparison tables.
 
 Usage:
     python3 scripts/summarize_results.py results/<dir>/csv
@@ -16,6 +16,7 @@ import math
 import re
 import sys
 from collections import defaultdict
+from math import comb, sqrt
 from pathlib import Path
 
 
@@ -1127,7 +1128,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
 
     headers = ["Label", "Tri", "k", "m", "n", "N", "tau", "Depth",
                "MinHash", "Encode", "Encrypt", "Multiply",
-               "RotSum", "Mask", "PolyEval", "Decrypt",
+               "RotSum", "Mask", "PolyEval", "Flood", "Decrypt",
                "Total (ms)", "CT Size"]
     rows = []
     for r in rows_data:
@@ -1147,6 +1148,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
             fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
             fmt_disp(r, "phase_mask_ms", ci=ci),
             fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+            fmt_disp(r, "phase_flood_ms", ci=ci),
             fmt_disp(r, "phase_decrypt_ms", ci=ci),
             fmt_disp(r, "total_ms", ci=ci),
             fmt_bytes(r.get("ct_size_bytes", "0")),
@@ -1160,7 +1162,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
         param_label = param_map.get(scenario, "Param")
         lh = [param_label, "$n$", "$N$", "Trials", "$\\tau$", "Depth",
               "MinHash", "Encode", "Encrypt", "Multiply",
-              "RotSum", "Mask", "PolyEval", "Decrypt",
+              "RotSum", "Mask", "PolyEval", "Flood", "Decrypt",
               "Total (ms)", "CT Size"]
         lr = []
         for r in rows_data:
@@ -1177,6 +1179,7 @@ def table_threshold_timing(data, scenario, tnum, title, latex=False, ci=False):
                 fmt_disp(r, "phase_rotate_sum_ms", ci=ci),
                 fmt_disp(r, "phase_mask_ms", ci=ci),
                 fmt_disp(r, "phase_poly_eval_ms", ci=ci),
+                fmt_disp(r, "phase_flood_ms", ci=ci),
                 fmt_disp(r, "phase_decrypt_ms", ci=ci),
                 fmt_disp(r, "total_ms", ci=ci),
                 fmt_bytes(r.get("ct_size_bytes", "0")),
@@ -1209,9 +1212,8 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
     if not groups:
         return
 
-    headers = [param_name, "Trials", "Thresh Acc",
-               "Mean |J err|", "Max |J err|", "RMSE J",
-               "Mean Rel Err"]
+    headers = [param_name, "Trials", "True-J Acc", "FP", "FN", "BFV Agree",
+               "Mean |J err|", "Max |J err|", "RMSE J", "Mean Rel Err"]
     rows = []
     for pval in sorted(groups.keys(), key=lambda s: float(s)):
         trials = groups[pval]
@@ -1220,6 +1222,22 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         # Threshold correctness
         correct = sum(1 for r in trials if r.get("threshold_correct", "0") == "1")
         thresh_acc = f"{correct / n:.3f}" if n > 0 else "N/A"
+
+        # New-format columns (R3-4). Old CSVs lack them: fall back to N/A so
+        # historical results still render.
+        n_fp = sum(1 for r in trials if r.get("outcome") == "FP")
+        n_fn = sum(1 for r in trials if r.get("outcome") == "FN")
+        agrees = [int(r["fhe_agrees"]) for r in trials
+                  if r.get("fhe_agrees", "") not in ("", "-1")]
+        bfv_agree = f"{sum(agrees) / len(agrees):.3f}" if agrees else "N/A"
+        has_outcome = any(r.get("outcome") for r in trials)
+        fp_s = str(n_fp) if has_outcome else "N/A"
+        fn_s = str(n_fn) if has_outcome else "N/A"
+        if not has_outcome:
+            # Old CSVs: threshold_correct is the *tautological* match-count
+            # accuracy — the very number R3-4 rejects. Never present it
+            # under the True-J Acc header.
+            thresh_acc = "N/A"
 
         # Jaccard error stats
         errors = [abs(float(r.get("jaccard_error", "0"))) for r in trials]
@@ -1232,7 +1250,7 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         mean_rel = f"{sum(valid_rel) / len(valid_rel):.4f}" if valid_rel else "N/A"
 
         rows.append([
-            pval, str(n), thresh_acc,
+            pval, str(n), thresh_acc, fp_s, fn_s, bfv_agree,
             f"{mean_err:.4f}", f"{max_err:.4f}",
             f"{rmse:.4f}", mean_rel,
         ])
@@ -1243,10 +1261,219 @@ def table_threshold_accuracy(data, param_prefix, param_name, tnum, title, latex=
         print()
         pn = f"${param_name}$" if len(param_name) <= 2 else param_name
         tab_id = param_prefix.replace("accuracy_", "")
-        lh = [pn, "Trials", "Thresh Acc",
+        lh = [pn, "Trials", "True-$J$ Acc", "FP", "FN", "BFV Agr.",
               "Mean $|\\epsilon_J|$", "Max $|\\epsilon_J|$", "RMSE",
               "Mean Rel Err"]
         print_latex_table(title, f"tab:threshold-accuracy-{tab_id}", lh, rows)
+
+
+# ── T27: Threshold FP/FN near the true-Jaccard boundary ─────────────
+
+def _binom_sf(tau, k, q):
+    """P[Binom(k, q) >= tau]; stdlib only (no scipy on the bench machines)."""
+    if q <= 0.0:
+        return 1.0 if tau <= 0 else 0.0
+    if q >= 1.0:
+        return 1.0
+    return sum(comb(k, i) * (q ** i) * ((1.0 - q) ** (k - i))
+               for i in range(tau, k + 1))
+
+
+def _decide_prob_theory(j, k, tau, m):
+    """P(protocol decides 1 | true Jaccard j): match_count ~ Binom(k, q(j))."""
+    q = j + (1.0 - j) / m
+    return _binom_sf(tau, k, q)
+
+
+def _wilson(p_hat, n, z=1.96):
+    """Wilson score interval for a binomial proportion."""
+    if n == 0:
+        return (0.0, 1.0)
+    denom = 1.0 + z * z / n
+    center = (p_hat + z * z / (2 * n)) / denom
+    half = z * sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+_FPFN_POINT_RE = re.compile(r"^fpfn_k(\d+)_p(\d+)_t\d+$")
+
+
+def table_threshold_fpfn(data, tnum, title, latex=False):
+    """FP/FN vs true Jaccard near the boundary, with an idealized binomial
+    theory overlay (exact only under ideal minwise hashing; the SHA-256
+    rank-hashing family approximates it).
+
+    Summary per k: FP rate over true negatives, FN rate over true positives
+    (each with a Wilson 95% CI), precision, recall, and the same rates
+    predicted by match_count ~ Binom(k, q(J)) on the *sampled* J values.
+    Curve per k: 0.5-sigma bins of z = (J - J_tau)/sigma_J with empirical and
+    theoretical P(decide = 1). The two edge bins absorb clamped |z| >= 2.5
+    outliers (including the z = +3 endpoint) and are labeled open-ended.
+    """
+    rows_in = [r for r in data if r.get("label", "").startswith("fpfn_")]
+    if not rows_in:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    by_k = defaultdict(list)
+    for r in rows_in:
+        by_k[int(r["k"])].append(r)
+
+    sum_headers = ["k", "tau", "J_tau", "sigma_J", "Total n", "Trials/pt",
+                   "FP rate [95% CI]", "FN rate [95% CI]",
+                   "Prec", "Rec", "Idz.FP", "Idz.FN"]
+    sum_rows = []
+    curve_blocks = []
+
+    for k in sorted(by_k):
+        rows = by_k[k]
+        tau = int(rows[0]["tau"])
+        m = int(rows[0]["m"])
+        j_tau = float(rows[0]["j_tau"])
+        q_tau = j_tau + (1.0 - j_tau) / m
+        sigma = sqrt(q_tau * (1.0 - q_tau) / k) / (1.0 - 1.0 / m)
+
+        tp = fp = tn = fn = 0
+        th_fp_sum = th_fn_sum = 0.0
+        bins = defaultdict(lambda: [0, 0, 0.0, 0.0])  # z-bin -> [n, dec1, sumJ, sumTh]
+        for r in rows:
+            j = float(r["jaccard_expected"])
+            dec = int(r["threshold_result"])
+            truth = int(r["threshold_expected"])
+            th = _decide_prob_theory(j, k, tau, m)
+            if truth == 1:
+                th_fn_sum += 1.0 - th
+                if dec == 1: tp += 1
+                else: fn += 1
+            else:
+                th_fp_sum += th
+                if dec == 1: fp += 1
+                else: tn += 1
+            z = (j - j_tau) / sigma if sigma > 0 else 0.0
+            b = max(-6, min(5, int(math.floor(z / 0.5))))  # 12 bins over [-3, 3)
+            cell = bins[b]
+            cell[0] += 1; cell[1] += dec; cell[2] += j; cell[3] += th
+
+        n_neg, n_pos = fp + tn, tp + fn
+        if n_neg:
+            fp_rate = fp / n_neg
+            fp_lo, fp_hi = _wilson(fp_rate, n_neg)
+            fp_cell = f"{fp_rate:.4f} [{fp_lo:.4f},{fp_hi:.4f}]"
+        else:
+            fp_cell = "N/A"
+        if n_pos:
+            fn_rate = fn / n_pos
+            fn_lo, fn_hi = _wilson(fn_rate, n_pos)
+            fn_cell = f"{fn_rate:.4f} [{fn_lo:.4f},{fn_hi:.4f}]"
+        else:
+            fn_cell = "N/A"
+        prec_cell = f"{tp / (tp + fp):.4f}" if (tp + fp) else "N/A"
+        rec_cell = f"{tp / (tp + fn):.4f}" if (tp + fn) else "N/A"
+
+        # Per-point trial count: labels are fpfn_k{k}_p{p}_t{t}, so group by
+        # the point id (p) the same way the trial id (t) split is used
+        # elsewhere. len(rows) is the *total* n across all points for this
+        # k (Trials/pt x number of points), which is easy to mistake for the
+        # per-point sample size the R3-4 commitment is expressed against.
+        # A row whose label fails to parse, or whose label-k disagrees with
+        # this group's k, means the data isn't what it claims to be; either
+        # case must force "varies" rather than silently reporting a
+        # possibly-understated uniform count.
+        pt_counts = defaultdict(int)
+        all_matched = True
+        k_agrees = True
+        for r in rows:
+            pm = _FPFN_POINT_RE.match(r.get("label", ""))
+            if pm:
+                if int(pm.group(1)) != k:
+                    k_agrees = False
+                pt_counts[pm.group(2)] += 1
+            else:
+                all_matched = False
+        distinct_counts = set(pt_counts.values())
+        if all_matched and k_agrees and len(distinct_counts) == 1:
+            trials_per_pt = str(distinct_counts.pop())
+        else:
+            trials_per_pt = "varies"
+
+        sum_rows.append([
+            str(k), str(tau), f"{j_tau:.4f}", f"{sigma:.4f}", str(len(rows)), trials_per_pt,
+            fp_cell, fn_cell, prec_cell, rec_cell,
+            f"{th_fp_sum / n_neg:.4f}" if n_neg else "N/A",
+            f"{th_fn_sum / n_pos:.4f}" if n_pos else "N/A",
+        ])
+
+        c_rows = []
+        for b in sorted(bins):
+            n, d1, sj, sth = bins[b]
+            # The clamp above folds z <= -3 into bin -6 and z >= +3 (incl. the
+            # exact +3 endpoint) into bin 5; a half-open [+2.5,+3.0) label
+            # would misdescribe those rows, so the edge bins are open-ended.
+            if b == -6:
+                zlab = "(-inf,-2.5)"
+            elif b == 5:
+                zlab = "[+2.5,+inf)"
+            else:
+                zlab = f"[{b * 0.5:+.1f},{(b + 1) * 0.5:+.1f})"
+            c_rows.append([zlab, str(n),
+                           f"{sj / n:.4f}", f"{d1 / n:.4f}", f"{sth / n:.4f}",
+                           f"{abs(d1 / n - sth / n):.4f}"])
+        curve_blocks.append((k, c_rows))
+
+    print_table(sum_headers, sum_rows)
+    for k, c_rows in curve_blocks:
+        print(f"\n  Decision curve, k={k} (z = (J - J_tau)/sigma):")
+        print_table(["z bin", "n", "mean J", "emp P(dec=1)", "idz. theory", "|diff|"],
+                    c_rows)
+
+    if latex:
+        print()
+        lh = ["$k$", r"$\tau$", r"$J_\tau$", r"$\sigma_J$", "Total $n$", "Trials/pt",
+              "FP rate", "FN rate", "Prec.", "Rec.",
+              "FP (idealized)", "FN (idealized)"]
+        print_latex_table(title, "tab:threshold-fpfn", lh, sum_rows)
+
+
+# ── T28: u_tau construction & evaluation parameters ─────────────────
+
+def table_threshold_spec(data, tnum, title, latex=False):
+    """Per-k u_tau spec: degree, Paterson-Stockmeyer shape, depth, modulus,
+    noise/flooding budget. SKIPPED rows carry the infeasibility reason."""
+    if not data:
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"  Table {tnum}: {title}")
+    print(f"{'=' * 70}")
+
+    headers = ["k", "tau", "deg", "PS s", "chunks", "depth(nat)", "depth(prov)",
+               "limb", "N", "p", "log2 q", "eval noise", "flood bits",
+               "ct KB", "status"]
+    rows = []
+    for r in sorted(data, key=lambda r: int(r["k"])):
+        if r.get("status") == "SKIPPED":
+            rows.append([r["k"], r["tau"], r["degree"], r["ps_baby_s"],
+                         r["ps_num_chunks"], r["natural_mult_depth"], "-", "-",
+                         "-", "-", "-", "-", "-", "-",
+                         f"SKIPPED: {r.get('note', '')[:40]}"])
+            continue
+        ct_kb = f"{int(r['ct_bytes']) / 1024:.0f}"
+        rows.append([r["k"], r["tau"], r["degree"], r["ps_baby_s"],
+                     r["ps_num_chunks"], r["natural_mult_depth"],
+                     r["mult_depth"], r["scaling_mod_size"], r["ring_dim"],
+                     r["plaintext_mod"], r["log2_q"], r["eval_noise_bits"],
+                     r["flood_noise_bits"], ct_kb, "ok"])
+    print_table(headers, rows)
+
+    if latex:
+        print()
+        lh = ["$k$", r"$\tau$", r"$\deg u_\tau$", "$s$", "chunks",
+              "depth", "prov.", "limb", "$N$", "$p$", r"$\log_2 q$",
+              "noise", "flood", "ct KB", "status"]
+        print_latex_table(title, "tab:threshold-spec", lh, rows)
 
 
 # ── Save helper ──────────────────────────────────────────────────────
@@ -1270,7 +1497,7 @@ def run_and_save(func, save_path, *args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Summarize Piccard benchmark results (26 tables).")
+        description="Summarize Piccard benchmark results (28 tables).")
     parser.add_argument("results_dir",
                         help="Path to CSV results directory")
     parser.add_argument("--latex", action="store_true",
@@ -1335,6 +1562,8 @@ def main():
         dynamic_accuracy = read_csv(d / f"dynamic_accuracy{suffix}.csv")
         threshold_timing = read_csv(d / f"threshold_timing{suffix}.csv")
         threshold_accuracy = read_csv(d / f"threshold_accuracy{suffix}.csv")
+        threshold_fpfn = read_csv(d / f"threshold_fpfn{suffix}.csv")
+        threshold_spec = read_csv(d / f"threshold_spec{suffix}.csv")
 
         fs = suffix  # file suffix for saved tables
         lx = args.latex
@@ -1438,6 +1667,19 @@ def main():
         run_and_save(table_threshold_accuracy, sp("T26_threshold_accuracy_vary_n"),
                      threshold_accuracy, "accuracy_size", "n", 26,
                      "Threshold Accuracy — Varying n", latex=lx)
+
+        # ── T27: Threshold boundary FP/FN ─────────────────────────
+        run_and_save(table_threshold_fpfn, sp("T27_threshold_fpfn_boundary"),
+                     threshold_fpfn, 27,
+                     "Threshold FP/FN near the true-Jaccard boundary "
+                     "(empirical vs idealized binomial overlay)",
+                     latex=lx)
+
+        # ── T28: u_tau spec ───────────────────────────────────────
+        run_and_save(table_threshold_spec, sp("T28_threshold_spec"),
+                     threshold_spec, 28,
+                     "Threshold polynomial u_tau: construction and "
+                     "evaluation parameters", latex=lx)
 
     if sd:
         saved = [f.name for f in sorted(sd.glob("T*.txt"))]

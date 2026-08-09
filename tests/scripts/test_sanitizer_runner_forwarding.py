@@ -102,6 +102,9 @@ class SanitizerRunnerForwardingTest(unittest.TestCase):
             "--set_size=1000",
             "bench_threshold --mode=accuracy --security=TOY --trials=5 "
             "--set_size=1000",
+            "bench_threshold --mode=fpfn --security=TOY --trials=50 "
+            "--set_size=1000",
+            "bench_threshold --mode=spec --security=TOY",
         ]
         planned = [
             line.strip()
@@ -126,7 +129,7 @@ class SanitizerRunnerForwardingTest(unittest.TestCase):
             for line in completed.stdout.splitlines()
             if line.startswith("  bench_")
         ]
-        self.assertEqual(len(planned), 8)
+        self.assertEqual(len(planned), 10)
         self.assertNotIn("--depth=5", "\n".join(planned))
         for line in planned[:6]:
             self.assertIn("--transcript_stat_bits=40", line)

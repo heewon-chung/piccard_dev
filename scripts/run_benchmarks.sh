@@ -65,6 +65,7 @@ print_env_line() {
 SECURITY_LEVELS=("STD128")
 TIMING_TRIALS=30
 ACCURACY_TRIALS=50
+FPFN_TRIALS=2000        # boundary FP/FN trials per J-grid point
 TAG="paper"
 TRANSCRIPT_STAT_BITS=40
 MAX_QUERIES=1048576
@@ -90,6 +91,7 @@ while [[ $# -gt 0 ]]; do
             SECURITY_LEVELS=("TOY")
             TIMING_TRIALS=2
             ACCURACY_TRIALS=5
+            FPFN_TRIALS=50
             TAG="quick"
             ;;
         --transcript_stat_bits=*)
@@ -241,6 +243,8 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
         echo "  bench_dynamic --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000${DYNAMIC_EXTRA_FLAGS:+ $DYNAMIC_EXTRA_FLAGS} ${SANITIZER_FLAGS[*]}"
         echo "  bench_threshold --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000"
         echo "  bench_threshold --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000"
+        echo "  bench_threshold --mode=fpfn --security=$SECURITY --trials=$FPFN_TRIALS --set_size=1000"
+        echo "  bench_threshold --mode=spec --security=$SECURITY"
     done
     echo "Resolved sanitizer profile: transcript_stat_bits=$TRANSCRIPT_STAT_BITS max_queries=$MAX_QUERIES"
     echo "Resolved results root: $BENCH_RESULTS_ROOT"
@@ -386,6 +390,18 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
             "$BUILD_DIR/bench_threshold" \
             "$CSV_DIR/threshold_accuracy_${SECURITY}.csv" \
             --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000
+
+        # ── 8b. bench_threshold: boundary FP/FN (true-Jaccard, R3-4) ─
+        run_bench "Threshold boundary FP/FN ($SECURITY)" \
+            "$BUILD_DIR/bench_threshold" \
+            "$CSV_DIR/threshold_fpfn_${SECURITY}.csv" \
+            --mode=fpfn --security="$SECURITY" --trials="$FPFN_TRIALS" --set_size=1000
+
+        # ── 8c. bench_threshold: u_tau spec dump (paper table, R3-4) ─
+        run_bench "Threshold u_tau spec ($SECURITY)" \
+            "$BUILD_DIR/bench_threshold" \
+            "$CSV_DIR/threshold_spec_${SECURITY}.csv" \
+            --mode=spec --security="$SECURITY"
     else
         echo "  (bench_threshold not built, skipping)"
     fi
