@@ -11,6 +11,37 @@ if len(sys.argv) != 2:
     raise SystemExit("usage: test_review_comparison_cli.py BENCH_BINARY")
 BENCH_BINARY = pathlib.Path(sys.argv.pop()).resolve()
 
+CANONICAL_TOY_METHODS = (
+    "piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+    "bcg12_exact_ec", "sj16",
+)
+
+
+def _read_be32(data, offset):
+    return int.from_bytes(data[offset:offset + 4], "big"), offset + 4
+
+
+def _read_string(data, offset):
+    length, offset = _read_be32(data, offset)
+    return data[offset:offset + length].decode(), offset + length
+
+
+def _workload_methods(path):
+    data = path.read_bytes()
+    domain = b"piccard-review-workload-v1\0"
+    if not data.startswith(domain):
+        raise AssertionError("workload domain is not canonical")
+    offset = len(domain)
+    _, offset = _read_string(data, offset)  # suite
+    _, offset = _read_string(data, offset)  # profile
+    offset += 7 * 8  # root seed, geometry, and target rational
+    count, offset = _read_be32(data, offset)
+    methods = []
+    for _ in range(count):
+        method, offset = _read_string(data, offset)
+        methods.append(method)
+    return methods
+
 
 class ReviewComparisonCliTest(unittest.TestCase):
     @classmethod
@@ -86,6 +117,26 @@ class ReviewComparisonCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("trial counts do not match the frozen policy", result.stderr)
+
+    def test_toy_smoke_manifest_freezes_canonical_fhe_ind_method_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            command = self.base_command(root)
+            command[command.index(
+                "--methods=piccard,piccard_sqrt,bcg12_mh_ec,bcg12_exact_ec,sj16"
+            )] = "--methods=" + ",".join(CANONICAL_TOY_METHODS)
+            command[-2] = f"--manifest-out={root / 'workload.bin'}"
+            command[-1] = f"--execution-trace-out={root / 'trace.bin'}"
+            result = self.run_cli(command)
+
+            # Workload bytes are durably written before adapter setup.  The
+            # current implementation stops at the frozen-policy gap, so the
+            # missing artifact is the intentional Phase-1 RED signal.
+            manifest = root / "workload.bin"
+            self.assertTrue(manifest.is_file(), result.stderr)
+            self.assertEqual(_workload_methods(manifest),
+                             list(CANONICAL_TOY_METHODS))
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

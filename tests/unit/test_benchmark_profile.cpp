@@ -323,7 +323,7 @@ TEST(BenchmarkProvenance, FheIndKeepsActualBfvAndSanitizerNotApplicable) {
     context.InitializeContextOnly();
 
     ComparisonResult row;
-    row.method = "baseline";
+    row.method = "fhe_ind";
     row.capability = ResolveBaselineCapability(
         BaselineMethod::FheInd, 0, BaselineEvidenceKind::Timing);
     row.ring_dim = context.GetSlotCount();
@@ -335,6 +335,10 @@ TEST(BenchmarkProvenance, FheIndKeepsActualBfvAndSanitizerNotApplicable) {
     const auto cells = CsvCells(SerializeComparisonRow(row, 1, provenance));
 
     EXPECT_EQ(cells[ColumnIndex(header, "sanitizer_model")],
+              "not-applicable");
+    EXPECT_EQ(cells[ColumnIndex(header, "sanitizer_assurance")],
+              "not-applicable");
+    EXPECT_EQ(cells[ColumnIndex(header, "estimator_model")],
               "not-applicable");
     EXPECT_TRUE(cells[ColumnIndex(header, "query_stat_bits")].empty());
     EXPECT_TRUE(cells[ColumnIndex(header, "coefficient_stat_bits")].empty());

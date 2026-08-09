@@ -180,6 +180,11 @@ class SummarizeStdSecurityEvidenceTest(unittest.TestCase):
         self.assertEqual(len(fhe_rows), 2)
         self.assertTrue(all(row["universe"] == "64" for row in fhe_rows))
         self.assertTrue(all(row["bfv_context_fingerprint"] for row in fhe_rows))
+        self.assertTrue(all(row["k"] == "N/A" and row["m"] == "N/A"
+                            for row in fhe_rows))
+        self.assertTrue(all(row["sanitizer_profile"] == "not-applicable"
+                            for row in fhe_rows))
+        self.assertIn("not table-eligible", markdown)
 
     def test_oversize_fhe_cells_are_reported_as_preflight_skips(self):
         fhe_binary = self.tmp / "fhe-ind"

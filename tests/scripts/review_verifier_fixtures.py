@@ -14,6 +14,17 @@ HASH_DOMAINS = {
     2: b"piccard-review-hash-accuracy-v1\0",
 }
 SUITES = {
+    "toy-smoke": {
+        "profile": "toy-smoke",
+        "run_class": "smoke",
+        "methods": (
+            "piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+            "bcg12_exact_ec", "sj16",
+        ),
+        "timing": 1,
+        "accuracy": 1,
+        "seed": 7,
+    },
     "primary-review": {
         "profile": "std128-t40-primary",
         "run_class": "primary",
@@ -63,6 +74,32 @@ def _hash_seed(root_seed, kind, index):
 
 
 def _method_metadata(method, primary):
+    if method == "fhe_ind":
+        target_bits = "128" if primary else "0"
+        profile = "live-BFV-STD128" if primary else "live-BFV-TOY"
+        return {
+            "cryptographic_profile": profile,
+            "nominal_security_bits": target_bits,
+            "security_match": "true",
+            "comparison_eligible": "false",
+            "comparison_scope": "diagnostic-only",
+            "primitive": "bfv-indicator-comparison",
+            "protocol_model": "local-universe-sized-BFV-comparator",
+            "output_semantics": "intersection-indicator-vector",
+            "assurance_scope": "live-bfv-primitive-only",
+            "security_basis": "openfhe-hesea-standard-live-context",
+            "cost_scope": "primitive-only",
+            "precomputation_mode": "not-applicable",
+            "estimator_model": "not-applicable",
+            "sanitizer_model": "not-applicable",
+            "sanitizer_assurance": "not-applicable",
+            "actual_ring_dim": "1024",
+            "log_q_bits": "160.0",
+            "plaintext_modulus": "12289",
+            "num_limbs": "4",
+            "openfhe_version": "1.5.0",
+        }
+
     if method in {"piccard", "piccard_sqrt"}:
         sqrt = method == "piccard_sqrt"
         return {
@@ -164,10 +201,11 @@ def _method_metadata(method, primary):
     }
 
 
-def write_review_fixture(suite, fields, csv_path, workload_path, trace_path):
+def write_review_fixture(suite, fields, csv_path, workload_path, trace_path,
+                         methods=None):
     """Write a canonical empty-set fixture without invoking a benchmark."""
     spec = SUITES[suite]
-    methods = spec["methods"]
+    methods = tuple(spec["methods"] if methods is None else methods)
     records = [(0, 0)]
     records.extend((1, index) for index in range(spec["timing"]))
     records.extend((2, index) for index in range(spec["accuracy"]))
@@ -223,10 +261,13 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path):
                 "method": method,
                 "profile_id": spec["profile"],
                 "run_class": spec["run_class"],
-                "target_security_bits": "128",
+                "target_security_bits": (
+                    "0" if spec["profile"] == "toy-smoke" else "128"
+                ),
                 "secure_division_included": "false",
                 "measurement_kind": (
                     f"fhe-{arm}" if method in {"piccard", "piccard_sqrt"}
+                    else "diagnostic" if method == "fhe_ind"
                     else f"psi-{arm}" if method.startswith("bcg12_")
                     else f"ahe-{arm}"
                 ),
@@ -258,7 +299,7 @@ def write_review_fixture(suite, fields, csv_path, workload_path, trace_path):
                     "piccard", "piccard_sqrt", "bcg12_mh_ff", "bcg12_mh_ec"
                 } else "",
                 "total_ms": "1.000000",
-                "total_ms_sd": "0.100000",
+                "total_ms_sd": "",
                 "total_ms_median": "1.000000",
                 "jaccard_computed": "1.000000",
                 "jaccard_expected": "1.000000",

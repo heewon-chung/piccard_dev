@@ -216,28 +216,60 @@ TEST(BaselineProfile, Sj16PrecomputedRandomizersAreSensitivityOnly) {
 }
 
 TEST(BaselineProfile, FheIndIsOnlyTheLocalBfvDiagnosticPrimitive) {
-    const auto fhe_ind = Capability(BaselineMethod::FheInd, 192);
+    for (const auto target_bits : {0u, 128u, 192u}) {
+        const auto fhe_ind = Capability(BaselineMethod::FheInd, target_bits);
 
-    EXPECT_EQ(fhe_ind.cryptographic_profile, "live-BFV-STD192");
-    EXPECT_EQ(fhe_ind.nominal_security_bits, std::optional<uint32_t>(192));
-    EXPECT_TRUE(fhe_ind.security_match);
-    EXPECT_FALSE(fhe_ind.comparison_eligible);
-    EXPECT_EQ(fhe_ind.primitive, Primitive::BfvIndicatorComparison);
-    EXPECT_EQ(fhe_ind.protocol_model,
-              ProtocolModel::LocalUniverseSizedBfvComparator);
-    EXPECT_EQ(fhe_ind.output_semantics,
-              OutputSemantics::IntersectionIndicatorVector);
-    EXPECT_EQ(fhe_ind.assurance_scope,
-              AssuranceScope::LiveBfvPrimitiveOnly);
-    EXPECT_EQ(fhe_ind.comparison_scope, ComparisonScope::DiagnosticOnly);
-    EXPECT_EQ(fhe_ind.security_basis,
-              SecurityBasis::OpenFheHeseaStandardLiveContext);
-    EXPECT_EQ(fhe_ind.cost_scope, CostScope::PrimitiveOnly);
-    EXPECT_EQ(fhe_ind.precomputation_mode,
-              PrecomputationMode::NotApplicable);
-    EXPECT_FALSE(fhe_ind.secure_division_included);
-    EXPECT_EQ(fhe_ind.measurement_kind,
-              BenchmarkMeasurementKind::Diagnostic);
+        const std::string expected_profile = target_bits == 0
+            ? "live-BFV-TOY"
+            : "live-BFV-STD" + std::to_string(target_bits);
+        EXPECT_EQ(fhe_ind.cryptographic_profile, expected_profile);
+        EXPECT_EQ(fhe_ind.nominal_security_bits,
+                  std::optional<uint32_t>(target_bits));
+        EXPECT_TRUE(fhe_ind.security_match);
+        EXPECT_FALSE(fhe_ind.comparison_eligible);
+        EXPECT_EQ(fhe_ind.primitive, Primitive::BfvIndicatorComparison);
+        EXPECT_EQ(fhe_ind.protocol_model,
+                  ProtocolModel::LocalUniverseSizedBfvComparator);
+        EXPECT_EQ(fhe_ind.output_semantics,
+                  OutputSemantics::IntersectionIndicatorVector);
+        EXPECT_EQ(fhe_ind.assurance_scope,
+                  AssuranceScope::LiveBfvPrimitiveOnly);
+        EXPECT_EQ(fhe_ind.comparison_scope, ComparisonScope::DiagnosticOnly);
+        EXPECT_EQ(fhe_ind.security_basis,
+                  SecurityBasis::OpenFheHeseaStandardLiveContext);
+        EXPECT_EQ(fhe_ind.cost_scope, CostScope::PrimitiveOnly);
+        EXPECT_EQ(fhe_ind.precomputation_mode,
+                  PrecomputationMode::NotApplicable);
+        EXPECT_FALSE(fhe_ind.secure_division_included);
+        EXPECT_EQ(fhe_ind.measurement_kind,
+                  BenchmarkMeasurementKind::Diagnostic);
+    }
+}
+
+TEST(BaselineProfile, FheIndMethodNameIsCanonicalAndLegacyLabelIsRejected) {
+    EXPECT_STREQ(BaselineMethodName(BaselineMethod::FheInd), "fhe_ind");
+
+    ComparisonResult row = BaseComparisonRow();
+    row.method = "baseline";
+    row.capability = Capability(BaselineMethod::FheInd, 128);
+    row.ring_dim = 8192;
+    row.provenance = LiveBfvProvenance();
+    EXPECT_THROW(SerializeComparisonRow(row, 2, row.provenance),
+                 std::logic_error);
+
+    SanitizerMetadata inherited_sanitizer;
+    inherited_sanitizer.model = SanitizerModel::PhaseSmudgingEnc0PocV1;
+    inherited_sanitizer.transcript_stat_bits = 40;
+    inherited_sanitizer.max_queries = UINT64_C(1048576);
+    inherited_sanitizer.query_stat_bits = 60;
+    inherited_sanitizer.coefficient_stat_bits = 73;
+    inherited_sanitizer.flood_margin_bits = 8;
+    inherited_sanitizer.eval_noise_bits = 60;
+    inherited_sanitizer.flood_noise_bits = 141;
+    row.method = "fhe_ind";
+    row.sanitizer = inherited_sanitizer;
+    EXPECT_THROW(SerializeComparisonRow(row, 2, row.provenance),
+                 std::logic_error);
 }
 
 TEST(BaselineProfile, ExactTaxonomyNamesAreStable) {
@@ -258,7 +290,7 @@ TEST(BaselineProfile, ExactTaxonomyNamesAreStable) {
 
 TEST(BaselineProfile, SerializerEmitsTypedFheIndTaxonomyAndLiveProvenance) {
     ComparisonResult row = BaseComparisonRow();
-    row.method = "baseline";
+    row.method = "fhe_ind";
     row.capability = Capability(BaselineMethod::FheInd, 128);
     row.ring_dim = 8192;
     row.provenance = LiveBfvProvenance();
@@ -296,7 +328,7 @@ TEST(BaselineProfile, SerializerEmitsTypedFheIndTaxonomyAndLiveProvenance) {
 
 TEST(BaselineProfile, SerializerPreservesDiagnosticAccuracyArm) {
     ComparisonResult row = BaseComparisonRow();
-    row.method = "baseline";
+    row.method = "fhe_ind";
     row.capability = Capability(
         BaselineMethod::FheInd, 128, BaselineEvidenceKind::Accuracy);
     row.ring_dim = 8192;

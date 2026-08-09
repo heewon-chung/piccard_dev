@@ -50,6 +50,15 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
+    def write_canonical_toy_fixture(self, methods=None):
+        with (EVIDENCE / "work4-phase4-toy-results.csv").open(
+                newline="", encoding="utf-8") as source:
+            fields = next(csv.reader(source))
+        return write_review_fixture(
+            "toy-smoke", fields, self.csv_path,
+            self.workload_path, self.trace_path, methods=methods,
+        )
+
     def assert_rejects_mutation(self, column, value, cause, row_index=0):
         fields, rows = self.read_rows()
         rows[row_index][column] = value
@@ -69,6 +78,27 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"verdict": "PASS"', result.stdout)
         self.assertIn('"rows": 10', result.stdout)
+
+    def test_canonical_toy_fixture_contains_one_diagnostic_fhe_ind_pair(self):
+        rows = self.write_canonical_toy_fixture()
+        self.assertEqual(
+            [row["method"] for row in rows[::2]],
+            ["piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+             "bcg12_exact_ec", "sj16"],
+        )
+        fhe_rows = [row for row in rows if row["method"] == "fhe_ind"]
+        self.assertEqual(len(fhe_rows), 2)
+        self.assertTrue(all(row["k"] == "" and row["m"] == ""
+                            for row in fhe_rows))
+        self.assertTrue(all(row["estimator_model"] == "not-applicable"
+                            for row in fhe_rows))
+        self.assertTrue(all(row["sanitizer_model"] == "not-applicable"
+                            for row in fhe_rows))
+        self.assertTrue(all(row["actual_ring_dim"] == "1024"
+                            for row in fhe_rows))
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"rows": 12', result.stdout)
 
     def test_primary_review_14_row_non_benchmark_fixture_passes(self):
         fields, _ = self.read_rows()
@@ -156,6 +186,50 @@ class ReviewComparisonVerifierTest(unittest.TestCase):
                 result = self.run_verifier()
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(cause, result.stderr)
+
+    def test_fhe_ind_membership_and_legacy_aliases_fail_closed(self):
+        rows = self.write_canonical_toy_fixture()
+        fields, _ = self.read_rows()
+        fhe_timing = next(row for row in rows
+                          if row["method"] == "fhe_ind" and
+                          row["evidence_arm"] == "timing")
+        cases = (
+            ([*rows, dict(fhe_timing)], "duplicate method-kind"),
+            ([row for row in rows if row["method"] != "fhe_ind"],
+             "missing method-kind"),
+            ([dict(row, method="baseline") if row is fhe_timing else dict(row)
+              for row in rows], "unexpected method-kind"),
+        )
+        for mutated, cause in cases:
+            with self.subTest(cause=cause):
+                self.write_rows(fields, mutated)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+
+    def test_manifest_method_order_and_legacy_substitution_are_rejected(self):
+        canonical = ("piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+                     "bcg12_exact_ec", "sj16")
+        for methods, cause in (
+                (canonical[1:] + canonical[:1], "ordered method list"),
+                (("piccard", "baseline", "bcg12_mh_ec", "bcg12_exact_ec",
+                  "sj16", "fhe_ind"), "ordered method list"),
+        ):
+            with self.subTest(methods=methods):
+                self.write_canonical_toy_fixture(methods=methods)
+                result = self.run_verifier()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(cause, result.stderr)
+
+    def test_primary_fixture_never_promotes_diagnostic_fhe_ind(self):
+        fields, _ = self.read_rows()
+        rows = write_review_fixture(
+            "primary-review", fields, self.csv_path,
+            self.workload_path, self.trace_path,
+        )
+        self.assertNotIn("fhe_ind", {row["method"] for row in rows})
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_row_parameters_membership_and_trial_counts_are_exact(self):
         cases = (

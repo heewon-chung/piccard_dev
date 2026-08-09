@@ -150,8 +150,22 @@ class StdSecurityEvidenceRunnerTest(unittest.TestCase):
         self.assertFalse(manifest["cells"]["fhe-ind-std128"]["calibration_started"])
         self.assertEqual(manifest["cells"]["fhe-ind-std128"]["calibration_applicable"],
                          False)
-        self.assertTrue((results / "preflight" / "fhe-ind-std128.json").is_file())
-        self.assertTrue((results / "measurements" / "fhe-ind-std128.csv").is_file())
+        preflight = json.loads(
+            (results / "preflight" / "fhe-ind-std128.json").read_text())
+        self.assertEqual(preflight["method"], "fhe_ind")
+        self.assertEqual(preflight["k"], "N/A")
+        self.assertEqual(preflight["m"], "N/A")
+        self.assertTrue(preflight["diagnostic_only"])
+        self.assertFalse(preflight["table_eligible"])
+        measurement = results / "measurements" / "fhe-ind-std128.csv"
+        self.assertTrue(measurement.is_file())
+        with measurement.open(newline="", encoding="utf-8") as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(row["method"], "fhe_ind")
+        self.assertEqual(row["k"], "N/A")
+        self.assertEqual(row["m"], "N/A")
+        self.assertEqual(row["sanitizer_profile"], "not-applicable")
+        self.assertEqual(row["calibration_origin"], "not-applicable")
 
     def test_oversize_fhe_preflight_skips_before_e2e(self):
         fhe_binary = self.tmp / "fhe-ind"

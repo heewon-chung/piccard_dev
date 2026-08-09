@@ -346,6 +346,17 @@ TEST(EstimatorProvenanceSerializers, ComparisonClassifiesConcreteModes) {
         const std::string serialized =
             SerializeComparisonRow(row, 4, row.provenance);
         const auto cells = CsvCells(serialized);
+        if (c.method == BaselineMethod::FheInd) {
+            EXPECT_EQ(row.method, "fhe_ind");
+            EXPECT_EQ(cells[ColumnIndex(header, "k")], "");
+            EXPECT_EQ(cells[ColumnIndex(header, "m")], "");
+            EXPECT_EQ(cells[ColumnIndex(header, "estimator_model")],
+                      kNotApplicable);
+            EXPECT_EQ(cells[ColumnIndex(header, "sanitizer_model")],
+                      kNotApplicable);
+            EXPECT_EQ(cells[ColumnIndex(header, "actual_ring_dim")],
+                      "8192");
+        }
         EXPECT_EQ(cells[ColumnIndex(header, "measurement_kind")],
                   c.expected_kind);
         EXPECT_EQ(cells[ColumnIndex(header, "protocol_model")],
