@@ -224,7 +224,9 @@ add_library(
 if(OpenFHE_FOUND)
     target_sources(
         piccard_benchmark_serializers
-        PRIVATE benchmarks/benchmark_provenance.cpp
+        PRIVATE
+            benchmarks/benchmark_provenance.cpp
+            benchmarks/baseline_engine.cpp
     )
 endif()
 target_include_directories(
@@ -657,6 +659,22 @@ if(BUILD_TESTS)
             add_executable(test_bfv_context tests/unit/test_bfv_context.cpp)
             target_link_libraries(test_bfv_context piccard_fhe test_main)
             add_test(NAME BFVContext COMMAND test_bfv_context)
+
+            add_executable(
+                test_baseline_engine
+                tests/unit/test_baseline_engine.cpp
+            )
+            target_link_libraries(
+                test_baseline_engine
+                piccard_fhe
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_baseline_engine
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME BaselineEngine COMMAND test_baseline_engine)
 
             add_executable(
                 test_noise_calibration_probe
