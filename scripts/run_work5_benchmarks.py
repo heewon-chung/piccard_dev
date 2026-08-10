@@ -139,6 +139,11 @@ class PhaseBudgetExpired(Work5Error):
 class SubprocessTimedOut(Work5Error):
     """A subprocess used its bounded timeout without completing."""
 
+    def __init__(self, message: str, *, stdout: bytes = b"", stderr: bytes = b""):
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
 
 class SignalAbort(BaseException):
     """Raised only after the active child has been terminated."""
@@ -150,7 +155,7 @@ _ACTIVE_CHILD: subprocess.Popen[bytes] | None = None
 def _signal_abort(signum: int, _frame: Any) -> None:
     global _ACTIVE_CHILD
     if _ACTIVE_CHILD is not None and _ACTIVE_CHILD.poll() is None:
-        _ACTIVE_CHILD.terminate()
+        _signal_process_group(_ACTIVE_CHILD, signal.SIGTERM)
     raise SignalAbort(f"received signal {signum}")
 
 
@@ -213,32 +218,132 @@ def read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def git(*arguments: str) -> str:
-    result = subprocess.run(["git", *arguments], cwd=SOURCE_ROOT, text=True,
-                            capture_output=True, check=False)
+def phase_timeout(deadline: float, *, limit: float = CELL_TIMEOUT_SECONDS) -> float:
+    """Return the only permitted subprocess timeout for the active phase."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PhaseBudgetExpired("parameter phase cap exhausted before subprocess start")
+    return min(float(CELL_TIMEOUT_SECONDS), limit, remaining)
+
+
+def _cleanup_timeout(deadline: float) -> float | None:
+    """Return a bounded cleanup wait that never borrows past the phase cap."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    return min(1.0, remaining)
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def terminate_process_group(process: subprocess.Popen[bytes], deadline: float) -> tuple[bytes, bytes]:
+    """TERM then KILL a process group without waiting on inherited pipe FDs."""
+    stdout = stderr = b""
+    _signal_process_group(process, signal.SIGTERM)
+    cleanup_timeout = _cleanup_timeout(deadline)
+    if cleanup_timeout is None:
+        _signal_process_group(process, signal.SIGKILL)
+        _close_process_pipes(process)
+        return stdout, stderr
+    try:
+        stdout, stderr = process.communicate(timeout=cleanup_timeout)
+        return stdout or b"", stderr or b""
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, bytes) else b""
+        stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
+    _signal_process_group(process, signal.SIGKILL)
+    cleanup_timeout = _cleanup_timeout(deadline)
+    if cleanup_timeout is None:
+        _close_process_pipes(process)
+        return stdout, stderr
+    try:
+        final_stdout, final_stderr = process.communicate(timeout=cleanup_timeout)
+        return final_stdout or stdout or b"", final_stderr or stderr or b""
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout if isinstance(exc.stdout, bytes) else b"") or stdout
+        stderr = (exc.stderr if isinstance(exc.stderr, bytes) else b"") or stderr
+        # A descendant that escaped the group may retain stdout/stderr.  Do not
+        # let that pipe hold terminalization hostage after the producer died.
+        _close_process_pipes(process)
+        cleanup_timeout = _cleanup_timeout(deadline)
+        if cleanup_timeout is None:
+            return stdout, stderr
+        try:
+            process.wait(timeout=cleanup_timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return stdout, stderr
+
+
+def bounded_subprocess(argv: list[str], *, deadline: float, cwd: Path,
+                       env: dict[str, str] | None = None,
+                       limit: float = CELL_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[bytes]:
+    """Run an argv array in its own process group under the phase deadline."""
+    timeout = phase_timeout(deadline, limit=limit)
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        raise Work5Error(f"cannot start subprocess {argv[0]!r}: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = terminate_process_group(process, deadline)
+        raise SubprocessTimedOut("subprocess exceeded bounded phase timeout",
+                                 stdout=stdout, stderr=stderr)
+    except BaseException:
+        terminate_process_group(process, deadline)
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def git(*arguments: str, deadline: float) -> str:
+    test_override = os.environ.get("PICCARD_WORK5_TEST_GIT_EXECUTABLE")
+    if test_override and not is_test_fixture_mode():
+        raise Work5Error("test-only git override is forbidden outside fixture mode")
+    try:
+        result = bounded_subprocess([test_override or "git", *arguments], cwd=SOURCE_ROOT,
+                                    deadline=deadline, env=os.environ.copy())
+    except SubprocessTimedOut as exc:
+        raise PhaseBudgetExpired("parameter phase cap exhausted during source provenance") from exc
     if result.returncode != 0:
-        raise Work5Error(f"git {' '.join(arguments)} failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+        raise Work5Error(f"git {' '.join(arguments)} failed: " +
+                         result.stderr.decode("utf-8", "replace").strip())
+    return result.stdout.decode("utf-8", "replace").strip()
 
 
-def source_identity() -> tuple[str, bool]:
+def source_identity(deadline: float) -> tuple[str, bool]:
     # Untracked evidence is deliberately outside the source identity.  A final
     # evidence run still records a dirty tracked tree and cannot be sealed.
-    return (git("rev-parse", "HEAD"),
-            bool(git("status", "--porcelain=v1", "--untracked-files=no")))
+    return (git("rev-parse", "HEAD", deadline=deadline),
+            bool(git("status", "--porcelain=v1", "--untracked-files=no", deadline=deadline)))
 
 
-def source_provenance() -> dict[str, Any]:
+def source_provenance(deadline: float) -> dict[str, Any]:
     """Pinned source identity used both at creation and resume.
 
     The repository root is canonicalized rather than inferred from an output
     path, which prevents a copied evidence directory from becoming a valid
     continuation under a different checkout.
     """
-    return {"git_sha": git("rev-parse", "HEAD"),
-            "git_tree": git("rev-parse", "HEAD^{tree}"),
-            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve()),
-            "git_dirty": bool(git("status", "--porcelain=v1", "--untracked-files=no"))}
+    return {"git_sha": git("rev-parse", "HEAD", deadline=deadline),
+            "git_tree": git("rev-parse", "HEAD^{tree}", deadline=deadline),
+            "repository_root": str(Path(git("rev-parse", "--show-toplevel", deadline=deadline)).resolve()),
+            "git_dirty": bool(git("status", "--porcelain=v1", "--untracked-files=no", deadline=deadline))}
 
 
 def results_root_digest(root: Path) -> str:
@@ -246,14 +351,16 @@ def results_root_digest(root: Path) -> str:
                                         "results_root": str(root.resolve())}))
 
 
-def compiler_descriptor() -> dict[str, str]:
+def compiler_descriptor(deadline: float) -> dict[str, str]:
     compiler = os.environ.get("CXX", "c++")
     try:
-        result = subprocess.run([compiler, "--version"], text=True,
-                                capture_output=True, check=False, timeout=5)
-        version = (result.stdout or result.stderr).splitlines()
+        result = bounded_subprocess([compiler, "--version"], cwd=SOURCE_ROOT,
+                                    deadline=deadline, env=os.environ.copy())
+        version = (result.stdout or result.stderr).decode("utf-8", "replace").splitlines()
         return {"path": compiler, "version": version[0] if result.returncode == 0 and version else "unavailable"}
-    except (OSError, subprocess.TimeoutExpired):
+    except SubprocessTimedOut as exc:
+        raise PhaseBudgetExpired("parameter phase cap exhausted during compiler provenance") from exc
+    except OSError:
         return {"path": compiler, "version": "unavailable"}
 
 
@@ -656,12 +763,13 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
         if remaining <= 0:
             raise PhaseBudgetExpired("parameter phase cap exhausted before context preflight")
         try:
-            completed = subprocess.run(
-                argv, cwd=SOURCE_ROOT, env=process_environment(), capture_output=True,
-                check=False, timeout=min(float(CELL_TIMEOUT_SECONDS), timeout, remaining))
-        except subprocess.TimeoutExpired as exc:
+            completed = bounded_subprocess(
+                argv, cwd=SOURCE_ROOT, env=process_environment(), deadline=deadline,
+                limit=min(float(CELL_TIMEOUT_SECONDS), timeout, remaining))
+        except SubprocessTimedOut as exc:
             raise SubprocessTimedOut(
-                "context-only preflight subprocess exceeded its bounded timeout") from exc
+                "context-only preflight subprocess exceeded its bounded timeout",
+                stdout=exc.stdout, stderr=exc.stderr) from exc
         if completed.returncode != 0:
             raise Work5Error("context-only preflight subprocess failed before workload/keygen: " +
                              completed.stderr.decode("utf-8", "replace").strip())
@@ -678,7 +786,7 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
         required_caps = ("realized_ring_dim", "provisioned_depth", "log_q_bits",
                          "context_tuple_sha256", "source_commit", "build_id", binary_field)
         if any(name not in observed for name in required_caps) or \
-                observed["source_commit"] != source_provenance()["git_sha"] or \
+                observed["source_commit"] != source_provenance(deadline)["git_sha"] or \
                 observed[binary_field] != sha256_file(helper):
             raise Work5Error("artifact mismatch: context preflight lacks current observed provenance")
         try:
@@ -914,20 +1022,23 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
             if test_fixture:
                 note_test_dispatch(argv)
             global _ACTIVE_CHILD
-            _ACTIVE_CHILD = subprocess.Popen(argv, cwd=SOURCE_ROOT, env=process_environment(),
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = _ACTIVE_CHILD.communicate(timeout=min(timeout, remaining))
-            completed = subprocess.CompletedProcess(argv, _ACTIVE_CHILD.returncode, stdout, stderr)
-            _ACTIVE_CHILD = None
-        except subprocess.TimeoutExpired as exc:
-            if _ACTIVE_CHILD is not None:
-                _ACTIVE_CHILD.kill()
-                stdout, stderr = _ACTIVE_CHILD.communicate()
+            timeout_limit = min(timeout, remaining)
+            _ACTIVE_CHILD = subprocess.Popen(
+                argv, cwd=SOURCE_ROOT, env=process_environment(), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, start_new_session=True)
+            try:
+                stdout, stderr = _ACTIVE_CHILD.communicate(
+                    timeout=phase_timeout(deadline, limit=timeout_limit))
+                completed = subprocess.CompletedProcess(argv, _ACTIVE_CHILD.returncode, stdout, stderr)
                 _ACTIVE_CHILD = None
-            else:
-                stdout, stderr = b"", b""
-            stdout = stdout or (exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode())
-            stderr = stderr or (exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode())
+            except subprocess.TimeoutExpired:
+                child = _ACTIVE_CHILD
+                _ACTIVE_CHILD = None
+                stdout, stderr = terminate_process_group(child, deadline)
+                raise SubprocessTimedOut("benchmark subprocess exceeded bounded phase timeout",
+                                         stdout=stdout, stderr=stderr)
+        except SubprocessTimedOut as exc:
+            stdout, stderr = exc.stdout, exc.stderr
             install_logs(root, cell, stdout, stderr)
             discard_staging(root, cell["cell_id"])
             discard_unsealed_outputs(root, cell["cell_id"])
@@ -938,11 +1049,7 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
             raise Work5Error("terminal ERROR/TIMEOUT")
         except SignalAbort as exc:
             if _ACTIVE_CHILD is not None:
-                try:
-                    stdout, stderr = _ACTIVE_CHILD.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    _ACTIVE_CHILD.kill()
-                    stdout, stderr = _ACTIVE_CHILD.communicate()
+                stdout, stderr = terminate_process_group(_ACTIVE_CHILD, deadline)
                 _ACTIVE_CHILD = None
             else:
                 stdout, stderr = b"", b""
@@ -1048,12 +1155,12 @@ def read_records(root: Path) -> list[dict[str, Any]]:
 
 
 def resume_validate(root: Path, build_dir: Path, executable_hashes: dict[str, str],
-                    matrix: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                    matrix: dict[str, Any], *, deadline: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     run = read_json(root / "run.json", "run.json")
     if run.get("schema") != RUNNER_SCHEMA:
         raise Work5Error("resume run schema mismatch")
-    source_sha, dirty = source_identity()
-    provenance = source_provenance()
+    source_sha, dirty = source_identity(deadline)
+    provenance = source_provenance(deadline)
     if run.get("git_sha") != source_sha or run.get("git_dirty") != dirty or \
             run.get("git_tree") != provenance["git_tree"] or \
             run.get("repository_root") != provenance["repository_root"] or \
@@ -1104,16 +1211,16 @@ def script_hashes() -> dict[str, str]:
 
 
 def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: str,
-                root: Path, *, test_fixture: bool) -> dict[str, Any]:
-    source_sha, dirty = source_identity()
-    provenance = source_provenance()
+                root: Path, *, test_fixture: bool, deadline: float) -> dict[str, Any]:
+    source_sha, dirty = source_identity(deadline)
+    provenance = source_provenance(deadline)
     cache = build_dir / "CMakeCache.txt"
     return {
         "schema": RUNNER_SCHEMA,
         "created_at_utc": utc_now(), "source_root": str(SOURCE_ROOT.resolve()),
         "git_sha": source_sha, "git_dirty": dirty, "git_tree": provenance["git_tree"],
         "repository_root": provenance["repository_root"], "build_type": "Release",
-        "build_dir": str(build_dir), "compiler": compiler_descriptor(),
+        "build_dir": str(build_dir), "compiler": compiler_descriptor(deadline),
         "build_identity": {"cmake_cache_sha256": sha256_file(cache) if cache.is_file() else None},
         "results_root": str(root.resolve()), "results_root_sha256": results_root_digest(root),
         "openfhe_version": os.environ.get("PICCARD_OPENFHE_VERSION", "recorded-by-live-producer"),
@@ -1157,94 +1264,133 @@ def validate_new_root(root: Path, resume: bool) -> None:
         raise Work5Error("--results-root must name a new evidence-run directory")
 
 
+def write_run_level_timeout(root: Path, *, resume: bool, phase_seconds: float,
+                            detail: str) -> None:
+    """Record a pre-cell deadline failure without fabricating a terminal cell."""
+    if resume:
+        return
+    cells = root / "cells.jsonl"
+    if cells.exists() and cells.read_text(encoding="utf-8").strip():
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "run-level-timeout.json"
+    if path.exists():
+        return
+    atomic_write(path, canonical_json({
+        "schema": "piccard-work5-run-level-timeout-v1",
+        "phase": "parameters",
+        "status": "ERROR",
+        "reason_code": "TIMEOUT",
+        "reason_detail": detail,
+        "phase_timeout_seconds": phase_seconds,
+        "cell_started": False,
+        "recorded_at_utc": utc_now(),
+    }), new=True)
+
+
 def process(args: argparse.Namespace) -> int:
-    # The handler is installed before any root mutation so an interrupt cannot
-    # leave a running producer without a terminal ERROR path.
-    signal.signal(signal.SIGTERM, _signal_abort)
-    signal.signal(signal.SIGINT, _signal_abort)
-    build_dir = Path(args.build_dir).resolve()
-    root = Path(args.results_root).resolve()
-    validate_new_root(root, args.resume)
-    if args.phase != "parameters":
-        raise Work5Error(f"Phase 3 implements only --phase=parameters; {args.phase!r} is not live yet")
+    # The phase clock begins before provenance, binary identity, matrix, root,
+    # or metadata work.  No preflight subprocess may borrow time from it.
     test_fixture = is_test_fixture_mode()
-    executable_hashes = executable_map(build_dir, test_fixture=test_fixture)
-    cells = frozen_cells()
-    matrix = matrix_document(cells)
-    if args.resume:
-        run, records = resume_validate(root, build_dir, executable_hashes, matrix)
-    else:
-        root.mkdir(parents=True)
-        for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", ".tmp"):
-            (root / directory).mkdir(exist_ok=False)
-        matrix_path = root / "matrix.json"
-        atomic_write(matrix_path, canonical_json(matrix), new=True)
-        run = initial_run(build_dir, executable_hashes, sha256_file(matrix_path), root,
-                          test_fixture=test_fixture)
-        atomic_write(root / "run.json", canonical_json(run), new=True)
-        records = []
-        write_cells(root, records)
-        run["cells_sha256"] = sha256_file(root / "cells.jsonl")
-        atomic_write(root / "run.json", canonical_json(run))
-
-    expected_by_id = {cell["cell_id"]: cell for cell in cells}
-    terminal_ids = {record["cell_id"] for record in records}
-    for cell_id, cell in expected_by_id.items():
-        if cell_id in terminal_ids:
-            continue
-        # A crash before the terminal append may leave an unbound artifact.
-        # Treat that as incompatible resume state rather than silently running
-        # the cell again and potentially overwriting its first attempt.
-        if args.resume and any(path.exists() for path in artifact_paths(root, cell_id).values()):
-            raise Work5Error(f"resume has unbound artifacts for PENDING cell: {cell_id}")
-
-    timeout = (float(os.environ.get("PICCARD_WORK5_TEST_CELL_TIMEOUT_SECONDS", CELL_TIMEOUT_SECONDS))
-               if test_fixture else float(CELL_TIMEOUT_SECONDS))
-    if timeout <= 0:
-        raise Work5Error("cell timeout must be positive")
     phase_seconds = PARAMETER_TIMEOUT_SECONDS
     if test_fixture and os.environ.get("PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"):
         phase_seconds = float(os.environ["PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"])
     if phase_seconds <= 0:
         raise Work5Error("parameter phase timeout must be positive")
     deadline = time.monotonic() + phase_seconds
-    for cell in cells:
-        if cell["cell_id"] in terminal_ids:
-            continue  # terminal records are immutable and never rerun
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            started = utc_now()
-            ensure_staging_directory(root, cell["cell_id"])
-            argv = planned_argv(build_dir, root, cell)
-            write_command_artifact(root, cell, argv)
-            install_logs(root, cell, b"", b"parameter phase cap exhausted before subprocess start")
-            terminalize(root, records, record_for(
-                root, cell, argv, status="ERROR", reason_code="TIMEOUT",
-                reason_detail=f"parameter phase exceeded {phase_seconds:g} seconds",
-                flags=stage_values(True, False, False, False, False), exit_code=124,
-                started=started))
+    # The handler is installed before any root mutation so an interrupt cannot
+    # leave a running producer without a terminal ERROR path.
+    signal.signal(signal.SIGTERM, _signal_abort)
+    signal.signal(signal.SIGINT, _signal_abort)
+    build_dir = Path(args.build_dir).resolve()
+    root = Path(args.results_root).resolve()
+    try:
+        phase_timeout(deadline)
+        validate_new_root(root, args.resume)
+        if args.phase != "parameters":
+            raise Work5Error(f"Phase 3 implements only --phase=parameters; {args.phase!r} is not live yet")
+        # Bind source identity before any output-root mutation.  A stalled
+        # provenance command therefore produces the distinct run-level
+        # terminal record rather than pretending that a parameter cell began.
+        source_provenance(deadline)
+        executable_hashes = executable_map(build_dir, test_fixture=test_fixture)
+        phase_timeout(deadline)
+        cells = frozen_cells()
+        matrix = matrix_document(cells)
+        phase_timeout(deadline)
+        if args.resume:
+            run, records = resume_validate(root, build_dir, executable_hashes, matrix,
+                                           deadline=deadline)
+        else:
+            root.mkdir(parents=True)
+            for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", ".tmp"):
+                (root / directory).mkdir(exist_ok=False)
+            matrix_path = root / "matrix.json"
+            atomic_write(matrix_path, canonical_json(matrix), new=True)
+            run = initial_run(build_dir, executable_hashes, sha256_file(matrix_path), root,
+                              test_fixture=test_fixture, deadline=deadline)
+            atomic_write(root / "run.json", canonical_json(run), new=True)
+            records = []
+            write_cells(root, records)
             run["cells_sha256"] = sha256_file(root / "cells.jsonl")
             atomic_write(root / "run.json", canonical_json(run))
-            raise Work5Error("terminal ERROR/TIMEOUT: parameter phase cap")
-        try:
-            run_parameter_cell(build_dir, root, cell, records, test_fixture=test_fixture,
-                               timeout=min(timeout, remaining), deadline=deadline)
-        except Work5Error:
-            run["cells_sha256"] = sha256_file(root / "cells.jsonl")
-            atomic_write(root / "run.json", canonical_json(run))
-            raise
-        terminal_ids.add(cell["cell_id"])
-        run["cells_sha256"] = sha256_file(root / "cells.jsonl")
-        atomic_write(root / "run.json", canonical_json(run))
 
-    if len(records) != len(cells):
-        raise Work5Error("parameter phase ended with PENDING cells")
-    if any(record["status"] == "ERROR" for record in records):
-        raise Work5Error("parameter phase contains terminal ERROR")
-    if "parameters" not in run["completed_phases"]:
-        run["completed_phases"].append("parameters")
-        atomic_write(root / "run.json", canonical_json(run))
-    return 0
+        expected_by_id = {cell["cell_id"]: cell for cell in cells}
+        terminal_ids = {record["cell_id"] for record in records}
+        for cell_id, cell in expected_by_id.items():
+            if cell_id in terminal_ids:
+                continue
+        # A crash before the terminal append may leave an unbound artifact.
+        # Treat that as incompatible resume state rather than silently running
+        # the cell again and potentially overwriting its first attempt.
+            if args.resume and any(path.exists() for path in artifact_paths(root, cell_id).values()):
+                raise Work5Error(f"resume has unbound artifacts for PENDING cell: {cell_id}")
+
+        timeout = (float(os.environ.get("PICCARD_WORK5_TEST_CELL_TIMEOUT_SECONDS", CELL_TIMEOUT_SECONDS))
+                   if test_fixture else float(CELL_TIMEOUT_SECONDS))
+        if timeout <= 0:
+            raise Work5Error("cell timeout must be positive")
+        for cell in cells:
+            if cell["cell_id"] in terminal_ids:
+                continue  # terminal records are immutable and never rerun
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                started = utc_now()
+                ensure_staging_directory(root, cell["cell_id"])
+                argv = planned_argv(build_dir, root, cell)
+                write_command_artifact(root, cell, argv)
+                install_logs(root, cell, b"", b"parameter phase cap exhausted before subprocess start")
+                terminalize(root, records, record_for(
+                root, cell, argv, status="ERROR", reason_code="TIMEOUT",
+                    reason_detail=f"parameter phase exceeded {phase_seconds:g} seconds",
+                    flags=stage_values(True, False, False, False, False), exit_code=124,
+                    started=started))
+                run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+                atomic_write(root / "run.json", canonical_json(run))
+                raise Work5Error("terminal ERROR/TIMEOUT: parameter phase cap")
+            try:
+                run_parameter_cell(build_dir, root, cell, records, test_fixture=test_fixture,
+                                   timeout=min(timeout, remaining), deadline=deadline)
+            except Work5Error:
+                run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+                atomic_write(root / "run.json", canonical_json(run))
+                raise
+            terminal_ids.add(cell["cell_id"])
+            run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+            atomic_write(root / "run.json", canonical_json(run))
+
+        if len(records) != len(cells):
+            raise Work5Error("parameter phase ended with PENDING cells")
+        if any(record["status"] == "ERROR" for record in records):
+            raise Work5Error("parameter phase contains terminal ERROR")
+        if "parameters" not in run["completed_phases"]:
+            run["completed_phases"].append("parameters")
+            atomic_write(root / "run.json", canonical_json(run))
+        return 0
+    except PhaseBudgetExpired as exc:
+        write_run_level_timeout(root, resume=args.resume, phase_seconds=phase_seconds,
+                                detail=str(exc))
+        raise
 
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:

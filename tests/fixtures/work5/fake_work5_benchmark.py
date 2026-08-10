@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -49,6 +50,19 @@ def main() -> int:
         # translating a fixture-selected exit code.
         time.sleep(float(os.environ.get("PICCARD_WORK5_FAKE_SLEEP_SECONDS",
                                         "1.0")))
+    if mode == "descendant_pipe":
+        # Escape the runner's process group while retaining its captured pipe.
+        # This models a hostile helper which would make an unbounded
+        # communicate() hang even after the direct producer is killed.
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        pid_file = os.environ.get("PICCARD_WORK5_FAKE_DESCENDANT_PID")
+        if pid_file:
+            Path(pid_file).write_text(str(child.pid), encoding="ascii")
+        time.sleep(float(os.environ.get("PICCARD_WORK5_FAKE_SLEEP_SECONDS",
+                                        "30.0")))
     if mode == "timeout":
         # The runner must translate a command timeout / conventional 124 into
         # terminal ERROR/TIMEOUT and never reclassify it as a preflight skip.

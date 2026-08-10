@@ -613,6 +613,53 @@ class Work5RunnerContractTest(unittest.TestCase):
         self.assertTrue(any(event["argv"] for event in read_jsonl(self.events)))
         self.assertEqual(lifecycle["timeout_status"], "ERROR")
 
+    def test_descendant_pipe_holder_cannot_extend_terminal_timeout(self) -> None:
+        results = self.tmp / "work5-descendant-pipe"
+        pid_path = self.tmp / "escaped-descendant.pid"
+        started = time.monotonic()
+        try:
+            run = self.run_runner("parameters", results, env={
+                "PICCARD_WORK5_FAKE_MODE": "descendant_pipe",
+                "PICCARD_WORK5_FAKE_SLEEP_SECONDS": "30",
+                "PICCARD_WORK5_FAKE_DESCENDANT_PID": str(pid_path),
+                "PICCARD_WORK5_TEST_CELL_TIMEOUT_SECONDS": "0.05",
+            })
+            elapsed = time.monotonic() - started
+            self.assertNotEqual(run.returncode, 0)
+            self.assertLess(elapsed, 1.5,
+                            "escaped descendant pipe held terminalization past its bound")
+            records = read_jsonl(results / "cells.jsonl")
+            error = next(record for record in records if record["status"] == "ERROR")
+            self.assertEqual(error["reason_code"], "TIMEOUT")
+            self.assertTrue((results / error["command_path"]).is_file())
+            self.assertTrue((results / error["stdout_path"]).is_file())
+            self.assertTrue((results / error["stderr_path"]).is_file())
+        finally:
+            if pid_path.exists():
+                try:
+                    os.kill(int(pid_path.read_text(encoding="ascii")), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_stalled_provenance_creates_only_run_level_timeout_record(self) -> None:
+        results = self.tmp / "work5-stalled-provenance"
+        started = time.monotonic()
+        run = self.run_runner("parameters", results, env={
+            "PICCARD_WORK5_TEST_GIT_EXECUTABLE": str(self.build / "bench_comparison"),
+            "PICCARD_WORK5_FAKE_MODE": "sleep",
+            "PICCARD_WORK5_FAKE_SLEEP_SECONDS": "30",
+            "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.05",
+        })
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(run.returncode, 0)
+        self.assertLess(elapsed, 1.0, "stalled git was not phase-bounded")
+        timeout = json.loads((results / "run-level-timeout.json").read_text())
+        self.assertEqual((timeout["status"], timeout["reason_code"], timeout["cell_started"]),
+                         ("ERROR", "TIMEOUT", False))
+        self.assertFalse((results / "cells.jsonl").exists())
+        self.assertFalse((results / "run.json").exists())
+        self.assertFalse((results / "matrix.json").exists())
+
     def test_sigterm_flushes_a_terminal_error_and_stops_the_child(self) -> None:
         results = self.tmp / "work5-sigterm"
         environment = os.environ.copy()
@@ -642,10 +689,10 @@ class Work5RunnerContractTest(unittest.TestCase):
         run = self.run_runner("parameters", results, env={
             "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.000001"})
         self.assertNotEqual(run.returncode, 0)
-        records = read_jsonl(results / "cells.jsonl")
-        self.assertEqual(len(records), 1)
-        self.assertEqual((records[0]["status"], records[0]["reason_code"]), ("ERROR", "TIMEOUT"))
-        self.assertFalse(records[0]["context_started"])
+        timeout = json.loads((results / "run-level-timeout.json").read_text())
+        self.assertEqual((timeout["status"], timeout["reason_code"], timeout["cell_started"]),
+                         ("ERROR", "TIMEOUT", False))
+        self.assertFalse((results / "cells.jsonl").exists())
         self.assertFalse(self.events.exists(), "phase cap must start no producer subprocess")
 
     def test_pre_setup_and_setup_errors_have_stage_specific_terminal_flags(self) -> None:
