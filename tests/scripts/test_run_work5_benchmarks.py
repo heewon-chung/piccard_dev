@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -599,6 +600,30 @@ class Work5RunnerContractTest(unittest.TestCase):
                              for record in records))
         self.assertTrue(any(event["argv"] for event in read_jsonl(self.events)))
         self.assertEqual(lifecycle["timeout_status"], "ERROR")
+
+    def test_sigterm_flushes_a_terminal_error_and_stops_the_child(self) -> None:
+        results = self.tmp / "work5-sigterm"
+        environment = os.environ.copy()
+        environment.update({"PICCARD_WORK5_FAKE_EVENT_LOG": str(self.events),
+                            "PICCARD_WORK5_FAKE_MODE": "sleep",
+                            "PICCARD_WORK5_FAKE_SLEEP_SECONDS": "5",
+                            "PYTHONDONTWRITEBYTECODE": "1"})
+        process = subprocess.Popen(
+            ["python3", str(RUNNER), "--phase=parameters", f"--build-dir={self.build}",
+             f"--results-root={results}", "--seed=7", "--threads=2"],
+            cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 3
+        while not (results / "cells.jsonl").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.15)
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=5)
+        self.assertNotEqual(process.returncode, 0, stderr)
+        records = read_jsonl(results / "cells.jsonl")
+        self.assertTrue(records)
+        error = next(record for record in records if record["status"] == "ERROR")
+        self.assertEqual(error["reason_code"], "EXCEPTION")
+        self.assertIn("signal", error["reason_detail"])
 
     def test_pre_setup_and_setup_errors_have_stage_specific_terminal_flags(self) -> None:
         contract = load_contract()

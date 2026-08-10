@@ -53,6 +53,8 @@ constexpr char kCapabilitiesSchema[] =
     "piccard-std-security-fhe-ind-capabilities-v1";
 constexpr char kPreflightSchema[] =
     "piccard-std-security-fhe-ind-preflight-v1";
+constexpr char kWork5PreflightSchema[] =
+    "piccard-work5-fhe-ind-context-preflight-v1";
 constexpr char kShapeId[] = "fhe-indicator-v1";
 constexpr uint32_t kUniverse = 64;
 constexpr uint32_t kSetSize = 10;
@@ -77,6 +79,7 @@ struct Options {
     std::string target_jaccard;
     uint64_t seed = 0;
     uint64_t trials = 0;
+    uint64_t work5_n = 0;
     bool capabilities = false;
 };
 
@@ -297,6 +300,10 @@ Options ParseOptions(int argc, char** argv) {
                    !value.empty()) {
             MarkOption(&seen_options, "trials");
             options.trials = ParseUnsigned(value, "--trials");
+        } else if (const auto value = OptionValue(argument, "n");
+                   !value.empty()) {
+            MarkOption(&seen_options, "n");
+            options.work5_n = ParseUnsigned(value, "--n");
         } else if (argument == "--help") {
             std::cout
                 << "bench_fhe_ind --capabilities --format=json | "
@@ -319,8 +326,9 @@ Options ParseOptions(int argc, char** argv) {
         }
         return options;
     }
-    if (options.mode != "preflight" && options.mode != "e2e") {
-        throw std::invalid_argument("--mode must be preflight or e2e");
+    if (options.mode != "preflight" && options.mode != "e2e" &&
+        options.mode != "work5-preflight") {
+        throw std::invalid_argument("--mode must be preflight, e2e, or work5-preflight");
     }
     if (options.method != "fhe_ind" || options.circuit != "fhe_ind" ||
         options.shape_id != kShapeId) {
@@ -328,6 +336,18 @@ Options ParseOptions(int argc, char** argv) {
     }
     if (options.security != "STD128" && options.security != "STD192") {
         throw std::invalid_argument("--security must be STD128 or STD192");
+    }
+    if (options.mode == "work5-preflight") {
+        if (options.cell_id.empty() || options.universe == 0 || options.work5_n == 0 ||
+            (options.universe != 16384 && options.universe != 65536) ||
+            options.output.empty() || options.format != "json" ||
+            !options.workload.empty() || !options.preflight.empty() ||
+            options.set_size != 0 || !options.target_jaccard.empty() ||
+            options.seed != 0 || options.trials != 0) {
+            throw std::invalid_argument(
+                "work5-preflight requires only bound cell-id/n/universe/security and json output");
+        }
+        return options;
     }
     const std::string expected_cell =
         options.security == "STD128" ? "fhe-ind-std128" : "fhe-ind-std192";
@@ -780,6 +800,35 @@ std::string PreflightJson(const Options& options, const WorkloadData& workload,
     return object.Serialize() + "\n";
 }
 
+// Work #5 context admission is intentionally independent of the frozen Work
+// #4 workload-bound preflight.  n binds the requested cell even though only U
+// changes the BFV context parameters.
+std::string Work5PreflightJson(const Options& options, const TupleData& tuple,
+                               const ProducerIdentity& identity) {
+    evidence::PreflightCaps caps{tuple.realized_ring_dim,
+                                 tuple.provisioned_depth, tuple.log_q_bits};
+    const auto decision = evidence::EvaluatePreflight(caps);
+    CanonicalJsonObject object;
+    object.AddString("schema", kWork5PreflightSchema);
+    object.AddString("mode", "work5-preflight");
+    object.AddString("cell_id", options.cell_id);
+    object.AddString("method", "fhe_ind");
+    object.AddNumber("n", options.work5_n);
+    object.AddNumber("universe", options.universe);
+    AddTuple(&object, tuple);
+    object.AddString("ordered_rns_moduli_sha256",
+                     OrderedRnsSha256(tuple.ordered_rns_moduli));
+    object.AddString("fhe_ind_binary_sha256", identity.fhe_ind_binary_sha256);
+    object.AddString("capabilities_sha256", identity.capabilities_sha256);
+    object.AddBool("keygen_started", false);
+    object.AddBool("skipped", decision.skipped);
+    object.AddString("reason", JoinReasons(decision));
+    object.AddBool("diagnostic_only", true);
+    object.AddBool("threshold_enabled", false);
+    AddBuild(&object);
+    return object.Serialize() + "\n";
+}
+
 void WriteNew(const std::string& path, const std::string& text) {
     RequireAbsolutePath(path, "--output");
     const std::filesystem::path destination(path);
@@ -1100,8 +1149,22 @@ int Run(const Options& options) {
         std::cout << CapabilitiesJson(identity);
         return 0;
     }
-    RequireAbsolutePath(options.workload, "--workload");
     RequireAbsolutePath(options.output, "--output");
+    if (options.mode == "work5-preflight") {
+        baseline::BaselineParams params;
+        params.universe_size = options.universe;
+        params.security = ParseSecurity(options.security);
+        params.Validate();
+        baseline::BaselineEngine engine(params);
+        engine.InitializeContextOnly();
+        if (engine.HasGeneratedKeys()) {
+            throw std::logic_error("Work #5 FHE-IND preflight generated keys");
+        }
+        WriteNew(options.output, Work5PreflightJson(
+            options, TupleFromContext(engine, options.security), identity));
+        return 0;
+    }
+    RequireAbsolutePath(options.workload, "--workload");
     if (options.mode == "e2e") RequireAbsolutePath(options.preflight, "--preflight");
 
     const WorkloadData workload = ReadWorkloadArtifact(options.workload);

@@ -38,6 +38,18 @@ SUITES = {
         "bcg12_exact_ec", "sj16"], 1, 1),
     "sj16-precompute-sensitivity": ("std128-t64-sensitivity", [
         "sj16", "sj16_precomputed"], 3, 0),
+    # Work #5 uses the same canonical workload/trace wire format, but has
+    # one warmup, timing, and accuracy record per cell.  Keeping these entries
+    # here lets its independent lifecycle verifier semantically parse the
+    # producer bytes rather than merely checking their hashes.
+    "work5-std128-piccard": ("work5-std128-t40-single-trial", ["piccard", "piccard_sqrt"], 1, 1),
+    "work5-std128-fhe-ind": ("work5-std128-t40-single-trial", ["fhe_ind"], 1, 1),
+    "work5-std128-bcg12-mh": ("work5-std128-t40-single-trial", ["bcg12_mh_ec", "bcg12_mh_ff"], 1, 1),
+    "work5-std128-bcg12-exact": ("work5-std128-t40-single-trial", ["bcg12_exact_ec", "bcg12_exact_ff"], 1, 1),
+    "work5-std128-sj16": ("work5-std128-t40-single-trial", ["sj16"], 1, 1),
+    "work5-std192-piccard": ("work5-std192-t40-single-trial", ["piccard", "piccard_sqrt"], 1, 1),
+    "work5-std192-fhe-ind": ("work5-std192-t40-single-trial", ["fhe_ind"], 1, 1),
+    "work5-std192-sj16": ("work5-std192-t40-single-trial", ["sj16"], 1, 1),
 }
 REVIEW_REQUIRED_COLUMNS = REQUIRED_COLUMNS | {
     "suite", "scenario", "workload_id", "workload_manifest_sha256",

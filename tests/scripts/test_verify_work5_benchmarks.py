@@ -10,6 +10,7 @@ missing entities.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import stat
@@ -85,7 +86,8 @@ class Work5VerifierContractTest(unittest.TestCase):
 
     def verify(self, results: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(VERIFIER), str(results), "--require-phase=parameters"],
+            ["python3", str(VERIFIER), str(results), "--require-phase=parameters",
+             "--allow-test-fixture"],
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
 
@@ -93,6 +95,45 @@ class Work5VerifierContractTest(unittest.TestCase):
         results = self.produce_parameter_root("valid")
         verified = self.verify(results)
         self.assertEqual(verified.returncode, 0, verified.stderr)
+        production = subprocess.run(
+            ["python3", str(VERIFIER), str(results), "--require-phase=parameters"],
+            cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertNotEqual(production.returncode, 0)
+
+    def test_root_binding_exact_argv_and_orphan_inventory_fail_even_when_rehashed(self) -> None:
+        source = self.produce_parameter_root("identity-source")
+        copied = self.tmp / "identity-copy"
+        shutil.copytree(source, copied)
+        self.assertNotEqual(self.verify(copied).returncode, 0,
+                            "A->B copy must not verify under B")
+
+        # Rebind every affected hash after forging a benign-looking /bin/true
+        # command.  The independent verifier must still reconstruct the exact
+        # frozen argv rather than trusting self-consistent record hashes.
+        records = read_jsonl(source / "cells.jsonl")
+        record = records[0]
+        record["argv"][0] = "/bin/true"
+        command = source / record["command_path"]
+        command_value = json.loads(command.read_text(encoding="utf-8"))
+        command_value["argv"] = record["argv"]
+        command.write_text(json.dumps(command_value, sort_keys=True, separators=(",", ":")) + "\n",
+                           encoding="utf-8")
+        record["command_sha256"] = hashlib.sha256(command.read_bytes()).hexdigest()
+        write_jsonl(source / "cells.jsonl", records)
+        run_path = source / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run["cells_sha256"] = hashlib.sha256((source / "cells.jsonl").read_bytes()).hexdigest()
+        run_path.write_text(json.dumps(run, sort_keys=True, separators=(",", ":")) + "\n",
+                            encoding="utf-8")
+        self.assertNotEqual(self.verify(source).returncode, 0,
+                            "rehashed /bin/true command must not verify")
+
+        # A separate valid root demonstrates an extra, unreferenced file is
+        # rejected rather than ignored by a count-only verifier.
+        orphan = self.produce_parameter_root("identity-orphan")
+        (orphan / "csv" / "orphan.csv").write_text("forged\n", encoding="utf-8")
+        self.assertNotEqual(self.verify(orphan).returncode, 0,
+                            "orphan producer artifact must not verify")
 
     def test_semantic_matrix_mutations_fail_closed(self) -> None:
         source = self.produce_parameter_root("source")

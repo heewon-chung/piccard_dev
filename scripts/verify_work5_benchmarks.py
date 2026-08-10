@@ -13,10 +13,16 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+import run_work5_benchmarks as runner
+import verify_review_comparison as review_verifier
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 RUNNER_SCHEMA = "piccard-work5-run-v1"
 MATRIX_SCHEMA = "piccard-work5-matrix-v1"
@@ -135,9 +141,12 @@ def relative_file(root: Path, value: Any, label: str) -> Path:
     return candidate
 
 
-def verify_artifacts(root: Path, record: dict[str, Any]) -> None:
+def verify_artifacts(root: Path, record: dict[str, Any], *, test_fixture: bool) -> None:
     status = record["status"]
     pairs = (("command", True), ("stdout", True), ("stderr", True),
+             ("context", status != "ERROR" and
+              bool(set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}) and
+              not test_fixture),
              ("workload", status == "MEASURED"), ("trace", status == "MEASURED"),
              ("csv", status == "MEASURED"))
     for name, mandatory in pairs:
@@ -164,6 +173,77 @@ def verify_artifacts(root: Path, record: dict[str, Any]) -> None:
             command.get("argv") == record["argv"] and
             command.get("environment") == record["environment"],
             f"{record['cell_id']}: command artifact does not bind record")
+
+
+def source_provenance() -> dict[str, str]:
+    def git(*arguments: str) -> str:
+        result = subprocess.run(["git", *arguments], cwd=SOURCE_ROOT, text=True,
+                                capture_output=True, check=False)
+        require(result.returncode == 0, "cannot read current source provenance")
+        return result.stdout.strip()
+    return {"git_sha": git("rev-parse", "HEAD"),
+            "git_tree": git("rev-parse", "HEAD^{tree}"),
+            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve())}
+
+
+def results_root_digest(root: Path) -> str:
+    return hashlib.sha256(canonical_json({"schema": "piccard-work5-results-root-v1",
+                                          "results_root": str(root.resolve())})).hexdigest()
+
+
+def verify_context(root: Path, run: dict[str, Any], record: dict[str, Any]) -> None:
+    if record["status"] == "ERROR" or run.get("test_fixture_mode") or \
+            not set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}:
+        return
+    path = relative_file(root, record.get("context_path"), f"{record['cell_id']} context")
+    value = load_object(path, "context preflight")
+    is_fhe = record["methods"] == ["fhe_ind"]
+    schema = "piccard-work5-fhe-ind-context-preflight-v1" if is_fhe else \
+        "piccard-work5-piccard-context-preflight-v1"
+    require(value.get("schema") == schema and value.get("mode") == "work5-preflight" and
+            value.get("keygen_started") is False and value.get("cell_id") == record["cell_id"] and
+            value.get("security") == record["security"] and value.get("n") == record["n"] and
+            value.get("universe") == record["U"] and value.get("source_commit") == run["git_sha"],
+            f"{record['cell_id']}: context preflight identity mismatch")
+    if is_fhe:
+        require(value.get("method") == "fhe_ind", f"{record['cell_id']}: FHE-IND context method mismatch")
+    else:
+        circuit = "sqrt" if "piccard_sqrt" in record["methods"] else "onehot"
+        require(value.get("circuit") == circuit and value.get("k") == record["k"] and
+                value.get("m") == record["m"], f"{record['cell_id']}: Piccard context identity mismatch")
+    caps = (("RING_DIM_CAP", "realized_ring_dim", 32768),
+            ("DEPTH_CAP", "provisioned_depth", 4), ("LOGQ_CAP", "log_q_bits", 240.0))
+    try:
+        breached = next((code for code, key, limit in caps if float(value[key]) > limit), None)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VerificationError(f"{record['cell_id']}: context observed caps malformed") from exc
+    require(bool(value.get("skipped")) == (breached is not None),
+            f"{record['cell_id']}: context skip/cap mismatch")
+    if record["status"] == "SKIPPED_PRECHECK" and record.get("reason_code") in {"RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP"}:
+        require(breached == record["reason_code"],
+                f"{record['cell_id']}: cap skip is not observation-backed")
+
+
+def verify_live_semantics(root: Path, record: dict[str, Any]) -> None:
+    if record["status"] != "MEASURED":
+        return
+    csv_path = relative_file(root, record["csv_path"], f"{record['cell_id']} csv")
+    workload_path = relative_file(root, record["workload_path"], f"{record['cell_id']} workload")
+    trace_path = relative_file(root, record["trace_path"], f"{record['cell_id']} trace")
+    try:
+        _, rows = review_verifier.load_csv(csv_path, review_verifier.REVIEW_REQUIRED_COLUMNS)
+        workload = review_verifier.parse_workload(workload_path)
+        trace_digest = review_verifier.verify_trace(trace_path, workload)
+        review_verifier.verify_rows(rows, workload, trace_digest)
+        review_verifier.validate_rows(rows)
+    except (review_verifier.VerificationError, OSError, ValueError) as exc:
+        raise VerificationError(f"{record['cell_id']}: semantic producer verification failed: {exc}") from exc
+    require((workload.suite, workload.profile, workload.root_seed, workload.k, workload.m,
+             workload.set_size, workload.universe, list(workload.methods),
+             workload.timing_trials, workload.accuracy_trials) ==
+            (record["suite"], record["profile"], 7, record["k"], record["m"], record["n"],
+             record["U"], record["methods"], 1, 1),
+            f"{record['cell_id']}: parsed workload does not bind terminal cell")
 
 
 def expected_stage_flags(status: str, reason: Any) -> dict[str, bool]:
@@ -294,7 +374,7 @@ def verify_matrix(root: Path, run: dict[str, Any], expected: list[dict[str, Any]
         require(actual == target, "matrix cell membership/order mismatch")
 
 
-def verify_run(run: dict[str, Any]) -> None:
+def verify_run(root: Path, run: dict[str, Any]) -> None:
     require(run.get("schema") == RUNNER_SCHEMA and isinstance(run.get("created_at_utc"), str) and
             isinstance(run.get("source_root"), str) and isinstance(run.get("git_sha"), str) and
             isinstance(run.get("git_dirty"), bool) and run.get("build_type") == "Release",
@@ -308,6 +388,28 @@ def verify_run(run: dict[str, Any]) -> None:
     require(isinstance(run.get("executables"), dict) and isinstance(run.get("scripts"), dict) and
             isinstance(run.get("command_template_sha256"), str) and len(run["command_template_sha256"]) == 64,
             "run provenance hashes missing")
+    provenance = source_provenance()
+    require(run.get("source_root") == str(SOURCE_ROOT.resolve()) and
+            run.get("git_sha") == provenance["git_sha"] and
+            run.get("git_tree") == provenance["git_tree"] and
+            run.get("repository_root") == provenance["repository_root"],
+            "current/pinned source identity mismatch")
+    require(run.get("results_root") == str(root.resolve()) and
+            run.get("results_root_sha256") == results_root_digest(root),
+            "canonical results-root identity mismatch")
+    require(run.get("scripts") == {
+        "run_work5_benchmarks.py": sha256_file(SOURCE_ROOT / "scripts" / "run_work5_benchmarks.py"),
+        "verify_work5_benchmarks.py": sha256_file(SOURCE_ROOT / "scripts" / "verify_work5_benchmarks.py")},
+            "current script identity mismatch")
+    build_dir = Path(run.get("build_dir", ""))
+    require(build_dir.is_absolute() and build_dir.is_dir(), "build directory identity is invalid")
+    cache = build_dir / "CMakeCache.txt"
+    require(run.get("build_identity") == {"cmake_cache_sha256": sha256_file(cache) if cache.is_file() else None},
+            "build identity mismatch")
+    for name, digest in run["executables"].items():
+        path = build_dir / name
+        require(path.is_file() and os.access(path, os.X_OK) and sha256_file(path) == digest,
+                f"executable identity mismatch: {name}")
     require(isinstance(run.get("cells_sha256"), str) and len(run["cells_sha256"]) == 64,
             "run terminal-record hash missing")
     require(run.get("completed_phases") == ["parameters"],
@@ -350,15 +452,21 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
         require(actual.get("environment") == {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"} and
                 isinstance(actual.get("argv"), list) and actual["argv"],
                 f"{target['cell_id']}: argv/environment mismatch")
+        expected_argv = runner.planned_argv(Path(run["build_dir"]), root, target)
+        require(actual["argv"] == expected_argv and actual["argv"][0] ==
+                str((Path(run["build_dir"]) / "bench_review_comparison").resolve()),
+                f"{target['cell_id']}: argv is not the exact frozen producer command")
         require(isinstance(actual.get("started_at_utc"), str) and isinstance(actual.get("ended_at_utc"), str),
                 f"{target['cell_id']}: timestamps missing")
         verify_status(actual)
-        verify_artifacts(root, actual)
+        verify_artifacts(root, actual, test_fixture=bool(run.get("test_fixture_mode")))
+        verify_context(root, run, actual)
         if actual["status"] == "MEASURED" and not run.get("test_fixture_mode"):
             workload_path = relative_file(root, actual["workload_path"],
                                           f"{target['cell_id']} workload")
             require(payload == workload_trial_payload(workload_path, target),
                     f"{target['cell_id']}: TrialPayloadSha256 mismatch")
+            verify_live_semantics(root, actual)
         key = (actual["security"], actual["axis"], actual["axis_value"], actual["k"], actual["m"],
                actual["n"], actual["U"], actual["target_jaccard"], actual["seed"])
         expected_payloads.setdefault(key, set()).add(payload)
@@ -396,6 +504,28 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
                 continue
             marker = (root / record["csv_path"]).read_bytes().splitlines()[0]
             require(marker == b"method,evidence_arm,status", "test fixture CSV marker mismatch")
+    return records
+
+
+def verify_inventory(root: Path, records: list[dict[str, Any]]) -> None:
+    """Every on-disk artifact must be referenced exactly once by the lifecycle."""
+    expected = {"run.json", "matrix.json", "cells.jsonl"}
+    owners: set[str] = set()
+    for record in records:
+        for name in ("command", "stdout", "stderr", "context", "workload", "trace", "csv"):
+            relative = record.get(f"{name}_path")
+            if relative is None:
+                continue
+            require(relative not in owners, f"artifact referenced by multiple terminal cells: {relative}")
+            owners.add(relative)
+            expected.add(relative)
+    actual: set[str] = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        require(not path.is_symlink(), f"symlinked artifact is forbidden: {relative}")
+        if path.is_file():
+            actual.add(relative)
+    require(actual == expected, "artifact inventory has orphan, missing, or leftover producer output")
 
 
 def verify_existing_seal(root: Path, run: dict[str, Any]) -> None:
@@ -420,12 +550,17 @@ def process(args: argparse.Namespace) -> int:
     root = Path(args.results_root).resolve()
     require(root.is_dir(), "results root does not exist")
     run = load_object(root / "run.json", "run.json")
-    verify_run(run)
+    verify_run(root, run)
+    if run.get("test_fixture_mode") and not args.allow_test_fixture:
+        raise VerificationError("fixture-mode roots are not production evidence")
+    if args.allow_test_fixture and not run.get("test_fixture_mode"):
+        raise VerificationError("--allow-test-fixture is valid only for fixture-mode roots")
     expected = expected_cells()
     verify_matrix(root, run, expected)
     if args.require_phase and args.require_phase != "parameters":
         raise VerificationError(f"Phase-3 verifier cannot verify {args.require_phase!r} evidence")
-    verify_records(root, run, expected)
+    records = verify_records(root, run, expected)
+    verify_inventory(root, records)
     if args.require_complete:
         verify_existing_seal(root, run)
     print(json.dumps({"schema": "piccard-work5-verification-v1", "verdict": "PASS",
@@ -440,6 +575,8 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("results_root")
     parser.add_argument("--require-phase", choices=("toy", "parameters", "real", "dynamic"))
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--allow-test-fixture", action="store_true",
+                        help="test-only: inspect a root explicitly marked fixture mode")
     return parser.parse_args(list(argv))
 
 

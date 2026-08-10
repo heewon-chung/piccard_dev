@@ -54,6 +54,7 @@ struct Options {
     std::string circuit;
     std::string security;
     std::string shape_id;
+    std::string cell_id;
     std::string output;
     std::string calibration;
     std::string workload;
@@ -63,6 +64,8 @@ struct Options {
     uint32_t provisioned_depth = 0;
     uint32_t scaling_mod_size = 40;
     uint64_t seed = 7;
+    uint64_t work5_n = 0;
+    uint64_t work5_universe = 0;
     bool circuit_specified = false;
     bool security_specified = false;
     bool shape_specified = false;
@@ -71,6 +74,8 @@ struct Options {
     bool depth_specified = false;
     bool scaling_specified = false;
     bool seed_specified = false;
+    bool work5_n_specified = false;
+    bool work5_universe_specified = false;
 };
 
 std::string JsonEscape(const std::string& value) {
@@ -214,6 +219,9 @@ Options ParseOptions(int argc, char** argv) {
                    !value.empty()) {
             options.shape_id = value;
             options.shape_specified = true;
+        } else if (const auto value = OptionValue(argument, "cell-id");
+                   !value.empty()) {
+            options.cell_id = value;
         } else if (const auto value = OptionValue(argument, "output");
                    !value.empty()) {
             options.output = value;
@@ -246,9 +254,17 @@ Options ParseOptions(int argc, char** argv) {
                    !value.empty()) {
             options.seed = ParseUnsigned(value, "--seed");
             options.seed_specified = true;
+        } else if (const auto value = OptionValue(argument, "n");
+                   !value.empty()) {
+            options.work5_n = ParseUnsigned(value, "--n");
+            options.work5_n_specified = true;
+        } else if (const auto value = OptionValue(argument, "universe");
+                   !value.empty()) {
+            options.work5_universe = ParseUnsigned(value, "--universe");
+            options.work5_universe_specified = true;
         } else if (argument == "--help") {
             std::cout
-                << "bench_std_security_evidence --mode=workload|preflight|calibrate "
+                << "bench_std_security_evidence --mode=workload|preflight|work5-preflight|calibrate "
                    "--circuit=onehot|sqrt --security=TOY|STD128|STD192 "
                    "[--workload=PATH --format=json|csv --depth=N "
                    "--scaling-mod-size=N --output=PATH]\n";
@@ -258,10 +274,11 @@ Options ParseOptions(int argc, char** argv) {
         }
     }
     if (options.mode != "workload" && options.mode != "preflight" &&
+        options.mode != "work5-preflight" &&
         options.mode != "calibrate" &&
         options.mode != "e2e") {
         throw std::invalid_argument(
-            "--mode must be workload, preflight, calibrate, or e2e");
+            "--mode must be workload, preflight, work5-preflight, calibrate, or e2e");
     }
     if (options.mode == "e2e" && options.calibration.empty()) {
         throw std::invalid_argument("--mode=e2e requires --calibration=PATH");
@@ -290,7 +307,10 @@ Options ParseOptions(int argc, char** argv) {
         (options.circuit == "sqrt" && options.shape_id != "sqrt-b4-v1"))) {
         throw std::invalid_argument("shape id does not match circuit");
     }
+    // The original diagnostic modes are byte-frozen at k=m=16.  The
+    // Work #5-only mode carries its own schema and identity binding.
     if (options.mode != "workload" && options.mode != "e2e" &&
+        options.mode != "work5-preflight" &&
         (options.k != 16 || options.m != 16)) {
         throw std::invalid_argument(
             "diagnostic smoke workload is frozen at k=16,m=16");
@@ -304,6 +324,23 @@ Options ParseOptions(int argc, char** argv) {
         options.format != "csv") {
         throw std::invalid_argument(
             "workload-bound e2e requires --format=csv");
+    }
+    if (options.mode == "work5-preflight") {
+        if (options.cell_id.empty() || !options.work5_n_specified ||
+            !options.work5_universe_specified || options.work5_n == 0 ||
+            (options.work5_universe != 16384 && options.work5_universe != 65536)) {
+            throw std::invalid_argument(
+                "work5-preflight requires --cell-id, positive --n, and --universe=16384|65536");
+        }
+        if (options.format != "json" || options.output.empty() ||
+            !options.workload.empty() || !options.calibration.empty() ||
+            options.depth_specified || options.scaling_specified || options.seed_specified) {
+            throw std::invalid_argument(
+                "work5-preflight accepts only its bound context identity and --output=json");
+        }
+    } else if (!options.cell_id.empty() || options.work5_n_specified ||
+               options.work5_universe_specified) {
+        throw std::invalid_argument("--cell-id, --n, and --universe are Work #5-only options");
     }
     return options;
 }
@@ -1055,6 +1092,50 @@ std::string PreflightJson(const Options& options,
     return object.Serialize() + "\n";
 }
 
+// A new schema is intentional: Work #4's preflight serialization is a frozen
+// smoke contract.  n and universe do not alter Piccard context parameters, so
+// this record binds them as the requested Work #5 cell identity.
+std::string Work5PreflightJson(const Options& options,
+                               const piccard::PiccardParams& params,
+                               const probe::ContextDescription& context,
+                               const schema::ContextTuple& tuple,
+                               const schema::PreflightDecision& decision) {
+    const auto& metadata = context.metadata;
+    CanonicalJsonObject object;
+    object.AddString("schema", "piccard-work5-piccard-context-preflight-v1");
+    object.AddString("mode", "work5-preflight");
+    object.AddString("cell_id", options.cell_id);
+    object.AddString("circuit", options.circuit);
+    object.AddString("shape_id", options.shape_id);
+    object.AddString("security", options.security);
+    object.AddNumber("k", options.k);
+    object.AddNumber("m", options.m);
+    object.AddNumber("n", options.work5_n);
+    object.AddNumber("universe", options.work5_universe);
+    object.AddString("context_fingerprint", metadata.context_fingerprint);
+    object.AddString("context_tuple_sha256", schema::ContextTupleSha256(tuple));
+    object.AddNumber("requested_ring_dim", params.ring_dim);
+    object.AddNumber("natural_ring_dim", params.ring_dim);
+    object.AddNumber("natural_depth", params.natural_mult_depth);
+    object.AddNumber("realized_ring_dim", metadata.actual_ring_dim);
+    object.AddNumber("provisioned_depth", metadata.provisioned_depth);
+    object.AddNumber("scaling_mod_size", metadata.scaling_mod_size);
+    object.AddNumber("log_q_bits", metadata.log_q_bits);
+    object.AddNumber("plaintext_modulus", metadata.plaintext_modulus);
+    object.AddNumber("num_limbs", metadata.num_limbs);
+    object.Add("ordered_rns_moduli",
+               CanonicalJsonStringArray(metadata.ordered_rns_moduli));
+    object.AddString("openfhe_version", metadata.openfhe_version);
+    object.AddString("build_id", PICCARD_BUILD_ID);
+    object.AddBool("build_dirty", PICCARD_BUILD_DIRTY != 0);
+    object.AddString("build_type", PICCARD_BUILD_TYPE);
+    object.AddString("source_commit", PICCARD_BUILD_COMMIT);
+    object.AddBool("keygen_started", false);
+    object.AddBool("skipped", decision.skipped);
+    object.AddString("reason", JoinReasons(decision));
+    return object.Serialize() + "\n";
+}
+
 struct Observation {
     probe::Pattern pattern;
     uint64_t seed = 0;
@@ -1752,6 +1833,14 @@ int Run(const Options& options) {
             throw std::logic_error("preflight generated keys");
         }
         Emit(PreflightJson(options, params, described, tuple, decision),
+             options.output);
+        return 0;
+    }
+    if (options.mode == "work5-preflight") {
+        if (context.HasGeneratedKeysForTesting()) {
+            throw std::logic_error("Work #5 preflight generated keys");
+        }
+        Emit(Work5PreflightJson(options, params, described, tuple, decision),
              options.output);
         return 0;
     }

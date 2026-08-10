@@ -1365,6 +1365,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                     $<TARGET_FILE:bench_fhe_ind>
         )
         set_tests_properties(FheIndCli PROPERTIES TIMEOUT 600)
+        add_test(
+            NAME Work5ContextPreflight
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_work5_context_preflight.py
+                    $<TARGET_FILE:bench_std_security_evidence>
+                    $<TARGET_FILE:bench_fhe_ind>
+        )
+        set_tests_properties(Work5ContextPreflight PROPERTIES TIMEOUT 300)
     endif()
     if(BUILD_TESTS)
         if(TARGET test_main)
