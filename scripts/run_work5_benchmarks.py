@@ -132,6 +132,14 @@ class Work5Error(RuntimeError):
     """A fail-closed lifecycle or provenance violation."""
 
 
+class PhaseBudgetExpired(Work5Error):
+    """The fixed parameter-phase cap elapsed before a new subprocess started."""
+
+
+class SubprocessTimedOut(Work5Error):
+    """A subprocess used its bounded timeout without completing."""
+
+
 class SignalAbort(BaseException):
     """Raised only after the active child has been terminated."""
 
@@ -220,7 +228,7 @@ def source_identity() -> tuple[str, bool]:
             bool(git("status", "--porcelain=v1", "--untracked-files=no")))
 
 
-def source_provenance() -> dict[str, str]:
+def source_provenance() -> dict[str, Any]:
     """Pinned source identity used both at creation and resume.
 
     The repository root is canonicalized rather than inferred from an output
@@ -229,7 +237,8 @@ def source_provenance() -> dict[str, str]:
     """
     return {"git_sha": git("rev-parse", "HEAD"),
             "git_tree": git("rev-parse", "HEAD^{tree}"),
-            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve())}
+            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve()),
+            "git_dirty": bool(git("status", "--porcelain=v1", "--untracked-files=no"))}
 
 
 def results_root_digest(root: Path) -> str:
@@ -374,14 +383,32 @@ def artifact_paths(root: Path, cell_id: str) -> dict[str, Path]:
         "workload": root / "workloads" / f"{cell_id}.manifest.bin",
         "trace": root / "traces" / f"{cell_id}.trace.bin",
         "csv": root / "csv" / f"{cell_id}.csv",
-        "context": root / "context" / f"{cell_id}.json",
+        "context_onehot": root / "context" / f"{cell_id}.onehot.json",
+        "context_sqrt": root / "context" / f"{cell_id}.sqrt.json",
+        "context_fhe_ind": root / "context" / f"{cell_id}.fhe-ind.json",
     }
 
 
 def staging_paths(root: Path, cell_id: str) -> dict[str, Path]:
     base = root / ".tmp" / cell_id
-    return {"workload": base / "workload.manifest.bin",
-            "trace": base / "execution.trace.bin", "csv": base / "rows.csv"}
+    return {"command": base / "command.json",
+            "stdout": base / "benchmark.stdout",
+            "stderr": base / "benchmark.stderr",
+            "workload": base / "workload.manifest.bin",
+            "trace": base / "execution.trace.bin", "csv": base / "rows.csv",
+            "context_onehot": base / "context.onehot.json",
+            "context_sqrt": base / "context.sqrt.json",
+            "context_fhe_ind": base / "context.fhe-ind.json"}
+
+
+def ensure_staging_directory(root: Path, cell_id: str) -> None:
+    """Claim the cell-local staging directory before argv construction.
+
+    This is deliberately done for BCG12/SJ16 as well as BFV groups: a command
+    must never be able to manufacture a final evidence path directly.
+    """
+    directory = (root / ".tmp" / cell_id)
+    directory.mkdir(parents=True, exist_ok=False)
 
 
 def planned_payload_sha256(cell: dict[str, Any]) -> str:
@@ -414,21 +441,25 @@ def is_test_fixture_mode() -> bool:
     return bool(os.environ.get("PICCARD_WORK5_FAKE_EVENT_LOG"))
 
 
+def required_executable_names(test_fixture: bool) -> tuple[str, ...]:
+    return (("bench_review_comparison", "bench_fhe_ind", "bench_comparison") if test_fixture else
+            ("bench_review_comparison", "bench_fhe_ind", "bench_comparison",
+             "bench_std_security_evidence"))
+
+
 def executable_map(build_dir: Path, *, test_fixture: bool) -> dict[str, str]:
-    required = ("bench_review_comparison", "bench_fhe_ind", "bench_comparison")
+    required = required_executable_names(test_fixture)
     result: dict[str, str] = {}
     for name in required:
         path = build_dir / name
         if not path.is_file() or not os.access(path, os.X_OK):
             raise Work5Error(f"missing executable: {path}")
         result[name] = sha256_file(path)
-    if not test_fixture:
-        # It is the existing context-only API.  It is deliberately required
-        # before a live BFV/indicator cell can reach workload or keygen.
-        path = build_dir / "bench_std_security_evidence"
-        if path.is_file() and os.access(path, os.X_OK):
-            result["bench_std_security_evidence"] = sha256_file(path)
     return result
+
+
+def executable_paths(build_dir: Path, executable_hashes: dict[str, str]) -> dict[str, str]:
+    return {name: str((build_dir / name).resolve()) for name in executable_hashes}
 
 
 def planned_argv(build_dir: Path, root: Path, cell: dict[str, Any]) -> list[str]:
@@ -447,25 +478,31 @@ def planned_argv(build_dir: Path, root: Path, cell: dict[str, Any]) -> list[str]
     ]
 
 
-def write_command_and_logs(root: Path, cell: dict[str, Any], argv: list[str],
-                           stdout: bytes = b"", stderr: bytes = b"") -> None:
+def write_command_artifact(root: Path, cell: dict[str, Any], argv: list[str]) -> None:
+    """Install the planned command from the cell-local staging directory."""
     paths = artifact_paths(root, cell["cell_id"])
-    if not paths["command"].exists():
-        payload = {"schema": "piccard-work5-command-v1", "cell_id": cell["cell_id"],
-                   "argv": argv, "environment": command_environment()}
-        atomic_write(paths["command"], canonical_json(payload), new=True)
-    if not paths["stdout"].exists():
-        atomic_write(paths["stdout"], stdout, new=True)
-    if not paths["stderr"].exists():
-        atomic_write(paths["stderr"], stderr, new=True)
+    staged = staging_paths(root, cell["cell_id"])
+    if paths["command"].exists() or staged["command"].exists():
+        raise Work5Error(f"refusing to overwrite planned command: {cell['cell_id']}")
+    payload = {"schema": "piccard-work5-command-v1", "cell_id": cell["cell_id"],
+               "argv": argv, "environment": command_environment()}
+    atomic_write(staged["command"], canonical_json(payload), new=True)
+    install_staged(staged["command"], paths["command"])
 
 
-def update_logs(root: Path, cell: dict[str, Any], stdout: bytes, stderr: bytes) -> None:
-    # The empty log files were atomically claimed before execution; replacing
-    # their contents is safe because no terminal record exists yet.
+def install_logs(root: Path, cell: dict[str, Any], stdout: bytes, stderr: bytes) -> None:
+    """Atomically install raw producer logs without replacing a prior attempt."""
     paths = artifact_paths(root, cell["cell_id"])
-    atomic_write(paths["stdout"], stdout)
-    atomic_write(paths["stderr"], stderr)
+    staged = staging_paths(root, cell["cell_id"])
+    finals = (paths["stdout"], paths["stderr"])
+    if any(path.exists() for path in finals):
+        if all(path.is_file() for path in finals):
+            return
+        raise Work5Error(f"partial terminal log state for {cell['cell_id']}")
+    atomic_write(staged["stdout"], stdout, new=True)
+    atomic_write(staged["stderr"], stderr, new=True)
+    install_staged(staged["stdout"], paths["stdout"])
+    install_staged(staged["stderr"], paths["stderr"])
 
 
 def stage_values(preflight: bool, context: bool, workload: bool, keygen: bool,
@@ -497,7 +534,8 @@ def record_for(root: Path, cell: dict[str, Any], argv: list[str], *, status: str
         "environment": command_environment(),
         "exit_code": exit_code,
     }
-    for label in ("command", "stdout", "stderr", "context", "workload", "trace", "csv"):
+    for label in ("command", "stdout", "stderr", "context_onehot", "context_sqrt",
+                  "context_fhe_ind", "workload", "trace", "csv"):
         path, digest = artifact_pair(root, paths[label])
         record[f"{label}_path"] = path
         record[f"{label}_sha256"] = digest
@@ -556,8 +594,20 @@ def discard_staging(root: Path, cell_id: str) -> None:
             pass
 
 
+def discard_unsealed_outputs(root: Path, cell_id: str) -> None:
+    """Remove outputs from a failed, as-yet-unterminalized producer attempt."""
+    paths = artifact_paths(root, cell_id)
+    for name in ("context_onehot", "context_sqrt", "context_fhe_ind",
+                 "workload", "trace", "csv"):
+        try:
+            paths[name].unlink()
+        except FileNotFoundError:
+            pass
+
+
 def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
-                      test_fixture: bool) -> tuple[str | None, dict[str, Any] | None]:
+                      test_fixture: bool, timeout: float,
+                      deadline: float) -> tuple[str | None, dict[str, dict[str, Any]]]:
     """Run and validate a cell-bound, context-only admission record.
 
     The Work #5 modes are intentionally distinct from Work #4's byte-frozen
@@ -566,69 +616,85 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
     """
     if test_fixture or not any(method in {"piccard", "piccard_sqrt", "fhe_ind"}
                                for method in cell["methods"]):
-        return None, None
-    staging = root / ".tmp" / cell["cell_id"] / "context.json"
-    staging.parent.mkdir(parents=True, exist_ok=True)
-    final = artifact_paths(root, cell["cell_id"])["context"]
-    if final.exists() or staging.exists():
-        raise Work5Error("context preflight output already exists")
+        return None, {}
+    staged = staging_paths(root, cell["cell_id"])
+    finals = artifact_paths(root, cell["cell_id"])
+    specs: list[tuple[str, Path, Path, list[str], str, dict[str, Any]]] = []
     if cell["methods"] == ["fhe_ind"]:
         helper = build_dir / "bench_fhe_ind"
         argv = [str(helper.resolve()), "--mode=work5-preflight", "--method=fhe_ind",
                 "--circuit=fhe_ind", f"--security={cell['security']}",
                 "--shape-id=fhe-indicator-v1", f"--cell-id={cell['cell_id']}",
                 f"--n={cell['n']}", f"--universe={cell['U']}",
-                f"--output={staging}", "--format=json"]
+                f"--output={staged['context_fhe_ind']}", "--format=json"]
         schema = "piccard-work5-fhe-ind-context-preflight-v1"
         expected = {"cell_id": cell["cell_id"], "method": "fhe_ind", "n": cell["n"],
                     "universe": cell["U"], "security": cell["security"]}
+        specs.append(("context_fhe_ind", helper, staged["context_fhe_ind"], argv, schema, expected))
     else:
         helper = build_dir / "bench_std_security_evidence"
-        circuit = "sqrt" if "piccard_sqrt" in cell["methods"] else "onehot"
-        shape = "sqrt-b4-v1" if circuit == "sqrt" else "onehot-v1"
-        argv = [str(helper.resolve()), "--mode=work5-preflight", f"--circuit={circuit}",
-                f"--security={cell['security']}", f"--shape-id={shape}",
-                f"--cell-id={cell['cell_id']}", f"--k={cell['k']}", f"--m={cell['m']}",
-                f"--n={cell['n']}", f"--universe={cell['U']}",
-                f"--output={staging}", "--format=json"]
-        schema = "piccard-work5-piccard-context-preflight-v1"
-        expected = {"cell_id": cell["cell_id"], "circuit": circuit,
-                    "security": cell["security"], "k": cell["k"], "m": cell["m"],
-                    "n": cell["n"], "universe": cell["U"]}
-    if not helper.is_file() or not os.access(helper, os.X_OK):
-        raise Work5Error("context-only preflight executable is unavailable before workload/keygen")
-    completed = subprocess.run(argv, cwd=SOURCE_ROOT, env=process_environment(),
-                               capture_output=True, check=False, timeout=CELL_TIMEOUT_SECONDS)
-    if completed.returncode != 0:
-        raise Work5Error("context-only preflight subprocess failed before workload/keygen: " +
-                         completed.stderr.decode("utf-8", "replace").strip())
-    try:
-        observed = json.loads(staging.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise Work5Error(f"artifact mismatch: malformed context preflight: {exc}") from exc
-    if not isinstance(observed, dict) or observed.get("schema") != schema or \
-            observed.get("mode") != "work5-preflight" or observed.get("keygen_started") is not False or \
-            any(observed.get(name) != value for name, value in expected.items()):
-        raise Work5Error("artifact mismatch: context preflight does not bind this frozen cell")
-    required_caps = ("realized_ring_dim", "provisioned_depth", "log_q_bits",
-                     "context_tuple_sha256", "source_commit", "build_id")
-    if any(name not in observed for name in required_caps):
-        raise Work5Error("artifact mismatch: context preflight lacks observed caps/provenance")
-    if observed["source_commit"] != source_provenance()["git_sha"]:
-        raise Work5Error("artifact mismatch: context preflight source commit is not current")
-    try:
-        breaches = [("RING_DIM_CAP", float(observed["realized_ring_dim"]), BFV_CAPS["realized_ring_dim"]),
-                    ("DEPTH_CAP", float(observed["provisioned_depth"]), BFV_CAPS["provisioned_depth"]),
-                    ("LOGQ_CAP", float(observed["log_q_bits"]), BFV_CAPS["log_q_bits"])]
-    except (TypeError, ValueError) as exc:
-        raise Work5Error("artifact mismatch: context cap fields are invalid") from exc
-    reason = next((code for code, value, cap in breaches if value > cap), None)
-    if bool(observed.get("skipped")) != (reason is not None):
-        raise Work5Error("artifact mismatch: context skip does not match observed caps")
-    if reason is not None and not isinstance(observed.get("reason"), str):
-        raise Work5Error("artifact mismatch: context skip reason is absent")
-    install_staged(staging, final)
-    return reason, observed
+        for label, circuit, shape in (("context_onehot", "onehot", "onehot-v1"),
+                                      ("context_sqrt", "sqrt", "sqrt-b4-v1")):
+            argv = [str(helper.resolve()), "--mode=work5-preflight", f"--circuit={circuit}",
+                    f"--security={cell['security']}", f"--shape-id={shape}",
+                    f"--cell-id={cell['cell_id']}", f"--k={cell['k']}", f"--m={cell['m']}",
+                    f"--n={cell['n']}", f"--universe={cell['U']}",
+                    f"--output={staged[label]}", "--format=json"]
+            specs.append((label, helper, staged[label], argv,
+                          "piccard-work5-piccard-context-preflight-v1",
+                          {"cell_id": cell["cell_id"], "circuit": circuit,
+                           "security": cell["security"], "k": cell["k"], "m": cell["m"],
+                           "n": cell["n"], "universe": cell["U"]}))
+    observed_by_label: dict[str, dict[str, Any]] = {}
+    reason: str | None = None
+    for label, helper, staging, argv, schema, expected in specs:
+        if staging.exists() or finals[label].exists():
+            raise Work5Error("context preflight output already exists")
+        if not helper.is_file() or not os.access(helper, os.X_OK):
+            raise Work5Error("context-only preflight executable is unavailable before workload/keygen")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PhaseBudgetExpired("parameter phase cap exhausted before context preflight")
+        try:
+            completed = subprocess.run(
+                argv, cwd=SOURCE_ROOT, env=process_environment(), capture_output=True,
+                check=False, timeout=min(float(CELL_TIMEOUT_SECONDS), timeout, remaining))
+        except subprocess.TimeoutExpired as exc:
+            raise SubprocessTimedOut(
+                "context-only preflight subprocess exceeded its bounded timeout") from exc
+        if completed.returncode != 0:
+            raise Work5Error("context-only preflight subprocess failed before workload/keygen: " +
+                             completed.stderr.decode("utf-8", "replace").strip())
+        try:
+            observed = json.loads(staging.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise Work5Error(f"artifact mismatch: malformed context preflight: {exc}") from exc
+        if not isinstance(observed, dict) or observed.get("schema") != schema or \
+                observed.get("mode") != "work5-preflight" or observed.get("keygen_started") is not False or \
+                any(observed.get(name) != value for name, value in expected.items()):
+            raise Work5Error("artifact mismatch: context preflight does not bind this frozen cell")
+        binary_field = ("fhe_ind_binary_sha256" if label == "context_fhe_ind"
+                        else "piccard_binary_sha256")
+        required_caps = ("realized_ring_dim", "provisioned_depth", "log_q_bits",
+                         "context_tuple_sha256", "source_commit", "build_id", binary_field)
+        if any(name not in observed for name in required_caps) or \
+                observed["source_commit"] != source_provenance()["git_sha"] or \
+                observed[binary_field] != sha256_file(helper):
+            raise Work5Error("artifact mismatch: context preflight lacks current observed provenance")
+        try:
+            breached = next((code for code, value, cap in
+                             (("RING_DIM_CAP", float(observed["realized_ring_dim"]), BFV_CAPS["realized_ring_dim"]),
+                              ("DEPTH_CAP", float(observed["provisioned_depth"]), BFV_CAPS["provisioned_depth"]),
+                              ("LOGQ_CAP", float(observed["log_q_bits"]), BFV_CAPS["log_q_bits"]))
+                             if value > cap), None)
+        except (TypeError, ValueError) as exc:
+            raise Work5Error("artifact mismatch: context cap fields are invalid") from exc
+        if bool(observed.get("skipped")) != (breached is not None):
+            raise Work5Error("artifact mismatch: context skip does not match observed caps")
+        install_staged(staging, finals[label])
+        observed_by_label[label] = observed
+        reason = reason or breached
+    return reason, observed_by_label
 
 
 def assert_fake_success(stdout: bytes) -> None:
@@ -778,21 +844,24 @@ def trial_payload_sha256_from_workload(path: Path, cell: dict[str, Any]) -> str:
 
 def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
                        records: list[dict[str, Any]], *, test_fixture: bool,
-                       timeout: float) -> None:
+                       timeout: float, deadline: float) -> None:
     started = utc_now()
+    ensure_staging_directory(root, cell["cell_id"])
     argv = planned_argv(build_dir, root, cell)
     flags = stage_values(True, False, False, False, False)
     # The command/log triplet is claimed before any terminal decision.  It is
     # retained even for a cheap skip, making the no-keygen decision auditable.
-    write_command_and_logs(root, cell, argv)
+    write_command_artifact(root, cell, argv)
 
     geometry = geometry_reason(cell)
     if geometry is not None:
+        install_logs(root, cell, b"", b"")
         terminalize(root, records, record_for(
             root, cell, argv, status="SKIPPED_PRECHECK", reason_code="WORKLOAD_GEOMETRY",
             reason_detail=geometry, flags=flags, exit_code=None, started=started))
         return
     if cell["methods"] == ["sj16"] and projected_sj16_ms(cell["U"]) > SJ16_ADMISSION_CAP_MS:
+        install_logs(root, cell, b"", b"")
         terminalize(root, records, record_for(
             root, cell, argv, status="SKIPPED_PRECHECK", reason_code="PROJECTED_RUNTIME_CAP",
             reason_detail=(f"projected_cell_ms={projected_sj16_ms(cell['U']):.1f} "
@@ -800,31 +869,33 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
             flags=flags, exit_code=None, started=started))
         return
 
-    flags["context_started"] = True
-    forced_precheck = forced_value("PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON", cell["cell_id"])
-    if forced_precheck is not None:
-        if not test_fixture:
-            raise Work5Error("test-only precheck hook is forbidden outside fixture mode")
-        if forced_precheck not in ("RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP"):
-            raise Work5Error(f"invalid test-only context precheck reason: {forced_precheck}")
-        terminalize(root, records, record_for(
-            root, cell, argv, status="SKIPPED_PRECHECK", reason_code=forced_precheck,
-            reason_detail=f"test-only context observation admitted {forced_precheck}",
-            flags=flags, exit_code=None, started=started))
-        return
-
-    forced_error = forced_value("PICCARD_WORK5_TEST_FORCE_ERROR_STAGE", cell["cell_id"])
-    if forced_error == "pre_setup":
-        terminalize(root, records, record_for(
-            root, cell, argv, status="ERROR", reason_code="EXCEPTION",
-            reason_detail="test-only injected pre-setup exception", flags=flags,
-            exit_code=70, started=started))
-        raise Work5Error("terminal ERROR at pre_setup")
-
     try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PhaseBudgetExpired("parameter phase cap exhausted before context preflight")
+        flags["context_started"] = True
+        forced_precheck = forced_value("PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON", cell["cell_id"])
+        if forced_precheck is not None:
+            if not test_fixture:
+                raise Work5Error("test-only precheck hook is forbidden outside fixture mode")
+            if forced_precheck not in ("RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP"):
+                raise Work5Error(f"invalid test-only context precheck reason: {forced_precheck}")
+            install_logs(root, cell, b"", b"")
+            terminalize(root, records, record_for(
+                root, cell, argv, status="SKIPPED_PRECHECK", reason_code=forced_precheck,
+                reason_detail=f"test-only context observation admitted {forced_precheck}",
+                flags=flags, exit_code=None, started=started))
+            return
+
+        forced_error = forced_value("PICCARD_WORK5_TEST_FORCE_ERROR_STAGE", cell["cell_id"])
+        if forced_error == "pre_setup":
+            raise Work5Error("test-only injected pre-setup exception")
+
         context_reason, _context = context_preflight(
-            build_dir, root, cell, test_fixture=test_fixture)
+            build_dir, root, cell, test_fixture=test_fixture,
+            timeout=min(float(CELL_TIMEOUT_SECONDS), remaining), deadline=deadline)
         if context_reason is not None:
+            install_logs(root, cell, b"", b"")
             terminalize(root, records, record_for(
                 root, cell, argv, status="SKIPPED_PRECHECK", reason_code=context_reason,
                 reason_detail="observed Work #5 context cap exceeded", flags=flags,
@@ -833,20 +904,19 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
         flags["workload_started"] = True
         flags["keygen_started"] = True
         if forced_error == "setup":
-            terminalize(root, records, record_for(
-                root, cell, argv, status="ERROR", reason_code="EXCEPTION",
-                reason_detail="test-only injected setup exception", flags=flags,
-                exit_code=70, started=started))
-            raise Work5Error("terminal ERROR at setup")
+            raise Work5Error("test-only injected setup exception")
 
-        flags["measurement_started"] = True
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PhaseBudgetExpired("parameter phase cap exhausted before measurement")
+            flags["measurement_started"] = True
             if test_fixture:
                 note_test_dispatch(argv)
             global _ACTIVE_CHILD
             _ACTIVE_CHILD = subprocess.Popen(argv, cwd=SOURCE_ROOT, env=process_environment(),
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = _ACTIVE_CHILD.communicate(timeout=timeout)
+            stdout, stderr = _ACTIVE_CHILD.communicate(timeout=min(timeout, remaining))
             completed = subprocess.CompletedProcess(argv, _ACTIVE_CHILD.returncode, stdout, stderr)
             _ACTIVE_CHILD = None
         except subprocess.TimeoutExpired as exc:
@@ -858,8 +928,9 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
                 stdout, stderr = b"", b""
             stdout = stdout or (exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or "").encode())
             stderr = stderr or (exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or "").encode())
-            update_logs(root, cell, stdout, stderr)
+            install_logs(root, cell, stdout, stderr)
             discard_staging(root, cell["cell_id"])
+            discard_unsealed_outputs(root, cell["cell_id"])
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code="TIMEOUT",
                 reason_detail=f"subprocess exceeded {timeout:g} seconds", flags=flags,
@@ -875,16 +946,18 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
                 _ACTIVE_CHILD = None
             else:
                 stdout, stderr = b"", b""
-            update_logs(root, cell, stdout, stderr)
+            install_logs(root, cell, stdout, stderr)
             discard_staging(root, cell["cell_id"])
+            discard_unsealed_outputs(root, cell["cell_id"])
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code="EXCEPTION",
                 reason_detail=str(exc), flags=flags, exit_code=128,
                 started=started))
             raise Work5Error("terminal ERROR/signal") from exc
 
-        update_logs(root, cell, completed.stdout, completed.stderr)
+        install_logs(root, cell, completed.stdout, completed.stderr)
         if completed.returncode != 0:
+            discard_unsealed_outputs(root, cell["cell_id"])
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code="SUBPROCESS_EXIT",
                 reason_detail=f"benchmark exited {completed.returncode}", flags=flags,
@@ -901,19 +974,9 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
                 raise Work5Error("artifact mismatch: benchmark did not create workload/trace")
             validate_live_rows_from_bytes = completed.stdout
             # Validate before atomically installing the CSV representation.
-            descriptor, temporary_name = tempfile.mkstemp(prefix=".work5-rows-", suffix=".csv")
-            os.close(descriptor)
-            temporary_csv = Path(temporary_name)
-            try:
-                temporary_csv.write_bytes(validate_live_rows_from_bytes)
-                validate_live_rows(temporary_csv, cell)
-                verify_live_artifacts(temporary_csv, staged["workload"], staged["trace"], cell)
-            finally:
-                try:
-                    temporary_csv.unlink()
-                except FileNotFoundError:
-                    pass
             atomic_write(staged["csv"], validate_live_rows_from_bytes, new=True)
+            validate_live_rows(staged["csv"], cell)
+            verify_live_artifacts(staged["csv"], staged["workload"], staged["trace"], cell)
             payload = trial_payload_sha256_from_workload(staged["workload"], cell)
             for name in ("workload", "trace", "csv"):
                 install_staged(staged[name], paths[name])
@@ -923,17 +986,23 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
     except Work5Error as exc:
         discard_staging(root, cell["cell_id"])
         if not any(record["cell_id"] == cell["cell_id"] for record in records):
+            discard_unsealed_outputs(root, cell["cell_id"])
             detail = str(exc)
-            reason = ("VERIFIER_FAILURE" if detail.startswith("semantic verifier failure:") else
+            reason = ("TIMEOUT" if isinstance(exc, (PhaseBudgetExpired, SubprocessTimedOut)) else
+                      "VERIFIER_FAILURE" if detail.startswith("semantic verifier failure:") else
                       "ARTIFACT_MISMATCH" if detail.startswith("artifact mismatch:") else "EXCEPTION")
+            install_logs(root, cell, b"", detail.encode("utf-8", "replace"))
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code=reason,
-                reason_detail=detail, flags=flags, exit_code=70, started=started))
+                reason_detail=detail, flags=flags,
+                exit_code=124 if reason == "TIMEOUT" else 70, started=started))
         raise
     except BaseException as exc:
         # Signal/exception handling must leave exactly one immutable terminal.
         discard_staging(root, cell["cell_id"])
         if not any(record["cell_id"] == cell["cell_id"] for record in records):
+            discard_unsealed_outputs(root, cell["cell_id"])
+            install_logs(root, cell, b"", f"{type(exc).__name__}: {exc}".encode("utf-8", "replace"))
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code="EXCEPTION",
                 reason_detail=f"{type(exc).__name__}: {exc}", flags=flags,
@@ -943,7 +1012,8 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
 
 
 def validate_record_artifacts(root: Path, record: dict[str, Any]) -> None:
-    for name in ("command", "stdout", "stderr", "context", "workload", "trace", "csv"):
+    for name in ("command", "stdout", "stderr", "context_onehot", "context_sqrt",
+                 "context_fhe_ind", "workload", "trace", "csv"):
         path_value, digest = record.get(f"{name}_path"), record.get(f"{name}_sha256")
         if (path_value is None) != (digest is None):
             raise Work5Error(f"resume artifact pair mismatch: {record.get('cell_id')} {name}")
@@ -986,12 +1056,14 @@ def resume_validate(root: Path, build_dir: Path, executable_hashes: dict[str, st
     provenance = source_provenance()
     if run.get("git_sha") != source_sha or run.get("git_dirty") != dirty or \
             run.get("git_tree") != provenance["git_tree"] or \
-            run.get("repository_root") != provenance["repository_root"]:
+            run.get("repository_root") != provenance["repository_root"] or \
+            provenance["git_dirty"] != dirty:
         raise Work5Error("resume source SHA/dirty identity mismatch")
     if run.get("results_root") != str(root.resolve()) or \
             run.get("results_root_sha256") != results_root_digest(root):
         raise Work5Error("resume canonical results-root identity mismatch")
-    if run.get("build_dir") != str(build_dir) or run.get("executables") != executable_hashes:
+    if run.get("build_dir") != str(build_dir) or run.get("executables") != executable_hashes or \
+            run.get("executable_paths") != executable_paths(build_dir, executable_hashes):
         raise Work5Error("resume binary hash identity mismatch")
     cache = build_dir / "CMakeCache.txt"
     if run.get("build_identity") != {"cmake_cache_sha256": sha256_file(cache) if cache.is_file() else None}:
@@ -1026,9 +1098,9 @@ def command_template_sha256() -> str:
 
 
 def script_hashes() -> dict[str, str]:
-    return {"run_work5_benchmarks.py": sha256_file(Path(__file__)),
-            "verify_work5_benchmarks.py": sha256_file(
-                SOURCE_ROOT / "scripts" / "verify_work5_benchmarks.py")}
+    scripts = ("run_work5_benchmarks.py", "verify_work5_benchmarks.py",
+               "verify_review_comparison.py", "verify_benchmark_provenance.py")
+    return {name: sha256_file(SOURCE_ROOT / "scripts" / name) for name in scripts}
 
 
 def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: str,
@@ -1047,6 +1119,7 @@ def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: 
         "openfhe_version": os.environ.get("PICCARD_OPENFHE_VERSION", "recorded-by-live-producer"),
         "host": host_descriptor(), "environment": command_environment(),
         "executables": executable_hashes,
+        "executable_paths": executable_paths(build_dir, executable_hashes),
         "scripts": script_hashes(),
         "matrix_sha256": matrix_sha, "command_template_sha256": command_template_sha256(),
         "trials": TIMING_TRIALS, "accuracy_trials": ACCURACY_TRIALS,
@@ -1129,23 +1202,37 @@ def process(args: argparse.Namespace) -> int:
                if test_fixture else float(CELL_TIMEOUT_SECONDS))
     if timeout <= 0:
         raise Work5Error("cell timeout must be positive")
-    deadline = time.monotonic() + PARAMETER_TIMEOUT_SECONDS
+    phase_seconds = PARAMETER_TIMEOUT_SECONDS
+    if test_fixture and os.environ.get("PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"):
+        phase_seconds = float(os.environ["PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"])
+    if phase_seconds <= 0:
+        raise Work5Error("parameter phase timeout must be positive")
+    deadline = time.monotonic() + phase_seconds
     for cell in cells:
         if cell["cell_id"] in terminal_ids:
             continue  # terminal records are immutable and never rerun
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             started = utc_now()
+            ensure_staging_directory(root, cell["cell_id"])
             argv = planned_argv(build_dir, root, cell)
-            write_command_and_logs(root, cell, argv)
+            write_command_artifact(root, cell, argv)
+            install_logs(root, cell, b"", b"parameter phase cap exhausted before subprocess start")
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code="TIMEOUT",
-                reason_detail=f"parameter phase exceeded {PARAMETER_TIMEOUT_SECONDS} seconds",
+                reason_detail=f"parameter phase exceeded {phase_seconds:g} seconds",
                 flags=stage_values(True, False, False, False, False), exit_code=124,
                 started=started))
+            run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+            atomic_write(root / "run.json", canonical_json(run))
             raise Work5Error("terminal ERROR/TIMEOUT: parameter phase cap")
-        run_parameter_cell(build_dir, root, cell, records, test_fixture=test_fixture,
-                           timeout=min(timeout, remaining))
+        try:
+            run_parameter_cell(build_dir, root, cell, records, test_fixture=test_fixture,
+                               timeout=min(timeout, remaining), deadline=deadline)
+        except Work5Error:
+            run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+            atomic_write(root / "run.json", canonical_json(run))
+            raise
         terminal_ids.add(cell["cell_id"])
         run["cells_sha256"] = sha256_file(root / "cells.jsonl")
         atomic_write(root / "run.json", canonical_json(run))

@@ -841,37 +841,48 @@ void WriteNew(const std::string& path, const std::string& text) {
         throw std::runtime_error("diagnostic output parent does not exist: " +
                                  parent.string());
     }
-    const int descriptor = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL,
+    const auto temporary = parent / ("." + destination.filename().string() +
+                                     ".tmp-" + std::to_string(static_cast<unsigned long>(::getpid())));
+    const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL,
                                   0644);
     if (descriptor < 0) {
         throw std::system_error(errno, std::generic_category(),
                                 "create diagnostic output");
     }
-    size_t offset = 0;
-    while (offset < text.size()) {
-        const ssize_t written = ::write(descriptor, text.data() + offset,
-                                        text.size() - offset);
-        if (written < 0) {
-            const int error = errno;
-            ::close(descriptor);
-            throw std::system_error(error, std::generic_category(),
-                                    "write diagnostic output");
+    bool closed = false;
+    try {
+        size_t offset = 0;
+        while (offset < text.size()) {
+            const ssize_t written = ::write(descriptor, text.data() + offset,
+                                            text.size() - offset);
+            if (written < 0) {
+                throw std::system_error(errno, std::generic_category(),
+                                        "write diagnostic output");
+            }
+            if (written == 0) {
+                throw std::runtime_error("diagnostic output write made no progress");
+            }
+            offset += static_cast<size_t>(written);
         }
-        if (written == 0) {
-            ::close(descriptor);
-            throw std::runtime_error("diagnostic output write made no progress");
+        if (::fsync(descriptor) != 0) {
+            throw std::system_error(errno, std::generic_category(),
+                                    "fsync diagnostic output");
         }
-        offset += static_cast<size_t>(written);
-    }
-    if (::fsync(descriptor) != 0) {
-        const int error = errno;
-        ::close(descriptor);
-        throw std::system_error(error, std::generic_category(),
-                                "fsync diagnostic output");
-    }
-    if (::close(descriptor) != 0) {
-        throw std::system_error(errno, std::generic_category(),
-                                "close diagnostic output");
+        if (::close(descriptor) != 0) {
+            closed = true;
+            throw std::system_error(errno, std::generic_category(),
+                                    "close diagnostic output");
+        }
+        closed = true;
+        if (::link(temporary.c_str(), destination.c_str()) != 0) {
+            throw std::system_error(errno, std::generic_category(),
+                                    "atomically install diagnostic output");
+        }
+        ::unlink(temporary.c_str());
+    } catch (...) {
+        if (!closed) ::close(descriptor);
+        ::unlink(temporary.c_str());
+        throw;
     }
 }
 

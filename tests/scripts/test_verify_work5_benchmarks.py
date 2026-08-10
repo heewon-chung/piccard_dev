@@ -252,6 +252,47 @@ class Work5VerifierContractTest(unittest.TestCase):
         self.assertEqual(contract["hard_exclusions"]["sj16_cost_scope"],
                          "full-query-excluding-one-time-setup")
 
+    def test_recomputed_provenance_and_bfv_caps_reject_rehashed_mutations(self) -> None:
+        source = self.produce_parameter_root("provenance-source")
+
+        def rewrite_run(root: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
+            path = root / "run.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            mutate(payload)
+            path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+                            encoding="utf-8")
+
+        mutations: list[tuple[str, Callable[[Path], None]]] = [
+            ("dirty-flip", lambda root: rewrite_run(
+                root, lambda run: run.__setitem__("git_dirty", not run["git_dirty"]))),
+            ("command-template", lambda root: rewrite_run(
+                root, lambda run: run.__setitem__("command_template_sha256", "0" * 64))),
+            ("semantic-dependency", lambda root: rewrite_run(
+                root, lambda run: run["scripts"].__setitem__(
+                    "verify_benchmark_provenance.py", "0" * 64))),
+            ("binary-path", lambda root: rewrite_run(
+                root, lambda run: run["executable_paths"].__setitem__(
+                    "bench_review_comparison", "/bin/true"))),
+        ]
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                candidate = self.tmp / name
+                shutil.copytree(source, candidate)
+                mutate(candidate)
+                self.assertNotEqual(self.verify(candidate).returncode, 0)
+
+        candidate = self.tmp / "bfv-cap"
+        shutil.copytree(source, candidate)
+        matrix_path = candidate / "matrix.json"
+        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+        matrix["bfv_caps"]["log_q_bits"] = 999.0
+        matrix_path.write_text(json.dumps(matrix, sort_keys=True, separators=(",", ":")) + "\n",
+                               encoding="utf-8")
+        rewrite_run(candidate, lambda run: run.__setitem__(
+            "matrix_sha256", hashlib.sha256(matrix_path.read_bytes()).hexdigest()))
+        self.assertNotEqual(self.verify(candidate).returncode, 0,
+                            "rehashed BFV caps mutation must not verify")
+
 
 if __name__ == "__main__":
     unittest.main()

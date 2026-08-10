@@ -67,6 +67,10 @@ PROFILES = {
     "std128-t128-feasibility": ("feasibility", 128, 128, False),
     "std192-t128-feasibility": ("feasibility", 192, 128, False),
     "toy-smoke": ("smoke", 0, 40, False),
+    # Work #5 is implementation evidence only: it deliberately has the
+    # smoke run-class and no comparison/ranking eligibility at either target.
+    "work5-std128-t40-single-trial": ("smoke", 128, 40, False),
+    "work5-std192-t40-single-trial": ("smoke", 192, 40, False),
 }
 
 BENCHMARK_REQUIRED_COLUMNS = {

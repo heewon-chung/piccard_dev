@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -37,6 +38,15 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+#include <fcntl.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <limits.h>
+#elif defined(__linux__)
+#include <limits.h>
+#endif
+#include <unistd.h>
 
 namespace {
 
@@ -110,6 +120,39 @@ std::string Number(T value) {
     }
     out << value;
     return out.str();
+}
+
+std::string SelfExecutablePath() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    if (_NSGetExecutablePath(nullptr, &size) != -1 || size == 0) {
+        throw std::runtime_error("failed to query Piccard evidence executable path");
+    }
+    std::vector<char> buffer(size + 1, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        throw std::runtime_error("failed to resolve Piccard evidence executable path");
+    }
+    return std::filesystem::weakly_canonical(buffer.data()).string();
+#elif defined(__linux__)
+    std::vector<char> buffer(PATH_MAX + 1, '\0');
+    const ssize_t length = ::readlink("/proc/self/exe", buffer.data(),
+                                      buffer.size() - 1);
+    if (length <= 0) {
+        throw std::runtime_error("failed to resolve Piccard evidence executable path");
+    }
+    buffer[static_cast<size_t>(length)] = '\0';
+    return std::filesystem::weakly_canonical(buffer.data()).string();
+#else
+    throw std::runtime_error("unsupported platform for Piccard evidence executable hash");
+#endif
+}
+
+std::string SelfExecutableSha256() {
+    std::ifstream input(SelfExecutablePath(), std::ios::binary);
+    if (!input.is_open()) throw std::runtime_error("failed to open Piccard evidence executable");
+    const std::string bytes((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+    return workload::Sha256Hex(std::vector<uint8_t>(bytes.begin(), bytes.end()));
 }
 
 // All diagnostic JSON is emitted through this tiny object writer.  Keeping
@@ -1126,6 +1169,7 @@ std::string Work5PreflightJson(const Options& options,
     object.Add("ordered_rns_moduli",
                CanonicalJsonStringArray(metadata.ordered_rns_moduli));
     object.AddString("openfhe_version", metadata.openfhe_version);
+    object.AddString("piccard_binary_sha256", SelfExecutableSha256());
     object.AddString("build_id", PICCARD_BUILD_ID);
     object.AddBool("build_dirty", PICCARD_BUILD_DIRTY != 0);
     object.AddString("build_type", PICCARD_BUILD_TYPE);
@@ -1606,7 +1650,8 @@ std::string WorkloadCsv(const Options& options,
     return header + row.str();
 }
 
-void Emit(const std::string& text, const std::string& output);
+void Emit(const std::string& text, const std::string& output,
+          bool no_replace = false);
 
 std::string E2eJson(const Options& options,
                     const CalibrationArtifact& artifact,
@@ -1643,7 +1688,7 @@ int RunWorkloadE2e(const Options& requested,
     return 0;
 }
 
-void Emit(const std::string& text, const std::string& output);
+void Emit(const std::string& text, const std::string& output, bool no_replace);
 
 std::string E2eJson(const Options& options,
                     const CalibrationArtifact& artifact,
@@ -1771,7 +1816,7 @@ int RunE2e(const Options& requested) {
     return RunWorkloadE2e(requested, options, artifact, selected);
 }
 
-void Emit(const std::string& text, const std::string& output) {
+void Emit(const std::string& text, const std::string& output, bool no_replace) {
     if (output.empty()) {
         std::cout << text;
         return;
@@ -1808,10 +1853,48 @@ void Emit(const std::string& text, const std::string& output) {
         throw std::invalid_argument(
             "diagnostic output cannot be written inside the source or production table paths");
     }
-    std::ofstream file(normalized, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) throw std::runtime_error("failed to open " + output);
-    file << text;
-    if (!file) throw std::runtime_error("failed to write " + output);
+    if (no_replace && std::filesystem::exists(normalized)) {
+        throw std::runtime_error("refusing to overwrite existing artifact: " + output);
+    }
+    const auto temporary = normalized.string() + ".tmp-" +
+                           std::to_string(static_cast<unsigned long>(::getpid()));
+    const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (descriptor < 0) {
+        throw std::system_error(errno, std::generic_category(), "create diagnostic temporary");
+    }
+    bool closed = false;
+    try {
+        size_t offset = 0;
+        while (offset < text.size()) {
+            const ssize_t written = ::write(descriptor, text.data() + offset, text.size() - offset);
+            if (written <= 0) {
+                throw std::system_error(errno ? errno : EIO, std::generic_category(),
+                                        "write diagnostic temporary");
+            }
+            offset += static_cast<size_t>(written);
+        }
+        if (::fsync(descriptor) != 0) {
+            throw std::system_error(errno, std::generic_category(), "fsync diagnostic temporary");
+        }
+        if (::close(descriptor) != 0) {
+            closed = true;
+            throw std::system_error(errno, std::generic_category(), "close diagnostic temporary");
+        }
+        closed = true;
+        if (no_replace) {
+            if (::link(temporary.c_str(), normalized.c_str()) != 0) {
+                throw std::system_error(errno, std::generic_category(),
+                                        "atomically install diagnostic output");
+            }
+        } else {
+            std::filesystem::rename(temporary, normalized);
+        }
+        ::unlink(temporary.c_str());
+    } catch (...) {
+        if (!closed) ::close(descriptor);
+        ::unlink(temporary.c_str());
+        throw;
+    }
 }
 
 int Run(const Options& options) {
@@ -1841,7 +1924,7 @@ int Run(const Options& options) {
             throw std::logic_error("Work #5 preflight generated keys");
         }
         Emit(Work5PreflightJson(options, params, described, tuple, decision),
-             options.output);
+             options.output, true);
         return 0;
     }
     if (decision.skipped) {

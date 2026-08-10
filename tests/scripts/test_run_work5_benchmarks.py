@@ -545,6 +545,18 @@ class Work5RunnerContractTest(unittest.TestCase):
         ))
         self.assertTrue(load_contract()["lifecycle"]["preflight_before_keygen"])
 
+    def test_every_method_group_gets_a_cell_local_staging_directory_before_argv(self) -> None:
+        results = self.tmp / "work5-staging"
+        run = self.run_runner("parameters", results)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        records = self.assert_parameter_matrix(results)
+        for suite in ("work5-std128-bcg12-mh", "work5-std128-sj16"):
+            record = next(item for item in records if item["suite"] == suite and
+                          item["axis"] == "control")
+            staged = results / ".tmp" / record["cell_id"]
+            self.assertTrue(staged.is_dir(), f"missing staging directory for {suite}")
+            self.assertTrue(any(part == ".tmp" for part in Path(record["argv"][-2].split("=", 1)[1]).parts))
+
     def test_context_only_bfv_cap_skips_before_workload_or_keygen(self) -> None:
         contract = load_contract()
         lifecycle = contract["lifecycle"]
@@ -624,6 +636,17 @@ class Work5RunnerContractTest(unittest.TestCase):
         error = next(record for record in records if record["status"] == "ERROR")
         self.assertEqual(error["reason_code"], "EXCEPTION")
         self.assertIn("signal", error["reason_detail"])
+
+    def test_exhausted_phase_budget_is_timeout_before_subprocess_start(self) -> None:
+        results = self.tmp / "work5-phase-cap"
+        run = self.run_runner("parameters", results, env={
+            "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.000001"})
+        self.assertNotEqual(run.returncode, 0)
+        records = read_jsonl(results / "cells.jsonl")
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0]["status"], records[0]["reason_code"]), ("ERROR", "TIMEOUT"))
+        self.assertFalse(records[0]["context_started"])
+        self.assertFalse(self.events.exists(), "phase cap must start no producer subprocess")
 
     def test_pre_setup_and_setup_errors_have_stage_specific_terminal_flags(self) -> None:
         contract = load_contract()

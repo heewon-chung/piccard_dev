@@ -32,6 +32,9 @@ AXES = ("k", "m", "n", "U")
 STAGES = ("preflight_started", "context_started", "workload_started",
           "keygen_started", "measurement_started")
 CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
+BFV_CAPS = {"realized_ring_dim": 32768, "provisioned_depth": 4,
+            "log_q_bits": 240.0}
+CONTEXT_LABELS = ("context_onehot", "context_sqrt", "context_fhe_ind")
 PARAMETERS = {"k": (16, 32, 64, 128, 256, 512),
               "m": (16, 32, 64, 128, 256),
               "n": (100, 1000, 10000, 100000),
@@ -143,10 +146,13 @@ def relative_file(root: Path, value: Any, label: str) -> Path:
 
 def verify_artifacts(root: Path, record: dict[str, Any], *, test_fixture: bool) -> None:
     status = record["status"]
+    piccard = bool(set(record["methods"]) & {"piccard", "piccard_sqrt"})
+    fhe_ind = record["methods"] == ["fhe_ind"]
+    context_ran = status != "ERROR" and bool(record.get("context_started")) and not test_fixture
     pairs = (("command", True), ("stdout", True), ("stderr", True),
-             ("context", status != "ERROR" and
-              bool(set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}) and
-              not test_fixture),
+             ("context_onehot", context_ran and piccard),
+             ("context_sqrt", context_ran and piccard),
+             ("context_fhe_ind", context_ran and fhe_ind),
              ("workload", status == "MEASURED"), ("trace", status == "MEASURED"),
              ("csv", status == "MEASURED"))
     for name, mandatory in pairs:
@@ -166,6 +172,13 @@ def verify_artifacts(root: Path, record: dict[str, Any], *, test_fixture: bool) 
     if status == "SKIPPED_PRECHECK":
         require(all(record.get(f"{name}_path") is None for name in ("workload", "trace", "csv")),
                 f"{record['cell_id']}: preflight skip has output artifact")
+        if record.get("reason_code") in {"WORKLOAD_GEOMETRY", "PROJECTED_RUNTIME_CAP"}:
+            require(all(record.get(f"{name}_path") is None for name in CONTEXT_LABELS),
+                    f"{record['cell_id']}: pre-context skip has context artifact")
+    if status == "ERROR":
+        require(all(record.get(f"{name}_path") is None for name in (*CONTEXT_LABELS,
+                                                                  "workload", "trace", "csv")),
+                f"{record['cell_id']}: ERROR has leftover producer output")
     command_path = relative_file(root, record["command_path"], f"{record['cell_id']} command")
     command = load_object(command_path, "command artifact")
     require(command.get("schema") == "piccard-work5-command-v1" and
@@ -175,7 +188,7 @@ def verify_artifacts(root: Path, record: dict[str, Any], *, test_fixture: bool) 
             f"{record['cell_id']}: command artifact does not bind record")
 
 
-def source_provenance() -> dict[str, str]:
+def source_provenance() -> dict[str, Any]:
     def git(*arguments: str) -> str:
         result = subprocess.run(["git", *arguments], cwd=SOURCE_ROOT, text=True,
                                 capture_output=True, check=False)
@@ -183,7 +196,8 @@ def source_provenance() -> dict[str, str]:
         return result.stdout.strip()
     return {"git_sha": git("rev-parse", "HEAD"),
             "git_tree": git("rev-parse", "HEAD^{tree}"),
-            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve())}
+            "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve()),
+            "git_dirty": bool(git("status", "--porcelain=v1", "--untracked-files=no"))}
 
 
 def results_root_digest(root: Path) -> str:
@@ -193,34 +207,50 @@ def results_root_digest(root: Path) -> str:
 
 def verify_context(root: Path, run: dict[str, Any], record: dict[str, Any]) -> None:
     if record["status"] == "ERROR" or run.get("test_fixture_mode") or \
+            not record.get("context_started") or \
             not set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}:
         return
-    path = relative_file(root, record.get("context_path"), f"{record['cell_id']} context")
-    value = load_object(path, "context preflight")
-    is_fhe = record["methods"] == ["fhe_ind"]
-    schema = "piccard-work5-fhe-ind-context-preflight-v1" if is_fhe else \
-        "piccard-work5-piccard-context-preflight-v1"
-    require(value.get("schema") == schema and value.get("mode") == "work5-preflight" and
-            value.get("keygen_started") is False and value.get("cell_id") == record["cell_id"] and
-            value.get("security") == record["security"] and value.get("n") == record["n"] and
-            value.get("universe") == record["U"] and value.get("source_commit") == run["git_sha"],
-            f"{record['cell_id']}: context preflight identity mismatch")
-    if is_fhe:
-        require(value.get("method") == "fhe_ind", f"{record['cell_id']}: FHE-IND context method mismatch")
-    else:
-        circuit = "sqrt" if "piccard_sqrt" in record["methods"] else "onehot"
-        require(value.get("circuit") == circuit and value.get("k") == record["k"] and
-                value.get("m") == record["m"], f"{record['cell_id']}: Piccard context identity mismatch")
-    caps = (("RING_DIM_CAP", "realized_ring_dim", 32768),
-            ("DEPTH_CAP", "provisioned_depth", 4), ("LOGQ_CAP", "log_q_bits", 240.0))
-    try:
-        breached = next((code for code, key, limit in caps if float(value[key]) > limit), None)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise VerificationError(f"{record['cell_id']}: context observed caps malformed") from exc
-    require(bool(value.get("skipped")) == (breached is not None),
-            f"{record['cell_id']}: context skip/cap mismatch")
+    labels = (("context_fhe_ind", "fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),) if \
+        record["methods"] == ["fhe_ind"] else \
+        (("context_onehot", "onehot", "piccard-work5-piccard-context-preflight-v1"),
+         ("context_sqrt", "sqrt", "piccard-work5-piccard-context-preflight-v1"))
+    breached_codes: set[str] = set()
+    tuples: set[str] = set()
+    for label, circuit, schema in labels:
+        path = relative_file(root, record.get(f"{label}_path"), f"{record['cell_id']} {label}")
+        value = load_object(path, "context preflight")
+        require(value.get("schema") == schema and value.get("mode") == "work5-preflight" and
+                value.get("keygen_started") is False and value.get("cell_id") == record["cell_id"] and
+                value.get("security") == record["security"] and value.get("n") == record["n"] and
+                value.get("universe") == record["U"] and value.get("source_commit") == run["git_sha"],
+                f"{record['cell_id']}: context preflight identity mismatch")
+        if circuit == "fhe_ind":
+            require(value.get("method") == "fhe_ind" and
+                    value.get("fhe_ind_binary_sha256") == run["executables"].get("bench_fhe_ind"),
+                    f"{record['cell_id']}: FHE-IND context method/binary mismatch")
+        else:
+            require(value.get("circuit") == circuit and value.get("k") == record["k"] and
+                    value.get("m") == record["m"] and
+                    value.get("piccard_binary_sha256") ==
+                    run["executables"].get("bench_std_security_evidence"),
+                    f"{record['cell_id']}: Piccard context identity/binary mismatch")
+        tuples.add(str(value.get("context_tuple_sha256")))
+        try:
+            breached = next((code for code, key, limit in
+                             (("RING_DIM_CAP", "realized_ring_dim", BFV_CAPS["realized_ring_dim"]),
+                              ("DEPTH_CAP", "provisioned_depth", BFV_CAPS["provisioned_depth"]),
+                              ("LOGQ_CAP", "log_q_bits", BFV_CAPS["log_q_bits"]))
+                             if float(value[key]) > limit), None)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError(f"{record['cell_id']}: context observed caps malformed") from exc
+        require(bool(value.get("skipped")) == (breached is not None),
+                f"{record['cell_id']}: context skip/cap mismatch")
+        if breached:
+            breached_codes.add(breached)
+    if len(labels) == 2:
+        require(len(tuples) == 2, f"{record['cell_id']}: onehot/sqrt contexts are not distinct")
     if record["status"] == "SKIPPED_PRECHECK" and record.get("reason_code") in {"RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP"}:
-        require(breached == record["reason_code"],
+        require(record["reason_code"] in breached_codes,
                 f"{record['cell_id']}: cap skip is not observation-backed")
 
 
@@ -355,6 +385,8 @@ def verify_matrix(root: Path, run: dict[str, Any], expected: list[dict[str, Any]
     require(matrix.get("trials") == {"timing_trials": 1, "accuracy_trials": 1,
                                       "executed_trials": 3},
             "matrix trial invariant mismatch")
+    require(matrix.get("bfv_caps") == BFV_CAPS,
+            "matrix BFV-cap admission bounds mismatch")
     admission = matrix.get("sj16_admission")
     require(isinstance(admission, dict) and admission.get("executed_trials") == 3 and
             admission.get("formula") == "executed_trials * (18.0 * (U + 1) + 60000.0)" and
@@ -392,23 +424,31 @@ def verify_run(root: Path, run: dict[str, Any]) -> None:
     require(run.get("source_root") == str(SOURCE_ROOT.resolve()) and
             run.get("git_sha") == provenance["git_sha"] and
             run.get("git_tree") == provenance["git_tree"] and
-            run.get("repository_root") == provenance["repository_root"],
+            run.get("repository_root") == provenance["repository_root"] and
+            run.get("git_dirty") == provenance["git_dirty"],
             "current/pinned source identity mismatch")
     require(run.get("results_root") == str(root.resolve()) and
             run.get("results_root_sha256") == results_root_digest(root),
             "canonical results-root identity mismatch")
-    require(run.get("scripts") == {
-        "run_work5_benchmarks.py": sha256_file(SOURCE_ROOT / "scripts" / "run_work5_benchmarks.py"),
-        "verify_work5_benchmarks.py": sha256_file(SOURCE_ROOT / "scripts" / "verify_work5_benchmarks.py")},
+    require(run.get("scripts") == runner.script_hashes(),
             "current script identity mismatch")
+    require(run.get("command_template_sha256") == runner.command_template_sha256(),
+            "command template identity mismatch")
     build_dir = Path(run.get("build_dir", ""))
     require(build_dir.is_absolute() and build_dir.is_dir(), "build directory identity is invalid")
     cache = build_dir / "CMakeCache.txt"
     require(run.get("build_identity") == {"cmake_cache_sha256": sha256_file(cache) if cache.is_file() else None},
             "build identity mismatch")
-    for name, digest in run["executables"].items():
-        path = build_dir / name
-        require(path.is_file() and os.access(path, os.X_OK) and sha256_file(path) == digest,
+    test_fixture = bool(run.get("test_fixture_mode"))
+    expected_names = set(runner.required_executable_names(test_fixture))
+    require(set(run["executables"]) == expected_names and
+            isinstance(run.get("executable_paths"), dict) and
+            set(run["executable_paths"]) == expected_names,
+            "executable identity key set mismatch")
+    for name in sorted(expected_names):
+        path = (build_dir / name).resolve()
+        require(run["executable_paths"].get(name) == str(path) and path.is_file() and
+                os.access(path, os.X_OK) and sha256_file(path) == run["executables"][name],
                 f"executable identity mismatch: {name}")
     require(isinstance(run.get("cells_sha256"), str) and len(run["cells_sha256"]) == 64,
             "run terminal-record hash missing")
@@ -512,7 +552,8 @@ def verify_inventory(root: Path, records: list[dict[str, Any]]) -> None:
     expected = {"run.json", "matrix.json", "cells.jsonl"}
     owners: set[str] = set()
     for record in records:
-        for name in ("command", "stdout", "stderr", "context", "workload", "trace", "csv"):
+        for name in ("command", "stdout", "stderr", *CONTEXT_LABELS,
+                     "workload", "trace", "csv"):
             relative = record.get(f"{name}_path")
             if relative is None:
                 continue

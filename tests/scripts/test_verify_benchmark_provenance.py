@@ -270,6 +270,29 @@ class BenchmarkProvenanceVerifierTest(unittest.TestCase):
         result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_work5_single_trial_profiles_are_smoke_t40_and_not_comparison_eligible(self):
+        for profile, target in (("work5-std128-t40-single-trial", "128"),
+                                ("work5-std192-t40-single-trial", "192")):
+            with self.subTest(profile=profile):
+                rows = [dict(row) for row in self.rows]
+                for row in rows:
+                    row.update(profile_id=profile, run_class="smoke",
+                               target_security_bits=target, comparison_eligible="false")
+                    if row["method"] in {"piccard", "piccard_sqrt", "fhe_ind"}:
+                        row.update(cryptographic_profile=f"live-BFV-STD{target}",
+                                   nominal_security_bits=target, security_match="true")
+                    elif row["method"] == "sj16":
+                        row.update(cryptographic_profile="Paillier-3072", nominal_security_bits="128",
+                                   primitive="paillier-3072",
+                                   security_basis="rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+                                   security_match="true" if target == "128" else "false")
+                    elif row["method"].startswith("bcg12_"):
+                        row.update(nominal_security_bits="128",
+                                   security_match="true" if target == "128" else "false")
+                self.write_rows(rows)
+                result = self.run_verifier()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_missing_actual_fhe_metadata_fails(self):
         rows = [dict(row) for row in self.rows]
         rows[0]["actual_ring_dim"] = ""
