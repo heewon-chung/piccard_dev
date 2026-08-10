@@ -193,12 +193,14 @@ class Work5ContractFixtureTest(unittest.TestCase):
         lifecycle = contract["lifecycle"]
         self.assertEqual({key: lifecycle[key] for key in (
             "preflight_before_keygen", "timeout_status", "timeout_reason_code",
+            "phase_cap_reason_code",
             "refuse_existing_results_root", "resume_rejects_hash_mismatch",
             "terminal_cells_never_rerun",
         )}, {
             "preflight_before_keygen": True,
             "timeout_status": "ERROR",
             "timeout_reason_code": "TIMEOUT",
+            "phase_cap_reason_code": "PHASE_CAP_EXHAUSTED",
             "refuse_existing_results_root": True,
             "resume_rejects_hash_mismatch": True,
             "terminal_cells_never_rerun": True,
@@ -223,6 +225,7 @@ class Work5ContractFixtureTest(unittest.TestCase):
             "force_precheck_cell": "PICCARD_WORK5_TEST_FORCE_PRECHECK_CELL",
             "force_error_stage": "PICCARD_WORK5_TEST_FORCE_ERROR_STAGE",
             "force_error_cell": "PICCARD_WORK5_TEST_FORCE_ERROR_CELL",
+            "subprocess_timeout_seconds": "PICCARD_WORK5_TEST_SUBPROCESS_TIMEOUT_SECONDS",
         })
         schema = contract["status_schema"]
         self.assertEqual(schema["measured"]["flags"],
@@ -582,7 +585,7 @@ class Work5RunnerContractTest(unittest.TestCase):
             ["stage_flags_by_reason"]["RING_DIM_CAP"],
         )
 
-    def test_timeout_is_terminal_error_not_a_precheck_skip(self) -> None:
+    def test_14400_second_phase_preserves_subprocess_wall_timeout(self) -> None:
         results = self.tmp / "work5-timeout"
         started = time.monotonic()
         run = self.run_runner("parameters", results,
@@ -607,6 +610,9 @@ class Work5RunnerContractTest(unittest.TestCase):
             timeout,
             lifecycle["error_scenarios"]["timeout_after_admission"]["flags"],
         )
+        self.assertIn("subprocess wall timeout", timeout["reason_detail"])
+        run_json = json.loads((results / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(run_json["phase_timeout_seconds"]["parameters"], 14400)
         self.assertFalse(any(record["status"] == "SKIPPED_PRECHECK" and
                              record["reason_code"] == lifecycle["timeout_reason_code"]
                              for record in records))
@@ -641,14 +647,14 @@ class Work5RunnerContractTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
-    def test_stalled_provenance_creates_only_run_level_timeout_record(self) -> None:
+    def test_stalled_provenance_uses_subprocess_wall_timeout_not_phase_cap(self) -> None:
         results = self.tmp / "work5-stalled-provenance"
         started = time.monotonic()
         run = self.run_runner("parameters", results, env={
             "PICCARD_WORK5_TEST_GIT_EXECUTABLE": str(self.build / "bench_comparison"),
             "PICCARD_WORK5_FAKE_MODE": "sleep",
             "PICCARD_WORK5_FAKE_SLEEP_SECONDS": "30",
-            "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.05",
+            "PICCARD_WORK5_TEST_SUBPROCESS_TIMEOUT_SECONDS": "0.05",
         })
         elapsed = time.monotonic() - started
         self.assertNotEqual(run.returncode, 0)
@@ -656,6 +662,8 @@ class Work5RunnerContractTest(unittest.TestCase):
         timeout = json.loads((results / "run-level-timeout.json").read_text())
         self.assertEqual((timeout["status"], timeout["reason_code"], timeout["cell_started"]),
                          ("ERROR", "TIMEOUT", False))
+        self.assertIn("subprocess wall timeout", timeout["reason_detail"])
+        self.assertEqual(timeout["phase_timeout_seconds"], 14400)
         self.assertFalse((results / "cells.jsonl").exists())
         self.assertFalse((results / "run.json").exists())
         self.assertFalse((results / "matrix.json").exists())
@@ -684,16 +692,44 @@ class Work5RunnerContractTest(unittest.TestCase):
         self.assertEqual(error["reason_code"], "EXCEPTION")
         self.assertIn("signal", error["reason_detail"])
 
-    def test_exhausted_phase_budget_is_timeout_before_subprocess_start(self) -> None:
+    def test_exhausted_phase_budget_is_phase_cap_before_subprocess_start(self) -> None:
         results = self.tmp / "work5-phase-cap"
         run = self.run_runner("parameters", results, env={
             "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.000001"})
         self.assertNotEqual(run.returncode, 0)
         timeout = json.loads((results / "run-level-timeout.json").read_text())
         self.assertEqual((timeout["status"], timeout["reason_code"], timeout["cell_started"]),
-                         ("ERROR", "TIMEOUT", False))
+                         ("ERROR", "PHASE_CAP_EXHAUSTED", False))
         self.assertFalse((results / "cells.jsonl").exists())
         self.assertFalse(self.events.exists(), "phase cap must start no producer subprocess")
+
+    def test_existing_fresh_root_is_not_mutated_by_exhausted_phase(self) -> None:
+        results = self.tmp / "existing-timeout-root"
+        results.mkdir()
+        marker = results / "caller-sentinel.txt"
+        marker.write_text("preserve this root\n", encoding="utf-8")
+        before = {path.relative_to(results): path.read_bytes()
+                  for path in results.rglob("*") if path.is_file()}
+        run = self.run_runner("parameters", results, env={
+            "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.000001"})
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("results root already exists", run.stderr)
+        after = {path.relative_to(results): path.read_bytes()
+                 for path in results.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+        self.assertFalse((results / "run-level-timeout.json").exists())
+
+    def test_invalid_resume_root_is_rejected_before_phase_timeout_write(self) -> None:
+        results = self.tmp / "invalid-resume-timeout-root"
+        results.mkdir()
+        marker = results / "caller-sentinel.txt"
+        marker.write_text("resume must be validated\n", encoding="utf-8")
+        run = self.run_runner("parameters", results, resume=True, env={
+            "PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS": "0.000001"})
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("validated Work #5 state", run.stderr)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "resume must be validated\n")
+        self.assertFalse((results / "run-level-timeout.json").exists())
 
     def test_pre_setup_and_setup_errors_have_stage_specific_terminal_flags(self) -> None:
         contract = load_contract()

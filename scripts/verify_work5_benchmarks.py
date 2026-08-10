@@ -310,7 +310,7 @@ def verify_status(record: dict[str, Any]) -> None:
                 record.get("measured_trials") == 0 and flags == expected_stage_flags(status, record["reason_code"]),
                 f"{record['cell_id']}: SKIPPED_PRECHECK state invariant failed")
     else:
-        require(record.get("reason_code") in {"TIMEOUT", "SUBPROCESS_EXIT", "VERIFIER_FAILURE", "ARTIFACT_MISMATCH", "EXCEPTION"} and
+        require(record.get("reason_code") in {"TIMEOUT", "PHASE_CAP_EXHAUSTED", "SUBPROCESS_EXIT", "VERIFIER_FAILURE", "ARTIFACT_MISMATCH", "EXCEPTION"} and
                 isinstance(record.get("reason_detail"), str) and bool(record["reason_detail"]) and
                 isinstance(record.get("exit_code"), int) and record["exit_code"] != 0 and
                 record.get("measured_trials") == 0,

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -139,14 +140,26 @@ class PhaseBudgetExpired(Work5Error):
 class SubprocessTimedOut(Work5Error):
     """A subprocess used its bounded timeout without completing."""
 
-    def __init__(self, message: str, *, stdout: bytes = b"", stderr: bytes = b""):
+    def __init__(self, message: str, *, phase_cap_exhausted: bool,
+                 stdout: bytes = b"", stderr: bytes = b""):
         super().__init__(message)
+        self.phase_cap_exhausted = phase_cap_exhausted
         self.stdout = stdout
         self.stderr = stderr
 
 
 class SignalAbort(BaseException):
     """Raised only after the active child has been terminated."""
+
+
+@dataclass
+class ResultsRootCapability:
+    """Admission result that is required before this process may write a root."""
+
+    root: Path
+    resume: bool
+    fresh: bool
+    claimed_by_runner: bool = False
 
 
 _ACTIVE_CHILD: subprocess.Popen[bytes] | None = None
@@ -218,12 +231,42 @@ def read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def phase_timeout(deadline: float, *, limit: float = CELL_TIMEOUT_SECONDS) -> float:
-    """Return the only permitted subprocess timeout for the active phase."""
+def select_subprocess_timeout(deadline: float, *, limit: float = CELL_TIMEOUT_SECONDS) -> tuple[float, bool]:
+    """Select one wall timeout and whether the phase, rather than wall, binds it."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise PhaseBudgetExpired("parameter phase cap exhausted before subprocess start")
-    return min(float(CELL_TIMEOUT_SECONDS), limit, remaining)
+    wall_limit = min(float(CELL_TIMEOUT_SECONDS), limit)
+    return min(wall_limit, remaining), remaining <= wall_limit
+
+
+def phase_timeout(deadline: float, *, limit: float = CELL_TIMEOUT_SECONDS) -> float:
+    """Return the only permitted subprocess timeout for the active phase."""
+    return select_subprocess_timeout(deadline, limit=limit)[0]
+
+
+def subprocess_wall_limit(limit: float) -> float:
+    """Fixture-only shorter wall used to test the production 1800s boundary."""
+    override = os.environ.get("PICCARD_WORK5_TEST_SUBPROCESS_TIMEOUT_SECONDS")
+    if override is None:
+        return limit
+    if not is_test_fixture_mode():
+        raise Work5Error("test-only subprocess timeout override is forbidden outside fixture mode")
+    try:
+        parsed = float(override)
+    except ValueError as exc:
+        raise Work5Error("test-only subprocess timeout override must be numeric") from exc
+    if parsed <= 0:
+        raise Work5Error("test-only subprocess timeout override must be positive")
+    return min(limit, parsed)
+
+
+def timeout_reason_code(error: PhaseBudgetExpired | SubprocessTimedOut) -> str:
+    """Keep an admitted process wall timeout distinct from phase exhaustion."""
+    if isinstance(error, PhaseBudgetExpired) or error.phase_cap_exhausted:
+        return "PHASE_CAP_EXHAUSTED"
+    # The approved Phase-3 contract names an admitted process timeout TIMEOUT.
+    return "TIMEOUT"
 
 
 def _cleanup_timeout(deadline: float) -> float | None:
@@ -293,7 +336,8 @@ def bounded_subprocess(argv: list[str], *, deadline: float, cwd: Path,
                        env: dict[str, str] | None = None,
                        limit: float = CELL_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[bytes]:
     """Run an argv array in its own process group under the phase deadline."""
-    timeout = phase_timeout(deadline, limit=limit)
+    limit = subprocess_wall_limit(limit)
+    timeout, phase_cap_exhausted = select_subprocess_timeout(deadline, limit=limit)
     try:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
@@ -304,6 +348,7 @@ def bounded_subprocess(argv: list[str], *, deadline: float, cwd: Path,
     except subprocess.TimeoutExpired:
         stdout, stderr = terminate_process_group(process, deadline)
         raise SubprocessTimedOut("subprocess exceeded bounded phase timeout",
+                                 phase_cap_exhausted=phase_cap_exhausted,
                                  stdout=stdout, stderr=stderr)
     except BaseException:
         terminate_process_group(process, deadline)
@@ -319,7 +364,9 @@ def git(*arguments: str, deadline: float) -> str:
         result = bounded_subprocess([test_override or "git", *arguments], cwd=SOURCE_ROOT,
                                     deadline=deadline, env=os.environ.copy())
     except SubprocessTimedOut as exc:
-        raise PhaseBudgetExpired("parameter phase cap exhausted during source provenance") from exc
+        if exc.phase_cap_exhausted:
+            raise PhaseBudgetExpired("parameter phase cap exhausted during source provenance") from exc
+        raise
     if result.returncode != 0:
         raise Work5Error(f"git {' '.join(arguments)} failed: " +
                          result.stderr.decode("utf-8", "replace").strip())
@@ -359,7 +406,9 @@ def compiler_descriptor(deadline: float) -> dict[str, str]:
         version = (result.stdout or result.stderr).decode("utf-8", "replace").splitlines()
         return {"path": compiler, "version": version[0] if result.returncode == 0 and version else "unavailable"}
     except SubprocessTimedOut as exc:
-        raise PhaseBudgetExpired("parameter phase cap exhausted during compiler provenance") from exc
+        if exc.phase_cap_exhausted:
+            raise PhaseBudgetExpired("parameter phase cap exhausted during compiler provenance") from exc
+        raise
     except OSError:
         return {"path": compiler, "version": "unavailable"}
 
@@ -765,10 +814,11 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
         try:
             completed = bounded_subprocess(
                 argv, cwd=SOURCE_ROOT, env=process_environment(), deadline=deadline,
-                limit=min(float(CELL_TIMEOUT_SECONDS), timeout, remaining))
+                limit=timeout)
         except SubprocessTimedOut as exc:
             raise SubprocessTimedOut(
                 "context-only preflight subprocess exceeded its bounded timeout",
+                phase_cap_exhausted=exc.phase_cap_exhausted,
                 stdout=exc.stdout, stderr=exc.stderr) from exc
         if completed.returncode != 0:
             raise Work5Error("context-only preflight subprocess failed before workload/keygen: " +
@@ -1001,7 +1051,7 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
 
         context_reason, _context = context_preflight(
             build_dir, root, cell, test_fixture=test_fixture,
-            timeout=min(float(CELL_TIMEOUT_SECONDS), remaining), deadline=deadline)
+            timeout=timeout, deadline=deadline)
         if context_reason is not None:
             install_logs(root, cell, b"", b"")
             terminalize(root, records, record_for(
@@ -1022,13 +1072,14 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
             if test_fixture:
                 note_test_dispatch(argv)
             global _ACTIVE_CHILD
-            timeout_limit = min(timeout, remaining)
+            timeout_limit = timeout
+            subprocess_timeout, phase_cap_exhausted = select_subprocess_timeout(
+                deadline, limit=timeout_limit)
             _ACTIVE_CHILD = subprocess.Popen(
                 argv, cwd=SOURCE_ROOT, env=process_environment(), stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, start_new_session=True)
             try:
-                stdout, stderr = _ACTIVE_CHILD.communicate(
-                    timeout=phase_timeout(deadline, limit=timeout_limit))
+                stdout, stderr = _ACTIVE_CHILD.communicate(timeout=subprocess_timeout)
                 completed = subprocess.CompletedProcess(argv, _ACTIVE_CHILD.returncode, stdout, stderr)
                 _ACTIVE_CHILD = None
             except subprocess.TimeoutExpired:
@@ -1036,17 +1087,23 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
                 _ACTIVE_CHILD = None
                 stdout, stderr = terminate_process_group(child, deadline)
                 raise SubprocessTimedOut("benchmark subprocess exceeded bounded phase timeout",
+                                         phase_cap_exhausted=phase_cap_exhausted,
                                          stdout=stdout, stderr=stderr)
         except SubprocessTimedOut as exc:
             stdout, stderr = exc.stdout, exc.stderr
             install_logs(root, cell, stdout, stderr)
             discard_staging(root, cell["cell_id"])
             discard_unsealed_outputs(root, cell["cell_id"])
+            reason_code = timeout_reason_code(exc)
+            detail = (f"parameter phase cap exhausted during benchmark subprocess "
+                      f"(cap={PARAMETER_TIMEOUT_SECONDS:g}s)"
+                      if reason_code == "PHASE_CAP_EXHAUSTED" else
+                      f"subprocess wall timeout after {timeout:g} seconds")
             terminalize(root, records, record_for(
-                root, cell, argv, status="ERROR", reason_code="TIMEOUT",
-                reason_detail=f"subprocess exceeded {timeout:g} seconds", flags=flags,
+                root, cell, argv, status="ERROR", reason_code=reason_code,
+                reason_detail=detail, flags=flags,
                 exit_code=124, started=started))
-            raise Work5Error("terminal ERROR/TIMEOUT")
+            raise Work5Error(f"terminal ERROR/{reason_code}")
         except SignalAbort as exc:
             if _ACTIVE_CHILD is not None:
                 stdout, stderr = terminate_process_group(_ACTIVE_CHILD, deadline)
@@ -1095,14 +1152,19 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
         if not any(record["cell_id"] == cell["cell_id"] for record in records):
             discard_unsealed_outputs(root, cell["cell_id"])
             detail = str(exc)
-            reason = ("TIMEOUT" if isinstance(exc, (PhaseBudgetExpired, SubprocessTimedOut)) else
+            reason = (timeout_reason_code(exc) if isinstance(exc, (PhaseBudgetExpired, SubprocessTimedOut)) else
                       "VERIFIER_FAILURE" if detail.startswith("semantic verifier failure:") else
                       "ARTIFACT_MISMATCH" if detail.startswith("artifact mismatch:") else "EXCEPTION")
+            if reason == "TIMEOUT":
+                detail = f"subprocess wall timeout: {detail}"
+            elif reason == "PHASE_CAP_EXHAUSTED":
+                detail = f"parameter phase cap exhausted: {detail}"
             install_logs(root, cell, b"", detail.encode("utf-8", "replace"))
             terminalize(root, records, record_for(
                 root, cell, argv, status="ERROR", reason_code=reason,
                 reason_detail=detail, flags=flags,
-                exit_code=124 if reason == "TIMEOUT" else 70, started=started))
+                exit_code=124 if reason in {"TIMEOUT", "PHASE_CAP_EXHAUSTED"} else 70,
+                started=started))
         raise
     except BaseException as exc:
         # Signal/exception handling must leave exactly one immutable terminal.
@@ -1239,7 +1301,15 @@ def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: 
     }
 
 
-def validate_new_root(root: Path, resume: bool) -> None:
+def validate_results_root(root: Path, resume: bool) -> ResultsRootCapability:
+    """Validate root ownership before a timeout path can create an artifact.
+
+    A fresh root is represented by a capability that has not yet claimed its
+    directory.  A timeout writer may claim it exactly once.  Conversely, an
+    existing root has to present the minimum immutable resume skeleton before
+    any deadline/provenance path can proceed, and is never writable by the
+    run-level timeout path.
+    """
     if not root.is_absolute():
         raise Work5Error("--results-root must be absolute")
     if root.exists() and not resume:
@@ -1251,28 +1321,60 @@ def validate_new_root(root: Path, resume: bool) -> None:
     try:
         resolved.relative_to(source)
     except ValueError:
-        return
-    # The approved path is normally .omo/evidence/work5-single-trial/... in
-    # this checkout.  Permit only a new descendant there, never an arbitrary
-    # source-tree path that could collide with tracked input or code.
-    evidence_root = (source / ".omo" / "evidence").resolve(strict=False)
-    try:
-        relative = resolved.relative_to(evidence_root)
-    except ValueError as exc:
-        raise Work5Error("an in-worktree --results-root must be under .omo/evidence") from exc
-    if not relative.parts:
-        raise Work5Error("--results-root must name a new evidence-run directory")
-
-
-def write_run_level_timeout(root: Path, *, resume: bool, phase_seconds: float,
-                            detail: str) -> None:
-    """Record a pre-cell deadline failure without fabricating a terminal cell."""
+        pass
+    else:
+        # The approved path is normally .omo/evidence/work5-single-trial/... in
+        # this checkout.  Permit only a new descendant there, never an arbitrary
+        # source-tree path that could collide with tracked input or code.
+        evidence_root = (source / ".omo" / "evidence").resolve(strict=False)
+        try:
+            relative = resolved.relative_to(evidence_root)
+        except ValueError as exc:
+            raise Work5Error("an in-worktree --results-root must be under .omo/evidence") from exc
+        if not relative.parts:
+            raise Work5Error("--results-root must name a new evidence-run directory")
     if resume:
+        required = ("run.json", "matrix.json", "cells.jsonl")
+        absent = [name for name in required if not (root / name).is_file()]
+        if absent:
+            raise Work5Error("--resume requires validated Work #5 state: missing " +
+                             ", ".join(absent))
+        run = read_json(root / "run.json", "run.json")
+        matrix = read_json(root / "matrix.json", "matrix.json")
+        if run.get("schema") != RUNNER_SCHEMA or matrix.get("schema") != MATRIX_SCHEMA:
+            raise Work5Error("--resume requires validated Work #5 run/matrix schemas")
+    return ResultsRootCapability(root=root, resume=resume, fresh=not resume)
+
+
+def claim_fresh_root(capability: ResultsRootCapability) -> None:
+    """Atomically claim a caller-validated new root without overwrite rights."""
+    if not capability.fresh:
+        raise Work5Error("resume root cannot be claimed as a new results root")
+    if capability.claimed_by_runner:
         return
+    try:
+        capability.root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise Work5Error("results root was created after fresh-root validation") from exc
+    capability.claimed_by_runner = True
+
+
+def write_run_level_timeout(capability: ResultsRootCapability, *, phase_seconds: float,
+                            reason_code: str, detail: str) -> None:
+    """Record a pre-cell deadline failure without fabricating a terminal cell."""
+    if not capability.fresh:
+        return
+    root = capability.root
+    if not capability.claimed_by_runner:
+        try:
+            claim_fresh_root(capability)
+        except Work5Error:
+            # A racer created a root after validation.  Preserve it rather
+            # than treating our former absence observation as write authority.
+            return
     cells = root / "cells.jsonl"
     if cells.exists() and cells.read_text(encoding="utf-8").strip():
         return
-    root.mkdir(parents=True, exist_ok=True)
     path = root / "run-level-timeout.json"
     if path.exists():
         return
@@ -1280,7 +1382,7 @@ def write_run_level_timeout(root: Path, *, resume: bool, phase_seconds: float,
         "schema": "piccard-work5-run-level-timeout-v1",
         "phase": "parameters",
         "status": "ERROR",
-        "reason_code": "TIMEOUT",
+        "reason_code": reason_code,
         "reason_detail": detail,
         "phase_timeout_seconds": phase_seconds,
         "cell_started": False,
@@ -1298,15 +1400,18 @@ def process(args: argparse.Namespace) -> int:
     if phase_seconds <= 0:
         raise Work5Error("parameter phase timeout must be positive")
     deadline = time.monotonic() + phase_seconds
+    build_dir = Path(args.build_dir).resolve()
+    root = Path(args.results_root).resolve()
+    # Root admission intentionally precedes the first deadline check.  Thus an
+    # already-existing fresh root cannot be changed into a timeout record merely
+    # because the phase cap is already exhausted.
+    root_capability = validate_results_root(root, args.resume)
     # The handler is installed before any root mutation so an interrupt cannot
     # leave a running producer without a terminal ERROR path.
     signal.signal(signal.SIGTERM, _signal_abort)
     signal.signal(signal.SIGINT, _signal_abort)
-    build_dir = Path(args.build_dir).resolve()
-    root = Path(args.results_root).resolve()
     try:
         phase_timeout(deadline)
-        validate_new_root(root, args.resume)
         if args.phase != "parameters":
             raise Work5Error(f"Phase 3 implements only --phase=parameters; {args.phase!r} is not live yet")
         # Bind source identity before any output-root mutation.  A stalled
@@ -1322,7 +1427,7 @@ def process(args: argparse.Namespace) -> int:
             run, records = resume_validate(root, build_dir, executable_hashes, matrix,
                                            deadline=deadline)
         else:
-            root.mkdir(parents=True)
+            claim_fresh_root(root_capability)
             for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", ".tmp"):
                 (root / directory).mkdir(exist_ok=False)
             matrix_path = root / "matrix.json"
@@ -1348,6 +1453,7 @@ def process(args: argparse.Namespace) -> int:
 
         timeout = (float(os.environ.get("PICCARD_WORK5_TEST_CELL_TIMEOUT_SECONDS", CELL_TIMEOUT_SECONDS))
                    if test_fixture else float(CELL_TIMEOUT_SECONDS))
+        timeout = subprocess_wall_limit(timeout)
         if timeout <= 0:
             raise Work5Error("cell timeout must be positive")
         for cell in cells:
@@ -1361,16 +1467,16 @@ def process(args: argparse.Namespace) -> int:
                 write_command_artifact(root, cell, argv)
                 install_logs(root, cell, b"", b"parameter phase cap exhausted before subprocess start")
                 terminalize(root, records, record_for(
-                root, cell, argv, status="ERROR", reason_code="TIMEOUT",
-                    reason_detail=f"parameter phase exceeded {phase_seconds:g} seconds",
+                root, cell, argv, status="ERROR", reason_code="PHASE_CAP_EXHAUSTED",
+                    reason_detail=f"parameter phase cap exhausted ({phase_seconds:g} seconds)",
                     flags=stage_values(True, False, False, False, False), exit_code=124,
                     started=started))
                 run["cells_sha256"] = sha256_file(root / "cells.jsonl")
                 atomic_write(root / "run.json", canonical_json(run))
-                raise Work5Error("terminal ERROR/TIMEOUT: parameter phase cap")
+                raise Work5Error("terminal ERROR/PHASE_CAP_EXHAUSTED: parameter phase cap")
             try:
                 run_parameter_cell(build_dir, root, cell, records, test_fixture=test_fixture,
-                                   timeout=min(timeout, remaining), deadline=deadline)
+                                   timeout=timeout, deadline=deadline)
             except Work5Error:
                 run["cells_sha256"] = sha256_file(root / "cells.jsonl")
                 atomic_write(root / "run.json", canonical_json(run))
@@ -1387,9 +1493,12 @@ def process(args: argparse.Namespace) -> int:
             run["completed_phases"].append("parameters")
             atomic_write(root / "run.json", canonical_json(run))
         return 0
-    except PhaseBudgetExpired as exc:
-        write_run_level_timeout(root, resume=args.resume, phase_seconds=phase_seconds,
-                                detail=str(exc))
+    except (PhaseBudgetExpired, SubprocessTimedOut) as exc:
+        reason_code = timeout_reason_code(exc)
+        detail = (str(exc) if reason_code == "PHASE_CAP_EXHAUSTED" else
+                  f"subprocess wall timeout before any cell began: {exc}")
+        write_run_level_timeout(root_capability, phase_seconds=phase_seconds,
+                                reason_code=reason_code, detail=detail)
         raise
 
 
