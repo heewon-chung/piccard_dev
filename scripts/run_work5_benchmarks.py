@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fail-closed Phase-3 lifecycle for the frozen Work #5 parameter matrix.
+"""Fail-closed lifecycle for the executed Work #5 toy and parameter phases.
 
 This file deliberately orchestrates evidence; it does not estimate a result,
-retry a command, or manufacture a production measurement.  The only
-implemented execution phase is ``parameters``.  The later toy/real/dynamic
-phases have their own approved implementation work and are rejected here
-before a results root is created.
+retry a command, or manufacture a production measurement.  The toy smoke is
+recorded and independently verifiable before the production parameter matrix
+may be resumed in the same evidence root.  Real-data and dynamic phases remain
+outside this implementation boundary.
 """
 
 from __future__ import annotations
@@ -50,6 +50,18 @@ STAGE_FLAGS = ("preflight_started", "context_started", "workload_started",
 EXPECTED_KEY_SHA256 = "e51edfd36870410c48a0df5d2388c2e25e56b7c6dea65f33d76c213443cb435c"
 
 CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
+TOY_CELL = {
+    "cell_id": "toy-smoke",
+    "suite": "toy-smoke",
+    "profile": "toy-smoke",
+    "security": "TOY",
+    "k": 16,
+    "m": 16,
+    "n": 10,
+    "U": 64,
+    "methods": ["piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+                "bcg12_exact_ec", "sj16"],
+}
 PARAMETER_AXES = {
     "k": (16, 32, 64, 128, 256, 512),
     "m": (16, 32, 64, 128, 256),
@@ -545,6 +557,21 @@ def artifact_paths(root: Path, cell_id: str) -> dict[str, Path]:
     }
 
 
+def toy_artifact_paths(root: Path) -> dict[str, Path]:
+    """Final, immutable artifacts for the mandatory six-method toy smoke."""
+    base = root / "toy"
+    return {"command": base / "command.json", "stdout": base / "comparison.stdout",
+            "stderr": base / "comparison.stderr", "workload": base / "workload.manifest.bin",
+            "trace": base / "execution.trace.bin", "csv": base / "comparison.csv"}
+
+
+def toy_staging_paths(root: Path) -> dict[str, Path]:
+    base = root / ".tmp" / "toy-smoke"
+    return {"command": base / "command.json", "stdout": base / "comparison.stdout",
+            "stderr": base / "comparison.stderr", "workload": base / "workload.manifest.bin",
+            "trace": base / "execution.trace.bin", "csv": base / "comparison.csv"}
+
+
 def staging_paths(root: Path, cell_id: str) -> dict[str, Path]:
     base = root / ".tmp" / cell_id
     return {"command": base / "command.json",
@@ -630,6 +657,20 @@ def planned_argv(build_dir: Path, root: Path, cell: dict[str, Any]) -> list[str]
         "--trials=1", "--accuracy-trials=1", "--seed=7",
         "--methods=" + ",".join(cell["methods"]), "--sj16-key-bits=3072", policy,
         f"--manifest-out={paths['workload']}",
+        f"--execution-trace-out={paths['trace']}",
+    ]
+
+
+def planned_toy_argv(build_dir: Path, root: Path) -> list[str]:
+    """The exact, six-method producer invocation for the frozen toy smoke."""
+    paths = toy_staging_paths(root)
+    return [
+        str((build_dir / "bench_review_comparison").resolve()),
+        "--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16",
+        "--set-size=10", "--universe=64", "--target-jaccard=0.5",
+        "--trials=1", "--accuracy-trials=1", "--seed=7",
+        "--methods=" + ",".join(TOY_CELL["methods"]), "--sj16-key-bits=1024",
+        "--allow-unmatched-security", f"--manifest-out={paths['workload']}",
         f"--execution-trace-out={paths['trace']}",
     ]
 
@@ -739,6 +780,157 @@ def install_staged(staged: Path, final: Path) -> None:
     except FileExistsError as exc:
         raise Work5Error(f"refusing to overwrite existing artifact: {final}") from exc
     staged.unlink()
+
+
+def install_toy_logs(root: Path, stdout: bytes, stderr: bytes) -> None:
+    final, staged = toy_artifact_paths(root), toy_staging_paths(root)
+    if final["stdout"].exists() or final["stderr"].exists():
+        raise Work5Error("toy smoke logs are immutable")
+    atomic_write(staged["stdout"], stdout, new=True)
+    atomic_write(staged["stderr"], stderr, new=True)
+    install_staged(staged["stdout"], final["stdout"])
+    install_staged(staged["stderr"], final["stderr"])
+
+
+def toy_artifact_pair(root: Path, label: str) -> tuple[str | None, str | None]:
+    return artifact_pair(root, toy_artifact_paths(root)[label])
+
+
+def toy_document(root: Path, argv: list[str], *, status: str, reason_code: str | None,
+                 reason_detail: str | None, exit_code: int | None,
+                 started_at_utc: str, trial_payload_sha256: str | None) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema": "piccard-work5-toy-v1", "cell_id": TOY_CELL["cell_id"],
+        **{key: TOY_CELL[key] for key in ("suite", "profile", "security", "k", "m", "n", "U", "methods")},
+        "target_jaccard": TARGET_JACCARD, "seed": SEED,
+        "trials": {"timing_trials": 1, "accuracy_trials": 1, "executed_trials": 3},
+        "status": status, "reason_code": reason_code, "reason_detail": reason_detail,
+        "started_at_utc": started_at_utc, "ended_at_utc": utc_now(),
+        "argv": argv, "environment": command_environment(), "exit_code": exit_code,
+        "trial_payload_sha256": trial_payload_sha256,
+    }
+    for label in ("command", "stdout", "stderr", "workload", "trace", "csv"):
+        path, digest = toy_artifact_pair(root, label)
+        document[f"{label}_path"] = path
+        document[f"{label}_sha256"] = digest
+    return document
+
+
+def write_toy_document(root: Path, document: dict[str, Any]) -> str:
+    path = root / "toy.json"
+    atomic_write(path, canonical_json(document), new=True)
+    return sha256_file(path)
+
+
+def discard_toy_staging(root: Path) -> None:
+    for path in toy_staging_paths(root).values():
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def create_initial_root(root_capability: ResultsRootCapability, build_dir: Path,
+                        executable_hashes: dict[str, str], matrix: dict[str, Any], *,
+                        test_fixture: bool, deadline: float) -> dict[str, Any]:
+    """Create the immutable skeleton shared by the toy and parameter phases."""
+    root = root_capability.root
+    claim_fresh_root(root_capability)
+    for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", "toy", ".tmp"):
+        (root / directory).mkdir(exist_ok=False)
+    matrix_path = root / "matrix.json"
+    atomic_write(matrix_path, canonical_json(matrix), new=True)
+    run = initial_run(build_dir, executable_hashes, sha256_file(matrix_path), root,
+                      test_fixture=test_fixture, deadline=deadline)
+    atomic_write(root / "run.json", canonical_json(run), new=True)
+    write_cells(root, [])
+    run["cells_sha256"] = sha256_file(root / "cells.jsonl")
+    atomic_write(root / "run.json", canonical_json(run))
+    return run
+
+
+def run_toy_phase(args: argparse.Namespace, root_capability: ResultsRootCapability,
+                  *, deadline: float) -> int:
+    """Execute exactly one canonical toy comparison, then make it immutable."""
+    if is_test_fixture_mode():
+        raise Work5Error("fixture mode cannot produce production toy evidence")
+    root, build_dir = root_capability.root, Path(args.build_dir).resolve()
+    source_provenance(deadline)
+    executable_hashes = executable_map(build_dir, test_fixture=False)
+    matrix = matrix_document(frozen_cells())
+    if args.resume:
+        run, records = resume_validate(root, build_dir, executable_hashes, matrix, deadline=deadline)
+        if records or (root / "toy.json").exists() or run.get("completed_phases"):
+            raise Work5Error("toy smoke is terminal and cannot be rerun in the same root")
+    else:
+        run = create_initial_root(root_capability, build_dir, executable_hashes, matrix,
+                                 test_fixture=False, deadline=deadline)
+    staging = toy_staging_paths(root)
+    staging["command"].parent.mkdir(exist_ok=False)
+    final = toy_artifact_paths(root)
+    argv, started = planned_toy_argv(build_dir, root), utc_now()
+    command = {"schema": "piccard-work5-toy-command-v1", "cell_id": TOY_CELL["cell_id"],
+               "argv": argv, "environment": command_environment()}
+    atomic_write(staging["command"], canonical_json(command), new=True)
+    install_staged(staging["command"], final["command"])
+    stdout = stderr = b""
+    try:
+        global _ACTIVE_CHILD
+        timeout, phase_cap_exhausted = select_subprocess_timeout(deadline)
+        _ACTIVE_CHILD = subprocess.Popen(argv, cwd=SOURCE_ROOT, env=process_environment(),
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         start_new_session=True)
+        try:
+            stdout, stderr = _ACTIVE_CHILD.communicate(timeout=timeout)
+            completed = subprocess.CompletedProcess(argv, _ACTIVE_CHILD.returncode, stdout, stderr)
+            _ACTIVE_CHILD = None
+        except subprocess.TimeoutExpired:
+            child, _ACTIVE_CHILD = _ACTIVE_CHILD, None
+            stdout, stderr = terminate_process_group(child, deadline)
+            raise SubprocessTimedOut("toy benchmark subprocess exceeded bounded phase timeout",
+                                     phase_cap_exhausted=phase_cap_exhausted,
+                                     stdout=stdout, stderr=stderr)
+        if completed.returncode != 0:
+            raise Work5Error("toy benchmark subprocess failed: " +
+                             stderr.decode("utf-8", "replace").strip())
+        if not staging["workload"].is_file() or not staging["trace"].is_file():
+            raise Work5Error("artifact mismatch: toy benchmark did not create workload/trace")
+        atomic_write(staging["csv"], stdout, new=True)
+        validate_live_rows(staging["csv"], TOY_CELL)
+        verify_live_artifacts(staging["csv"], staging["workload"], staging["trace"], TOY_CELL)
+        payload = trial_payload_sha256_from_workload(staging["workload"], TOY_CELL)
+        install_toy_logs(root, stdout, stderr)
+        for label in ("workload", "trace", "csv"):
+            install_staged(staging[label], final[label])
+        toy_sha = write_toy_document(root, toy_document(
+            root, argv, status="MEASURED", reason_code=None, reason_detail=None,
+            exit_code=0, started_at_utc=started, trial_payload_sha256=payload))
+        run["toy_sha256"] = toy_sha
+        run["completed_phases"].append("toy")
+        atomic_write(root / "run.json", canonical_json(run))
+        return 0
+    except BaseException as exc:
+        if isinstance(exc, SubprocessTimedOut):
+            stdout, stderr = exc.stdout, exc.stderr
+            reason = timeout_reason_code(exc)
+        elif isinstance(exc, SignalAbort):
+            reason = "EXCEPTION"
+            stderr = f"SignalAbort: {exc}".encode("utf-8", "replace")
+        else:
+            reason = "ARTIFACT_MISMATCH" if str(exc).startswith("artifact mismatch:") else "EXCEPTION"
+            if not stderr:
+                stderr = f"{type(exc).__name__}: {exc}".encode("utf-8", "replace")
+        discard_toy_staging(root)
+        if not final["stdout"].exists():
+            install_toy_logs(root, stdout, stderr)
+        if not (root / "toy.json").exists():
+            run["toy_sha256"] = write_toy_document(root, toy_document(
+                root, argv, status="ERROR", reason_code=reason,
+                reason_detail=stderr.decode("utf-8", "replace"),
+                exit_code=124 if reason in {"TIMEOUT", "PHASE_CAP_EXHAUSTED"} else 70,
+                started_at_utc=started, trial_payload_sha256=None))
+            atomic_write(root / "run.json", canonical_json(run))
+        raise Work5Error(f"terminal toy ERROR/{reason}") from exc
 
 
 def discard_staging(root: Path, cell_id: str) -> None:
@@ -1294,7 +1486,8 @@ def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: 
         "trials": TIMING_TRIALS, "accuracy_trials": ACCURACY_TRIALS,
         "parameter_cell_executed_trials": EXECUTED_TRIALS,
         "cell_timeout_seconds": CELL_TIMEOUT_SECONDS,
-        "phase_timeout_seconds": {"parameters": PARAMETER_TIMEOUT_SECONDS,
+        "phase_timeout_seconds": {"toy": CELL_TIMEOUT_SECONDS,
+                                  "parameters": PARAMETER_TIMEOUT_SECONDS,
                                   "real": 7200, "dynamic": 600},
         "disclaimer": DISCLAIMER, "test_fixture_mode": test_fixture,
         "completed_phases": [], "cells_sha256": None,
@@ -1412,8 +1605,12 @@ def process(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _signal_abort)
     try:
         phase_timeout(deadline)
+        if args.phase == "toy":
+            return run_toy_phase(args, root_capability, deadline=deadline)
         if args.phase != "parameters":
-            raise Work5Error(f"Phase 3 implements only --phase=parameters; {args.phase!r} is not live yet")
+            raise Work5Error(f"--phase={args.phase!r} is not live yet")
+        if not test_fixture and not args.resume:
+            raise Work5Error("production parameter evidence requires a sealed toy phase and --resume")
         # Bind source identity before any output-root mutation.  A stalled
         # provenance command therefore produces the distinct run-level
         # terminal record rather than pretending that a parameter cell began.
@@ -1426,19 +1623,18 @@ def process(args: argparse.Namespace) -> int:
         if args.resume:
             run, records = resume_validate(root, build_dir, executable_hashes, matrix,
                                            deadline=deadline)
+            if not test_fixture:
+                toy_path = root / "toy.json"
+                if run.get("completed_phases") != ["toy"] or \
+                        not toy_path.is_file() or run.get("toy_sha256") != sha256_file(toy_path):
+                    raise Work5Error("production parameter evidence requires a verified terminal toy smoke")
+                toy = read_json(toy_path, "toy.json")
+                if toy.get("schema") != "piccard-work5-toy-v1" or toy.get("status") != "MEASURED":
+                    raise Work5Error("production parameter evidence requires a measured toy smoke")
         else:
-            claim_fresh_root(root_capability)
-            for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", ".tmp"):
-                (root / directory).mkdir(exist_ok=False)
-            matrix_path = root / "matrix.json"
-            atomic_write(matrix_path, canonical_json(matrix), new=True)
-            run = initial_run(build_dir, executable_hashes, sha256_file(matrix_path), root,
-                              test_fixture=test_fixture, deadline=deadline)
-            atomic_write(root / "run.json", canonical_json(run), new=True)
+            run = create_initial_root(root_capability, build_dir, executable_hashes, matrix,
+                                     test_fixture=test_fixture, deadline=deadline)
             records = []
-            write_cells(root, records)
-            run["cells_sha256"] = sha256_file(root / "cells.jsonl")
-            atomic_write(root / "run.json", canonical_json(run))
 
         expected_by_id = {cell["cell_id"]: cell for cell in cells}
         terminal_ids = {record["cell_id"] for record in records}

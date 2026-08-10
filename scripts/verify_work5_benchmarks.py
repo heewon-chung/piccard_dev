@@ -452,8 +452,68 @@ def verify_run(root: Path, run: dict[str, Any]) -> None:
                 f"executable identity mismatch: {name}")
     require(isinstance(run.get("cells_sha256"), str) and len(run["cells_sha256"]) == 64,
             "run terminal-record hash missing")
-    require(run.get("completed_phases") == ["parameters"],
-            "parameter root has an invalid completed-phase declaration")
+    completed = run.get("completed_phases")
+    if test_fixture:
+        require(completed == ["parameters"], "fixture root has an invalid completed-phase declaration")
+    else:
+        require(completed in (["toy"], ["toy", "parameters"]),
+                "production root has an invalid completed-phase declaration")
+
+
+def verify_toy(root: Path, run: dict[str, Any]) -> dict[str, Any]:
+    """Verify the immutable, six-method toy smoke before the parameter matrix."""
+    path = root / "toy.json"
+    require(path.is_file() and run.get("toy_sha256") == sha256_file(path),
+            "toy evidence hash is missing or mismatched")
+    toy = load_object(path, "toy.json")
+    expected = runner.TOY_CELL
+    require(toy.get("schema") == "piccard-work5-toy-v1" and
+            toy.get("cell_id") == expected["cell_id"] and
+            all(toy.get(key) == expected[key] for key in
+                ("suite", "profile", "security", "k", "m", "n", "U", "methods")) and
+            toy.get("target_jaccard") == "0.5" and toy.get("seed") == 7 and
+            toy.get("trials") == {"timing_trials": 1, "accuracy_trials": 1,
+                                  "executed_trials": 3} and
+            toy.get("status") == "MEASURED" and toy.get("reason_code") is None and
+            toy.get("reason_detail") is None and toy.get("exit_code") == 0 and
+            toy.get("environment") == {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"} and
+            isinstance(toy.get("started_at_utc"), str) and isinstance(toy.get("ended_at_utc"), str),
+            "toy evidence contract mismatch")
+    build_dir = Path(run["build_dir"])
+    require(toy.get("argv") == runner.planned_toy_argv(build_dir, root),
+            "toy argv is not the exact frozen producer command")
+    labels = ("command", "stdout", "stderr", "workload", "trace", "csv")
+    paths: dict[str, Path] = {}
+    for label in labels:
+        value, digest = toy.get(f"{label}_path"), toy.get(f"{label}_sha256")
+        require(isinstance(digest, str) and len(digest) == 64,
+                f"toy {label} artifact hash is malformed")
+        artifact = relative_file(root, value, f"toy {label}")
+        require(artifact.is_file() and sha256_file(artifact) == digest,
+                f"toy {label} artifact hash mismatch")
+        paths[label] = artifact
+    command = load_object(paths["command"], "toy command artifact")
+    require(command == {"schema": "piccard-work5-toy-command-v1", "cell_id": "toy-smoke",
+                        "argv": toy["argv"], "environment": toy["environment"]},
+            "toy command artifact does not bind the producer invocation")
+    try:
+        _, rows = review_verifier.load_csv(paths["csv"], review_verifier.REVIEW_REQUIRED_COLUMNS)
+        workload = review_verifier.parse_workload(paths["workload"])
+        trace_digest = review_verifier.verify_trace(paths["trace"], workload)
+        review_verifier.verify_rows(rows, workload, trace_digest)
+        review_verifier.validate_rows(rows)
+    except (review_verifier.VerificationError, OSError, ValueError) as exc:
+        raise VerificationError(f"toy semantic producer verification failed: {exc}") from exc
+    require((workload.suite, workload.profile, workload.root_seed, workload.k, workload.m,
+             workload.set_size, workload.universe, list(workload.methods),
+             workload.timing_trials, workload.accuracy_trials) ==
+            ("toy-smoke", "toy-smoke", 7, 16, 16, 10, 64, expected["methods"], 1, 1),
+            "toy workload does not bind frozen configuration")
+    require(all(record.intersection == 7 and record.union == 13 for record in workload.records),
+            "toy workload exact intersection/union mismatch")
+    require(toy.get("trial_payload_sha256") == workload_trial_payload(paths["workload"], expected),
+            "toy TrialPayloadSha256 mismatch")
+    return toy
 
 
 def read_records(root: Path) -> list[dict[str, Any]]:
@@ -547,10 +607,20 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
     return records
 
 
-def verify_inventory(root: Path, records: list[dict[str, Any]]) -> None:
+def verify_inventory(root: Path, records: list[dict[str, Any]],
+                     toy: dict[str, Any] | None) -> None:
     """Every on-disk artifact must be referenced exactly once by the lifecycle."""
     expected = {"run.json", "matrix.json", "cells.jsonl"}
+    if toy is not None:
+        expected.add("toy.json")
     owners: set[str] = set()
+    if toy is not None:
+        for name in ("command", "stdout", "stderr", "workload", "trace", "csv"):
+            relative = toy.get(f"{name}_path")
+            require(isinstance(relative, str) and relative not in owners,
+                    f"toy artifact ownership is invalid: {name}")
+            owners.add(relative)
+            expected.add(relative)
     for record in records:
         for name in ("command", "stdout", "stderr", *CONTEXT_LABELS,
                      "workload", "trace", "csv"):
@@ -598,14 +668,25 @@ def process(args: argparse.Namespace) -> int:
         raise VerificationError("--allow-test-fixture is valid only for fixture-mode roots")
     expected = expected_cells()
     verify_matrix(root, run, expected)
-    if args.require_phase and args.require_phase != "parameters":
-        raise VerificationError(f"Phase-3 verifier cannot verify {args.require_phase!r} evidence")
-    records = verify_records(root, run, expected)
-    verify_inventory(root, records)
+    fixture = bool(run.get("test_fixture_mode"))
+    if args.require_phase == "toy":
+        require(not fixture and run.get("completed_phases") == ["toy"],
+                "toy verification requires a production root sealed before parameters")
+        toy = verify_toy(root, run)
+        require(read_records(root) == [], "toy evidence has parameter terminal records")
+        verify_inventory(root, [], toy)
+        result_phase, terminal_cells = "toy", 0
+    else:
+        if args.require_phase and args.require_phase != "parameters":
+            raise VerificationError(f"Phase-4 verifier cannot verify {args.require_phase!r} evidence")
+        toy = None if fixture else verify_toy(root, run)
+        records = verify_records(root, run, expected)
+        verify_inventory(root, records, toy)
+        result_phase, terminal_cells = "parameters", 61
     if args.require_complete:
         verify_existing_seal(root, run)
     print(json.dumps({"schema": "piccard-work5-verification-v1", "verdict": "PASS",
-                      "phase": "parameters", "terminal_cells": 61,
+                      "phase": result_phase, "terminal_cells": terminal_cells,
                       "test_fixture_mode": bool(run.get("test_fixture_mode"))},
                      sort_keys=True))
     return 0

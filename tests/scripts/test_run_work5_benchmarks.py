@@ -16,6 +16,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -25,6 +26,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import run_work5_benchmarks as work5_runner
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "work5" / "single_trial_contract.json"
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
@@ -100,6 +103,25 @@ def matrix_key_digest(keys: list[str]) -> str:
 
 
 class Work5ContractFixtureTest(unittest.TestCase):
+    def test_toy_producer_command_is_frozen(self) -> None:
+        root = ROOT / ".omo" / "evidence" / "test-toy-command"
+        argv = work5_runner.planned_toy_argv(ROOT / "build", root)
+        self.assertEqual(work5_runner.TOY_CELL, {
+            "cell_id": "toy-smoke", "suite": "toy-smoke", "profile": "toy-smoke",
+            "security": "TOY", "k": 16, "m": 16, "n": 10, "U": 64,
+            "methods": ["piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
+                        "bcg12_exact_ec", "sj16"],
+        })
+        self.assertEqual(argv[1:14], [
+            "--suite=toy-smoke", "--profile=toy-smoke", "--k=16", "--m=16",
+            "--set-size=10", "--universe=64", "--target-jaccard=0.5",
+            "--trials=1", "--accuracy-trials=1", "--seed=7",
+            "--methods=piccard,piccard_sqrt,fhe_ind,bcg12_mh_ec,bcg12_exact_ec,sj16",
+            "--sj16-key-bits=1024", "--allow-unmatched-security",
+        ])
+        self.assertTrue(argv[-2].endswith("/.tmp/toy-smoke/workload.manifest.bin"))
+        self.assertTrue(argv[-1].endswith("/.tmp/toy-smoke/execution.trace.bin"))
+
     def test_contract_fixture_is_self_consistent(self) -> None:
         contract = load_contract()
         self.assertEqual(contract["schema"], "piccard-work5-phase1-contract-v2")
