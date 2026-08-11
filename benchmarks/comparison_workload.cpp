@@ -158,9 +158,9 @@ const std::array<FrozenSuite, 10>& Work5Suites() {
         {"work5-std128-sj16", "work5-std128-t40-single-trial",
          {"sj16"}},
         {"work5-std192-piccard", "work5-std192-t40-single-trial",
-         {"piccard", "piccard_sqrt"}},
+         {"piccard_encode", "piccard_sqrt_encode"}},
         {"work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
-         {"piccard"}},
+         {"piccard_encode"}},
         {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
          {"fhe_ind"}},
         {"work5-std192-sj16", "work5-std192-t40-single-trial",
@@ -530,6 +530,9 @@ void AtomicWriteNew(const std::filesystem::path& path, const Bytes& bytes) {
 
 std::string TimingKind(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "fhe-timing";
+    if (method == "piccard_encode" || method == "piccard_sqrt_encode") {
+        return "encoding-timing";
+    }
     if (method.rfind("bcg12_", 0) == 0) return "psi-timing";
     if (method == "sj16" || method == "sj16_precomputed") return "ahe-timing";
     if (method == "fhe_ind") return "diagnostic";
@@ -538,6 +541,9 @@ std::string TimingKind(const std::string& method) {
 
 std::string AccuracyKind(const std::string& method) {
     if (method == "piccard" || method == "piccard_sqrt") return "fhe-accuracy";
+    if (method == "piccard_encode" || method == "piccard_sqrt_encode") {
+        return "encoding-accuracy";
+    }
     if (method.rfind("bcg12_", 0) == 0) return "psi-accuracy";
     if (method == "sj16") return "ahe-accuracy";
     if (method == "fhe_ind") return "diagnostic";
@@ -553,6 +559,9 @@ std::string Precomputation(const std::string& method) {
     if (method == "sj16") return "randomizer-generation-included";
     if (method == "sj16_precomputed") return "randomizers-precomputed";
     if (method == "fhe_ind") return "not-applicable";
+    if (method == "piccard_encode" || method == "piccard_sqrt_encode") {
+        return "not-applicable";
+    }
     return "crs-and-keys-only";
 }
 
@@ -594,7 +603,8 @@ ReviewMethodRowPolicy ResolveReviewMethodRowPolicy(
     // Piccard consumes both configured dimensions. BCG12 MinHash consumes k
     // and the shared full-range CRS, but not one-hot m. Exact BCG12 and SJ16
     // have neither parameter nor a workload hash CRS in their aggregate rows.
-    const bool piccard = method == "piccard" || method == "piccard_sqrt";
+    const bool piccard = method == "piccard" || method == "piccard_sqrt" ||
+        method == "piccard_encode" || method == "piccard_sqrt_encode";
     const bool minhash = method == "bcg12_mh_ff" || method == "bcg12_mh_ec";
     const bool hash_crs = piccard || minhash;
     const bool fhe_ind = method == "fhe_ind";

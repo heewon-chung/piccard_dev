@@ -100,7 +100,7 @@ class Work5VerifierContractTest(unittest.TestCase):
             "work5-std128-piccard-m-extra":
                 ("work5-std128-t40-single-trial", ["piccard"], 1, 1),
             "work5-std192-piccard-m-extra":
-                ("work5-std192-t40-single-trial", ["piccard"], 1, 1),
+                ("work5-std192-t40-single-trial", ["piccard_encode"], 1, 1),
         }
         self.assertEqual({name: review_verifier.SUITES[name] for name in expected}, expected)
 
@@ -270,6 +270,22 @@ class Work5VerifierContractTest(unittest.TestCase):
             row["context_sqrt_path"] = "context/forged-sqrt.json"
             row["context_sqrt_sha256"] = "0" * 64
 
+        def add_context_to_std192_encoding(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["methods"] == ["piccard_encode"] and
+                       item["security"] == "STD192")
+            row["context_onehot_path"] = "context/forged-onehot.json"
+            row["context_onehot_sha256"] = "0" * 64
+
+        def start_keygen_for_std192_encoding(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["methods"] == ["piccard_encode"] and
+                       item["security"] == "STD192")
+            row["keygen_started"] = True
+
+        def lie_about_std192_encoding_taxonomy(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["methods"] == ["piccard_encode"] and
+                       item["security"] == "STD192")
+            row["taxonomy"]["piccard_encode"]["cost_scope"] = "primitive-only"
+
         def make_fhe_ind_comparison_eligible(
                 rows: list[dict[str, Any]], _: Path) -> None:
             row = next(item for item in rows if item["methods"] == ["fhe_ind"])
@@ -333,6 +349,9 @@ class Work5VerifierContractTest(unittest.TestCase):
             ("m-extra-sqrt", add_sqrt_to_m_extra),
             ("m-extra-copied-timing", copy_control_timing_to_m_extra),
             ("m-extra-sqrt-context", add_sqrt_context_to_m_extra),
+            ("std192-encoding-context", add_context_to_std192_encoding),
+            ("std192-encoding-keygen", start_keygen_for_std192_encoding),
+            ("std192-encoding-taxonomy", lie_about_std192_encoding_taxonomy),
             ("fhe-ind-eligible", make_fhe_ind_comparison_eligible),
             ("fhe-ind-protocol-model", change_fhe_ind_protocol_model),
             ("sj16-secure-division", give_sj16_secure_division),

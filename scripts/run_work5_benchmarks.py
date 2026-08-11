@@ -93,10 +93,10 @@ SUITES = (
     ("work5-std128-sj16", "work5-std128-t40-single-trial",
      ("sj16",), ("n", "U"), {}, True, None),
     ("work5-std192-piccard", "work5-std192-t40-single-trial",
-     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     ("piccard_encode", "piccard_sqrt_encode"), ("k", "m", "n", "U"),
      {"m": (16, 64, 256)}, True, None),
     ("work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
-     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     ("piccard_encode",), ("m",), {"m": (32, 128)}, False,
      "work5-std192-piccard::control"),
     ("work5-std192-fhe-ind", "work5-std192-t40-single-trial",
      ("fhe_ind",), ("n", "U"), {}, True, None),
@@ -116,6 +116,18 @@ TAXONOMY: dict[str, dict[str, Any]] = {
                      "cost_scope": "full-query-excluding-one-time-setup",
                      "secure_division_included": False,
                      "semantic_comparison_eligible": True},
+    "piccard_encode": {"primitive": "onehot-encoding",
+                       "protocol_model": "piccard-local-encoding",
+                       "comparison_scope": "encoding-only-diagnostic",
+                       "cost_scope": "encoding-only",
+                       "secure_division_included": False,
+                       "semantic_comparison_eligible": False},
+    "piccard_sqrt_encode": {"primitive": "sqrt-encoding",
+                            "protocol_model": "piccard-sqrt-local-encoding",
+                            "comparison_scope": "encoding-only-diagnostic",
+                            "cost_scope": "encoding-only",
+                            "secure_division_included": False,
+                            "semantic_comparison_eligible": False},
     "fhe_ind": {"primitive": "bfv-indicator-comparison",
                 "protocol_model": "local-universe-sized-BFV-comparator",
                 "comparison_scope": "diagnostic-only", "cost_scope": "primitive-only",
@@ -455,7 +467,8 @@ def suite_definitions() -> dict[str, dict[str, Any]]:
         if any(not values[axis] or not set(values[axis]).issubset(PARAMETER_AXES[axis])
                for axis in axes):
             raise Work5Error("internal Work #5 suite axis domain is malformed")
-        if "piccard_sqrt" in methods and any(value not in {16, 64, 256}
+        if any(method in {"piccard_sqrt", "piccard_sqrt_encode"}
+               for method in methods) and any(value not in {16, 64, 256}
                                               for value in values.get("m", ())):
             raise Work5Error("sqrt suite contains an unsupported m value")
         if owns_control != (control_cell_id is None):
@@ -649,6 +662,13 @@ def planned_payload_sha256(cell: dict[str, Any]) -> str:
 
 def command_environment() -> dict[str, str]:
     return {"OMP_NUM_THREADS": str(THREADS), "OMP_DYNAMIC": "FALSE"}
+
+
+def is_encoding_only_cell(cell: dict[str, Any]) -> bool:
+    """True only for the frozen STD192 local encoder producer contract."""
+    methods = cell.get("methods")
+    return (cell.get("security") == "STD192" and isinstance(methods, list) and
+            bool(methods) and set(methods) <= {"piccard_encode", "piccard_sqrt_encode"})
 
 
 def process_environment() -> dict[str, str]:
@@ -1002,6 +1022,7 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
     smoke modes.  The producer writes under ``.tmp``; only a successfully
     parsed, cap-checked record is installed under the evidence tree.
     """
+    note_test_context_preflight(cell["cell_id"])
     if test_fixture or not any(method in {"piccard", "piccard_sqrt", "fhe_ind"}
                                for method in cell["methods"]):
         return None, {}
@@ -1137,6 +1158,19 @@ def note_test_dispatch(argv: list[str]) -> None:
         stream.flush()
 
 
+def note_test_context_preflight(cell_id: str) -> None:
+    """Expose only the fixture-mode context-producer boundary to tests."""
+    value = os.environ.get("PICCARD_WORK5_FAKE_EVENT_LOG")
+    if not value:
+        return
+    path = Path(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"kind": "context-preflight", "cell_id": cell_id,
+                                 "argv": []}, sort_keys=True) + "\n")
+        stream.flush()
+
+
 def validate_live_rows(path: Path, cell: dict[str, Any]) -> None:
     # The CSV is checked together with its parsed workload and trace below.
     # This quick gate keeps the pre-terminal ordering explicit for diagnostics.
@@ -1155,11 +1189,8 @@ def verify_live_artifacts(csv_path: Path, workload_path: Path, trace_path: Path,
                           cell: dict[str, Any]) -> None:
     """Use the established binary/CSV semantic verifier before terminalizing."""
     try:
-        _, rows = review_verifier.load_csv(csv_path, review_verifier.REVIEW_REQUIRED_COLUMNS)
-        workload = review_verifier.parse_workload(workload_path)
-        trace_digest = review_verifier.verify_trace(trace_path, workload)
-        review_verifier.verify_rows(rows, workload, trace_digest)
-        review_verifier.validate_rows(rows)
+        workload, _rows = review_verifier.verify_csv_artifacts(
+            csv_path, workload_path, trace_path)
     except (review_verifier.VerificationError, OSError, ValueError, csv.Error) as exc:
         raise Work5Error(f"semantic verifier failure: {exc}") from exc
     if (workload.suite, workload.profile, workload.root_seed, workload.k, workload.m,
@@ -1267,9 +1298,11 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise PhaseBudgetExpired("parameter phase cap exhausted before context preflight")
-        flags["context_started"] = True
+        encoding_only = is_encoding_only_cell(cell)
+        if not encoding_only:
+            flags["context_started"] = True
         forced_precheck = forced_value("PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON", cell["cell_id"])
-        if forced_precheck is not None:
+        if forced_precheck is not None and not encoding_only:
             if not test_fixture:
                 raise Work5Error("test-only precheck hook is forbidden outside fixture mode")
             if forced_precheck not in ("RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP"):
@@ -1285,18 +1318,20 @@ def run_parameter_cell(build_dir: Path, root: Path, cell: dict[str, Any],
         if forced_error == "pre_setup":
             raise Work5Error("test-only injected pre-setup exception")
 
-        context_reason, _context = context_preflight(
-            build_dir, root, cell, test_fixture=test_fixture,
-            timeout=timeout, deadline=deadline)
-        if context_reason is not None:
-            install_logs(root, cell, b"", b"")
-            terminalize(root, records, record_for(
-                root, cell, argv, status="SKIPPED_PRECHECK", reason_code=context_reason,
-                reason_detail="observed Work #5 context cap exceeded", flags=flags,
-                exit_code=None, started=started))
-            return
+        if not encoding_only:
+            context_reason, _context = context_preflight(
+                build_dir, root, cell, test_fixture=test_fixture,
+                timeout=timeout, deadline=deadline)
+            if context_reason is not None:
+                install_logs(root, cell, b"", b"")
+                terminalize(root, records, record_for(
+                    root, cell, argv, status="SKIPPED_PRECHECK", reason_code=context_reason,
+                    reason_detail="observed Work #5 context cap exceeded", flags=flags,
+                    exit_code=None, started=started))
+                return
         flags["workload_started"] = True
-        flags["keygen_started"] = True
+        if not encoding_only:
+            flags["keygen_started"] = True
         if forced_error == "setup":
             raise Work5Error("test-only injected setup exception")
 

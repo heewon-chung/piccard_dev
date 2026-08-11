@@ -15,7 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from verify_benchmark_provenance import (
-    REQUIRED_COLUMNS, VerificationError, load_csv, require, validate_rows,
+    REQUIRED_COLUMNS, VerificationError, load_csv as load_provenance_csv, require, validate_rows,
     validate_measured_metrics, _parse_int, _finite,
 )
 
@@ -48,8 +48,8 @@ SUITES = {
     "work5-std128-bcg12-mh": ("work5-std128-t40-single-trial", ["bcg12_mh_ec", "bcg12_mh_ff"], 1, 1),
     "work5-std128-bcg12-exact": ("work5-std128-t40-single-trial", ["bcg12_exact_ec", "bcg12_exact_ff"], 1, 1),
     "work5-std128-sj16": ("work5-std128-t40-single-trial", ["sj16"], 1, 1),
-    "work5-std192-piccard": ("work5-std192-t40-single-trial", ["piccard", "piccard_sqrt"], 1, 1),
-    "work5-std192-piccard-m-extra": ("work5-std192-t40-single-trial", ["piccard"], 1, 1),
+    "work5-std192-piccard": ("work5-std192-t40-single-trial", ["piccard_encode", "piccard_sqrt_encode"], 1, 1),
+    "work5-std192-piccard-m-extra": ("work5-std192-t40-single-trial", ["piccard_encode"], 1, 1),
     "work5-std192-fhe-ind": ("work5-std192-t40-single-trial", ["fhe_ind"], 1, 1),
     "work5-std192-sj16": ("work5-std192-t40-single-trial", ["sj16"], 1, 1),
 }
@@ -67,6 +67,33 @@ REVIEW_DETAIL_COLUMNS = {
     "phase_compute_ms", "phase_decrypt_ms", "ct_size_bytes", "comm_bytes",
 }
 TOY_REVIEW_COLUMNS = REVIEW_REQUIRED_COLUMNS | REVIEW_DETAIL_COLUMNS
+ENCODING_METHODS = {"piccard_encode", "piccard_sqrt_encode"}
+ENCODING_CSV_COLUMNS = (
+    "suite", "scenario", "method", "profile_id", "run_class",
+    "target_security_bits", "cryptographic_profile", "nominal_security_bits",
+    "security_match", "comparison_eligible", "comparison_scope", "primitive",
+    "protocol_model", "output_semantics", "assurance_scope", "security_basis",
+    "cost_scope", "precomputation_mode", "secure_division_included",
+    "measurement_kind", "evidence_arm", "workload_id",
+    "workload_manifest_sha256", "execution_trace_sha256", "root_seed",
+    "omp_threads", "omp_dynamic", "k", "m", "set_size", "universe_size",
+    "target_semantics", "target_jaccard_numerator",
+    "target_jaccard_denominator", "target_jaccard", "realized_intersection",
+    "realized_union", "realized_jaccard", "timing_trials", "accuracy_trials",
+    "trials", "hash_randomness", "hash_seed", "encoder_input_construction",
+    "encoder_warmup_calls", "encoder_timed_calls", "encoder_correctness_calls",
+    "encoder_correctness_status", "encoded_feature_size",
+    "correctness_feature_sha256", "total_ms", "total_ms_sd", "total_ms_median",
+    "measurement_status",
+)
+ENCODING_FORBIDDEN_COLUMNS = {
+    "phase_encode_ms", "phase_encrypt_ms", "phase_compute_ms", "phase_decrypt_ms",
+    "ct_size_bytes", "comm_bytes", "actual_ring_dim", "log_q_bits",
+    "plaintext_modulus", "num_limbs", "openfhe_version", "sanitizer_model",
+    "sanitizer_assurance", "transcript_stat_bits", "max_queries",
+    "query_stat_bits", "coefficient_stat_bits", "flood_margin_bits",
+    "eval_noise_bits", "flood_noise_bits", "scaling_mod_size",
+}
 
 
 class Reader:
@@ -277,9 +304,38 @@ def verify_trace(path: Path, workload: Workload) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def is_encoding_workload(workload: Workload) -> bool:
+    return bool(workload.methods) and set(workload.methods) <= ENCODING_METHODS
+
+
+def load_encoding_csv(path: Path) -> list[dict[str, str]]:
+    """Load the narrow local-encoding schema and reject every FHE column."""
+    try:
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream, strict=True)
+            require(reader.fieldnames is not None,
+                    "encoding-only CSV is missing a header")
+            require(tuple(reader.fieldnames) == ENCODING_CSV_COLUMNS,
+                    "encoding-only CSV schema is not exact")
+            require(not (set(reader.fieldnames) & ENCODING_FORBIDDEN_COLUMNS),
+                    "encoding-only CSV contains forbidden FHE timing or provenance columns")
+            rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error) as error:
+        raise VerificationError(f"cannot read encoding-only CSV: {error}") from error
+    require(rows, "encoding-only CSV has no rows")
+    return rows
+
+
+def load_csv(path: Path, required_columns: set[str]):
+    """Backward-compatible producer loader for the legacy FHE-containing schema."""
+    return load_provenance_csv(path, required_columns)
+
+
 def expected_kind(method: str, arm: str) -> str:
     if method in {"piccard", "piccard_sqrt"}:
         return f"fhe-{arm}"
+    if method in ENCODING_METHODS:
+        return f"encoding-{arm}"
     if method == "fhe_ind":
         return "diagnostic"
     if method.startswith("bcg12_"):
@@ -289,7 +345,131 @@ def expected_kind(method: str, arm: str) -> str:
     raise VerificationError(f"unexpected method-kind method {method!r}")
 
 
+def verify_encoding_rows(rows: list[dict[str, str]], workload: Workload,
+                         trace_digest: str) -> None:
+    require(is_encoding_workload(workload),
+            "encoding-only verifier received a non-encoding workload")
+    expected_pairs = {(method, "timing") for method in workload.methods}
+    expected_pairs |= {(method, "accuracy") for method in workload.methods}
+    actual_pairs = [(row.get("method"), row.get("evidence_arm")) for row in rows]
+    require(len(actual_pairs) == len(set(actual_pairs)),
+            "encoding-only CSV has duplicate method/arm rows")
+    require(set(actual_pairs) == expected_pairs,
+            "encoding-only CSV method/arm membership is not frozen")
+    first = workload.records[0]
+    realized = Fraction(first.intersection, first.union) if first.union else Fraction(1, 1)
+    required_taxonomy = {
+        "comparison_eligible": "false",
+        "comparison_scope": "encoding-only-diagnostic",
+        "cost_scope": "encoding-only",
+        "secure_division_included": "false",
+        "cryptographic_profile": "local-encoding-only",
+        "nominal_security_bits": "",
+        "security_match": "false",
+        "output_semantics": "encoded-feature-vector",
+        "assurance_scope": "deterministic-encoder-correctness",
+        "security_basis": "local-encoding-no-cryptographic-security-claim",
+        "precomputation_mode": "not-applicable",
+        "encoder_input_construction": "canonical-minhash-signature-untimed",
+        "encoder_warmup_calls": "1",
+        "encoder_timed_calls": "1",
+        "encoder_correctness_calls": "1",
+        "encoder_correctness_status": "PASS",
+        "measurement_status": "measured",
+        "omp_dynamic": "false",
+        "target_semantics": "jaccard",
+        "target_jaccard_numerator": str(workload.target.numerator),
+        "target_jaccard_denominator": str(workload.target.denominator),
+        "timing_trials": "1",
+        "accuracy_trials": "1",
+        "trials": "1",
+    }
+    for row_number, row in enumerate(rows, 2):
+        method, arm = row["method"], row["evidence_arm"]
+        checks = {
+            **required_taxonomy,
+            "suite": workload.suite,
+            "scenario": f"review-{workload.universe}",
+            "profile_id": workload.profile,
+            "target_security_bits": "192",
+            "workload_id": workload.workload_id,
+            "workload_manifest_sha256": workload.digest,
+            "execution_trace_sha256": trace_digest,
+            "root_seed": str(workload.root_seed),
+            "k": str(workload.k),
+            "m": str(workload.m),
+            "set_size": str(workload.set_size),
+            "universe_size": str(workload.universe),
+            "measurement_kind": expected_kind(method, arm),
+            "realized_intersection": str(first.intersection),
+            "realized_union": str(first.union),
+        }
+        checks["primitive"] = "onehot-encoding" if method == "piccard_encode" else "sqrt-encoding"
+        checks["protocol_model"] = ("piccard-local-encoding" if method == "piccard_encode"
+                                     else "piccard-sqrt-local-encoding")
+        for column, expected in checks.items():
+            require(row.get(column) == expected,
+                    f"row {row_number}: {column} mismatch "
+                    f"({row.get(column)!r} != {expected!r})")
+        for column, expected in (("target_jaccard", workload.target),
+                                 ("realized_jaccard", realized)):
+            try:
+                actual = float(row[column])
+            except ValueError as error:
+                raise VerificationError(
+                    f"row {row_number}: {column} is invalid") from error
+            require(math.isfinite(actual) and math.isclose(
+                actual, float(expected), rel_tol=0.0, abs_tol=5e-12),
+                f"row {row_number}: {column} mismatch")
+        require(row["hash_randomness"] == ("fixed" if arm == "timing" else "resampled"),
+                f"row {row_number}: encoding hash-randomness mismatch")
+        expected_hash = str(workload.records[1].hash_seed) if arm == "timing" else ""
+        require(row["hash_seed"] == expected_hash,
+                f"row {row_number}: encoding hash seed mismatch")
+        feature_size = _parse_int(row, "encoded_feature_size", row_number, positive=True)
+        if method == "piccard_encode":
+            feature_dimension = workload.k * workload.m
+        else:
+            base = math.isqrt(workload.m)
+            require(base * base == workload.m,
+                    f"row {row_number}: sqrt encoding has a non-square m")
+            feature_dimension = workload.k * 2 * base
+        expected_feature_size = 1 << (feature_dimension - 1).bit_length()
+        require(feature_size == expected_feature_size,
+                f"row {row_number}: encoded feature shape mismatch")
+        digest = row["correctness_feature_sha256"]
+        require(len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
+                f"row {row_number}: deterministic correctness digest is invalid")
+        total = _finite(row["total_ms"], "total_ms", row_number)
+        median = _finite(row["total_ms_median"], "total_ms_median", row_number)
+        require(total >= 0.0 and math.isclose(total, median, rel_tol=0.0, abs_tol=1e-6),
+                f"row {row_number}: encoding timing aggregate is invalid")
+        require(row["total_ms_sd"] == "",
+                f"row {row_number}: one-sample encoding SD must be blank")
+        if arm == "accuracy":
+            require(total == 0.0,
+                    f"row {row_number}: correctness execution leaked into timed region")
+
+
+def verify_csv_artifacts(csv_path: Path, workload_path: Path,
+                         trace_path: Path) -> tuple[Workload, list[dict[str, str]]]:
+    """Verify a CSV with the schema selected by its immutable workload."""
+    workload = parse_workload(workload_path)
+    trace_digest = verify_trace(trace_path, workload)
+    if is_encoding_workload(workload):
+        rows = load_encoding_csv(csv_path)
+        verify_encoding_rows(rows, workload, trace_digest)
+    else:
+        _, rows = load_provenance_csv(csv_path, REVIEW_REQUIRED_COLUMNS)
+        verify_rows(rows, workload, trace_digest)
+        validate_rows(rows)
+    return workload, rows
+
+
 def verify_rows(rows: list[dict[str, str]], workload: Workload, trace_digest: str):
+    if is_encoding_workload(workload):
+        verify_encoding_rows(rows, workload, trace_digest)
+        return
     if workload.suite == "toy-smoke":
         require(set(rows[0]) == TOY_REVIEW_COLUMNS and len(rows[0]) == 73,
                 "canonical toy reviewer CSV must use the 73-column schema"
@@ -498,11 +678,7 @@ def main(argv=None) -> int:
             if any(value is None for value in explicit):
                 parser.error("--csv, --workload, and --execution-trace are required")
             csv_path, workload_path, trace_path = explicit
-        _, rows = load_csv(csv_path, REVIEW_REQUIRED_COLUMNS)
-        workload = parse_workload(workload_path)
-        trace_digest = verify_trace(trace_path, workload)
-        verify_rows(rows, workload, trace_digest)
-        validate_rows(rows)
+        workload, rows = verify_csv_artifacts(csv_path, workload_path, trace_path)
     except (VerificationError, OSError, ValueError, OverflowError) as error:
         print(f"verify_review_comparison: FAIL: {error}", file=sys.stderr)
         return 2

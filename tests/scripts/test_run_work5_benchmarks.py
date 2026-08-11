@@ -199,12 +199,15 @@ class Work5ContractFixtureTest(unittest.TestCase):
                                      cell["axis_value"] if axis == cell["axis"]
                                      else control[axis])
         for suite in contract["suites"]:
-            has_sqrt = "piccard_sqrt" in suite["methods"]
+            has_sqrt = any(method in {"piccard_sqrt", "piccard_sqrt_encode"}
+                           for method in suite["methods"])
             if has_sqrt:
                 self.assertEqual(suite["axis_values"].get("m"),
                                  contract["sqrt_supported_m"])
             if suite["id"].endswith("-m-extra"):
-                self.assertEqual(suite["methods"], ["piccard"])
+                expected_method = (["piccard_encode"] if suite["profile"].startswith("work5-std192")
+                                   else ["piccard"])
+                self.assertEqual(suite["methods"], expected_method)
                 self.assertFalse(suite["owns_control"])
                 self.assertEqual(suite["axis_values"], {"m": [32, 128]})
         by_id = {cell["cell_id"]: cell for cell in cells}
@@ -239,6 +242,11 @@ class Work5ContractFixtureTest(unittest.TestCase):
             "sj16_cost_scope": "full-query-excluding-one-time-setup",
             "sj16_comparison_scope": "component-lower-bound",
             "sj16_secure_division_included": False,
+            "std192_piccard_encoding_only": True,
+            "std192_piccard_context_started": False,
+            "std192_piccard_keygen_started": False,
+            "std192_piccard_forbidden_context_artifacts": True,
+            "std192_piccard_forbidden_fhe_timing_columns": True,
         })
         # The producer keeps SJ16's full-query timing boundary while retaining
         # its lower-bound comparison scope.  Phase 1 must not rewrite Work #4.
@@ -375,7 +383,9 @@ class Work5RunnerContractTest(unittest.TestCase):
             self.assertEqual(record["profile"], expected["profile"])
             self.assertEqual(record["methods"], expected["methods"])
             if record["suite"].endswith("-m-extra"):
-                self.assertEqual(record["methods"], ["piccard"])
+                self.assertEqual(record["methods"],
+                                 ["piccard_encode"] if record["security"] == "STD192"
+                                 else ["piccard"])
                 self.assertEqual(record["control_cell_id"],
                                  record["suite"].replace("-m-extra", "") + "::control")
                 self.assertFalse(any(key.startswith("control_timing") for key in record))
@@ -395,6 +405,19 @@ class Work5RunnerContractTest(unittest.TestCase):
                         record["security"]]
                 expected_taxonomy[method] = method_taxonomy
             self.assertEqual(record["taxonomy"], expected_taxonomy)
+            encoding_only = (record["security"] == "STD192" and
+                             set(record["methods"]) <=
+                             {"piccard_encode", "piccard_sqrt_encode"})
+            if encoding_only:
+                self.assertFalse(record["context_started"])
+                self.assertFalse(record["keygen_started"])
+                self.assertEqual(record["taxonomy"], {
+                    method: contract["taxonomy"][method]
+                    for method in record["methods"]
+                })
+                for label in ("context_onehot", "context_sqrt", "context_fhe_ind"):
+                    self.assertIsNone(record[f"{label}_path"])
+                    self.assertIsNone(record[f"{label}_sha256"])
             self.assertIn(record["U"], contract["allowed_universes"])
             self.assertNotIn(record["U"], contract["excluded_universes"])
             self.assertTrue(contract["hard_exclusions"]["threshold"])
@@ -489,7 +512,9 @@ class Work5RunnerContractTest(unittest.TestCase):
         m_extra = [record for record in records if record["suite"].endswith("-m-extra")]
         self.assertEqual(len(m_extra), 4)
         for record in m_extra:
-            self.assertEqual(record["methods"], ["piccard"])
+            expected_method = (["piccard_encode"] if record["security"] == "STD192"
+                               else ["piccard"])
+            self.assertEqual(record["methods"], expected_method)
             self.assertEqual(record["axis"], "m")
             self.assertIn(record["m"], (32, 128))
             self.assertEqual(record["control_cell_id"],
@@ -503,8 +528,9 @@ class Work5RunnerContractTest(unittest.TestCase):
         # The fixture records both the runner's dispatch boundary and the
         # sentinel process, so each of the four calls appears twice.
         self.assertEqual(len(m_extra_events), 8)
-        self.assertTrue(all("--methods=piccard" in event["argv"] and
-                            "--methods=piccard,piccard_sqrt" not in event["argv"]
+        self.assertTrue(all(any(methods in event["argv"] for methods in
+                                ("--methods=piccard", "--methods=piccard_encode")) and
+                            "piccard_sqrt" not in " ".join(event["argv"])
                             for event in m_extra_events))
 
     def assert_stage_flags(self, record: dict[str, Any],
@@ -534,7 +560,10 @@ class Work5RunnerContractTest(unittest.TestCase):
         self.assertIsInstance(record["started_at_utc"], str)
         self.assertIsInstance(record["ended_at_utc"], str)
         self.assertRegex(record["trial_payload_sha256"], r"^[0-9a-f]{64}$")
-        self.assert_monotonic_stage_flags(record)
+        encoding_only = (record["security"] == "STD192" and
+                         set(record["methods"]) <= {"piccard_encode", "piccard_sqrt_encode"})
+        if not encoding_only:
+            self.assert_monotonic_stage_flags(record)
         self.assertTrue(record["preflight_started"])
         for path_field, hash_field in schema["artifact_pairs"]:
             path, digest = record[path_field], record[hash_field]
@@ -548,7 +577,7 @@ class Work5RunnerContractTest(unittest.TestCase):
 
         status = record["status"]
         if status == "MEASURED":
-            expected = schema["measured"]
+            expected = schema["encoding_measured" if encoding_only else "measured"]
             self.assert_stage_flags(record, expected["flags"])
             self.assertEqual(record["exit_code"], expected["exit_code"])
             self.assertEqual(record["measured_trials"], expected["measured_trials"])
@@ -600,7 +629,18 @@ class Work5RunnerContractTest(unittest.TestCase):
         results = self.tmp / "work5-parameters"
         run = self.run_runner("parameters", results)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assert_parameter_matrix(results)
+        records = self.assert_parameter_matrix(results)
+        events = read_jsonl(self.events)
+        context_cells = {event["cell_id"] for event in events
+                         if event.get("kind") == "context-preflight"}
+        self.assertIn("work5-std128-piccard::control", context_cells)
+        self.assertFalse(any(cell.startswith("work5-std192-piccard")
+                             for cell in context_cells))
+        for record in records:
+            if record["security"] == "STD192" and \
+                    set(record["methods"]) <= {"piccard_encode", "piccard_sqrt_encode"}:
+                self.assertFalse(record["context_started"])
+                self.assertFalse(record["keygen_started"])
 
     def test_geometry_preflight_cannot_reach_the_keygen_command_sentinel(self) -> None:
         results = self.tmp / "work5-preflight"

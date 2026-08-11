@@ -110,7 +110,7 @@
     {
       "id": "work5-std192-piccard",
       "profile": "work5-std192-t40-single-trial",
-      "methods": ["piccard", "piccard_sqrt"],
+      "methods": ["piccard_encode", "piccard_sqrt_encode"],
       "applicable_axes": ["k", "m", "n", "U"],
       "axis_values": {"k": [16, 32, 64, 128, 256, 512], "m": [16, 64, 256], "n": [100, 1000, 10000, 100000], "U": [16384, 65536]},
       "applicability": {"k": true, "m": true, "n": true, "U": true},
@@ -121,7 +121,7 @@
     {
       "id": "work5-std192-piccard-m-extra",
       "profile": "work5-std192-t40-single-trial",
-      "methods": ["piccard"],
+      "methods": ["piccard_encode"],
       "applicable_axes": ["m"],
       "axis_values": {"m": [32, 128]},
       "applicability": {"k": false, "m": true, "n": false, "U": false},
@@ -254,6 +254,8 @@
   "taxonomy": {
     "piccard": {"primitive": "bfv-onehot-minhash", "protocol_model": "piccard-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
     "piccard_sqrt": {"primitive": "bfv-sqrt-minhash", "protocol_model": "piccard-sqrt-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
+    "piccard_encode": {"primitive": "onehot-encoding", "protocol_model": "piccard-local-encoding", "comparison_scope": "encoding-only-diagnostic", "cost_scope": "encoding-only", "secure_division_included": false, "semantic_comparison_eligible": false},
+    "piccard_sqrt_encode": {"primitive": "sqrt-encoding", "protocol_model": "piccard-sqrt-local-encoding", "comparison_scope": "encoding-only-diagnostic", "cost_scope": "encoding-only", "secure_division_included": false, "semantic_comparison_eligible": false},
     "fhe_ind": {"primitive": "bfv-indicator-comparison", "protocol_model": "local-universe-sized-BFV-comparator", "comparison_scope": "diagnostic-only", "cost_scope": "primitive-only", "secure_division_included": false, "semantic_comparison_eligible": false},
     "bcg12_mh_ec": {"primitive": "bcg12-ec", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
     "bcg12_mh_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": false, "semantic_comparison_eligible": true},
@@ -266,6 +268,7 @@
     "required_fields": ["cell_id", "profile", "suite", "security", "axis", "axis_value", "k", "m", "n", "U", "target_jaccard", "seed", "methods", "applicability", "profile_comparison_eligible", "control_cell_id", "taxonomy", "trial_payload_sha256", "status", "reason_code", "reason_detail", "preflight_started", "workload_started", "context_started", "keygen_started", "measurement_started", "measured_trials", "started_at_utc", "ended_at_utc", "argv", "environment", "exit_code", "command_path", "command_sha256", "stdout_path", "stdout_sha256", "stderr_path", "stderr_sha256", "workload_path", "workload_sha256", "trace_path", "trace_sha256", "csv_path", "csv_sha256"],
     "artifact_pairs": [["command_path", "command_sha256"], ["stdout_path", "stdout_sha256"], ["stderr_path", "stderr_sha256"], ["workload_path", "workload_sha256"], ["trace_path", "trace_sha256"], ["csv_path", "csv_sha256"]],
     "measured": {"flags": {"preflight_started": true, "workload_started": true, "context_started": true, "keygen_started": true, "measurement_started": true}, "measured_trials": 1, "exit_code": 0, "reason_code": null, "all_artifacts": "present"},
+    "encoding_measured": {"flags": {"preflight_started": true, "workload_started": true, "context_started": false, "keygen_started": false, "measurement_started": true}, "measured_trials": 1, "exit_code": 0, "reason_code": null, "all_artifacts": "present"},
     "skipped_precheck": {"stage_flags_by_reason": {"WORKLOAD_GEOMETRY": {"preflight_started": true, "context_started": false, "workload_started": false, "keygen_started": false, "measurement_started": false}, "PROJECTED_RUNTIME_CAP": {"preflight_started": true, "context_started": false, "workload_started": false, "keygen_started": false, "measurement_started": false}, "RING_DIM_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}, "DEPTH_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}, "LOGQ_CAP": {"preflight_started": true, "context_started": true, "workload_started": false, "keygen_started": false, "measurement_started": false}}, "measured_trials": 0, "exit_code": null, "command_log_artifacts": "present", "output_artifacts": "null"},
     "error": {"requires_preflight_started": true, "monotonic_stage_flags": true, "measured_trials": 0, "exit_code": "nonzero", "command_log_artifacts": "present", "output_artifacts": "null-or-paired"}
   },
@@ -277,7 +280,12 @@
     "fhe_ind_comparison_scope": "diagnostic-only",
     "sj16_secure_division_included": false,
     "sj16_comparison_scope": "component-lower-bound",
-    "sj16_cost_scope": "full-query-excluding-one-time-setup"
+    "sj16_cost_scope": "full-query-excluding-one-time-setup",
+    "std192_piccard_encoding_only": true,
+    "std192_piccard_context_started": false,
+    "std192_piccard_keygen_started": false,
+    "std192_piccard_forbidden_context_artifacts": true,
+    "std192_piccard_forbidden_fhe_timing_columns": true
   },
   "lifecycle": {
     "preflight_before_keygen": true,

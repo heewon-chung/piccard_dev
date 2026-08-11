@@ -12,6 +12,11 @@ bool IsPiccard(BaselineMethod method) {
            method == BaselineMethod::PiccardSqrt;
 }
 
+bool IsPiccardEncoding(BaselineMethod method) {
+    return method == BaselineMethod::PiccardEncode ||
+           method == BaselineMethod::PiccardSqrtEncode;
+}
+
 bool IsBcg12(BaselineMethod method) {
     return method == BaselineMethod::Bcg12MinHashFf ||
            method == BaselineMethod::Bcg12MinHashEc ||
@@ -91,6 +96,31 @@ BaselineCapability ResolveBaselineCapability(
             SecurityBasis::OpenFheHeseaStandardLiveContext;
         capability.cost_scope = CostScope::FullQueryExcludingOneTimeSetup;
         capability.precomputation_mode = PrecomputationMode::CrsAndKeysOnly;
+    } else if (IsPiccardEncoding(method)) {
+        if (precomputed_randomizers) {
+            throw std::invalid_argument(
+                "encoding-only Piccard does not support precomputation");
+        }
+        // These methods deliberately time only the local feature encoder. They
+        // do not construct an OpenFHE context or assert a cryptographic
+        // security equivalence to the requested STD profile.
+        capability.cryptographic_profile = "local-encoding-only";
+        capability.nominal_security_bits = std::nullopt;
+        capability.security_match = false;
+        capability.comparison_eligible = false;
+        capability.comparison_scope = ComparisonScope::EncodingOnlyDiagnostic;
+        capability.primitive = method == BaselineMethod::PiccardEncode
+            ? Primitive::OneHotEncoding : Primitive::SqrtEncoding;
+        capability.protocol_model = method == BaselineMethod::PiccardEncode
+            ? ProtocolModel::PiccardLocalEncoding
+            : ProtocolModel::PiccardSqrtLocalEncoding;
+        capability.output_semantics = OutputSemantics::EncodedFeatureVector;
+        capability.assurance_scope =
+            AssuranceScope::DeterministicEncoderCorrectness;
+        capability.security_basis =
+            SecurityBasis::LocalEncodingNoCryptographicSecurityClaim;
+        capability.cost_scope = CostScope::EncodingOnly;
+        capability.precomputation_mode = PrecomputationMode::NotApplicable;
     } else if (method == BaselineMethod::FheInd) {
         if (precomputed_randomizers) {
             throw std::invalid_argument(
@@ -231,6 +261,8 @@ const char* BaselineMethodName(BaselineMethod method) {
     switch (method) {
         case BaselineMethod::Piccard: return "piccard";
         case BaselineMethod::PiccardSqrt: return "piccard_sqrt";
+        case BaselineMethod::PiccardEncode: return "piccard_encode";
+        case BaselineMethod::PiccardSqrtEncode: return "piccard_sqrt_encode";
         case BaselineMethod::FheInd: return "fhe_ind";
         case BaselineMethod::Bcg12MinHashFf: return "bcg12_mh_ff";
         case BaselineMethod::Bcg12MinHashEc: return "bcg12_mh_ec";
@@ -265,6 +297,8 @@ const char* PrimitiveName(Primitive primitive) {
     switch (primitive) {
         case Primitive::BfvOneHotMinHash: return "bfv-onehot-minhash";
         case Primitive::BfvSqrtMinHash: return "bfv-sqrt-minhash";
+        case Primitive::OneHotEncoding: return "onehot-encoding";
+        case Primitive::SqrtEncoding: return "sqrt-encoding";
         case Primitive::BfvIndicatorComparison: return "bfv-indicator-comparison";
         case Primitive::Bcg12Ff: return "bcg12-ff";
         case Primitive::Bcg12Ec: return "bcg12-ec";
@@ -281,6 +315,10 @@ const char* ProtocolModelName(ProtocolModel model) {
             return "piccard-two-owner-outsourced";
         case ProtocolModel::PiccardSqrtTwoOwnerOutsourced:
             return "piccard-sqrt-two-owner-outsourced";
+        case ProtocolModel::PiccardLocalEncoding:
+            return "piccard-local-encoding";
+        case ProtocolModel::PiccardSqrtLocalEncoding:
+            return "piccard-sqrt-local-encoding";
         case ProtocolModel::LocalUniverseSizedBfvComparator:
             return "local-universe-sized-BFV-comparator";
         case ProtocolModel::Bcg12CardinalityOnMinHash:
@@ -297,6 +335,8 @@ const char* OutputSemanticsName(OutputSemantics semantics) {
     switch (semantics) {
         case OutputSemantics::BiasCorrectedJaccardEstimate:
             return "bias-corrected-jaccard-estimate";
+        case OutputSemantics::EncodedFeatureVector:
+            return "encoded-feature-vector";
         case OutputSemantics::ScalarIntersectionPlaintextJaccard:
             return "scalar-intersection-plaintext-jaccard";
         case OutputSemantics::MinHashCollisionJaccardEstimate:
@@ -313,6 +353,8 @@ const char* AssuranceScopeName(AssuranceScope scope) {
     switch (scope) {
         case AssuranceScope::LiveBfvEmpiricalSanitizerPoc:
             return "live-bfv+empirical-sanitizer-poc";
+        case AssuranceScope::DeterministicEncoderCorrectness:
+            return "deterministic-encoder-correctness";
         case AssuranceScope::LiveBfvPrimitiveOnly:
             return "live-bfv-primitive-only";
         case AssuranceScope::ImplementedBaselineParameterMap:
@@ -327,6 +369,8 @@ const char* SecurityBasisName(SecurityBasis basis) {
     switch (basis) {
         case SecurityBasis::OpenFheHeseaStandardLiveContext:
             return "openfhe-hesea-standard-live-context";
+        case SecurityBasis::LocalEncodingNoCryptographicSecurityClaim:
+            return "local-encoding-no-cryptographic-security-claim";
         case SecurityBasis::FiniteFieldDh3072Subgroup256ParameterMap:
             return "finite-field-dh-3072-subgroup-256-parameter-map";
         case SecurityBasis::NistP256ParameterMap:
@@ -348,6 +392,7 @@ const char* CostScopeName(CostScope scope) {
         case CostScope::OnlineQueryWithPrecomputedRandomizers:
             return "online-query-with-precomputed-randomizers";
         case CostScope::PrimitiveOnly: return "primitive-only";
+        case CostScope::EncodingOnly: return "encoding-only";
     }
     throw std::logic_error("unknown cost scope");
 }
@@ -374,6 +419,8 @@ const char* ComparisonScopeName(ComparisonScope scope) {
         case ComparisonScope::ComponentLowerBound:
             return "component-lower-bound";
         case ComparisonScope::DiagnosticOnly: return "diagnostic-only";
+        case ComparisonScope::EncodingOnlyDiagnostic:
+            return "encoding-only-diagnostic";
     }
     throw std::logic_error("unknown comparison scope");
 }

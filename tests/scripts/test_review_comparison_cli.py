@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """No-setup boundary tests for the Phase-4 reviewer comparison CLI."""
 
+import csv
+import os
 import pathlib
 import subprocess
 import sys
@@ -113,6 +115,18 @@ class ReviewComparisonCliTest(unittest.TestCase):
     def run_cli(self, command):
         return subprocess.run(command, text=True, capture_output=True, check=False)
 
+    def work5_std192_encoding_command(self, root: pathlib.Path, *, suite: str,
+                                       m: int, methods: str):
+        return [
+            str(self.binary), f"--suite={suite}",
+            "--profile=work5-std192-t40-single-trial", "--security=STD192",
+            "--k=128", f"--m={m}", "--set-size=1000", "--universe=16384",
+            "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1",
+            "--seed=7", f"--methods={methods}", "--sj16-key-bits=3072",
+            "--diagnostic-security", f"--manifest-out={root / 'workload.bin'}",
+            f"--execution-trace-out={root / 'trace.bin'}",
+        ]
+
     def test_named_profile_supplies_omitted_security_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_cli(self.base_command(pathlib.Path(tmp)))
@@ -214,6 +228,94 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertEqual(rejected.returncode, 2)
             self.assertEqual(rejected.stdout, "")
             self.assertIn("frozen policy", rejected.stderr)
+
+    def test_std192_encoding_only_shared_and_m_extra_execute_without_fhe_or_calibration(self):
+        cases = (
+            ("work5-std192-piccard", 64, "piccard_encode,piccard_sqrt_encode",
+             ["piccard_encode", "piccard_sqrt_encode"]),
+            ("work5-std192-piccard-m-extra", 32, "piccard_encode",
+             ["piccard_encode"]),
+        )
+        for suite, m, methods, expected_methods in cases:
+            with self.subTest(suite=suite):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = pathlib.Path(tmp)
+                    environment = os.environ.copy()
+                    environment.update({"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"})
+                    result = subprocess.run(
+                        self.work5_std192_encoding_command(
+                            root, suite=suite, m=m, methods=methods),
+                        text=True, capture_output=True, check=False, env=environment)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("calibration", result.stderr.lower())
+                    self.assertNotIn("openfhe", result.stderr.lower())
+                    rows = list(csv.DictReader(result.stdout.splitlines()))
+                    self.assertEqual([row["method"] for row in rows],
+                                     [method for method in expected_methods
+                                      for _ in ("timing", "accuracy")])
+                    self.assertNotIn("piccard_sqrt_encode",
+                                     [row["method"] for row in rows]
+                                     if suite.endswith("m-extra") else [])
+                    forbidden = {"phase_encode_ms", "phase_encrypt_ms",
+                                 "phase_compute_ms", "phase_decrypt_ms",
+                                 "actual_ring_dim", "log_q_bits", "sanitizer_model"}
+                    self.assertFalse(forbidden & set(rows[0]))
+                    for row in rows:
+                        self.assertEqual(
+                            (row["encoder_warmup_calls"], row["encoder_timed_calls"],
+                             row["encoder_correctness_calls"],
+                             row["encoder_correctness_status"]),
+                            ("1", "1", "1", "PASS"))
+                        self.assertEqual(row["comparison_eligible"], "false")
+                        self.assertEqual(row["comparison_scope"],
+                                         "encoding-only-diagnostic")
+                        self.assertEqual(row["cost_scope"], "encoding-only")
+                        self.assertEqual(row["secure_division_included"], "false")
+                    # Bind the verifier to exactly the direct producer stdout.
+                    (root / "rows.csv").write_text(result.stdout, encoding="utf-8")
+                    verifier = subprocess.run(
+                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
+                                        "scripts" / "verify_review_comparison.py"),
+                         f"--csv={root / 'rows.csv'}",
+                         f"--workload={root / 'workload.bin'}",
+                         f"--execution-trace={root / 'trace.bin'}"],
+                        text=True, capture_output=True, check=False, env=environment)
+                    self.assertEqual(verifier.returncode, 0, verifier.stderr)
+
+                    # The independent semantic parser must reject both a
+                    # taxonomy lie and an injected FHE timing column.
+                    fields = list(rows[0])
+                    bad_taxonomy = [dict(row) for row in rows]
+                    bad_taxonomy[0]["cost_scope"] = "primitive-only"
+                    with (root / "rows.csv").open("w", newline="") as stream:
+                        writer = csv.DictWriter(stream, fieldnames=fields)
+                        writer.writeheader()
+                        writer.writerows(bad_taxonomy)
+                    rejected = subprocess.run(
+                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
+                                        "scripts" / "verify_review_comparison.py"),
+                         f"--csv={root / 'rows.csv'}",
+                         f"--workload={root / 'workload.bin'}",
+                         f"--execution-trace={root / 'trace.bin'}"],
+                        text=True, capture_output=True, check=False, env=environment)
+                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+                    self.assertIn("cost_scope", rejected.stderr)
+
+                    forged_fields = [*fields, "phase_encrypt_ms"]
+                    with (root / "rows.csv").open("w", newline="") as stream:
+                        writer = csv.DictWriter(stream, fieldnames=forged_fields)
+                        writer.writeheader()
+                        for row in rows:
+                            writer.writerow({**row, "phase_encrypt_ms": "0.1"})
+                    rejected = subprocess.run(
+                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
+                                        "scripts" / "verify_review_comparison.py"),
+                         f"--csv={root / 'rows.csv'}",
+                         f"--workload={root / 'workload.bin'}",
+                         f"--execution-trace={root / 'trace.bin'}"],
+                        text=True, capture_output=True, check=False, env=environment)
+                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+                    self.assertIn("schema", rejected.stderr)
 
     def test_legacy_baseline_method_is_rejected_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:

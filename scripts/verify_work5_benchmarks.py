@@ -65,10 +65,10 @@ SUITES = (
     ("work5-std128-sj16", "work5-std128-t40-single-trial",
      ("sj16",), ("n", "U"), {}, True, None),
     ("work5-std192-piccard", "work5-std192-t40-single-trial",
-     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     ("piccard_encode", "piccard_sqrt_encode"), ("k", "m", "n", "U"),
      {"m": (16, 64, 256)}, True, None),
     ("work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
-     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     ("piccard_encode",), ("m",), {"m": (32, 128)}, False,
      "work5-std192-piccard::control"),
     ("work5-std192-fhe-ind", "work5-std192-t40-single-trial",
      ("fhe_ind",), ("n", "U"), {}, True, None),
@@ -78,6 +78,8 @@ SUITES = (
 TAXONOMY: dict[str, dict[str, Any]] = {
     "piccard": {"primitive": "bfv-onehot-minhash", "protocol_model": "piccard-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": False, "semantic_comparison_eligible": True},
     "piccard_sqrt": {"primitive": "bfv-sqrt-minhash", "protocol_model": "piccard-sqrt-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": False, "semantic_comparison_eligible": True},
+    "piccard_encode": {"primitive": "onehot-encoding", "protocol_model": "piccard-local-encoding", "comparison_scope": "encoding-only-diagnostic", "cost_scope": "encoding-only", "secure_division_included": False, "semantic_comparison_eligible": False},
+    "piccard_sqrt_encode": {"primitive": "sqrt-encoding", "protocol_model": "piccard-sqrt-local-encoding", "comparison_scope": "encoding-only-diagnostic", "cost_scope": "encoding-only", "secure_division_included": False, "semantic_comparison_eligible": False},
     "fhe_ind": {"primitive": "bfv-indicator-comparison", "protocol_model": "local-universe-sized-BFV-comparator", "comparison_scope": "diagnostic-only", "cost_scope": "primitive-only", "secure_division_included": False, "semantic_comparison_eligible": False},
     "bcg12_mh_ec": {"primitive": "bcg12-ec", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": False, "semantic_comparison_eligible": True},
     "bcg12_mh_ff": {"primitive": "bcg12-ff", "protocol_model": "bcg12-cardinality-on-minhash", "comparison_scope": "matched-estimator-component", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": False, "semantic_comparison_eligible": True},
@@ -127,7 +129,8 @@ def expected_cells() -> list[dict[str, Any]]:
         require(all(values[axis] and set(values[axis]).issubset(PARAMETERS[axis])
                     for axis in applicable_axes),
                 "verifier suite domain is malformed")
-        require(not ("piccard_sqrt" in methods and
+        require(not (any(method in {"piccard_sqrt", "piccard_sqrt_encode"}
+                         for method in methods) and
                      any(value not in {16, 64, 256} for value in values.get("m", ()))),
                 "verifier sqrt domain is malformed")
         require(owns_control == (control_cell_id is None),
@@ -326,11 +329,8 @@ def verify_live_semantics(root: Path, record: dict[str, Any]) -> None:
     workload_path = relative_file(root, record["workload_path"], f"{record['cell_id']} workload")
     trace_path = relative_file(root, record["trace_path"], f"{record['cell_id']} trace")
     try:
-        _, rows = review_verifier.load_csv(csv_path, review_verifier.REVIEW_REQUIRED_COLUMNS)
-        workload = review_verifier.parse_workload(workload_path)
-        trace_digest = review_verifier.verify_trace(trace_path, workload)
-        review_verifier.verify_rows(rows, workload, trace_digest)
-        review_verifier.validate_rows(rows)
+        workload, _rows = review_verifier.verify_csv_artifacts(
+            csv_path, workload_path, trace_path)
     except (review_verifier.VerificationError, OSError, ValueError) as exc:
         raise VerificationError(f"{record['cell_id']}: semantic producer verification failed: {exc}") from exc
     require((workload.suite, workload.profile, workload.root_seed, workload.k, workload.m,
@@ -341,8 +341,17 @@ def verify_live_semantics(root: Path, record: dict[str, Any]) -> None:
             f"{record['cell_id']}: parsed workload does not bind terminal cell")
 
 
-def expected_stage_flags(status: str, reason: Any) -> dict[str, bool]:
+def is_encoding_only_record(record: dict[str, Any]) -> bool:
+    methods = record.get("methods")
+    return (record.get("security") == "STD192" and isinstance(methods, list) and
+            bool(methods) and set(methods) <= {"piccard_encode", "piccard_sqrt_encode"})
+
+
+def expected_stage_flags(status: str, reason: Any,
+                         record: dict[str, Any] | None = None) -> dict[str, bool]:
     if status == "MEASURED":
+        if record is not None and is_encoding_only_record(record):
+            return dict(zip(STAGES, (True, False, True, False, True)))
         return dict(zip(STAGES, (True, True, True, True, True)))
     if status == "SKIPPED_PRECHECK":
         if reason in ("WORKLOAD_GEOMETRY", "PROJECTED_RUNTIME_CAP"):
@@ -359,12 +368,16 @@ def verify_status(record: dict[str, Any]) -> None:
     require(all(isinstance(value, bool) for value in flags.values()),
             f"{record['cell_id']}: stage flags are not booleans")
     observed = tuple(flags[name] for name in STAGES)
-    require(observed == tuple(sorted(observed, reverse=True)),
-            f"{record['cell_id']}: stage flags are not monotonic")
+    if is_encoding_only_record(record):
+        require(flags["context_started"] is False and flags["keygen_started"] is False,
+                f"{record['cell_id']}: encoding-only cell entered context/keygen")
+    else:
+        require(observed == tuple(sorted(observed, reverse=True)),
+                f"{record['cell_id']}: stage flags are not monotonic")
     require(record.get("preflight_started") is True,
             f"{record['cell_id']}: terminal record lacks preflight")
     if status == "MEASURED":
-        require(flags == expected_stage_flags(status, None) and record.get("exit_code") == 0 and
+        require(flags == expected_stage_flags(status, None, record) and record.get("exit_code") == 0 and
                 record.get("measured_trials") == 1 and record.get("reason_code") is None and
                 record.get("reason_detail") is None,
                 f"{record['cell_id']}: MEASURED state invariant failed")
@@ -372,7 +385,7 @@ def verify_status(record: dict[str, Any]) -> None:
         allowed = {"WORKLOAD_GEOMETRY", "RING_DIM_CAP", "DEPTH_CAP", "LOGQ_CAP", "PROJECTED_RUNTIME_CAP"}
         require(record.get("reason_code") in allowed and isinstance(record.get("reason_detail"), str) and
                 bool(record["reason_detail"]) and record.get("exit_code") is None and
-                record.get("measured_trials") == 0 and flags == expected_stage_flags(status, record["reason_code"]),
+                record.get("measured_trials") == 0 and flags == expected_stage_flags(status, record["reason_code"], record),
                 f"{record['cell_id']}: SKIPPED_PRECHECK state invariant failed")
     else:
         require(record.get("reason_code") in {"TIMEOUT", "PHASE_CAP_EXHAUSTED", "SUBPROCESS_EXIT", "VERIFIER_FAILURE", "ARTIFACT_MISMATCH", "EXCEPTION"} and

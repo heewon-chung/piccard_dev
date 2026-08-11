@@ -255,9 +255,9 @@ const std::vector<Work5Suite>& Work5Suites() {
         {"work5-std128-sj16", "work5-std128-t40-single-trial",
          {"sj16"}, 5},
         {"work5-std192-piccard", "work5-std192-t40-single-trial",
-         {"piccard", "piccard_sqrt"}, 12},
+         {"piccard_encode", "piccard_sqrt_encode"}, 12},
         {"work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
-         {"piccard"}, 2},
+         {"piccard_encode"}, 2},
         {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
          {"fhe_ind"}, 5},
         {"work5-std192-sj16", "work5-std192-t40-single-trial",
@@ -624,8 +624,22 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
 
     auto std192_bcg12 = Work5Spec(
         "work5-std192-piccard", "work5-std192-t40-single-trial",
-        {"piccard", "piccard_sqrt", "bcg12_mh_ec"});
+        {"piccard_encode", "piccard_sqrt_encode", "bcg12_mh_ec"});
     EXPECT_THROW(ComparisonWorkload::Generate(std192_bcg12),
+                 std::invalid_argument);
+
+    auto std192_legacy_piccard = Work5Spec(
+        "work5-std192-piccard", "work5-std192-t40-single-trial",
+        {"piccard", "piccard_sqrt"});
+    EXPECT_THROW(ComparisonWorkload::Generate(std192_legacy_piccard),
+                 std::invalid_argument);
+
+    auto std192_m_extra = Work5Spec(
+        "work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
+        {"piccard_encode"});
+    EXPECT_NO_THROW(ComparisonWorkload::Generate(std192_m_extra));
+    std192_m_extra.methods = {"piccard_encode", "piccard_sqrt_encode"};
+    EXPECT_THROW(ComparisonWorkload::Generate(std192_m_extra),
                  std::invalid_argument);
 
     auto two_trials = Work5Spec(

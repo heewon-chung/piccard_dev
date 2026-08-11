@@ -13,6 +13,8 @@ namespace benchmark {
 enum class BaselineMethod {
     Piccard,
     PiccardSqrt,
+    PiccardEncode,
+    PiccardSqrtEncode,
     FheInd,
     Bcg12MinHashFf,
     Bcg12MinHashEc,
@@ -32,6 +34,8 @@ enum class BaselineSecurityPolicy { RequireMatch, AllowDiagnostic };
 enum class Primitive {
     BfvOneHotMinHash,
     BfvSqrtMinHash,
+    OneHotEncoding,
+    SqrtEncoding,
     BfvIndicatorComparison,
     Bcg12Ff,
     Bcg12Ec,
@@ -43,6 +47,8 @@ enum class Primitive {
 enum class ProtocolModel {
     PiccardTwoOwnerOutsourced,
     PiccardSqrtTwoOwnerOutsourced,
+    PiccardLocalEncoding,
+    PiccardSqrtLocalEncoding,
     LocalUniverseSizedBfvComparator,
     Bcg12CardinalityOnMinHash,
     Bcg12ExactCardinality,
@@ -51,6 +57,7 @@ enum class ProtocolModel {
 
 enum class OutputSemantics {
     BiasCorrectedJaccardEstimate,
+    EncodedFeatureVector,
     ScalarIntersectionPlaintextJaccard,
     MinHashCollisionJaccardEstimate,
     HarnessReconstructedExactJaccard,
@@ -59,6 +66,7 @@ enum class OutputSemantics {
 
 enum class AssuranceScope {
     LiveBfvEmpiricalSanitizerPoc,
+    DeterministicEncoderCorrectness,
     LiveBfvPrimitiveOnly,
     ImplementedBaselineParameterMap,
     IntersectionSharesLowerBound,
@@ -66,6 +74,7 @@ enum class AssuranceScope {
 
 enum class SecurityBasis {
     OpenFheHeseaStandardLiveContext,
+    LocalEncodingNoCryptographicSecurityClaim,
     FiniteFieldDh3072Subgroup256ParameterMap,
     NistP256ParameterMap,
     RsaIfcModulusSizeProxyApproximately80Bits,
@@ -77,6 +86,7 @@ enum class CostScope {
     FullQueryExcludingOneTimeSetup,
     OnlineQueryWithPrecomputedRandomizers,
     PrimitiveOnly,
+    EncodingOnly,
 };
 
 enum class PrecomputationMode {
@@ -92,6 +102,7 @@ enum class ComparisonScope {
     MatchedCardinalityComponent,
     ComponentLowerBound,
     DiagnosticOnly,
+    EncodingOnlyDiagnostic,
 };
 
 /** @brief Complete method-conditioned capability metadata for one row. */

@@ -257,6 +257,30 @@ TEST(BaselineProfile, FheIndIsOnlyTheLocalBfvDiagnosticPrimitive) {
     }
 }
 
+TEST(BaselineProfile, Std192EncodingOnlyPiccardMethodsHaveNoFheClaim) {
+    const auto onehot = Capability(BaselineMethod::PiccardEncode, 192);
+    const auto sqrt = Capability(BaselineMethod::PiccardSqrtEncode, 192,
+                                 BaselineEvidenceKind::Accuracy);
+    for (const auto* capability : {&onehot, &sqrt}) {
+        EXPECT_EQ(capability->cryptographic_profile, "local-encoding-only");
+        EXPECT_EQ(capability->nominal_security_bits, std::nullopt);
+        EXPECT_FALSE(capability->security_match);
+        EXPECT_FALSE(capability->comparison_eligible);
+        EXPECT_EQ(capability->comparison_scope,
+                  ComparisonScope::EncodingOnlyDiagnostic);
+        EXPECT_EQ(capability->cost_scope, CostScope::EncodingOnly);
+        EXPECT_EQ(capability->precomputation_mode,
+                  PrecomputationMode::NotApplicable);
+        EXPECT_FALSE(capability->secure_division_included);
+        EXPECT_EQ(capability->measurement_kind,
+                  BenchmarkMeasurementKind::Diagnostic);
+    }
+    EXPECT_EQ(onehot.primitive, Primitive::OneHotEncoding);
+    EXPECT_EQ(onehot.protocol_model, ProtocolModel::PiccardLocalEncoding);
+    EXPECT_EQ(sqrt.primitive, Primitive::SqrtEncoding);
+    EXPECT_EQ(sqrt.protocol_model, ProtocolModel::PiccardSqrtLocalEncoding);
+}
+
 TEST(BaselineProfile, FheIndMethodNameIsCanonicalAndLegacyLabelIsRejected) {
     EXPECT_STREQ(BaselineMethodName(BaselineMethod::FheInd), "fhe_ind");
 
