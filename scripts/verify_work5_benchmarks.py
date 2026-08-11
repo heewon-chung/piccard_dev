@@ -27,7 +27,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_SCHEMA = "piccard-work5-run-v1"
 MATRIX_SCHEMA = "piccard-work5-matrix-v1"
 DISCLAIMER = "single-trial implementation evidence; not a performance or ranking claim"
-EXPECTED_KEY_SHA256 = "e51edfd36870410c48a0df5d2388c2e25e56b7c6dea65f33d76c213443cb435c"
+EXPECTED_KEY_SHA256 = "b123e80e3a0e5bf6d599a18e637085c8cf26f14966ec362afb72707d7b2d8f9e"
 AXES = ("k", "m", "n", "U")
 STAGES = ("preflight_started", "context_started", "workload_started",
           "keygen_started", "measurement_started")
@@ -41,15 +41,34 @@ PARAMETERS = {"k": (16, 32, 64, 128, 256, 512),
               "U": (16384, 65536)}
 PROFILES = {"work5-std128-t40-single-trial": "STD128",
             "work5-std192-t40-single-trial": "STD192"}
+# Match the runner's independent frozen definition: ordinary Piccard groups
+# retain only the sqrt-supported m values, while the two unsupported sqrt
+# shapes are Piccard-only cells sharing (but never copying) their control.
 SUITES = (
-    ("work5-std128-piccard", "work5-std128-t40-single-trial", ("piccard", "piccard_sqrt"), ("k", "m", "n", "U")),
-    ("work5-std128-fhe-ind", "work5-std128-t40-single-trial", ("fhe_ind",), ("n", "U")),
-    ("work5-std128-bcg12-mh", "work5-std128-t40-single-trial", ("bcg12_mh_ec", "bcg12_mh_ff"), ("k", "n")),
-    ("work5-std128-bcg12-exact", "work5-std128-t40-single-trial", ("bcg12_exact_ec", "bcg12_exact_ff"), ("n",)),
-    ("work5-std128-sj16", "work5-std128-t40-single-trial", ("sj16",), ("n", "U")),
-    ("work5-std192-piccard", "work5-std192-t40-single-trial", ("piccard", "piccard_sqrt"), ("k", "m", "n", "U")),
-    ("work5-std192-fhe-ind", "work5-std192-t40-single-trial", ("fhe_ind",), ("n", "U")),
-    ("work5-std192-sj16", "work5-std192-t40-single-trial", ("sj16",), ("n", "U")),
+    ("work5-std128-piccard", "work5-std128-t40-single-trial",
+     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     {"m": (16, 64, 256)}, True, None),
+    ("work5-std128-piccard-m-extra", "work5-std128-t40-single-trial",
+     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     "work5-std128-piccard::control"),
+    ("work5-std128-fhe-ind", "work5-std128-t40-single-trial",
+     ("fhe_ind",), ("n", "U"), {}, True, None),
+    ("work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
+     ("bcg12_mh_ec", "bcg12_mh_ff"), ("k", "n"), {}, True, None),
+    ("work5-std128-bcg12-exact", "work5-std128-t40-single-trial",
+     ("bcg12_exact_ec", "bcg12_exact_ff"), ("n",), {}, True, None),
+    ("work5-std128-sj16", "work5-std128-t40-single-trial",
+     ("sj16",), ("n", "U"), {}, True, None),
+    ("work5-std192-piccard", "work5-std192-t40-single-trial",
+     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     {"m": (16, 64, 256)}, True, None),
+    ("work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
+     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     "work5-std192-piccard::control"),
+    ("work5-std192-fhe-ind", "work5-std192-t40-single-trial",
+     ("fhe_ind",), ("n", "U"), {}, True, None),
+    ("work5-std192-sj16", "work5-std192-t40-single-trial",
+     ("sj16",), ("n", "U"), {}, True, None),
 )
 TAXONOMY: dict[str, dict[str, Any]] = {
     "piccard": {"primitive": "bfv-onehot-minhash", "protocol_model": "piccard-two-owner-outsourced", "comparison_scope": "end-to-end-estimator", "cost_scope": "full-query-excluding-one-time-setup", "secure_division_included": False, "semantic_comparison_eligible": True},
@@ -95,15 +114,42 @@ def load_object(path: Path, label: str) -> dict[str, Any]:
 
 def expected_cells() -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
-    for suite, profile, methods, applicable_axes in SUITES:
-        base = {"cell_id": f"{suite}::control", "profile": profile, "suite": suite,
-                "security": PROFILES[profile], "axis": "control", "axis_value": None,
+    definitions: dict[str, dict[str, Any]] = {}
+    for suite, profile, methods, applicable_axes, overrides, owns_control, control_cell_id in SUITES:
+        require(suite not in definitions and set(applicable_axes).issubset(AXES),
+                "verifier suite definition is malformed")
+        values = {axis: tuple(overrides.get(axis, PARAMETERS[axis])) for axis in applicable_axes}
+        require(all(values[axis] and set(values[axis]).issubset(PARAMETERS[axis])
+                    for axis in applicable_axes),
+                "verifier suite domain is malformed")
+        require(not ("piccard_sqrt" in methods and
+                     any(value not in {16, 64, 256} for value in values.get("m", ()))),
+                "verifier sqrt domain is malformed")
+        require(owns_control == (control_cell_id is None),
+                "verifier control ownership is malformed")
+        definitions[suite] = {"profile": profile, "methods": methods,
+                              "applicable_axes": applicable_axes, "axis_values": values,
+                              "owns_control": owns_control,
+                              "control_cell_id": control_cell_id}
+    for suite, details in definitions.items():
+        if details["control_cell_id"] is not None:
+            control_suite, separator, control_axis = details["control_cell_id"].partition("::")
+            source = definitions.get(control_suite)
+            require(separator == "::" and control_axis == "control" and source is not None and
+                    source["owns_control"] and source["profile"] == details["profile"],
+                    f"verifier shared control is malformed: {suite}")
+        profile, methods, applicable_axes = (details["profile"], details["methods"],
+                                              details["applicable_axes"])
+        base = {"profile": profile, "suite": suite, "security": PROFILES[profile],
                 **CONTROL, "methods": list(methods),
                 "applicability": {axis: axis in applicable_axes for axis in AXES},
-                "profile_comparison_eligible": False}
-        cells.append(base)
+                "profile_comparison_eligible": False,
+                "control_cell_id": details["control_cell_id"]}
+        if details["owns_control"]:
+            cells.append({"cell_id": f"{suite}::control", "axis": "control",
+                          "axis_value": None, **base})
         for axis in applicable_axes:
-            for value in PARAMETERS[axis]:
+            for value in details["axis_values"][axis]:
                 if value == CONTROL[axis]:
                     continue
                 cell = dict(base)
@@ -205,15 +251,31 @@ def results_root_digest(root: Path) -> str:
                                           "results_root": str(root.resolve())})).hexdigest()
 
 
+def expected_context_labels(methods: list[str]) -> tuple[str, ...]:
+    if methods == ["fhe_ind"]:
+        return ("context_fhe_ind",)
+    labels: list[str] = []
+    if "piccard" in methods:
+        labels.append("context_onehot")
+    if "piccard_sqrt" in methods:
+        labels.append("context_sqrt")
+    return tuple(labels)
+
+
 def verify_context(root: Path, run: dict[str, Any], record: dict[str, Any]) -> None:
     if record["status"] == "ERROR" or run.get("test_fixture_mode") or \
             not record.get("context_started") or \
             not set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}:
         return
-    labels = (("context_fhe_ind", "fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),) if \
-        record["methods"] == ["fhe_ind"] else \
-        (("context_onehot", "onehot", "piccard-work5-piccard-context-preflight-v1"),
-         ("context_sqrt", "sqrt", "piccard-work5-piccard-context-preflight-v1"))
+    labels: tuple[tuple[str, str, str], ...]
+    if record["methods"] == ["fhe_ind"]:
+        labels = (("context_fhe_ind", "fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),)
+    else:
+        labels = tuple((label, circuit, "piccard-work5-piccard-context-preflight-v1")
+                       for label, circuit in (("context_onehot", "onehot"),
+                                              ("context_sqrt", "sqrt"))
+                       if ((circuit == "onehot" and "piccard" in record["methods"]) or
+                           (circuit == "sqrt" and "piccard_sqrt" in record["methods"])))
     breached_codes: set[str] = set()
     tuples: set[str] = set()
     for label, circuit, schema in labels:
@@ -538,9 +600,18 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
     expected_payloads: dict[tuple[Any, ...], set[str]] = {}
     for actual, target in zip(records, expected):
         for field in ("cell_id", "profile", "suite", "security", "axis", "axis_value", "k", "m", "n", "U",
-                      "methods", "applicability", "profile_comparison_eligible"):
+                      "methods", "applicability", "profile_comparison_eligible", "control_cell_id"):
             require(actual.get(field) == target[field],
                     f"{target['cell_id']}: frozen {field} mismatch")
+        if target["control_cell_id"] is not None:
+            require(not any(key.startswith("control_timing") for key in actual),
+                    f"{target['cell_id']}: shared control timing copy is forbidden")
+        allowed_context = set(expected_context_labels(target["methods"]))
+        for label in CONTEXT_LABELS:
+            if label not in allowed_context:
+                require(actual.get(f"{label}_path") is None and
+                        actual.get(f"{label}_sha256") is None,
+                        f"{target['cell_id']}: inapplicable context artifact is forbidden")
         require(actual.get("target_jaccard") == "0.5" and actual.get("seed") == 7,
                 f"{target['cell_id']}: target/seed mismatch")
         require(actual.get("taxonomy") == expected_taxonomy(target["methods"], target["security"]),
@@ -582,7 +653,7 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
         ("work5-std128-sj16", "U", 65536): "PROJECTED_RUNTIME_CAP",
         ("work5-std192-sj16", "U", 65536): "PROJECTED_RUNTIME_CAP",
     }
-    for suite, _, _, axes in SUITES:
+    for suite, _, _, axes, _, _, _ in SUITES:
         if "n" in axes:
             required_skips[(suite, "n", 100000)] = "WORKLOAD_GEOMETRY"
     require(len(required_skips) == 10, "internal required skip count mismatch")

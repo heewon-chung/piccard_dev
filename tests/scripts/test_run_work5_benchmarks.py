@@ -81,10 +81,12 @@ def frozen_parameter_cells(contract: dict[str, Any]) -> list[dict[str, Any]]:
             "cell_id": contract["control_cell"]["cell_id_format"].format(
                 suite=suite["id"]),
             **{axis: control[axis] for axis in AXES},
+            "control_cell_id": suite["control_cell_id"],
         }
-        cells.append(base)
+        if suite["owns_control"]:
+            cells.append(base)
         for axis in suite["applicable_axes"]:
-            for value in contract["parameter_axes"][axis]:
+            for value in suite["axis_values"][axis]:
                 if value == control[axis]:
                     continue
                 cell = dict(base)
@@ -142,6 +144,14 @@ class Work5ContractFixtureTest(unittest.TestCase):
         })
         self.assertEqual(contract["allowed_universes"], [16384, 65536])
         self.assertEqual(contract["excluded_universes"], [262144, 1048576])
+        self.assertEqual(contract["sqrt_supported_m"], [16, 64, 256])
+        self.assertEqual([suite["id"] for suite in contract["suites"]], [
+            "work5-std128-piccard", "work5-std128-piccard-m-extra",
+            "work5-std128-fhe-ind", "work5-std128-bcg12-mh",
+            "work5-std128-bcg12-exact", "work5-std128-sj16",
+            "work5-std192-piccard", "work5-std192-piccard-m-extra",
+            "work5-std192-fhe-ind", "work5-std192-sj16",
+        ])
 
         cells = frozen_parameter_cells(contract)
         keys = [parameter_cell_key(cell) for cell in cells]
@@ -168,6 +178,8 @@ class Work5ContractFixtureTest(unittest.TestCase):
                 suite["applicable_axes"],
             )
             if cell["axis"] == "control":
+                self.assertTrue(suite["owns_control"])
+                self.assertIsNone(cell["control_cell_id"])
                 self.assertIsNone(cell["axis_value"])
                 self.assertEqual(cell["cell_id"], f"{cell['suite']}::control")
                 self.assertEqual({axis: cell[axis] for axis in AXES},
@@ -176,13 +188,37 @@ class Work5ContractFixtureTest(unittest.TestCase):
                 self.assertIn(cell["axis"], suite["applicable_axes"])
                 self.assertEqual(cell["cell_id"],
                                  f"{cell['suite']}::{cell['axis']}={cell['axis_value']}")
-                self.assertIn(cell["axis_value"],
-                              contract["parameter_axes"][cell["axis"]])
-                self.assertNotEqual(cell["axis_value"], control[cell["axis"]])
+                self.assertIn(cell["axis_value"], suite["axis_values"][cell["axis"]])
+                if suite["owns_control"]:
+                    self.assertNotEqual(cell["axis_value"], control[cell["axis"]])
+                    self.assertIsNone(cell["control_cell_id"])
+                else:
+                    self.assertEqual(cell["control_cell_id"], suite["control_cell_id"])
                 for axis in AXES:
                     self.assertEqual(cell[axis],
                                      cell["axis_value"] if axis == cell["axis"]
                                      else control[axis])
+        for suite in contract["suites"]:
+            has_sqrt = "piccard_sqrt" in suite["methods"]
+            if has_sqrt:
+                self.assertEqual(suite["axis_values"].get("m"),
+                                 contract["sqrt_supported_m"])
+            if suite["id"].endswith("-m-extra"):
+                self.assertEqual(suite["methods"], ["piccard"])
+                self.assertFalse(suite["owns_control"])
+                self.assertEqual(suite["axis_values"], {"m": [32, 128]})
+        by_id = {cell["cell_id"]: cell for cell in cells}
+        m_extra_cells = [cell for cell in cells if cell["suite"].endswith("-m-extra")]
+        self.assertEqual([(cell["suite"], cell["axis"], cell["axis_value"])
+                          for cell in m_extra_cells], [
+                              ("work5-std128-piccard-m-extra", "m", 32),
+                              ("work5-std128-piccard-m-extra", "m", 128),
+                              ("work5-std192-piccard-m-extra", "m", 32),
+                              ("work5-std192-piccard-m-extra", "m", 128),
+                          ])
+        for cell in m_extra_cells:
+            self.assertIn(cell["control_cell_id"], by_id)
+            self.assertEqual(by_id[cell["control_cell_id"]]["profile"], cell["profile"])
         self.assertEqual(sum(suite["planned_cells"] for suite in contract["suites"]
                              if suite["profile"].startswith("work5-std128")), 37)
         self.assertEqual(sum(suite["planned_cells"] for suite in contract["suites"]
@@ -330,7 +366,7 @@ class Work5RunnerContractTest(unittest.TestCase):
         for record, expected_cell in zip(records, expected_cells):
             self.assertEqual({field: record[field] for field in (
                 "cell_id", "profile", "suite", "security", "axis", "axis_value",
-                "k", "m", "n", "U",
+                "k", "m", "n", "U", "control_cell_id",
             )}, expected_cell)
             self.assertIn(record["status"], contract["terminal_statuses"])
             self.assertIn(record["suite"], expected_suites)
@@ -338,6 +374,11 @@ class Work5RunnerContractTest(unittest.TestCase):
             observed_suites[record["suite"]].append(record)
             self.assertEqual(record["profile"], expected["profile"])
             self.assertEqual(record["methods"], expected["methods"])
+            if record["suite"].endswith("-m-extra"):
+                self.assertEqual(record["methods"], ["piccard"])
+                self.assertEqual(record["control_cell_id"],
+                                 record["suite"].replace("-m-extra", "") + "::control")
+                self.assertFalse(any(key.startswith("control_timing") for key in record))
             self.assertEqual(str(record["target_jaccard"]),
                              contract["control"]["target_jaccard"])
             self.assertEqual(record["seed"], contract["control"]["seed"])
@@ -439,6 +480,32 @@ class Work5RunnerContractTest(unittest.TestCase):
             ) == key) > 1:
                 self.assertEqual(len(digests), 1, key)
         return records
+
+    def test_m_extra_cells_never_invoke_sqrt_or_copy_a_control_timing(self) -> None:
+        results = self.tmp / "work5-m-extra"
+        run = self.run_runner("parameters", results)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        records = self.assert_parameter_matrix(results)
+        m_extra = [record for record in records if record["suite"].endswith("-m-extra")]
+        self.assertEqual(len(m_extra), 4)
+        for record in m_extra:
+            self.assertEqual(record["methods"], ["piccard"])
+            self.assertEqual(record["axis"], "m")
+            self.assertIn(record["m"], (32, 128))
+            self.assertEqual(record["control_cell_id"],
+                             record["suite"].replace("-m-extra", "") + "::control")
+            self.assertNotIn("piccard_sqrt", " ".join(record["argv"]))
+            self.assertFalse(any(field.startswith("control_timing") for field in record))
+        events = read_jsonl(self.events)
+        m_extra_events = [event for event in events if any(
+            arg.startswith("--suite=work5-") and arg.endswith("-piccard-m-extra")
+            for arg in event["argv"])]
+        # The fixture records both the runner's dispatch boundary and the
+        # sentinel process, so each of the four calls appears twice.
+        self.assertEqual(len(m_extra_events), 8)
+        self.assertTrue(all("--methods=piccard" in event["argv"] and
+                            "--methods=piccard,piccard_sqrt" not in event["argv"]
+                            for event in m_extra_events))
 
     def assert_stage_flags(self, record: dict[str, Any],
                            expected: dict[str, bool]) -> None:

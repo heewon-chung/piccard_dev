@@ -47,7 +47,7 @@ BFV_CAPS = {"realized_ring_dim": 32768, "provisioned_depth": 4,
 AXES = ("k", "m", "n", "U")
 STAGE_FLAGS = ("preflight_started", "context_started", "workload_started",
                "keygen_started", "measurement_started")
-EXPECTED_KEY_SHA256 = "e51edfd36870410c48a0df5d2388c2e25e56b7c6dea65f33d76c213443cb435c"
+EXPECTED_KEY_SHA256 = "b123e80e3a0e5bf6d599a18e637085c8cf26f14966ec362afb72707d7b2d8f9e"
 
 CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
 TOY_CELL = {
@@ -72,23 +72,36 @@ PROFILES = {
     "work5-std128-t40-single-trial": {"security": "STD128", "bits": 128},
     "work5-std192-t40-single-trial": {"security": "STD192", "bits": 192},
 }
+# Each entry freezes: suite, profile, methods, applicable axes, per-axis values,
+# whether the suite owns a control cell, and an optional shared control reference.
+# The sqrt encoding accepts only even log2(m), so m=32 and m=128 are Piccard-only
+# cells in their dedicated suites.  Their reference binds the comparison baseline
+# without importing or copying a measured timing value.
 SUITES = (
     ("work5-std128-piccard", "work5-std128-t40-single-trial",
-     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U")),
+     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     {"m": (16, 64, 256)}, True, None),
+    ("work5-std128-piccard-m-extra", "work5-std128-t40-single-trial",
+     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     "work5-std128-piccard::control"),
     ("work5-std128-fhe-ind", "work5-std128-t40-single-trial",
-     ("fhe_ind",), ("n", "U")),
+     ("fhe_ind",), ("n", "U"), {}, True, None),
     ("work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
-     ("bcg12_mh_ec", "bcg12_mh_ff"), ("k", "n")),
+     ("bcg12_mh_ec", "bcg12_mh_ff"), ("k", "n"), {}, True, None),
     ("work5-std128-bcg12-exact", "work5-std128-t40-single-trial",
-     ("bcg12_exact_ec", "bcg12_exact_ff"), ("n",)),
+     ("bcg12_exact_ec", "bcg12_exact_ff"), ("n",), {}, True, None),
     ("work5-std128-sj16", "work5-std128-t40-single-trial",
-     ("sj16",), ("n", "U")),
+     ("sj16",), ("n", "U"), {}, True, None),
     ("work5-std192-piccard", "work5-std192-t40-single-trial",
-     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U")),
+     ("piccard", "piccard_sqrt"), ("k", "m", "n", "U"),
+     {"m": (16, 64, 256)}, True, None),
+    ("work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
+     ("piccard",), ("m",), {"m": (32, 128)}, False,
+     "work5-std192-piccard::control"),
     ("work5-std192-fhe-ind", "work5-std192-t40-single-trial",
-     ("fhe_ind",), ("n", "U")),
+     ("fhe_ind",), ("n", "U"), {}, True, None),
     ("work5-std192-sj16", "work5-std192-t40-single-trial",
-     ("sj16",), ("n", "U")),
+     ("sj16",), ("n", "U"), {}, True, None),
 )
 TAXONOMY: dict[str, dict[str, Any]] = {
     "piccard": {"primitive": "bfv-onehot-minhash",
@@ -435,10 +448,33 @@ def host_descriptor() -> dict[str, Any]:
 
 def suite_definitions() -> dict[str, dict[str, Any]]:
     definitions: dict[str, dict[str, Any]] = {}
-    for suite, profile, methods, axes in SUITES:
-        definitions[suite] = {"profile": profile, "methods": list(methods),
-                              "applicable_axes": tuple(axes),
-                              "applicability": {axis: axis in axes for axis in AXES}}
+    for suite, profile, methods, axes, axis_values, owns_control, control_cell_id in SUITES:
+        if suite in definitions or not set(axes).issubset(AXES):
+            raise Work5Error("internal Work #5 suite definition is malformed")
+        values = {axis: tuple(axis_values.get(axis, PARAMETER_AXES[axis])) for axis in axes}
+        if any(not values[axis] or not set(values[axis]).issubset(PARAMETER_AXES[axis])
+               for axis in axes):
+            raise Work5Error("internal Work #5 suite axis domain is malformed")
+        if "piccard_sqrt" in methods and any(value not in {16, 64, 256}
+                                              for value in values.get("m", ())):
+            raise Work5Error("sqrt suite contains an unsupported m value")
+        if owns_control != (control_cell_id is None):
+            raise Work5Error("internal Work #5 control ownership is malformed")
+        definitions[suite] = {
+            "profile": profile, "methods": list(methods), "applicable_axes": tuple(axes),
+            "axis_values": values, "owns_control": owns_control,
+            "control_cell_id": control_cell_id,
+            "applicability": {axis: axis in axes for axis in AXES},
+        }
+    for suite, details in definitions.items():
+        control_cell_id = details["control_cell_id"]
+        if control_cell_id is None:
+            continue
+        control_suite, separator, control_axis = control_cell_id.partition("::")
+        source = definitions.get(control_suite)
+        if separator != "::" or control_axis != "control" or source is None or \
+                not source["owns_control"] or source["profile"] != details["profile"]:
+            raise Work5Error(f"internal Work #5 shared control is malformed: {suite}")
     return definitions
 
 
@@ -463,15 +499,17 @@ def frozen_cells() -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
     for suite, details in definitions.items():
         profile = details["profile"]
-        base = {"cell_id": f"{suite}::control", "profile": profile, "suite": suite,
-                "security": PROFILES[profile]["security"], "axis": "control",
-                "axis_value": None, **CONTROL,
+        base = {"profile": profile, "suite": suite,
+                "security": PROFILES[profile]["security"], **CONTROL,
                 "methods": list(details["methods"]),
                 "applicability": dict(details["applicability"]),
-                "profile_comparison_eligible": False}
-        cells.append(base)
+                "profile_comparison_eligible": False,
+                "control_cell_id": details["control_cell_id"]}
+        if details["owns_control"]:
+            cells.append({"cell_id": f"{suite}::control", "axis": "control",
+                          "axis_value": None, **base})
         for axis in details["applicable_axes"]:
-            for value in PARAMETER_AXES[axis]:
+            for value in details["axis_values"][axis]:
                 if value == CONTROL[axis]:
                     continue
                 cell = dict(base)
@@ -521,7 +559,8 @@ def matrix_document(cells: list[dict[str, Any]]) -> dict[str, Any]:
         "cells": [
             {key: cell[key] for key in ("cell_id", "profile", "suite", "security", "axis",
                                         "axis_value", "k", "m", "n", "U", "methods",
-                                        "applicability", "profile_comparison_eligible")}
+                                        "applicability", "profile_comparison_eligible",
+                                        "control_cell_id")}
             for cell in cells
         ],
     }
@@ -715,7 +754,8 @@ def record_for(root: Path, cell: dict[str, Any], argv: list[str], *, status: str
     record = {
         **{key: cell[key] for key in ("cell_id", "profile", "suite", "security", "axis",
                                       "axis_value", "k", "m", "n", "U", "methods",
-                                      "applicability", "profile_comparison_eligible")},
+                                      "applicability", "profile_comparison_eligible",
+                                      "control_cell_id")},
         "target_jaccard": TARGET_JACCARD,
         "seed": SEED,
         "taxonomy": expanded_taxonomy(cell["methods"], cell["security"]),
@@ -981,8 +1021,12 @@ def context_preflight(build_dir: Path, root: Path, cell: dict[str, Any], *,
         specs.append(("context_fhe_ind", helper, staged["context_fhe_ind"], argv, schema, expected))
     else:
         helper = build_dir / "bench_std_security_evidence"
-        for label, circuit, shape in (("context_onehot", "onehot", "onehot-v1"),
-                                      ("context_sqrt", "sqrt", "sqrt-b4-v1")):
+        context_specs: list[tuple[str, str, str]] = []
+        if "piccard" in cell["methods"]:
+            context_specs.append(("context_onehot", "onehot", "onehot-v1"))
+        if "piccard_sqrt" in cell["methods"]:
+            context_specs.append(("context_sqrt", "sqrt", "sqrt-b4-v1"))
+        for label, circuit, shape in context_specs:
             argv = [str(helper.resolve()), "--mode=work5-preflight", f"--circuit={circuit}",
                     f"--security={cell['security']}", f"--shape-id={shape}",
                     f"--cell-id={cell['cell_id']}", f"--k={cell['k']}", f"--m={cell['m']}",
@@ -1454,7 +1498,8 @@ def command_template_sha256() -> str:
         "--suite", "--profile", "--k", "--m", "--set-size", "--universe",
         "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1", "--seed=7",
         "--methods", "--sj16-key-bits=3072", "security-policy", "--manifest-out",
-        "--execution-trace-out"], "no_shell": True}
+        "--execution-trace-out"], "frozen_suites": [entry[0] for entry in SUITES],
+        "no_shell": True}
     return sha256_bytes(canonical_json(template))
 
 

@@ -223,7 +223,7 @@ WorkloadSpec Work5Spec(const std::string& suite,
 // The trial generator deliberately excludes suite/profile/method metadata.
 // This legal existing toy-suite reference has the Work #5 control geometry,
 // so it independently freezes the shared 3-record payload before Phase 2
-// makes all eight named Work #5 suites constructible.
+// makes all ten named Work #5 suites constructible.
 WorkloadSpec Work5PayloadReferenceSpec() {
     auto spec = ToySpec();
     spec.k = 128;
@@ -243,7 +243,9 @@ struct Work5Suite {
 const std::vector<Work5Suite>& Work5Suites() {
     static const std::vector<Work5Suite> suites = {
         {"work5-std128-piccard", "work5-std128-t40-single-trial",
-         {"piccard", "piccard_sqrt"}, 14},
+         {"piccard", "piccard_sqrt"}, 12},
+        {"work5-std128-piccard-m-extra", "work5-std128-t40-single-trial",
+         {"piccard"}, 2},
         {"work5-std128-fhe-ind", "work5-std128-t40-single-trial",
          {"fhe_ind"}, 5},
         {"work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
@@ -253,7 +255,9 @@ const std::vector<Work5Suite>& Work5Suites() {
         {"work5-std128-sj16", "work5-std128-t40-single-trial",
          {"sj16"}, 5},
         {"work5-std192-piccard", "work5-std192-t40-single-trial",
-         {"piccard", "piccard_sqrt"}, 14},
+         {"piccard", "piccard_sqrt"}, 12},
+        {"work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
+         {"piccard"}, 2},
         {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
          {"fhe_ind"}, 5},
         {"work5-std192-sj16", "work5-std192-t40-single-trial",
@@ -593,7 +597,7 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
               (std::set<std::string>{kWork5ControlTrialPayloadSha256}));
 
     const auto& piccard = generated[0];
-    const auto& fhe_ind = generated[1];
+    const auto& fhe_ind = generated[2];
     EXPECT_NE(piccard.ManifestSha256Hex(), fhe_ind.ManifestSha256Hex());
     EXPECT_EQ(IndependentWork5TrialPayloadSha256(piccard),
               IndependentWork5TrialPayloadSha256(fhe_ind));
@@ -608,6 +612,14 @@ TEST(ComparisonWorkload, Work5SuitesPinMethodsTrialsAndPayloadIdentity) {
         "work5-std128-piccard", "work5-std128-t40-single-trial",
         {"piccard", "piccard_sqrt", "threshold"});
     EXPECT_THROW(ComparisonWorkload::Generate(threshold),
+                 std::invalid_argument);
+
+    auto m_extra = Work5Spec(
+        "work5-std128-piccard-m-extra", "work5-std128-t40-single-trial",
+        {"piccard"});
+    EXPECT_NO_THROW(ComparisonWorkload::Generate(m_extra));
+    m_extra.methods = {"piccard", "piccard_sqrt"};
+    EXPECT_THROW(ComparisonWorkload::Generate(m_extra),
                  std::invalid_argument);
 
     auto std192_bcg12 = Work5Spec(

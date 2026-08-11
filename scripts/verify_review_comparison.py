@@ -43,11 +43,13 @@ SUITES = {
     # here lets its independent lifecycle verifier semantically parse the
     # producer bytes rather than merely checking their hashes.
     "work5-std128-piccard": ("work5-std128-t40-single-trial", ["piccard", "piccard_sqrt"], 1, 1),
+    "work5-std128-piccard-m-extra": ("work5-std128-t40-single-trial", ["piccard"], 1, 1),
     "work5-std128-fhe-ind": ("work5-std128-t40-single-trial", ["fhe_ind"], 1, 1),
     "work5-std128-bcg12-mh": ("work5-std128-t40-single-trial", ["bcg12_mh_ec", "bcg12_mh_ff"], 1, 1),
     "work5-std128-bcg12-exact": ("work5-std128-t40-single-trial", ["bcg12_exact_ec", "bcg12_exact_ff"], 1, 1),
     "work5-std128-sj16": ("work5-std128-t40-single-trial", ["sj16"], 1, 1),
     "work5-std192-piccard": ("work5-std192-t40-single-trial", ["piccard", "piccard_sqrt"], 1, 1),
+    "work5-std192-piccard-m-extra": ("work5-std192-t40-single-trial", ["piccard"], 1, 1),
     "work5-std192-fhe-ind": ("work5-std192-t40-single-trial", ["fhe_ind"], 1, 1),
     "work5-std192-sj16": ("work5-std192-t40-single-trial", ["sj16"], 1, 1),
 }

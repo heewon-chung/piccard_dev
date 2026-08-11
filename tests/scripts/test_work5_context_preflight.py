@@ -118,6 +118,24 @@ class Work5ContextPreflightTest(unittest.TestCase):
             self.assertEqual((onehot["circuit"], sqrt["circuit"]), ("onehot", "sqrt"))
             self.assertNotEqual(onehot["context_tuple_sha256"], sqrt["context_tuple_sha256"])
 
+    def test_m_extra_preflight_is_piccard_only_and_never_requests_sqrt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".tmp").mkdir()
+            cell = next(item for item in work5_runner.frozen_cells()
+                        if item["cell_id"] == "work5-std128-piccard-m-extra::m=32")
+            self.assertEqual(cell["methods"], ["piccard"])
+            self.assertEqual(cell["control_cell_id"], "work5-std128-piccard::control")
+            work5_runner.ensure_staging_directory(root, cell["cell_id"])
+            reason, observed = work5_runner.context_preflight(
+                self.piccard.parent, root, cell, test_fixture=False, timeout=90,
+                deadline=time.monotonic() + 90)
+            self.assertIsNone(reason)
+            self.assertEqual(set(observed), {"context_onehot"})
+            paths = work5_runner.artifact_paths(root, cell["cell_id"])
+            self.assertTrue(paths["context_onehot"].is_file())
+            self.assertFalse(paths["context_sqrt"].exists())
+
     def test_context_output_install_is_no_replace_and_leaves_no_partial_final(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

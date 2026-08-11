@@ -15,6 +15,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,8 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import verify_review_comparison as review_verifier
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 VERIFIER = ROOT / "scripts" / "verify_work5_benchmarks.py"
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
@@ -91,6 +94,15 @@ class Work5VerifierContractTest(unittest.TestCase):
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
 
+    def test_semantic_verifier_registers_both_piccard_m_extra_suites(self) -> None:
+        expected = {
+            "work5-std128-piccard-m-extra":
+                ("work5-std128-t40-single-trial", ["piccard"], 1, 1),
+            "work5-std192-piccard-m-extra":
+                ("work5-std192-t40-single-trial", ["piccard"], 1, 1),
+        }
+        self.assertEqual({name: review_verifier.SUITES[name] for name in expected}, expected)
+
     def test_valid_parameter_root_passes(self) -> None:
         results = self.produce_parameter_root("valid")
         verified = self.verify(results)
@@ -155,6 +167,23 @@ class Work5VerifierContractTest(unittest.TestCase):
         def change_applicability(rows: list[dict[str, Any]], _: Path) -> None:
             rows[0]["applicability"]["k"] = False
 
+        def forge_m_extra_control_reference(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["suite"].endswith("-m-extra"))
+            row["control_cell_id"] = "work5-std192-piccard::control"
+
+        def add_sqrt_to_m_extra(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["suite"].endswith("-m-extra"))
+            row["methods"] = ["piccard", "piccard_sqrt"]
+
+        def copy_control_timing_to_m_extra(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["suite"].endswith("-m-extra"))
+            row["control_timing_ms"] = 1.0
+
+        def add_sqrt_context_to_m_extra(rows: list[dict[str, Any]], _: Path) -> None:
+            row = next(item for item in rows if item["suite"].endswith("-m-extra"))
+            row["context_sqrt_path"] = "context/forged-sqrt.json"
+            row["context_sqrt_sha256"] = "0" * 64
+
         def make_fhe_ind_comparison_eligible(
                 rows: list[dict[str, Any]], _: Path) -> None:
             row = next(item for item in rows if item["methods"] == ["fhe_ind"])
@@ -214,6 +243,10 @@ class Work5VerifierContractTest(unittest.TestCase):
             ("u262144", add_oversized_universe),
             ("control-axis", change_control_axis),
             ("applicability", change_applicability),
+            ("m-extra-control-reference", forge_m_extra_control_reference),
+            ("m-extra-sqrt", add_sqrt_to_m_extra),
+            ("m-extra-copied-timing", copy_control_timing_to_m_extra),
+            ("m-extra-sqrt-context", add_sqrt_context_to_m_extra),
             ("fhe-ind-eligible", make_fhe_ind_comparison_eligible),
             ("fhe-ind-protocol-model", change_fhe_ind_protocol_model),
             ("sj16-secure-division", give_sj16_secure_division),

@@ -90,6 +90,26 @@ class ReviewComparisonCliTest(unittest.TestCase):
             f"--execution-trace-out={root / 'trace.bin'}",
         ]
 
+    def work5_m_extra_command(self, root: pathlib.Path, methods: str):
+        return [
+            str(self.binary),
+            "--suite=work5-std128-piccard-m-extra",
+            "--profile=work5-std128-t40-single-trial",
+            "--k=128",
+            "--m=32",
+            "--set-size=10",
+            "--universe=64",
+            "--target-jaccard=0.5",
+            "--trials=1",
+            "--accuracy-trials=1",
+            "--seed=7",
+            f"--methods={methods}",
+            "--sj16-key-bits=3072",
+            "--diagnostic-security",
+            f"--manifest-out={root / 'missing' / 'workload.bin'}",
+            f"--execution-trace-out={root / 'missing' / 'trace.bin'}",
+        ]
+
     def run_cli(self, command):
         return subprocess.run(command, text=True, capture_output=True, check=False)
 
@@ -179,6 +199,21 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertTrue((root / "workload.bin").is_file())
             self.assertTrue((root / "trace.bin").is_file())
             self.assertEqual(len(result.stdout.splitlines()), 3)
+
+    def test_work5_m_extra_registers_piccard_only_without_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            accepted = self.run_cli(self.work5_m_extra_command(root, "piccard"))
+            self.assertEqual(accepted.returncode, 2)
+            self.assertEqual(accepted.stdout, "")
+            self.assertIn("parent directory does not exist", accepted.stderr)
+            self.assertNotIn("frozen policy", accepted.stderr)
+
+            rejected = self.run_cli(self.work5_m_extra_command(
+                root, "piccard,piccard_sqrt"))
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("frozen policy", rejected.stderr)
 
     def test_legacy_baseline_method_is_rejected_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:

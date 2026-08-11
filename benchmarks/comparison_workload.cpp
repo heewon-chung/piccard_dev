@@ -143,10 +143,12 @@ struct FrozenSuite {
     std::vector<std::string> methods;
 };
 
-const std::array<FrozenSuite, 8>& Work5Suites() {
-    static const std::array<FrozenSuite, 8> suites = {{
+const std::array<FrozenSuite, 10>& Work5Suites() {
+    static const std::array<FrozenSuite, 10> suites = {{
         {"work5-std128-piccard", "work5-std128-t40-single-trial",
          {"piccard", "piccard_sqrt"}},
+        {"work5-std128-piccard-m-extra", "work5-std128-t40-single-trial",
+         {"piccard"}},
         {"work5-std128-fhe-ind", "work5-std128-t40-single-trial",
          {"fhe_ind"}},
         {"work5-std128-bcg12-mh", "work5-std128-t40-single-trial",
@@ -157,6 +159,8 @@ const std::array<FrozenSuite, 8>& Work5Suites() {
          {"sj16"}},
         {"work5-std192-piccard", "work5-std192-t40-single-trial",
          {"piccard", "piccard_sqrt"}},
+        {"work5-std192-piccard-m-extra", "work5-std192-t40-single-trial",
+         {"piccard"}},
         {"work5-std192-fhe-ind", "work5-std192-t40-single-trial",
          {"fhe_ind"}},
         {"work5-std192-sj16", "work5-std192-t40-single-trial",
