@@ -267,7 +267,10 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "sanitizer_model,sanitizer_assurance,estimator_model,profile_id,"
         "run_class,target_security_bits,comparison_eligible,measurement_kind,"
         "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
-        "openfhe_version,dynamic_scenario,refresh_owner_set_id,"
+        "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+        "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+        "local_inner_product,decrypted_inner_product,correctness_status,"
+        "refresh_owner_set_id,"
         "refresh_updates,refresh_epoch_before,refresh_epoch_after,"
         "refresh_status,phase_refresh_update_ms,phase_refresh_signature_ms,"
         "phase_refresh_encode_ms,phase_refresh_encrypt_ms,"
@@ -284,7 +287,7 @@ TEST(EstimatorProvenanceSerializers, DynamicGoldenSchema) {
         "phase-smudging-enc0-poc-v1,"
         "empirical-phase-statistical+ciphertext-computational,"
         "sha256-random-ranking-poc-v1,legacy,legacy,0,false,diagnostic" +
-        expected_dynamic_provenance + ",legacy,,,,,,,,,,,,,,,,\n";
+        expected_dynamic_provenance + ",legacy,,,,,,,,,,,,,,,,,,,,,,,,,\n";
 
     ExpectGoldenCsv(SerializeDynamicHeader(),
                     SerializeDynamicRow(row, row.provenance),
