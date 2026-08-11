@@ -59,8 +59,8 @@ DynamicResult RunSingleOwnerRefresh(
     if (set_a.empty() || set_b.empty()) {
         throw std::invalid_argument("refresh requires nonempty input sets");
     }
-    if (refresh_updates == 0) {
-        throw std::invalid_argument("refresh_updates must be positive");
+    if (refresh_updates != 1 && refresh_updates != 2) {
+        throw std::invalid_argument("refresh_updates must be exactly 1 or 2");
     }
     const uint64_t max_value = *std::max_element(set_a.begin(), set_a.end());
     if (max_value == std::numeric_limits<uint64_t>::max()) {
@@ -77,7 +77,7 @@ DynamicResult RunSingleOwnerRefresh(
     const uint64_t next_value = max_value + 1;
 
     DynamicResult row;
-    row.label = "refresh_owner_a_0_to_1";
+    row.label = "refresh_owner_a_0_to_" + std::to_string(refresh_updates);
     row.dynamic_scenario = "refresh";
     row.k = engine.GetParams().k;
     row.m = engine.GetParams().m;
@@ -93,10 +93,12 @@ DynamicResult RunSingleOwnerRefresh(
     row.hash_randomness = "fixed";
     row.accuracy_trials = 0;
     row.trials = 1;
+    row.updates_requested = refresh_updates;
+    row.initial_epoch = 0;
     row.refresh_owner_set_id = "owner-a";
     row.refresh_updates = refresh_updates;
     row.refresh_epoch_before = 0;
-    row.refresh_epoch_after = 1;
+    row.refresh_epoch_after = refresh_updates;
 
     const auto bottom_a = engine.InitSet(set_a);
     const auto bottom_b = engine.InitSet(set_b);
@@ -115,43 +117,64 @@ DynamicResult RunSingleOwnerRefresh(
 
     std::vector<uint64_t> refreshed_set_a = set_a;
     refreshed_set_a.reserve(set_a.size() + refresh_updates);
+    double update_ms = 0.0;
+    double signature_ms = 0.0;
+    double encode_ms = 0.0;
+    double encrypt_ms = 0.0;
+    double serialize_ms = 0.0;
+    double replace_ms = 0.0;
+    size_t upload_bytes = 0;
+    uint64_t applied_updates = 0;
     Timer timer;
-    timer.Start();
     for (uint64_t offset = 0; offset < refresh_updates; ++offset) {
+        timer.Start();
         const uint64_t value = next_value + offset;
         refreshed_set_a.push_back(value);
         bottom_a->Insert(value);
+        update_ms += timer.ElapsedMs();
+
+        timer.Start();
+        const auto signature_a = bottom_a->GetSignature();
+        signature_ms += timer.ElapsedMs();
+
+        timer.Start();
+        const auto feature_a = engine.EncodeSignature(signature_a);
+        encode_ms += timer.ElapsedMs();
+
+        timer.Start();
+        const auto ciphertext_a = engine.EncryptFeature(feature_a);
+        encrypt_ms += timer.ElapsedMs();
+
+        timer.Start();
+        const auto upload = codec->Serialize(ciphertext_a);
+        serialize_ms += timer.ElapsedMs();
+
+        const uint64_t expected_epoch = offset;
+        const uint64_t next_epoch = offset + 1;
+        const auto replacement = MakeVersionedCiphertext(
+            "owner-a", next_epoch, engine.GetParams(), *codec, upload);
+        timer.Start();
+        const auto outcome = store.TryReplace("owner-a", expected_epoch, replacement);
+        replace_ms += timer.ElapsedMs();
+        if (outcome.status != ReplaceStatus::Applied ||
+            outcome.observed_epoch != next_epoch) {
+            throw std::runtime_error("refresh replacement was not applied at the expected epoch");
+        }
+        upload_bytes += upload.size();
+        ++applied_updates;
     }
-    row.phase_refresh_update_ms = timer.ElapsedMs();
-
-    timer.Start();
-    const auto signature_a = bottom_a->GetSignature();
-    row.phase_refresh_signature_ms = timer.ElapsedMs();
-
-    timer.Start();
-    const auto feature_a = engine.EncodeSignature(signature_a);
-    row.phase_refresh_encode_ms = timer.ElapsedMs();
-
-    timer.Start();
-    const auto ciphertext_a = engine.EncryptFeature(feature_a);
-    row.phase_refresh_encrypt_ms = timer.ElapsedMs();
-
-    timer.Start();
-    const auto upload = codec->Serialize(ciphertext_a);
-    row.phase_refresh_serialize_ms = timer.ElapsedMs();
-
-    const auto replacement = MakeVersionedCiphertext(
-        "owner-a", 1, engine.GetParams(), *codec, upload);
-    timer.Start();
-    const auto outcome = store.TryReplace("owner-a", 0, replacement);
-    row.phase_cloud_replace_ms = timer.ElapsedMs();
-    if (outcome.status != ReplaceStatus::Applied || outcome.observed_epoch != 1) {
-        throw std::runtime_error("refresh replacement was not applied at epoch 1");
-    }
-
-    row.refresh_status = ReplaceStatusName(outcome.status);
-    row.refresh_upload_bytes = upload.size();
-    row.refresh_ciphertexts_uploaded = 1;
+    row.phase_refresh_update_ms = update_ms;
+    row.phase_refresh_signature_ms = signature_ms;
+    row.phase_refresh_encode_ms = encode_ms;
+    row.phase_refresh_encrypt_ms = encrypt_ms;
+    row.phase_refresh_serialize_ms = serialize_ms;
+    row.phase_cloud_replace_ms = replace_ms;
+    row.refresh_status = ReplaceStatusName(ReplaceStatus::Applied);
+    row.refresh_upload_bytes = upload_bytes;
+    row.refresh_ciphertexts_uploaded = static_cast<uint32_t>(applied_updates);
+    row.updates_applied = applied_updates;
+    row.final_epoch = applied_updates;
+    row.ciphertext_upload_count = applied_updates;
     row.refresh_context_fingerprint = codec->ContextFingerprintHex();
     row.refresh_public_key_fingerprint = codec->PublicKeyFingerprintHex();
     row.refresh_total_ms = *row.phase_refresh_update_ms +
@@ -191,14 +214,22 @@ DynamicResult RunSingleOwnerRefresh(
     if (!(stored.second == saved_b)) {
         throw std::runtime_error("refresh changed owner-b envelope");
     }
+    row.owner_b_unchanged = "true";
+    if (stored.first.epoch != refresh_updates) {
+        throw std::runtime_error("refresh final owner-a epoch does not match requested updates");
+    }
     const auto stored_a = codec->Deserialize(stored.first.serialized_ciphertext);
     const auto stored_b = codec->Deserialize(stored.second.serialized_ciphertext);
     const JaccardResult decrypted = engine.Decrypt(engine.Evaluate(stored_a, stored_b));
+    const auto feature_a = engine.EncodeSignature(bottom_a->GetSignature());
     const int64_t local_inner_product = std::inner_product(
         feature_a.begin(), feature_a.end(), feature_b.begin(), int64_t{0});
     if (decrypted.match_count != local_inner_product) {
         throw std::runtime_error("stored refresh result differs from local inner product");
     }
+    row.local_inner_product = local_inner_product;
+    row.decrypted_inner_product = decrypted.match_count;
+    row.correctness_status = "PASS";
     row.jaccard_computed = decrypted.jaccard_estimate;
     row.jaccard_expected = ExactJaccard(refreshed_set_a, set_b);
     row.jaccard_error = std::abs(row.jaccard_computed - row.jaccard_expected);

@@ -40,6 +40,15 @@ TEST(DynamicRefreshBenchmarkTest, SerializesAllRefreshFieldsByName) {
     row.sanitizer = NotApplicableSanitizerMetadata();
     row.provenance = MakeAheBenchmarkProvenance();
     row.dynamic_scenario = "refresh";
+    row.updates_requested = 1;
+    row.updates_applied = 1;
+    row.initial_epoch = 0;
+    row.final_epoch = 1;
+    row.owner_b_unchanged = "true";
+    row.ciphertext_upload_count = 1;
+    row.local_inner_product = 7;
+    row.decrypted_inner_product = 7;
+    row.correctness_status = "PASS";
     row.refresh_owner_set_id = "owner-a";
     row.refresh_updates = 1;
     row.refresh_epoch_before = 0;
@@ -60,6 +69,15 @@ TEST(DynamicRefreshBenchmarkTest, SerializesAllRefreshFieldsByName) {
     const auto header = SplitComma(SerializeDynamicHeader());
     const auto cells = SplitComma(SerializeDynamicRow(row, row.provenance));
     EXPECT_EQ(cells[Column(header, "dynamic_scenario")], "refresh");
+    EXPECT_EQ(cells[Column(header, "updates_requested")], "1");
+    EXPECT_EQ(cells[Column(header, "updates_applied")], "1");
+    EXPECT_EQ(cells[Column(header, "initial_epoch")], "0");
+    EXPECT_EQ(cells[Column(header, "final_epoch")], "1");
+    EXPECT_EQ(cells[Column(header, "owner_b_unchanged")], "true");
+    EXPECT_EQ(cells[Column(header, "ciphertext_upload_count")], "1");
+    EXPECT_EQ(cells[Column(header, "local_inner_product")], "7");
+    EXPECT_EQ(cells[Column(header, "decrypted_inner_product")], "7");
+    EXPECT_EQ(cells[Column(header, "correctness_status")], "PASS");
     EXPECT_EQ(cells[Column(header, "refresh_owner_set_id")], "owner-a");
     EXPECT_EQ(cells[Column(header, "refresh_updates")], "1");
     EXPECT_EQ(cells[Column(header, "refresh_epoch_before")], "0");
@@ -78,7 +96,7 @@ TEST(DynamicRefreshBenchmarkTest, SerializesAllRefreshFieldsByName) {
     EXPECT_EQ(cells[Column(header, "refresh_public_key_fingerprint")], "public-key");
 }
 
-TEST(DynamicRefreshBenchmarkTest, MeasuresExactlyOneOwnerZeroToOne) {
+TEST(DynamicRefreshBenchmarkTest, AppliesFrozenOneOrTwoOwnerAUpdatesSequentially) {
     PiccardParams params;
     params.k = 16;
     params.m = 16;
@@ -94,34 +112,53 @@ TEST(DynamicRefreshBenchmarkTest, MeasuresExactlyOneOwnerZeroToOne) {
     for (uint64_t value = 0; value < 100; ++value) a.push_back(value);
     for (uint64_t value = 50; value < 150; ++value) b.push_back(value);
 
-    const DynamicResult row = RunSingleOwnerRefresh(engine, a, b, 5, 1);
-    EXPECT_EQ(row.dynamic_scenario, "refresh");
-    EXPECT_EQ(row.refresh_owner_set_id, "owner-a");
-    EXPECT_EQ(row.refresh_updates, 1u);
-    EXPECT_EQ(row.refresh_epoch_before, 0u);
-    EXPECT_EQ(row.refresh_epoch_after, 1u);
-    EXPECT_EQ(row.refresh_status, "applied");
-    EXPECT_EQ(row.refresh_ciphertexts_uploaded, 1u);
-    ASSERT_TRUE(row.refresh_upload_bytes.has_value());
-    EXPECT_GT(*row.refresh_upload_bytes, 0u);
-    ASSERT_TRUE(row.refresh_total_ms.has_value());
-    EXPECT_DOUBLE_EQ(row.total_ms, *row.refresh_total_ms);
-    EXPECT_DOUBLE_EQ(row.total_ms_median, row.total_ms);
-    EXPECT_DOUBLE_EQ(row.total_ms_sd, -1.0);
-    EXPECT_DOUBLE_EQ(row.phase_insert_ms, *row.phase_refresh_update_ms);
-    EXPECT_DOUBLE_EQ(row.phase_signature_ms, *row.phase_refresh_signature_ms);
-    EXPECT_DOUBLE_EQ(row.phase_encode_ms, *row.phase_refresh_encode_ms);
-    EXPECT_DOUBLE_EQ(row.phase_encrypt_ms, *row.phase_refresh_encrypt_ms);
-    EXPECT_DOUBLE_EQ(row.phase_insert_ms_median, row.phase_insert_ms);
-    EXPECT_DOUBLE_EQ(row.phase_signature_ms_median, row.phase_signature_ms);
-    EXPECT_DOUBLE_EQ(row.phase_encode_ms_median, row.phase_encode_ms);
-    EXPECT_DOUBLE_EQ(row.phase_encrypt_ms_median, row.phase_encrypt_ms);
-    EXPECT_EQ(row.ct_size_bytes, *row.refresh_upload_bytes);
-    EXPECT_DOUBLE_EQ(row.jaccard_error, std::abs(row.jaccard_computed - row.jaccard_expected));
-    ASSERT_GT(row.jaccard_expected, 0.0);
-    EXPECT_DOUBLE_EQ(row.jaccard_rel_error, row.jaccard_error / row.jaccard_expected);
-    EXPECT_EQ(row.rel_error_eligible_n, 1u);
-    EXPECT_EQ(row.trials, 1u);
+    for (const uint64_t updates : {uint64_t{1}, uint64_t{2}}) {
+        SCOPED_TRACE(updates);
+        const DynamicResult row = RunSingleOwnerRefresh(engine, a, b, 5, updates);
+        EXPECT_EQ(row.dynamic_scenario, "refresh");
+        EXPECT_EQ(row.refresh_owner_set_id, "owner-a");
+        EXPECT_EQ(row.refresh_updates, updates);
+        EXPECT_EQ(row.refresh_epoch_before, 0u);
+        EXPECT_EQ(row.refresh_epoch_after, updates);
+        EXPECT_EQ(row.refresh_status, "applied");
+        EXPECT_EQ(row.refresh_ciphertexts_uploaded, updates);
+        ASSERT_TRUE(row.refresh_upload_bytes.has_value());
+        EXPECT_GT(*row.refresh_upload_bytes, 0u);
+        ASSERT_TRUE(row.refresh_total_ms.has_value());
+        EXPECT_DOUBLE_EQ(row.total_ms, *row.refresh_total_ms);
+        EXPECT_DOUBLE_EQ(row.total_ms_median, row.total_ms);
+        EXPECT_DOUBLE_EQ(row.total_ms_sd, -1.0);
+        EXPECT_DOUBLE_EQ(row.phase_insert_ms, *row.phase_refresh_update_ms);
+        EXPECT_DOUBLE_EQ(row.phase_signature_ms, *row.phase_refresh_signature_ms);
+        EXPECT_DOUBLE_EQ(row.phase_encode_ms, *row.phase_refresh_encode_ms);
+        EXPECT_DOUBLE_EQ(row.phase_encrypt_ms, *row.phase_refresh_encrypt_ms);
+        EXPECT_DOUBLE_EQ(row.phase_insert_ms_median, row.phase_insert_ms);
+        EXPECT_DOUBLE_EQ(row.phase_signature_ms_median, row.phase_signature_ms);
+        EXPECT_DOUBLE_EQ(row.phase_encode_ms_median, row.phase_encode_ms);
+        EXPECT_DOUBLE_EQ(row.phase_encrypt_ms_median, row.phase_encrypt_ms);
+        EXPECT_EQ(row.ct_size_bytes, *row.refresh_upload_bytes);
+        EXPECT_DOUBLE_EQ(row.jaccard_error, std::abs(row.jaccard_computed - row.jaccard_expected));
+        ASSERT_GT(row.jaccard_expected, 0.0);
+        EXPECT_DOUBLE_EQ(row.jaccard_rel_error, row.jaccard_error / row.jaccard_expected);
+        EXPECT_EQ(row.rel_error_eligible_n, 1u);
+        EXPECT_EQ(row.trials, 1u);
+    }
+}
+
+TEST(DynamicRefreshBenchmarkTest, RejectsUpdateCountsOutsideFrozenOneOrTwo) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 16;
+    params.bottom_depth = 5;
+    params.hash_seed = 7;
+    params.security = SecurityLevel::TOY;
+    params.Validate();
+    DynamicPiccard engine(params);
+    engine.KeyGen();
+
+    const std::vector<uint64_t> a{1, 2, 3};
+    const std::vector<uint64_t> b{2, 3, 4};
+    EXPECT_THROW(RunSingleOwnerRefresh(engine, a, b, 5, 3), std::invalid_argument);
 }
 
 TEST(DynamicRefreshBenchmarkTest, RejectsRefreshValueSpaceOverflowBeforeTiming) {

@@ -210,6 +210,15 @@ struct DynamicResult {
     BenchmarkProvenance provenance;
 
     std::string dynamic_scenario = "legacy";
+    std::optional<uint64_t> updates_requested;
+    std::optional<uint64_t> updates_applied;
+    std::optional<uint64_t> initial_epoch;
+    std::optional<uint64_t> final_epoch;
+    std::optional<std::string> owner_b_unchanged;
+    std::optional<uint64_t> ciphertext_upload_count;
+    std::optional<int64_t> local_inner_product;
+    std::optional<int64_t> decrypted_inner_product;
+    std::optional<std::string> correctness_status;
     std::optional<std::string> refresh_owner_set_id;
     std::optional<uint64_t> refresh_updates;
     std::optional<uint64_t> refresh_epoch_before;

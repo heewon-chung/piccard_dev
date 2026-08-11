@@ -786,11 +786,12 @@ int main(int argc, char** argv) {
         if (config.profile.id != "toy-smoke" ||
             config.security_level != SecurityLevel::TOY ||
             config.mode != "timing" || !config.evidence_point ||
-            config.trials != 1 || !saw_refresh_updates || refresh_updates == 0) {
+            config.trials != 1 || !saw_refresh_updates ||
+            (refresh_updates != 1 && refresh_updates != 2)) {
             throw std::invalid_argument(
                 "refresh requires --profile=toy-smoke, --security=TOY, "
                 "--mode=timing, --evidence_point, --trials=1, and "
-                "--refresh_updates>0");
+                "--refresh_updates=1 or --refresh_updates=2");
         }
         PiccardParams params;
         params.k = config.k;
@@ -808,7 +809,9 @@ int main(int argc, char** argv) {
             config.set_size, intersection_fraction);
         auto row = RunSingleOwnerRefresh(
             engine, set_a, set_b, depth, refresh_updates);
-        ApplyBenchmarkProfile(config, row, BenchmarkMeasurementKind::FheTiming);
+        // Refresh rows are correctness-only; phase timings remain incidental
+        // diagnostics and must never be aggregated as performance evidence.
+        ApplyBenchmarkProfile(config, row, BenchmarkMeasurementKind::Diagnostic);
         csv.WriteRow(row);
         return 0;
     }

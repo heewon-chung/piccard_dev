@@ -56,6 +56,24 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
         self.assertEqual(row["refresh_ciphertexts_uploaded"], "1")
         self.assertGreater(int(row["refresh_upload_bytes"]), 0)
 
+    def test_two_updates_are_a_real_two_epoch_sequence(self):
+        command = self.base_command()
+        command = ["--refresh_updates=2" if arg == "--refresh_updates=1" else arg
+                   for arg in command]
+        result = self.run_cli(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = list(csv.DictReader(io.StringIO(result.stdout)))[0]
+        self.assertEqual(row["refresh_updates"], "2")
+        self.assertEqual(row["refresh_epoch_before"], "0")
+        self.assertEqual(row["refresh_epoch_after"], "2")
+        self.assertEqual(row["refresh_ciphertexts_uploaded"], "2")
+
+    def test_rejects_update_counts_outside_frozen_one_or_two(self):
+        command = self.base_command()
+        command = ["--refresh_updates=3" if arg == "--refresh_updates=1" else arg
+                   for arg in command]
+        self.assert_rejected_before_refresh(command)
+
     def test_rejects_all_refresh_preconditions_and_invalid_updates(self):
         cases = {
             "wrong_profile": ["--profile=legacy"],
