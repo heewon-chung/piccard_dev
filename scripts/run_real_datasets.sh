@@ -166,12 +166,20 @@ def run_short(command, cwd=None) -> str:
     return result.stdout.strip()
 
 
-def source_identity(project: pathlib.Path):
+def source_identity(project: pathlib.Path, *, tracked_only: bool = False):
+    """Return the source commit and cleanliness under the selected contract.
+
+    Quick/paper retain their historical all-files cleanliness rule.  The
+    single-trial validation path must instead match the outer Work 5 runner's
+    frozen identity rule: tracked and staged changes are disqualifying, while
+    the explicitly permitted untracked `.omo/evidence/` receipts are not.
+    """
     commit = run_short(["git", "rev-parse", "HEAD"], project)
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         fail("git HEAD is not a full lowercase commit")
+    untracked = "no" if tracked_only else "all"
     dirty = bool(run_short(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"], project))
+        ["git", "status", "--porcelain=v1", f"--untracked-files={untracked}"], project))
     return commit, dirty
 
 
@@ -627,7 +635,8 @@ def execute(args, project: pathlib.Path) -> int:
     if not summarizer_path.is_file():
         fail("scripts/summarize_real_datasets.py is missing from the committed source root")
 
-    commit, dirty = source_identity(project)
+    commit, dirty = source_identity(
+        project, tracked_only=(args.evidence_mode == "single-trial-validation"))
     if args.evidence_mode in ("paper", "single-trial-validation"):
         if dirty:
             fail(f"evidence_mode={args.evidence_mode} requires a clean source tree")

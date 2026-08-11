@@ -51,6 +51,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from prepare_real_datasets import (  # noqa: E402
     ManifestError,
+    format_float,
     parse_two_column_tsv,
     sha256_file,
     validate_source_manifest,
@@ -716,6 +717,221 @@ def _cell_processed_dir(cell: dict) -> Path:
     fail(f"cell {cell['id']!r} has no processed-manifest input")
 
 
+_RECORDS_HEADER = (
+    "record_id\traw_feature_count\traw_features_csv\t"
+    "bucketed_feature_count\tbucketed_features_csv")
+_PAIRS_HEADER = "pair_id\trecord_a\trecord_b\tpair_kind\tlabel"
+
+
+def _strict_nonnegative_int(raw: str, label: str) -> int:
+    if not re.fullmatch(r"0|[1-9][0-9]*", raw):
+        fail(f"{label} must be a canonical non-negative decimal integer")
+    return int(raw)
+
+
+def _strict_feature_vector(raw: str, declared_count: int, label: str) -> tuple:
+    if declared_count == 0:
+        if raw != "":
+            fail(f"{label} must be empty when its declared count is zero")
+        return ()
+    if raw == "":
+        fail(f"{label} is empty despite a nonzero declared count")
+    values = tuple(_strict_nonnegative_int(value, f"{label} item")
+                   for value in raw.split(","))
+    if len(values) != declared_count:
+        fail(f"{label} count does not match its declared count")
+    if any(left >= right for left, right in zip(values, values[1:])):
+        fail(f"{label} is not strictly increasing and unique")
+    return values
+
+
+def _load_bound_processed_dataset(processed_dir: Path, processed_values: dict) -> dict:
+    """Strictly load the records/pairs bytes bound by dataset.manifest.tsv.
+
+    Metadata and CSV hashes alone cannot attest to the ground truth they
+    describe: a malicious producer can consistently rehash them.  This loader
+    therefore validates both committed processed files before any row truth is
+    recomputed from their raw/bucketed feature vectors.
+    """
+    records_path = _resolve_under(processed_dir, processed_values["records_file"],
+                                  "processed records_file")
+    pairs_path = _resolve_under(processed_dir, processed_values["pairs_file"],
+                                "processed pairs_file")
+    if not records_path.is_file() or not pairs_path.is_file():
+        fail("processed records.tsv or pairs.tsv is missing")
+    if sha256_file(records_path) != processed_values["records_sha256"]:
+        fail("processed records.tsv checksum does not match dataset.manifest.tsv")
+    if sha256_file(pairs_path) != processed_values["pairs_sha256"]:
+        fail("processed pairs.tsv checksum does not match dataset.manifest.tsv")
+    try:
+        record_lines = records_path.read_text(encoding="utf-8", errors="strict").split("\n")
+        pair_lines = pairs_path.read_text(encoding="utf-8", errors="strict").split("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"processed records/pairs are not strict UTF-8: {exc}")
+    if not record_lines or record_lines[-1] != "" or record_lines[0] != _RECORDS_HEADER:
+        fail("processed records.tsv header or termination mismatch")
+    if not pair_lines or pair_lines[-1] != "" or pair_lines[0] != _PAIRS_HEADER:
+        fail("processed pairs.tsv header or termination mismatch")
+
+    records = {}
+    for line_number, line in enumerate(record_lines[1:-1], start=2):
+        fields = line.split("\t")
+        if len(fields) != 5 or not fields[0]:
+            fail(f"processed records.tsv line {line_number} has malformed fields")
+        record_id, raw_count, raw_csv, bucketed_count, bucketed_csv = fields
+        if record_id in records:
+            fail(f"processed records.tsv duplicates record_id {record_id!r}")
+        raw_size = _strict_nonnegative_int(raw_count, "processed raw_feature_count")
+        bucketed_size = _strict_nonnegative_int(bucketed_count,
+                                                "processed bucketed_feature_count")
+        records[record_id] = {
+            "raw": _strict_feature_vector(raw_csv, raw_size,
+                                          "processed raw_features_csv"),
+            "bucketed": _strict_feature_vector(bucketed_csv, bucketed_size,
+                                                "processed bucketed_features_csv"),
+        }
+    if len(records) != _strict_nonnegative_int(processed_values["record_count"],
+                                                "processed record_count"):
+        fail("processed records.tsv count does not match dataset.manifest.tsv")
+
+    pairs = []
+    pair_ids = set()
+    positive_count = 0
+    for line_number, line in enumerate(pair_lines[1:-1], start=2):
+        fields = line.split("\t")
+        if len(fields) != 5 or not all(fields[:4]):
+            fail(f"processed pairs.tsv line {line_number} has malformed fields")
+        pair_id, record_a, record_b, pair_kind, label_raw = fields
+        if pair_id in pair_ids:
+            fail(f"processed pairs.tsv duplicates pair_id {pair_id!r}")
+        pair_ids.add(pair_id)
+        if record_a not in records or record_b not in records:
+            fail(f"processed pairs.tsv pair {pair_id!r} references an unknown record")
+        if record_a == record_b:
+            fail(f"processed pairs.tsv pair {pair_id!r} has identical endpoints")
+        if label_raw not in ("0", "1"):
+            fail(f"processed pairs.tsv pair {pair_id!r} label is not binary")
+        label = int(label_raw)
+        expected_label = {"known_match": 1, "sampled_nonmatch": 0}.get(pair_kind)
+        if expected_label is None or label != expected_label:
+            fail(f"processed pairs.tsv pair {pair_id!r} pair_kind/label mismatch")
+        positive_count += label
+        pairs.append({"pair_id": pair_id, "record_a": record_a,
+                      "record_b": record_b, "pair_kind": pair_kind,
+                      "label": label})
+    if len(pairs) != _strict_nonnegative_int(processed_values["pair_count"],
+                                              "processed pair_count"):
+        fail("processed pairs.tsv count does not match dataset.manifest.tsv")
+    if positive_count != _strict_nonnegative_int(processed_values["retained_positive_count"],
+                                                  "processed retained_positive_count"):
+        fail("processed pairs.tsv positive count does not match dataset.manifest.tsv")
+    return {"records": records, "pairs": pairs}
+
+
+def _truth_overlap(left: tuple, right: tuple) -> tuple:
+    """Return (intersection, union) for canonical sorted-unique vectors."""
+    i = j = intersection = union = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            intersection += 1
+            union += 1
+            i += 1
+            j += 1
+        elif left[i] < right[j]:
+            union += 1
+            i += 1
+        else:
+            union += 1
+            j += 1
+    union += len(left) - i + len(right) - j
+    return intersection, union
+
+
+def _truth_jaccard(left: tuple, right: tuple) -> tuple:
+    intersection, union = _truth_overlap(left, right)
+    return intersection, union, (0.0 if union == 0 else intersection / union)
+
+
+def _numeric_truth_equal(observed, expected: float, field: str, cell_id: str,
+                         row_number: int) -> None:
+    if observed is None or not isinstance(observed, float) or not math.isclose(
+            observed, expected, rel_tol=1e-12, abs_tol=1e-15):
+        rendered = format_float(expected)
+        fail(f"cell {cell_id!r} row {row_number}: {field} truth mismatch "
+             f"(expected canonical value {rendered!r})")
+
+
+def _validate_accuracy_truth(cell: dict, csv_rows: list,
+                             processed_dataset: dict) -> None:
+    """Recompute every accuracy truth/value coupling from bound records/pairs."""
+    cell_id = cell["id"]
+    pairs = {pair["pair_id"]: pair for pair in processed_dataset["pairs"]}
+    records = processed_dataset["records"]
+    for offset, row in enumerate(csv_rows, start=2):
+        pair_id = str(row.get("pair_id"))
+        pair = pairs.get(pair_id)
+        if pair is None:
+            fail(f"cell {cell_id!r} row {offset}: pair_id {pair_id!r} is absent from pairs.tsv")
+        for field in ("pair_kind", "record_a", "record_b"):
+            if str(row.get(field)) != pair[field]:
+                fail(f"cell {cell_id!r} row {offset}: {field} truth mismatch")
+        if row.get("label") != pair["label"]:
+            fail(f"cell {cell_id!r} row {offset}: label truth mismatch")
+        record_a, record_b = records[pair["record_a"]], records[pair["record_b"]]
+        raw_intersection, raw_union, raw_jaccard = _truth_jaccard(
+            record_a["raw"], record_b["raw"])
+        bucketed_intersection, bucketed_union, bucketed_jaccard = _truth_jaccard(
+            record_a["bucketed"], record_b["bucketed"])
+        del raw_intersection, raw_union  # CSV does not expose raw overlap counts.
+        expected_ints = {
+            "set_size_a_raw": len(record_a["raw"]),
+            "set_size_b_raw": len(record_b["raw"]),
+            "set_size_a_bucketed": len(record_a["bucketed"]),
+            "set_size_b_bucketed": len(record_b["bucketed"]),
+            "realized_intersection": bucketed_intersection,
+            "realized_union": bucketed_union,
+        }
+        for field, expected in expected_ints.items():
+            if row.get(field) != expected:
+                fail(f"cell {cell_id!r} row {offset}: {field} truth mismatch")
+        for field, expected in (("realized_jaccard", bucketed_jaccard),
+                                ("exact_jaccard_raw", raw_jaccard),
+                                ("exact_jaccard_bucketed", bucketed_jaccard)):
+            _numeric_truth_equal(row.get(field), expected, field, cell_id, offset)
+
+        k, m = row.get("k"), row.get("m")
+        if not isinstance(k, int) or k <= 0 or not isinstance(m, int) or m < 2:
+            fail(f"cell {cell_id!r} row {offset}: k/m estimator parameters are invalid")
+        fraction = row.get("bucket_match_fraction")
+        if not isinstance(fraction, float):
+            fail(f"cell {cell_id!r} row {offset}: bucket_match_fraction truth mismatch")
+        candidate_matches = round(fraction * k)
+        if candidate_matches < 0 or candidate_matches > k or not math.isclose(
+                fraction * k, candidate_matches, rel_tol=0.0, abs_tol=1e-12):
+            fail(f"cell {cell_id!r} row {offset}: bucket_match_fraction truth mismatch")
+        expected_fraction = candidate_matches / k
+        _numeric_truth_equal(fraction, expected_fraction, "bucket_match_fraction", cell_id, offset)
+        collision = 1.0 / m
+        expected_estimated = max(0.0, min(1.0, (fraction - collision) / (1.0 - collision)))
+        _numeric_truth_equal(row.get("estimated_jaccard"), expected_estimated,
+                             "estimated_jaccard", cell_id, offset)
+        expected_abs_error = abs(expected_estimated - bucketed_jaccard)
+        _numeric_truth_equal(row.get("abs_error"), expected_abs_error,
+                             "abs_error", cell_id, offset)
+        rel_error = row.get("rel_error")
+        if bucketed_jaccard == 0.0:
+            if rel_error is not None:
+                fail(f"cell {cell_id!r} row {offset}: rel_error truth mismatch")
+        else:
+            _numeric_truth_equal(rel_error, expected_abs_error / bucketed_jaccard,
+                                 "rel_error", cell_id, offset)
+        expected_bucket = ("b00_10" if bucketed_jaccard < 0.1 else
+                           "b10_30" if bucketed_jaccard < 0.3 else
+                           "b30_60" if bucketed_jaccard < 0.6 else "b60_100")
+        if str(row.get("jaccard_bucket")) != expected_bucket:
+            fail(f"cell {cell_id!r} row {offset}: jaccard_bucket truth mismatch")
+
+
 def _read_processed_pairs(processed_dir: Path, processed_values: dict) -> list:
     """Returns [(pair_id, record_a, record_b)] in file (manifest) order."""
     pairs_path = processed_dir / processed_values["pairs_file"]
@@ -788,7 +1004,8 @@ def _derive_encoding_hash_seed(root_seed: int, dataset_sha_raw: bytes, k: int,
 
 
 def _validate_accuracy_workload(cell: dict, variant: str, csv_rows: list,
-                                processed_values: dict) -> None:
+                                processed_values: dict,
+                                processed_dataset: dict) -> None:
     """Codex stop-gate round 5: the workload manifest/rows are OUTPUTS whose
     file hashes were already bound, but their CONTENT is a semantic
     invariant — schema literal, argv bindings, rows binding, seed
@@ -833,12 +1050,14 @@ def _validate_accuracy_workload(cell: dict, variant: str, csv_rows: list,
     # Codex stop-gate round 6: bind to the EXACT manifest-order-prefix
     # pair list, not just counts/membership -- duplicated (pair, trial)
     # rows hiding an omitted pair must fail.
-    processed_dir = _cell_processed_dir(cell)
-    all_pairs = _read_processed_pairs(processed_dir, processed_values)
+    all_pairs = processed_dataset["pairs"]
     selected_pairs = all_pairs[:expected_pairs]
-    records_by_pair = {p: (a, b) for p, a, b in selected_pairs}
+    records_by_pair = {
+        pair["pair_id"]: (pair["record_a"], pair["record_b"])
+        for pair in selected_pairs
+    }
     expected_entries = sorted(
-        (pair_id, trial) for pair_id, _, _ in selected_pairs
+        (pair["pair_id"], trial) for pair in selected_pairs
         for trial in range(trials_n))
     entries = []
     for line in lines[1:-1]:
@@ -883,6 +1102,7 @@ def _validate_accuracy_workload(cell: dict, variant: str, csv_rows: list,
                                 str(row.get("record_b"))):
             fail(f"cell {cell_id!r} accuracy CSV endpoints for {pair_id!r} do "
                  "not match pairs.tsv")
+    _validate_accuracy_truth(cell, csv_rows, processed_dataset)
 
 
 def _validate_timing_workload(cell: dict, variant: str, profile: str,
@@ -1261,6 +1481,7 @@ def verify(results_root: Path) -> str:
 
     by_id = {cell["id"]: cell for cell in cells}
     processed_manifest_cache: dict = {}
+    processed_dataset_cache: dict = {}
     source_values_by_variant: dict = {}
 
     for artifact in artifacts:
@@ -1269,6 +1490,10 @@ def verify(results_root: Path) -> str:
             source_values_by_variant[variant] = dict(
                 parse_two_column_tsv(artifact["resolved"]))
 
+    # Bind each variant's source-of-truth dataset before interpreting any
+    # cell.  Cell metadata is deliberately not trusted to arrive in producer
+    # order, so an accuracy-summary cell cannot bypass the dataset loader by
+    # appearing first.
     for cell in cells:
         variant = _cell_variant(cell["id"])
         processed_input = next(
@@ -1276,13 +1501,20 @@ def verify(results_root: Path) -> str:
         if processed_input is not None and variant not in processed_manifest_cache:
             processed_manifest_cache[variant] = _validate_processed_manifest(
                 processed_input["resolved"], "dblp_acm")
+            processed_dataset_cache[variant] = _load_bound_processed_dataset(
+                processed_input["resolved"].parent,
+                processed_manifest_cache[variant])
+
+    for cell in cells:
+        variant = _cell_variant(cell["id"])
 
         if cell["id"].endswith(":accuracy"):
             csv_path = _output_path_for(cell, f"real_accuracy_{variant}.csv")
             rows = _read_rows(csv_path, ACCURACY_HEADER_FIELDS, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
             _validate_accuracy_workload(cell, variant, rows,
-                                        processed_manifest_cache[variant])
+                                        processed_manifest_cache[variant],
+                                        processed_dataset_cache[variant])
         elif ":timing:" in cell["id"]:
             profile = cell["id"].split(":timing:", 1)[1]
             csv_path = _output_path_for(cell, f"real_timing_{variant}_{profile}.csv")

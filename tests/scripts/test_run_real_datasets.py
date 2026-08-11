@@ -28,12 +28,15 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run_real_datasets.sh"
 VERIFIER = ROOT / "scripts" / "verify_real_dataset_outputs.py"
+SUMMARIZER = ROOT / "scripts" / "summarize_real_datasets.py"
 QUICK_VARIANT = "dblp_acm_u65536"
 QUICK_FIXTURE_DIR = ROOT / "tests" / "fixtures" / "real_datasets" / "quick" / QUICK_VARIANT
 QUICK_SOURCE_MANIFEST = QUICK_FIXTURE_DIR / "source.manifest.tsv"
@@ -81,6 +84,20 @@ def load_verifier_module():
     spec = importlib.util.spec_from_file_location("verify_real_dataset_outputs", VERIFIER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def load_runner_module():
+    shell_wrapped = RUNNER.read_text(encoding="utf-8")
+    python_source = shell_wrapped.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+    module = types.ModuleType("run_real_datasets")
+    module.__file__ = str(RUNNER)
+    sys.modules[module.__name__] = module
+    sys.path.insert(0, str(RUNNER.parent))
+    try:
+        exec(compile(python_source, str(RUNNER), "exec"), module.__dict__)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -259,7 +276,63 @@ def main():
             continue
         fields = line.split("\t")
         real_pairs.append({"pair_id": fields[0], "record_a": fields[1],
-                           "record_b": fields[2]})
+                           "record_b": fields[2], "pair_kind": fields[3],
+                           "label": fields[4]})
+
+    records_lines = open(os.path.join(manifest_dir, manifest["records_file"]),
+                         encoding="utf-8").read().split("\n")
+    records_by_id = {}
+    for line in records_lines[1:]:
+        if not line:
+            continue
+        fields = line.split("\t")
+        records_by_id[fields[0]] = {
+            "raw": {int(value) for value in fields[2].split(",") if value},
+            "bucketed": {int(value) for value in fields[4].split(",") if value},
+        }
+
+    def format_real17(value):
+        return "0" if value == 0 else format(value, ".17g")
+
+    def truth_for(pair):
+        a, b = records_by_id[pair["record_a"]], records_by_id[pair["record_b"]]
+        raw_intersection = len(a["raw"] & b["raw"])
+        raw_union = len(a["raw"] | b["raw"])
+        bucketed_intersection = len(a["bucketed"] & b["bucketed"])
+        bucketed_union = len(a["bucketed"] | b["bucketed"])
+        raw_jaccard = raw_intersection / raw_union if raw_union else 0.0
+        bucketed_jaccard = (bucketed_intersection / bucketed_union
+                            if bucketed_union else 0.0)
+        # This fake intentionally emits a zero observed bucket-match count.
+        # With m >= 2 the deployed bias correction clamps its estimate to 0.
+        estimated = 0.0
+        abs_error = abs(estimated - bucketed_jaccard)
+        if bucketed_jaccard < 0.1:
+            bucket = "b00_10"
+        elif bucketed_jaccard < 0.3:
+            bucket = "b10_30"
+        elif bucketed_jaccard < 0.6:
+            bucket = "b30_60"
+        else:
+            bucket = "b60_100"
+        return {
+            "pair_kind": pair["pair_kind"], "label": pair["label"],
+            "set_size_a_raw": str(len(a["raw"])),
+            "set_size_b_raw": str(len(b["raw"])),
+            "set_size_a_bucketed": str(len(a["bucketed"])),
+            "set_size_b_bucketed": str(len(b["bucketed"])),
+            "realized_intersection": str(bucketed_intersection),
+            "realized_union": str(bucketed_union),
+            "realized_jaccard": format_real17(bucketed_jaccard),
+            "exact_jaccard_raw": format_real17(raw_jaccard),
+            "exact_jaccard_bucketed": format_real17(bucketed_jaccard),
+            "bucket_match_fraction": "0",
+            "estimated_jaccard": format_real17(estimated),
+            "abs_error": format_real17(abs_error),
+            "rel_error": (format_real17(abs_error / bucketed_jaccard)
+                          if bucketed_jaccard else ""),
+            "jaccard_bucket": bucket,
+        }
 
     header = ACCURACY_HEADER if mode == "accuracy" else TIMING_HEADER
     root_seed = int(opts["seed"])
@@ -306,7 +379,8 @@ def main():
                                accuracy_trial_index=str(trial),
                                hash_seed=str(seed),
                                workload_manifest_sha256=workload_sha,
-                               accuracy_workload_sha256=workload_sha)
+                               accuracy_workload_sha256=workload_sha,
+                               **truth_for(pair))
                 writer.writerow([row[name] for name in header])
     else:
         trials = int(opts["trials"])
@@ -431,6 +505,22 @@ def rebind_file_hash(results_root: pathlib.Path, rel_path: str) -> None:
                 lines[i] = f"{prefix}.sha256\t{new_sha}\n"
     meta_path.write_text("".join(lines), encoding="utf-8")
     (results_root / "verification_status.tsv").unlink(missing_ok=True)
+
+
+def recompute_and_rebind_summary(results_root: pathlib.Path) -> None:
+    """Rebuild the accuracy summary after a CSV mutation and rebind both
+    artifacts in run_metadata.tsv.  The ensuing verifier rejection must be
+    semantic, never merely a stale output checksum or stale summary byte."""
+    accuracy_rel = f"csv/real_accuracy_{QUICK_VARIANT}.csv"
+    summary_rel = f"csv/real_accuracy_summary_{QUICK_VARIANT}.csv"
+    completed = run_command([
+        sys.executable, str(SUMMARIZER),
+        f"--input={results_root / accuracy_rel}",
+        f"--output={results_root / summary_rel}",
+    ])
+    assert completed.returncode == 0, completed.stderr
+    rebind_file_hash(results_root, accuracy_rel)
+    rebind_file_hash(results_root, summary_rel)
 
 
 def read_kv_file(path: pathlib.Path) -> dict:
@@ -571,6 +661,80 @@ class QuickCliValidationTest(unittest.TestCase):
                             f"--build-dir={self.tmp / 'build'}",
                             f"--results-root={self.tmp / 'results'}")
         self.assertNotEqual(result.returncode, 0)
+
+
+class SourceIdentityCleanlinessTest(unittest.TestCase):
+    """Validation identity ignores evidence-only untracked files, unlike
+    existing quick/paper semantics, but never ignores tracked/staged edits."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = pathlib.Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        for argv in (("git", "init"),
+                     ("git", "config", "user.email", "test@example.invalid"),
+                     ("git", "config", "user.name", "Test")):
+            completed = run_command(list(argv), cwd=self.repo)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        tracked = self.repo / "tracked.txt"
+        tracked.write_text("baseline\n", encoding="utf-8")
+        completed = run_command(["git", "add", "tracked.txt"], cwd=self.repo)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        completed = run_command(["git", "commit", "-m", "baseline"], cwd=self.repo)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.runner = load_runner_module()
+
+    def test_validation_identity_ignores_untracked_only_but_default_remains_dirty(self):
+        marker = self.repo / ".omo" / "evidence" / "prelive" / "marker.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("untracked evidence\n", encoding="utf-8")
+
+        _commit, validation_dirty = self.runner.source_identity(
+            self.repo, tracked_only=True)
+        self.assertFalse(validation_dirty)
+        _commit, default_dirty = self.runner.source_identity(self.repo)
+        self.assertTrue(default_dirty)
+
+        (self.repo / "tracked.txt").write_text("tracked edit\n", encoding="utf-8")
+        _commit, validation_dirty = self.runner.source_identity(
+            self.repo, tracked_only=True)
+        self.assertTrue(validation_dirty)
+
+    def test_validation_mode_uses_tracked_only_before_any_pair_work(self):
+        build_dir = self.repo.parent / "build"
+        write_fake_bench_real_datasets(build_dir)
+        pair = self.runner.load_manifest_pair(QUICK_SOURCE_MANIFEST,
+                                              QUICK_DATASET_MANIFEST)
+
+        def args_for(results_name):
+            return types.SimpleNamespace(
+                build_dir=str(build_dir), results_root=str(self.repo.parent / results_name),
+                resume=False, evidence_mode="single-trial-validation", pairs=[pair],
+                seed=20260729, threads=2,
+                profiles=("work5-std128-t40-single-trial",
+                          "work5-std192-t40-single-trial"),
+            )
+
+        # An untracked pre-live marker must not block the validation identity
+        # gate; the sentinel proves validation proceeds only after that gate.
+        marker = self.repo / ".omo" / "evidence" / "marker.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("allowed untracked receipt\n", encoding="utf-8")
+        with mock.patch.object(self.runner, "validate_single_trial_pair",
+                               side_effect=self.runner.RunnerError("sentinel")) as validate:
+            with self.assertRaisesRegex(self.runner.RunnerError, "sentinel"):
+                self.runner.execute(args_for("untracked-results"), self.repo)
+        validate.assert_called_once_with(pair)
+
+        # A staged edit remains disqualifying and must fail before pair work.
+        (self.repo / "tracked.txt").write_text("staged edit\n", encoding="utf-8")
+        completed = run_command(["git", "add", "tracked.txt"], cwd=self.repo)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        with mock.patch.object(self.runner, "validate_single_trial_pair") as validate:
+            with self.assertRaisesRegex(self.runner.RunnerError, "clean source tree"):
+                self.runner.execute(args_for("staged-results"), self.repo)
+        validate.assert_not_called()
 
 
 class SingleTrialValidationCliTest(unittest.TestCase):
@@ -754,6 +918,50 @@ class QuickEndToEndTest(unittest.TestCase):
         expected_sha = hashlib.sha256(
             (self.results_root / "run_metadata.tsv").read_bytes()).hexdigest()
         self.assertEqual(status["run_metadata_sha256"], expected_sha)
+
+    def test_verifier_rejects_rehashed_accuracy_truth_field_mutations(self):
+        """Every truth-derived accuracy field is recomputed from the bound
+        processed records/pairs.  Rebinding the CSV, regenerated summary,
+        and every run-metadata checksum must not turn an altered claim into
+        a verified result."""
+        mutations = {
+            "pair_kind": lambda old: "known_match" if old != "known_match" else "sampled_nonmatch",
+            "label": lambda old: "0" if old == "1" else "1",
+            "set_size_a_raw": lambda old: str(int(old) + 1),
+            "set_size_b_raw": lambda old: str(int(old) + 1),
+            "set_size_a_bucketed": lambda old: str(int(old) + 1),
+            "set_size_b_bucketed": lambda old: str(int(old) + 1),
+            "realized_intersection": lambda old: str(int(old) + 1),
+            "realized_union": lambda old: str(int(old) + 1),
+            "realized_jaccard": lambda old: "0.123456789",
+            "exact_jaccard_raw": lambda old: "0.123456789",
+            "exact_jaccard_bucketed": lambda old: "0.123456789",
+            "bucket_match_fraction": lambda old: "0.123" if old != "0.123" else "0",
+            "estimated_jaccard": lambda old: "0.5" if old != "0.5" else "0",
+            "abs_error": lambda old: "0.5" if old != "0.5" else "0",
+            "rel_error": lambda old: "0.5" if old != "0.5" else "",
+            "jaccard_bucket": lambda old: "b60_100" if old != "b60_100" else "b00_10",
+        }
+        accuracy_rel = f"csv/real_accuracy_{QUICK_VARIANT}.csv"
+        for field, mutate in mutations.items():
+            with self.subTest(field=field):
+                results_root = self.tmp / f"truth-mutation-{field}"
+                result = self.run_quick(results_root=results_root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                csv_path = results_root / accuracy_rel
+                lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                header = lines[0].rstrip("\n").split(",")
+                index = header.index(field)
+                first_row = lines[1].rstrip("\n").split(",")
+                first_row[index] = mutate(first_row[index])
+                lines[1] = ",".join(first_row) + "\n"
+                csv_path.write_text("".join(lines), encoding="utf-8")
+                recompute_and_rebind_summary(results_root)
+
+                verify_result = run_verifier(results_root)
+                self.assertNotEqual(verify_result.returncode, 0)
+                self.assertIn(field, verify_result.stderr)
+                self.assertFalse((results_root / "verification_status.tsv").exists())
 
     def test_verification_status_reproduced_byte_identical_on_rerun(self):
         result = self.run_quick()
