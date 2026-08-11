@@ -110,6 +110,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def planned_payload_commitment(record: dict[str, Any]) -> str:
+    """Independently reconstruct a skipped cell's legacy payload commitment.
+
+    A preflight skip deliberately has no materialized ``ComparisonTrial``
+    records.  Its legacy-named field is instead the runner's frozen
+    ``piccard-work5-planned-payload-v1`` commitment.  Keep this serializer
+    local to the verifier so a matching runner/verifier defect cannot bless a
+    forged skip commitment.
+    """
+    material = {key: record[key] for key in ("security", "axis", "axis_value",
+                                              "k", "m", "n", "U")}
+    material.update({"target_jaccard": "0.5", "seed": 7, "executed_trials": 3})
+    return hashlib.sha256(
+        b"piccard-work5-planned-payload-v1\0" + canonical_json(material)
+    ).hexdigest()
+
+
 def load_object(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -613,7 +630,7 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
     require(sum(record.get("security") == "STD128" for record in records) == 37 and
             sum(record.get("security") == "STD192" for record in records) == 24,
             "terminal profile totals mismatch")
-    expected_payloads: dict[tuple[Any, ...], set[str]] = {}
+    measured_payloads: dict[tuple[Any, ...], list[str]] = {}
     for actual, target in zip(records, expected):
         for field in ("cell_id", "profile", "suite", "security", "axis", "axis_value", "k", "m", "n", "U",
                       "methods", "applicability", "profile_comparison_eligible", "control_cell_id"):
@@ -630,6 +647,13 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
         require(isinstance(payload, str) and len(payload) == 64 and
                 all(ch in "0123456789abcdef" for ch in payload),
                 f"{target['cell_id']}: missing trial payload hash")
+        planned_commitment = planned_payload_commitment(actual)
+        if actual["status"] == "SKIPPED_PRECHECK":
+            require(payload == planned_commitment,
+                    f"{target['cell_id']}: skip planned-payload commitment mismatch")
+        elif actual["status"] == "MEASURED":
+            require(payload != planned_commitment,
+                    f"{target['cell_id']}: measured cell carries a skip commitment")
         require(actual.get("environment") == {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"} and
                 isinstance(actual.get("argv"), list) and actual["argv"],
                 f"{target['cell_id']}: argv/environment mismatch")
@@ -650,12 +674,12 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
             verify_live_semantics(root, actual)
         key = (actual["security"], actual["axis"], actual["axis_value"], actual["k"], actual["m"],
                actual["n"], actual["U"], actual["target_jaccard"], actual["seed"])
-        expected_payloads.setdefault(key, set()).add(payload)
-    for key, digests in expected_payloads.items():
-        matching = sum(1 for cell in expected if (cell["security"], cell["axis"], cell["axis_value"],
-                   cell["k"], cell["m"], cell["n"], cell["U"], "0.5", 7) == key)
-        if matching > 1:
-            require(len(digests) == 1, f"trial payload hashes diverge for shared cell {key}")
+        if actual["status"] == "MEASURED":
+            measured_payloads.setdefault(key, []).append(payload)
+    for key, digests in measured_payloads.items():
+        if len(digests) > 1:
+            require(len(set(digests)) == 1,
+                    f"trial payload hashes diverge for jointly measured cell {key}")
     require(not any(record["status"] == "ERROR" for record in records),
             "parameter evidence contains ERROR terminal record")
 

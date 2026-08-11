@@ -25,6 +25,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import verify_review_comparison as review_verifier
+import run_work5_benchmarks as work5_runner
 import verify_work5_benchmarks as work5_verifier
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 VERIFIER = ROOT / "scripts" / "verify_work5_benchmarks.py"
@@ -69,13 +70,16 @@ class Work5VerifierContractTest(unittest.TestCase):
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         self.events = self.tmp / "fake-events.jsonl"
 
-    def produce_parameter_root(self, name: str) -> Path:
+    def produce_parameter_root(self, name: str,
+                               extra_environment: dict[str, str] | None = None) -> Path:
         results = self.tmp / name
         environment = os.environ.copy()
         environment.update({
             "PICCARD_WORK5_FAKE_EVENT_LOG": str(self.events),
             "PYTHONDONTWRITEBYTECODE": "1",
         })
+        if extra_environment:
+            environment.update(extra_environment)
         run = subprocess.run(
             [
                 "python3", str(RUNNER), "--phase=parameters",
@@ -94,6 +98,54 @@ class Work5VerifierContractTest(unittest.TestCase):
              "--allow-test-fixture"],
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
+
+    @staticmethod
+    def rebind_cells(root: Path, rows: list[dict[str, Any]]) -> None:
+        write_jsonl(root / "cells.jsonl", rows)
+        run_path = root / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run["cells_sha256"] = hashlib.sha256((root / "cells.jsonl").read_bytes()).hexdigest()
+        run_path.write_text(json.dumps(run, sort_keys=True, separators=(",", ":")) + "\n",
+                            encoding="utf-8")
+
+    @staticmethod
+    def fixture_actual_payload(record: dict[str, Any]) -> str:
+        """Method-neutral marker for a materialized fake workload only.
+
+        The real producer's hash is reconstructed from ordered trial records.
+        The hermetic fixture has no such records, so its distinct test-domain
+        marker is used solely to test that a skip commitment is never treated
+        as an actual payload digest.
+        """
+        material = {key: record[key] for key in
+                    ("security", "k", "m", "n", "U", "target_jaccard", "seed")}
+        return hashlib.sha256(
+            b"piccard-work5-test-actual-payload-v1\0" +
+            (json.dumps(material, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=True) + "\n").encode("ascii")
+        ).hexdigest()
+
+    @staticmethod
+    def forged_skip_commitment(record: dict[str, Any], **overrides: Any) -> str:
+        """Independent commitment oracle with one intentionally wrong field."""
+        material = {key: record[key] for key in
+                    ("security", "axis", "axis_value", "k", "m", "n", "U")}
+        material.update({"target_jaccard": record["target_jaccard"],
+                         "seed": record["seed"], "executed_trials": 3})
+        material.update(overrides)
+        return hashlib.sha256(
+            b"piccard-work5-planned-payload-v1\0" +
+            (json.dumps(material, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=True) + "\n").encode("ascii")
+        ).hexdigest()
+
+    def mark_fixture_measurements_actual(self, root: Path) -> list[dict[str, Any]]:
+        rows = read_jsonl(root / "cells.jsonl")
+        for row in rows:
+            if row["status"] == "MEASURED":
+                row["trial_payload_sha256"] = self.fixture_actual_payload(row)
+        self.rebind_cells(root, rows)
+        return rows
 
     def test_semantic_verifier_registers_both_piccard_m_extra_suites(self) -> None:
         expected = {
@@ -191,6 +243,7 @@ class Work5VerifierContractTest(unittest.TestCase):
 
     def test_valid_parameter_root_passes(self) -> None:
         results = self.produce_parameter_root("valid")
+        self.mark_fixture_measurements_actual(results)
         verified = self.verify(results)
         self.assertEqual(verified.returncode, 0, verified.stderr)
         production = subprocess.run(
@@ -198,8 +251,113 @@ class Work5VerifierContractTest(unittest.TestCase):
             cwd=ROOT, text=True, capture_output=True, check=False)
         self.assertNotEqual(production.returncode, 0)
 
+    def test_status_aware_payload_commitments_accept_mixed_groups_and_reject_forgery(self) -> None:
+        """Mixed real-payload/skip-commitment groups are valid only status-aware.
+
+        Each generated root forces the FHE-IND ``U=65536`` cell to its
+        observation-backed preflight terminal.  SJ16 at that same key is
+        already a frozen projected-runtime skip.  Thus STD128 and STD192 both
+        exercise exactly one materialized Piccard payload beside FHE/SJ skip
+        commitments without touching an immutable production evidence root.
+        """
+        mixed_roots: dict[str, Path] = {}
+        for security in ("STD128", "STD192"):
+            root = self.produce_parameter_root(
+                f"mixed-{security.lower()}",
+                {
+                    "PICCARD_WORK5_TEST_FORCE_PRECHECK_REASON": "RING_DIM_CAP",
+                    "PICCARD_WORK5_TEST_FORCE_PRECHECK_CELL":
+                        f"work5-{security.lower()}-fhe-ind::U=65536",
+                },
+            )
+            rows = self.mark_fixture_measurements_actual(root)
+            group = [row for row in rows if
+                     (row["security"], row["axis"], row["axis_value"], row["k"],
+                      row["m"], row["n"], row["U"], row["target_jaccard"], row["seed"]) ==
+                     (security, "U", 65536, 128, 64, 1000, 65536, "0.5", 7)]
+            self.assertEqual(
+                [(row["methods"], row["status"], row["reason_code"]) for row in group],
+                [(["piccard", "piccard_sqrt"] if security == "STD128" else
+                  ["piccard_encode", "piccard_sqrt_encode"], "MEASURED", None),
+                 (["fhe_ind"], "SKIPPED_PRECHECK", "RING_DIM_CAP"),
+                 (["sj16"], "SKIPPED_PRECHECK", "PROJECTED_RUNTIME_CAP")],
+            )
+            measured = group[0]
+            self.assertNotEqual(measured["trial_payload_sha256"],
+                                group[1]["trial_payload_sha256"])
+            self.assertEqual(group[1]["trial_payload_sha256"],
+                             work5_runner.planned_payload_sha256(group[1]))
+            self.assertEqual(group[1]["trial_payload_sha256"],
+                             work5_verifier.planned_payload_commitment(group[1]))
+            self.assertEqual(group[2]["trial_payload_sha256"],
+                             work5_runner.planned_payload_sha256(group[2]))
+            self.assertEqual(group[2]["trial_payload_sha256"],
+                             work5_verifier.planned_payload_commitment(group[2]))
+            mixed_roots[security] = root
+
+        # This is the RED boundary before the status-aware verifier fix: it
+        # incorrectly compares the actual marker with both skip commitments.
+        for security, root in mixed_roots.items():
+            with self.subTest(valid_mixed_group=security):
+                verified = self.verify(root)
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+
+        source = mixed_roots["STD128"]
+
+        def mutate(name: str, change: Callable[[list[dict[str, Any]], Path], None]) -> None:
+            candidate = self.tmp / name
+            shutil.copytree(source, candidate)
+            rows = read_jsonl(candidate / "cells.jsonl")
+            change(rows, candidate)
+            self.rebind_cells(candidate, rows)
+            self.assertNotEqual(self.verify(candidate).returncode, 0, name)
+
+        def u65536(rows: list[dict[str, Any]], methods: list[str]) -> dict[str, Any]:
+            return next(row for row in rows if row["security"] == "STD128" and
+                        row["axis"] == "U" and row["axis_value"] == 65536 and
+                        row["methods"] == methods)
+
+        mutate("measured-planned-commitment", lambda rows, _: u65536(
+            rows, ["piccard", "piccard_sqrt"]).__setitem__(
+                "trial_payload_sha256", work5_runner.planned_payload_sha256(
+                    u65536(rows, ["piccard", "piccard_sqrt"]))))
+        mutate("skipped-actual-payload", lambda rows, _: u65536(
+            rows, ["fhe_ind"]).__setitem__(
+                "trial_payload_sha256", self.fixture_actual_payload(
+                    u65536(rows, ["fhe_ind"]))))
+
+        skip = next(row for row in read_jsonl(source / "cells.jsonl")
+                    if row["methods"] == ["fhe_ind"] and row["axis"] == "U" and
+                    row["axis_value"] == 65536)
+        changed = {
+            "security": "TOY", "axis": "m", "axis_value": 65537, "k": 129,
+            "m": 65, "n": 1001, "U": 65537, "target_jaccard": "0.4", "seed": 8,
+            "executed_trials": 4,
+        }
+        for field, value in changed.items():
+            mutate(f"skip-commitment-{field}", lambda rows, _, field=field, value=value:
+                   u65536(rows, ["fhe_ind"]).__setitem__(
+                       "trial_payload_sha256",
+                       self.forged_skip_commitment(skip, **{field: value})))
+
+        def skipped_workload(rows: list[dict[str, Any]], _: Path) -> None:
+            measured = u65536(rows, ["piccard", "piccard_sqrt"])
+            target = u65536(rows, ["fhe_ind"])
+            target["workload_path"] = measured["workload_path"]
+            target["workload_sha256"] = measured["workload_sha256"]
+
+        def divergent_measured(rows: list[dict[str, Any]], _: Path) -> None:
+            controls = [row for row in rows if row["axis"] == "control" and
+                        row["status"] == "MEASURED"]
+            self.assertGreaterEqual(len(controls), 2)
+            controls[1]["trial_payload_sha256"] = "d" * 64
+
+        mutate("skipped-workload-artifact", skipped_workload)
+        mutate("jointly-measured-divergence", divergent_measured)
+
     def test_root_binding_exact_argv_and_orphan_inventory_fail_even_when_rehashed(self) -> None:
         source = self.produce_parameter_root("identity-source")
+        self.mark_fixture_measurements_actual(source)
         copied = self.tmp / "identity-copy"
         shutil.copytree(source, copied)
         self.assertNotEqual(self.verify(copied).returncode, 0,
@@ -229,12 +387,14 @@ class Work5VerifierContractTest(unittest.TestCase):
         # A separate valid root demonstrates an extra, unreferenced file is
         # rejected rather than ignored by a count-only verifier.
         orphan = self.produce_parameter_root("identity-orphan")
+        self.mark_fixture_measurements_actual(orphan)
         (orphan / "csv" / "orphan.csv").write_text("forged\n", encoding="utf-8")
         self.assertNotEqual(self.verify(orphan).returncode, 0,
                             "orphan producer artifact must not verify")
 
     def test_semantic_matrix_mutations_fail_closed(self) -> None:
         source = self.produce_parameter_root("source")
+        self.mark_fixture_measurements_actual(source)
 
         def change_method(rows: list[dict[str, Any]], _: Path) -> None:
             rows[0]["methods"] = ["threshold"]
@@ -392,6 +552,7 @@ class Work5VerifierContractTest(unittest.TestCase):
 
     def test_recomputed_provenance_and_bfv_caps_reject_rehashed_mutations(self) -> None:
         source = self.produce_parameter_root("provenance-source")
+        self.mark_fixture_measurements_actual(source)
 
         def rewrite_run(root: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
             path = root / "run.json"

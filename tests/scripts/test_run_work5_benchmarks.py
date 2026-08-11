@@ -487,16 +487,20 @@ class Work5RunnerContractTest(unittest.TestCase):
             sum(record["reason_code"] == "PROJECTED_RUNTIME_CAP"
                 for record in observed_required.values()), 2)
 
-        payloads: dict[tuple[Any, ...], set[str]] = defaultdict(set)
+        measured_payloads: dict[tuple[Any, ...], set[str]] = defaultdict(set)
         for record in records:
             key = (
                 record["security"], record["axis"], record["axis_value"],
                 record["k"], record["m"], record["n"], record["U"],
                 target_value(record), record["seed"],
             )
-            payloads[key].add(record["trial_payload_sha256"])
-        for key, digests in payloads.items():
-            if sum(1 for record in records if (
+            if record["status"] == "MEASURED":
+                measured_payloads[key].add(record["trial_payload_sha256"])
+            elif record["status"] == "SKIPPED_PRECHECK":
+                self.assertEqual(record["trial_payload_sha256"],
+                                 work5_runner.planned_payload_sha256(record))
+        for key, digests in measured_payloads.items():
+            if sum(1 for record in records if record["status"] == "MEASURED" and (
                     record["security"], record["axis"], record["axis_value"],
                     record["k"], record["m"], record["n"], record["U"],
                     target_value(record), record["seed"],
