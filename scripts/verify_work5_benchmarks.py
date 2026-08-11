@@ -35,6 +35,11 @@ CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
 BFV_CAPS = {"realized_ring_dim": 32768, "provisioned_depth": 4,
             "log_q_bits": 240.0}
 CONTEXT_LABELS = ("context_onehot", "context_sqrt", "context_fhe_ind")
+CONTEXT_SPECS = {
+    "context_onehot": ("onehot", "piccard-work5-piccard-context-preflight-v1"),
+    "context_sqrt": ("sqrt", "piccard-work5-piccard-context-preflight-v1"),
+    "context_fhe_ind": ("fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),
+}
 PARAMETERS = {"k": (16, 32, 64, 128, 256, 512),
               "m": (16, 32, 64, 128, 256),
               "n": (100, 1000, 10000, 100000),
@@ -190,21 +195,39 @@ def relative_file(root: Path, value: Any, label: str) -> Path:
     return candidate
 
 
+def expected_context_labels(methods: list[str]) -> tuple[str, ...]:
+    """Freeze required context artifacts solely from the ordered method list."""
+    if methods == ["fhe_ind"]:
+        return ("context_fhe_ind",)
+    labels: list[str] = []
+    if "piccard" in methods:
+        labels.append("context_onehot")
+    if "piccard_sqrt" in methods:
+        labels.append("context_sqrt")
+    return tuple(labels)
+
+
+def required_context_labels(record: dict[str, Any], *, test_fixture: bool) -> tuple[str, ...]:
+    """Context must be absent before admission or in the explicitly fake mode."""
+    if test_fixture or record["status"] == "ERROR" or not record.get("context_started"):
+        return ()
+    return expected_context_labels(record["methods"])
+
+
 def verify_artifacts(root: Path, record: dict[str, Any], *, test_fixture: bool) -> None:
     status = record["status"]
-    piccard = bool(set(record["methods"]) & {"piccard", "piccard_sqrt"})
-    fhe_ind = record["methods"] == ["fhe_ind"]
-    context_ran = status != "ERROR" and bool(record.get("context_started")) and not test_fixture
+    required_context = set(required_context_labels(record, test_fixture=test_fixture))
     pairs = (("command", True), ("stdout", True), ("stderr", True),
-             ("context_onehot", context_ran and piccard),
-             ("context_sqrt", context_ran and piccard),
-             ("context_fhe_ind", context_ran and fhe_ind),
+             *((label, label in required_context) for label in CONTEXT_LABELS),
              ("workload", status == "MEASURED"), ("trace", status == "MEASURED"),
              ("csv", status == "MEASURED"))
     for name, mandatory in pairs:
         path_value, digest = record.get(f"{name}_path"), record.get(f"{name}_sha256")
         require((path_value is None) == (digest is None),
                 f"{record['cell_id']}: {name} path/hash pair mismatch")
+        if name in CONTEXT_LABELS and name not in required_context:
+            require(path_value is None,
+                    f"{record['cell_id']}: forbidden {name} artifact is present")
         if mandatory:
             require(path_value is not None, f"{record['cell_id']}: missing {name} artifact")
         if path_value is None:
@@ -251,34 +274,14 @@ def results_root_digest(root: Path) -> str:
                                           "results_root": str(root.resolve())})).hexdigest()
 
 
-def expected_context_labels(methods: list[str]) -> tuple[str, ...]:
-    if methods == ["fhe_ind"]:
-        return ("context_fhe_ind",)
-    labels: list[str] = []
-    if "piccard" in methods:
-        labels.append("context_onehot")
-    if "piccard_sqrt" in methods:
-        labels.append("context_sqrt")
-    return tuple(labels)
-
-
 def verify_context(root: Path, run: dict[str, Any], record: dict[str, Any]) -> None:
-    if record["status"] == "ERROR" or run.get("test_fixture_mode") or \
-            not record.get("context_started") or \
-            not set(record["methods"]) & {"piccard", "piccard_sqrt", "fhe_ind"}:
+    labels = required_context_labels(record, test_fixture=bool(run.get("test_fixture_mode")))
+    if not labels:
         return
-    labels: tuple[tuple[str, str, str], ...]
-    if record["methods"] == ["fhe_ind"]:
-        labels = (("context_fhe_ind", "fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),)
-    else:
-        labels = tuple((label, circuit, "piccard-work5-piccard-context-preflight-v1")
-                       for label, circuit in (("context_onehot", "onehot"),
-                                              ("context_sqrt", "sqrt"))
-                       if ((circuit == "onehot" and "piccard" in record["methods"]) or
-                           (circuit == "sqrt" and "piccard_sqrt" in record["methods"])))
     breached_codes: set[str] = set()
     tuples: set[str] = set()
-    for label, circuit, schema in labels:
+    for label in labels:
+        circuit, schema = CONTEXT_SPECS[label]
         path = relative_file(root, record.get(f"{label}_path"), f"{record['cell_id']} {label}")
         value = load_object(path, "context preflight")
         require(value.get("schema") == schema and value.get("mode") == "work5-preflight" and
@@ -606,12 +609,6 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
         if target["control_cell_id"] is not None:
             require(not any(key.startswith("control_timing") for key in actual),
                     f"{target['cell_id']}: shared control timing copy is forbidden")
-        allowed_context = set(expected_context_labels(target["methods"]))
-        for label in CONTEXT_LABELS:
-            if label not in allowed_context:
-                require(actual.get(f"{label}_path") is None and
-                        actual.get(f"{label}_sha256") is None,
-                        f"{target['cell_id']}: inapplicable context artifact is forbidden")
         require(actual.get("target_jaccard") == "0.5" and actual.get("seed") == 7,
                 f"{target['cell_id']}: target/seed mismatch")
         require(actual.get("taxonomy") == expected_taxonomy(target["methods"], target["security"]),

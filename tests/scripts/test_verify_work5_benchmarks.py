@@ -25,6 +25,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import verify_review_comparison as review_verifier
+import verify_work5_benchmarks as work5_verifier
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 VERIFIER = ROOT / "scripts" / "verify_work5_benchmarks.py"
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
@@ -102,6 +103,91 @@ class Work5VerifierContractTest(unittest.TestCase):
                 ("work5-std192-t40-single-trial", ["piccard"], 1, 1),
         }
         self.assertEqual({name: review_verifier.SUITES[name] for name in expected}, expected)
+
+    def test_nonfixture_m_extra_requires_onehot_only_and_checks_context_identity(self) -> None:
+        root = self.tmp / "production-shaped-m-extra"
+        root.mkdir()
+
+        def install(relative: str, payload: bytes) -> tuple[str, str]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return relative, hashlib.sha256(payload).hexdigest()
+
+        cell_id = "work5-std128-piccard-m-extra::m=32"
+        source_commit = "a" * 40
+        piccard_binary = "b" * 64
+        argv = ["/production/bench_review_comparison", "--suite=work5-std128-piccard-m-extra"]
+        environment = {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"}
+        command = json.dumps({"schema": "piccard-work5-command-v1", "cell_id": cell_id,
+                              "argv": argv, "environment": environment},
+                             sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        artifacts = {}
+        for name, payload in (("command", command), ("stdout", b"producer stdout\n"),
+                              ("stderr", b""), ("workload", b"workload\n"),
+                              ("trace", b"trace\n"), ("csv", b"csv\n")):
+            relative, digest = install(f"{name}/{cell_id}.{name}", payload)
+            artifacts[f"{name}_path"] = relative
+            artifacts[f"{name}_sha256"] = digest
+        context = {
+            "schema": "piccard-work5-piccard-context-preflight-v1",
+            "mode": "work5-preflight", "keygen_started": False, "cell_id": cell_id,
+            "circuit": "onehot", "security": "STD128", "k": 128, "m": 32,
+            "n": 1000, "universe": 16384, "source_commit": source_commit,
+            "piccard_binary_sha256": piccard_binary, "realized_ring_dim": 32768,
+            "provisioned_depth": 4, "log_q_bits": 240.0,
+            "context_tuple_sha256": "c" * 64, "skipped": False,
+        }
+        onehot_path, onehot_digest = install(
+            f"context/{cell_id}.onehot.json",
+            json.dumps(context, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        record = {
+            "cell_id": cell_id, "status": "MEASURED", "methods": ["piccard"],
+            "context_started": True, "security": "STD128", "k": 128, "m": 32,
+            "n": 1000, "U": 16384, "argv": argv, "environment": environment,
+            **artifacts,
+            "context_onehot_path": onehot_path,
+            "context_onehot_sha256": onehot_digest,
+            "context_sqrt_path": None, "context_sqrt_sha256": None,
+            "context_fhe_ind_path": None, "context_fhe_ind_sha256": None,
+        }
+        run = {"test_fixture_mode": False, "git_sha": source_commit,
+               "executables": {"bench_std_security_evidence": piccard_binary}}
+        self.assertEqual(work5_verifier.expected_context_labels(["piccard"]),
+                         ("context_onehot",))
+        self.assertEqual(work5_verifier.expected_context_labels(
+            ["piccard", "piccard_sqrt"]),
+            ("context_onehot", "context_sqrt"))
+        self.assertEqual(work5_verifier.expected_context_labels(["fhe_ind"]),
+                         ("context_fhe_ind",))
+        self.assertFalse(run["test_fixture_mode"])
+        work5_verifier.verify_artifacts(root, record, test_fixture=False)
+        work5_verifier.verify_context(root, run, record)
+
+        missing = dict(record)
+        missing["context_onehot_path"] = None
+        missing["context_onehot_sha256"] = None
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_artifacts(root, missing, test_fixture=False)
+
+        sqrt_path, sqrt_digest = install(f"context/{cell_id}.forged-sqrt.json", b"forged\n")
+        extra_sqrt = dict(record)
+        extra_sqrt["context_sqrt_path"] = sqrt_path
+        extra_sqrt["context_sqrt_sha256"] = sqrt_digest
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_artifacts(root, extra_sqrt, test_fixture=False)
+
+        wrong_context = dict(context)
+        wrong_context["m"] = 64
+        wrong_path, wrong_digest = install(
+            f"context/{cell_id}.wrong-onehot.json",
+            json.dumps(wrong_context, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        wrong_identity = dict(record)
+        wrong_identity["context_onehot_path"] = wrong_path
+        wrong_identity["context_onehot_sha256"] = wrong_digest
+        work5_verifier.verify_artifacts(root, wrong_identity, test_fixture=False)
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_context(root, run, wrong_identity)
 
     def test_valid_parameter_root_passes(self) -> None:
         results = self.produce_parameter_root("valid")
