@@ -9,7 +9,9 @@ verification when the caller supplies a phase-specific output path.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -39,6 +41,16 @@ CONTEXT_SPECS = {
     "context_sqrt": ("sqrt", "piccard-work5-piccard-context-preflight-v1"),
     "context_fhe_ind": ("fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),
 }
+DYNAMIC_CSV_FIELDS = frozenset({
+    "label", "k", "m", "set_size", "depth", "trials", "hash_seed",
+    "accuracy_trials", "profile_id", "run_class", "target_security_bits",
+    "comparison_eligible", "measurement_kind", "dynamic_scenario",
+    "updates_requested", "updates_applied", "initial_epoch", "final_epoch",
+    "owner_b_unchanged", "ciphertext_upload_count", "local_inner_product",
+    "decrypted_inner_product", "correctness_status", "refresh_owner_set_id",
+    "refresh_updates", "refresh_epoch_before", "refresh_epoch_after",
+    "refresh_status", "refresh_upload_bytes", "refresh_ciphertexts_uploaded",
+})
 PHASE_ORDERS = {
     "toy": ["toy"],
     "parameters": ["toy", "parameters"],
@@ -565,6 +577,12 @@ def verify_phase_inventories(root: Path, run: dict[str, Any]) -> None:
                                                 "std192_encoding_rows": 2,
                                                 "errors": 0},
                     "real phase inventory row counts mismatch")
+        elif phase == "dynamic":
+            require(inventory["row_counts"] == {"correctness_rows": 2,
+                                                "updates_1": 1,
+                                                "updates_2": 1,
+                                                "errors": 0},
+                    "dynamic phase inventory row counts mismatch")
 
 
 def verify_phase_inventory_membership(root: Path, run: dict[str, Any], phase: str,
@@ -848,6 +866,120 @@ def verify_real(root: Path, run: dict[str, Any]) -> None:
     verify_phase_inventory_membership(root, run, "real", expected_paths)
 
 
+def _dynamic_canonical_integer(row: dict[str, str], key: str) -> int:
+    """Parse one producer number without accepting alternate spellings."""
+    value = row.get(key)
+    require(isinstance(value, str) and value, f"dynamic CSV field is missing: {key}")
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise VerificationError(f"dynamic CSV field is not an integer: {key}") from exc
+    require(str(parsed) == value, f"dynamic CSV integer is not canonical: {key}")
+    return parsed
+
+
+def verify_dynamic_csv(path: Path, updates: int) -> None:
+    """Independently verify one dynamic correctness row, never its timing.
+
+    This code intentionally does not call the runner's producer-side CSV
+    validator.  A matching producer/verifier defect must not turn a changed
+    owner, epoch, upload, or plaintext/ciphertext result into a PASS.
+    """
+    require(updates in (1, 2), "dynamic verifier received an unfrozen update count")
+    try:
+        text = path.read_text(encoding="utf-8")
+        reader = csv.DictReader(io.StringIO(text))
+        fieldnames = reader.fieldnames
+        require(fieldnames is not None and len(fieldnames) == len(set(fieldnames)) and
+                DYNAMIC_CSV_FIELDS.issubset(fieldnames),
+                "dynamic CSV header misses frozen correctness fields")
+        rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise VerificationError(f"cannot parse dynamic CSV: {exc}") from exc
+    require(len(rows) == 1 and None not in rows[0],
+            "dynamic phase requires exactly one well-formed CSV row per update")
+    row = rows[0]
+    require(all(row.get(name) not in (None, "") for name in DYNAMIC_CSV_FIELDS),
+            "dynamic CSV contains an empty frozen correctness field")
+    expected_text = {
+        "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
+        "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
+        "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
+        "target_security_bits": "0", "comparison_eligible": "false",
+        "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
+        "owner_b_unchanged": "true", "correctness_status": "PASS",
+        "refresh_owner_set_id": "owner-a", "refresh_status": "applied",
+    }
+    require(all(row[name] == value for name, value in expected_text.items()),
+            "dynamic CSV violates the frozen correctness/provenance contract")
+    expected_numbers = {
+        "updates_requested": updates, "updates_applied": updates,
+        "initial_epoch": 0, "final_epoch": updates,
+        "ciphertext_upload_count": updates, "refresh_updates": updates,
+        "refresh_epoch_before": 0, "refresh_epoch_after": updates,
+        "refresh_ciphertexts_uploaded": updates,
+    }
+    observed = {key: _dynamic_canonical_integer(row, key)
+                for key in (*expected_numbers, "local_inner_product",
+                            "decrypted_inner_product", "refresh_upload_bytes")}
+    require(all(observed[key] == value for key, value in expected_numbers.items()),
+            "dynamic CSV update/epoch/upload counters are inconsistent")
+    require(observed["local_inner_product"] == observed["decrypted_inner_product"],
+            "dynamic CSV local/decrypted inner products differ")
+    require(observed["refresh_upload_bytes"] > 0,
+            "dynamic CSV upload must contain one non-empty ciphertext")
+
+
+def verify_dynamic(root: Path, run: dict[str, Any]) -> None:
+    """Verify the terminal two-row TOY refresh correctness phase."""
+    dynamic_root = root / "dynamic"
+    require(dynamic_root.is_dir() and not dynamic_root.is_symlink(),
+            "dynamic phase directory is missing or unsafe")
+    command_path = dynamic_root / "commands.json"
+    terminal_path = dynamic_root / "terminal.json"
+    require(command_path.is_file() and terminal_path.is_file(),
+            "dynamic phase command/terminal artifact is missing")
+    commands = runner.planned_dynamic_commands(Path(run["build_dir"]), root)
+    require(len(commands) == 2, "dynamic command count is not frozen")
+    expected_commands = [{"label": label, "argv": argv} for label, argv in commands]
+    command = load_object(command_path, "dynamic command artifact")
+    require(command == {"schema": "piccard-work5-dynamic-command-v1",
+                        "commands": expected_commands,
+                        "environment": {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"}},
+            "dynamic command artifact does not bind the frozen producer argv")
+    terminal = load_object(terminal_path, "dynamic terminal artifact")
+    require(terminal.get("schema") == "piccard-work5-dynamic-terminal-v1" and
+            terminal.get("status") == "MEASURED" and terminal.get("detail") == "PASS" and
+            terminal.get("scenario") == "refresh" and terminal.get("profile") == "toy-smoke" and
+            terminal.get("security") == "TOY" and terminal.get("updates") == [1, 2] and
+            terminal.get("trials") == 1 and terminal.get("measurement_kind") == "diagnostic" and
+            terminal.get("commands") == expected_commands and
+            isinstance(terminal.get("ended_at_utc"), str),
+            "dynamic terminal contract mismatch")
+    expected_paths = {"dynamic/commands.json", "dynamic/terminal.json"}
+    for updates, (label, _argv) in zip((1, 2), commands):
+        csv_path = dynamic_root / f"{label}.csv"
+        stdout_path = dynamic_root / f"{label}.stdout"
+        stderr_path = dynamic_root / f"{label}.stderr"
+        require(csv_path.is_file() and stdout_path.is_file() and stderr_path.is_file() and
+                not csv_path.is_symlink() and not stdout_path.is_symlink() and
+                not stderr_path.is_symlink(),
+                f"dynamic {label} CSV or logs are missing or unsafe")
+        require(csv_path.read_bytes() == stdout_path.read_bytes(),
+                f"dynamic {label} CSV must be the exact producer stdout")
+        verify_dynamic_csv(csv_path, updates)
+        expected_paths.update({f"dynamic/{label}.csv", f"dynamic/{label}.stdout",
+                               f"dynamic/{label}.stderr"})
+    observed_paths: set[str] = set()
+    for path in dynamic_root.rglob("*"):
+        require(not path.is_symlink(), "dynamic phase contains a symlink")
+        if path.is_file():
+            observed_paths.add(path.relative_to(root).as_posix())
+    require(observed_paths == expected_paths,
+            "dynamic phase contains an unexpected or missing artifact")
+    verify_phase_inventory_membership(root, run, "dynamic", expected_paths)
+
+
 def verify_inventory(root: Path, records: list[dict[str, Any]],
                      toy: dict[str, Any] | None, run: dict[str, Any]) -> None:
     """Every on-disk artifact must be referenced exactly once by the lifecycle."""
@@ -985,7 +1117,13 @@ def process(args: argparse.Namespace) -> int:
     expected = expected_cells()
     verify_matrix(root, run, expected)
     fixture = bool(run.get("test_fixture_mode"))
-    if args.require_phase == "toy":
+    requested_phase = args.require_phase
+    # A complete seal must also independently traverse the final dynamic
+    # phase; otherwise a valid four-phase declaration could bypass its own
+    # correctness receipt checks by omitting --require-phase.
+    if args.require_complete and requested_phase is None:
+        requested_phase = "dynamic"
+    if requested_phase == "toy":
         require(not fixture and run.get("completed_phases") == ["toy"],
                 "toy verification requires a production root sealed before parameters")
         toy = verify_toy(root, run)
@@ -994,15 +1132,21 @@ def process(args: argparse.Namespace) -> int:
         verify_inventory(root, [], toy, run)
         result_phase, terminal_cells = "toy", 0
     else:
-        if args.require_phase and args.require_phase not in ("parameters", "real"):
-            raise VerificationError(f"Phase-5 verifier cannot verify {args.require_phase!r} evidence")
+        if requested_phase and requested_phase not in ("parameters", "real", "dynamic"):
+            raise VerificationError(f"verifier cannot verify {requested_phase!r} evidence")
         toy = None if fixture else verify_toy(root, run)
         records = verify_records(root, run, expected)
         if toy is not None:
             verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
         verify_phase_inventory_membership(root, run, "parameters",
                                           _expected_parameter_inventory_paths(records))
-        if args.require_phase == "real":
+        if requested_phase == "dynamic":
+            require(not fixture and run.get("completed_phases") == PHASE_ORDERS["dynamic"],
+                    "dynamic verification requires the exact toy,parameters,real,dynamic lifecycle")
+            verify_real(root, run)
+            verify_dynamic(root, run)
+            result_phase, terminal_cells = "dynamic", 61
+        elif requested_phase == "real":
             require(not fixture and run.get("completed_phases") == PHASE_ORDERS["real"],
                     "real verification requires the exact toy,parameters,real lifecycle")
             verify_real(root, run)

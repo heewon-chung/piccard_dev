@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Fail-closed lifecycle for the executed Work #5 toy, parameter, and real phases.
+"""Fail-closed lifecycle for the executed Work #5 evidence phases.
 
 This file deliberately orchestrates evidence; it does not estimate a result,
 retry a command, or manufacture a production measurement.  The toy smoke is
 recorded and independently verifiable before the production parameter matrix
 may be resumed in the same evidence root.  The real phase is source-bound to
-the DBLP-ACM single-trial contract; dynamic remains outside this implementation
-boundary.
+the DBLP-ACM single-trial contract, and the bounded dynamic correctness path.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -60,6 +60,14 @@ REAL_THREADS = 2
 REAL_PAIR_COUNT = 10000
 REAL_PROFILES = ("work5-std128-t40-single-trial",
                  "work5-std192-t40-single-trial")
+
+DYNAMIC_PROFILE = "toy-smoke"
+DYNAMIC_SECURITY = "TOY"
+DYNAMIC_UPDATES = (1, 2)
+DYNAMIC_K = 16
+DYNAMIC_M = 16
+DYNAMIC_SET_SIZE = 100
+DYNAMIC_DEPTH = 5
 
 CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
 TOY_CELL = {
@@ -698,7 +706,7 @@ def is_test_fixture_mode() -> bool:
 def required_executable_names(test_fixture: bool) -> tuple[str, ...]:
     return (("bench_review_comparison", "bench_fhe_ind", "bench_comparison") if test_fixture else
             ("bench_review_comparison", "bench_fhe_ind", "bench_comparison",
-             "bench_std_security_evidence", "bench_real_datasets"))
+             "bench_std_security_evidence", "bench_real_datasets", "bench_dynamic"))
 
 
 def executable_map(build_dir: Path, *, test_fixture: bool) -> dict[str, str]:
@@ -1625,6 +1633,12 @@ def command_template_sha256() -> str:
                  "seed": REAL_SEED, "threads": REAL_THREADS,
                  "profiles": list(REAL_PROFILES), "accuracy_trials": 1,
                  "timing_trials": 1, "timing_pair": "median"},
+        "dynamic": {"scenario": "refresh", "profile": DYNAMIC_PROFILE,
+                    "security": DYNAMIC_SECURITY, "updates": list(DYNAMIC_UPDATES),
+                    "k": DYNAMIC_K, "m": DYNAMIC_M, "set_size": DYNAMIC_SET_SIZE,
+                    "depth": DYNAMIC_DEPTH, "target_jaccard": TARGET_JACCARD,
+                    "trials": 1, "seed": SEED,
+                    "measurement_kind": "diagnostic"},
         "no_shell": True}
     return sha256_bytes(canonical_json(template))
 
@@ -1755,6 +1769,114 @@ def planned_real_commands(build_dir: Path, root: Path) -> list[tuple[str, list[s
     ]
 
 
+def planned_dynamic_commands(build_dir: Path, root: Path) -> list[tuple[str, list[str]]]:
+    """Return the two and only two dynamic correctness producer argv arrays.
+
+    ``root`` deliberately remains an argument even though the dynamic producer
+    writes CSV to stdout: keeping the planner shape identical to the real
+    phase makes the command/identity record independently reconstructable.
+    The dynamic path is TOY correctness evidence only, never an aggregate or
+    a performance comparison.
+    """
+    del root
+    command_prefix = [
+        str(build_dir / "bench_dynamic"), "--scenario=refresh",
+        "--profile=toy-smoke", "--security=TOY", "--mode=timing",
+        "--evidence_point", "--k=16", "--m=16", "--set_size=100",
+        "--target_jaccard=0.5", "--depth=5", "--trials=1", "--seed=7",
+    ]
+    return [
+        (f"updates-{updates}", [*command_prefix[:2],
+                                f"--refresh_updates={updates}",
+                                *command_prefix[2:]])
+        for updates in DYNAMIC_UPDATES
+    ]
+
+
+DYNAMIC_CSV_FIELDS = frozenset({
+    "label", "k", "m", "set_size", "depth", "trials", "hash_seed",
+    "accuracy_trials", "profile_id", "run_class", "target_security_bits",
+    "comparison_eligible", "measurement_kind", "dynamic_scenario",
+    "updates_requested", "updates_applied", "initial_epoch", "final_epoch",
+    "owner_b_unchanged", "ciphertext_upload_count", "local_inner_product",
+    "decrypted_inner_product", "correctness_status", "refresh_owner_set_id",
+    "refresh_updates", "refresh_epoch_before", "refresh_epoch_after",
+    "refresh_status", "refresh_upload_bytes", "refresh_ciphertexts_uploaded",
+})
+
+
+def _dynamic_canonical_integer(row: dict[str, str], key: str) -> int:
+    value = row.get(key)
+    if not isinstance(value, str) or not value:
+        raise Work5Error(f"dynamic CSV field is missing: {key}")
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise Work5Error(f"dynamic CSV field is not an integer: {key}") from exc
+    if str(parsed) != value:
+        raise Work5Error(f"dynamic CSV integer is not canonical: {key}")
+    return parsed
+
+
+def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
+    """Fail closed over one frozen dynamic correctness CSV row.
+
+    The runner applies this producer-side check before phase publication; the
+    independent verifier reconstructs the same public contract separately.
+    It intentionally validates correctness counters and provenance labels, not
+    timing values, because no dynamic timing result is a Work #5 claim.
+    """
+    if updates not in DYNAMIC_UPDATES:
+        raise Work5Error("dynamic CSV validator received an unfrozen update count")
+    try:
+        text = raw.decode("utf-8", "strict")
+        reader = csv.DictReader(io.StringIO(text))
+        fieldnames = reader.fieldnames
+        if (not fieldnames or len(fieldnames) != len(set(fieldnames)) or
+                not DYNAMIC_CSV_FIELDS.issubset(fieldnames)):
+            raise Work5Error("dynamic CSV header misses frozen correctness fields")
+        rows = list(reader)
+    except UnicodeDecodeError as exc:
+        raise Work5Error("dynamic CSV is not strict UTF-8") from exc
+    except csv.Error as exc:
+        raise Work5Error(f"dynamic CSV is malformed: {exc}") from exc
+    if len(rows) != 1 or any(None in row for row in rows):
+        raise Work5Error("dynamic phase requires exactly one well-formed CSV row per update")
+    row = rows[0]
+    if any(row.get(name) in (None, "") for name in DYNAMIC_CSV_FIELDS):
+        raise Work5Error("dynamic CSV contains an empty frozen correctness field")
+    expected_text = {
+        "label": f"refresh_owner_a_0_to_{updates}", "k": str(DYNAMIC_K),
+        "m": str(DYNAMIC_M), "set_size": str(DYNAMIC_SET_SIZE),
+        "depth": str(DYNAMIC_DEPTH), "trials": "1", "hash_seed": str(SEED),
+        "accuracy_trials": "0", "profile_id": DYNAMIC_PROFILE,
+        "run_class": "smoke", "target_security_bits": "0",
+        "comparison_eligible": "false", "measurement_kind": "diagnostic",
+        "dynamic_scenario": "refresh", "owner_b_unchanged": "true",
+        "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
+        "refresh_status": "applied",
+    }
+    if any(row[name] != value for name, value in expected_text.items()):
+        raise Work5Error("dynamic CSV violates the frozen correctness/provenance contract")
+    expected_numbers = {
+        "updates_requested": updates, "updates_applied": updates,
+        "initial_epoch": 0, "final_epoch": updates,
+        "ciphertext_upload_count": updates, "refresh_updates": updates,
+        "refresh_epoch_before": 0, "refresh_epoch_after": updates,
+        "refresh_ciphertexts_uploaded": updates,
+    }
+    observed = {key: _dynamic_canonical_integer(row, key)
+                for key in (*expected_numbers, "local_inner_product",
+                            "decrypted_inner_product", "refresh_upload_bytes")}
+    if any(observed[key] != value for key, value in expected_numbers.items()):
+        raise Work5Error("dynamic CSV update/epoch/upload counters are inconsistent")
+    if observed["local_inner_product"] != observed["decrypted_inner_product"]:
+        raise Work5Error("dynamic CSV local/decrypted inner products differ")
+    if observed["refresh_upload_bytes"] <= 0:
+        raise Work5Error("dynamic CSV upload must contain one non-empty ciphertext")
+    return row
+
+
 def _write_real_terminal(root: Path, *, status: str, detail: str,
                          commands: list[tuple[str, list[str]]]) -> Path:
     path = root / "real" / "terminal.json"
@@ -1845,6 +1967,98 @@ def run_real_phase(args: argparse.Namespace, root_capability: ResultsRootCapabil
         raise
 
 
+def _write_dynamic_terminal(root: Path, *, status: str, detail: str,
+                            commands: list[tuple[str, list[str]]]) -> Path:
+    path = root / "dynamic" / "terminal.json"
+    if path.exists():
+        raise Work5Error("dynamic phase already has a terminal record")
+    atomic_write(path, canonical_json({
+        "schema": "piccard-work5-dynamic-terminal-v1", "status": status,
+        "scenario": "refresh", "profile": DYNAMIC_PROFILE,
+        "security": DYNAMIC_SECURITY, "updates": list(DYNAMIC_UPDATES),
+        "trials": 1, "measurement_kind": "diagnostic",
+        "commands": [{"label": label, "argv": argv} for label, argv in commands],
+        "detail": detail, "ended_at_utc": utc_now(),
+    }), new=True)
+    return path
+
+
+def _dynamic_phase_artifacts(root: Path) -> list[Path]:
+    dynamic_root = root / "dynamic"
+    return sorted((path for path in dynamic_root.rglob("*") if path.is_file()),
+                  key=lambda path: path.as_posix())
+
+
+def run_dynamic_phase(args: argparse.Namespace, root_capability: ResultsRootCapability,
+                      *, deadline: float) -> int:
+    """Execute the terminal TOY refresh correctness phase once, after real.
+
+    This is a live producer solely for the future final root.  The Phase-6
+    code gate tests this function with isolated fixtures and invokes
+    ``bench_dynamic`` directly; it never invokes this lifecycle entrypoint.
+    """
+    if is_test_fixture_mode():
+        raise Work5Error("fixture mode cannot produce production dynamic evidence")
+    if not args.resume:
+        raise Work5Error("production dynamic evidence requires --resume after real")
+    root, build_dir = root_capability.root, Path(args.build_dir).resolve()
+    source_provenance(deadline)
+    executable_hashes = executable_map(build_dir, test_fixture=False)
+    matrix = matrix_document(frozen_cells())
+    run, records = resume_validate(root, build_dir, executable_hashes, matrix, deadline=deadline)
+    if run.get("git_dirty"):
+        raise Work5Error("production dynamic evidence requires a clean tracked source tree")
+    if run.get("completed_phases") != ["toy", "parameters", "real"]:
+        raise Work5Error("dynamic phase requires the exact ordered toy,parameters,real lifecycle")
+    if len(records) != 61 or any(record.get("status") == "ERROR" for record in records):
+        raise Work5Error("dynamic phase requires a terminal error-free parameter matrix")
+    require_prior_receipt(root, run, "real", ["toy", "parameters", "real"])
+    dynamic_root = root / "dynamic"
+    if any(dynamic_root.iterdir()):
+        raise Work5Error("dynamic phase has prior artifacts and cannot be retried or overwritten")
+    commands = planned_dynamic_commands(build_dir, root)
+    if len(commands) != len(DYNAMIC_UPDATES):
+        raise Work5Error("dynamic phase command count is not frozen")
+    for _label, argv in commands:
+        if not argv or not all(isinstance(item, str) and item for item in argv):
+            raise Work5Error("dynamic phase argv construction failed")
+    command_path = dynamic_root / "commands.json"
+    atomic_write(command_path, canonical_json({
+        "schema": "piccard-work5-dynamic-command-v1",
+        "commands": [{"label": label, "argv": argv} for label, argv in commands],
+        "environment": command_environment(),
+    }), new=True)
+    try:
+        for updates, (label, argv) in zip(DYNAMIC_UPDATES, commands):
+            result = bounded_subprocess(argv, deadline=deadline, cwd=SOURCE_ROOT,
+                                        env=process_environment())
+            stdout_path, stderr_path = (dynamic_root / f"{label}.stdout",
+                                        dynamic_root / f"{label}.stderr")
+            atomic_write(stdout_path, result.stdout or b"", new=True)
+            atomic_write(stderr_path, result.stderr or b"", new=True)
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
+                raise Work5Error(f"dynamic {label} subprocess failed: {detail}")
+            validate_dynamic_csv(result.stdout or b"", updates)
+            atomic_write(dynamic_root / f"{label}.csv", result.stdout or b"", new=True)
+        terminal = _write_dynamic_terminal(root, status="MEASURED", detail="PASS",
+                                           commands=commands)
+        artifacts = _dynamic_phase_artifacts(root)
+        if terminal not in artifacts:
+            raise Work5Error("dynamic terminal artifact is missing")
+        install_phase_inventory(run, "dynamic", phase_inventory_document(
+            root, "dynamic", artifacts,
+            row_counts={"correctness_rows": 2, "updates_1": 1,
+                        "updates_2": 1, "errors": 0}))
+        atomic_write(root / "run.json", canonical_json(run))
+        return 0
+    except BaseException as exc:
+        if not (dynamic_root / "terminal.json").exists():
+            _write_dynamic_terminal(root, status="ERROR",
+                                    detail=f"{type(exc).__name__}: {exc}", commands=commands)
+        raise
+
+
 def write_run_level_timeout(capability: ResultsRootCapability, *, phase: str,
                             phase_seconds: float, reason_code: str, detail: str) -> None:
     """Record a pre-cell deadline failure without fabricating a terminal cell."""
@@ -1904,6 +2118,8 @@ def process(args: argparse.Namespace) -> int:
             return run_toy_phase(args, root_capability, deadline=deadline)
         if args.phase == "real":
             return run_real_phase(args, root_capability, deadline=deadline)
+        if args.phase == "dynamic":
+            return run_dynamic_phase(args, root_capability, deadline=deadline)
         if args.phase != "parameters":
             raise Work5Error(f"--phase={args.phase!r} is not live yet")
         if not test_fixture and not args.resume:

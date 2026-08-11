@@ -9,7 +9,9 @@ lifecycle test intentionally fails at the missing-runner boundary.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -948,6 +950,167 @@ class Work5RunnerContractTest(unittest.TestCase):
         self.assertFalse((self.tmp / "fixture-real").exists(),
                          "fixture-mode real call must not create a Work #5 root")
         self.assertFalse(self.events.exists(), "fixture-mode real call started a producer")
+
+    def test_dynamic_phase_argv_is_frozen_for_the_two_correctness_rows(self) -> None:
+        root = self.tmp / "future-final-root"
+        commands = work5_runner.planned_dynamic_commands(self.build, root)
+        self.assertEqual([label for label, _ in commands], ["updates-1", "updates-2"])
+        for expected_updates, (_label, argv) in zip((1, 2), commands):
+            self.assertEqual(argv, [
+                str(self.build / "bench_dynamic"), "--scenario=refresh",
+                f"--refresh_updates={expected_updates}", "--profile=toy-smoke",
+                "--security=TOY", "--mode=timing", "--evidence_point", "--k=16",
+                "--m=16", "--set_size=100", "--target_jaccard=0.5", "--depth=5",
+                "--trials=1", "--seed=7",
+            ])
+
+    @staticmethod
+    def dynamic_refresh_csv(updates: int) -> bytes:
+        """A minimal valid producer row for lifecycle-only unit tests."""
+        values = {
+            "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
+            "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
+            "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
+            "target_security_bits": "0", "comparison_eligible": "false",
+            "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
+            "updates_requested": str(updates), "updates_applied": str(updates),
+            "initial_epoch": "0", "final_epoch": str(updates),
+            "owner_b_unchanged": "true", "ciphertext_upload_count": str(updates),
+            "local_inner_product": "7", "decrypted_inner_product": "7",
+            "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
+            "refresh_updates": str(updates), "refresh_epoch_before": "0",
+            "refresh_epoch_after": str(updates), "refresh_status": "applied",
+            "refresh_upload_bytes": "1", "refresh_ciphertexts_uploaded": str(updates),
+        }
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=sorted(work5_runner.DYNAMIC_CSV_FIELDS),
+                                lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(values)
+        return stream.getvalue().encode("utf-8")
+
+    def test_dynamic_csv_semantic_mutations_fail_before_phase_publication(self) -> None:
+        original = self.dynamic_refresh_csv(2)
+        self.assertEqual(work5_runner.validate_dynamic_csv(original, 2)["correctness_status"],
+                         "PASS")
+        cases = {
+            "owner_b_change": ("owner_b_unchanged", "false"),
+            "epoch_discontinuity": ("final_epoch", "1"),
+            "wrong_upload_count": ("ciphertext_upload_count", "1"),
+            "local_decrypted_mismatch": ("decrypted_inner_product", "8"),
+            "timing_promotion": ("measurement_kind", "fhe_timing"),
+        }
+        for name, (field, value) in cases.items():
+            with self.subTest(name=name):
+                reader = csv.DictReader(io.StringIO(original.decode("utf-8")))
+                row = next(reader)
+                row[field] = value
+                stream = io.StringIO()
+                writer = csv.DictWriter(stream, fieldnames=reader.fieldnames,
+                                        lineterminator="\n")
+                writer.writeheader()
+                writer.writerow(row)
+                with self.assertRaises(work5_runner.Work5Error):
+                    work5_runner.validate_dynamic_csv(stream.getvalue().encode("utf-8"), 2)
+
+    def test_dynamic_phase_requires_real_receipt_order_and_is_terminal(self) -> None:
+        root = self.tmp / "dynamic-terminal"
+        root.mkdir()
+        (root / "dynamic").mkdir()
+        capability = work5_runner.ResultsRootCapability(root=root, resume=True, fresh=False)
+        args = type("Args", (), {"resume": True, "build_dir": str(self.build)})()
+        commands = work5_runner.planned_dynamic_commands(self.build, root)
+        run = {
+            "completed_phases": ["toy", "parameters", "real"],
+            "phase_inventory": {"toy": {}, "parameters": {}, "real": {}},
+            "git_dirty": False,
+        }
+        results = [
+            subprocess.CompletedProcess(argv, 0, self.dynamic_refresh_csv(updates), b"")
+            for updates, (_label, argv) in zip((1, 2), commands)
+        ]
+        with mock.patch.object(work5_runner, "source_provenance", return_value={}), \
+             mock.patch.object(work5_runner, "executable_map", return_value={}), \
+             mock.patch.object(work5_runner, "resume_validate",
+                               return_value=(run, [{"status": "MEASURED"}] * 61)), \
+             mock.patch.object(work5_runner, "require_prior_receipt") as prior_receipt, \
+             mock.patch.object(work5_runner, "bounded_subprocess", side_effect=results):
+            self.assertEqual(work5_runner.run_dynamic_phase(
+                args, capability, deadline=time.monotonic() + 30), 0)
+        prior_receipt.assert_called_once_with(
+            root, run, "real", ["toy", "parameters", "real"])
+        self.assertEqual(run["completed_phases"], ["toy", "parameters", "real", "dynamic"])
+        self.assertEqual(run["phase_inventory"]["dynamic"]["row_counts"], {
+            "correctness_rows": 2, "updates_1": 1, "updates_2": 1, "errors": 0,
+        })
+        self.assertEqual(json.loads((root / "dynamic" / "terminal.json").read_text(encoding="utf-8"))[
+            "status"], "MEASURED")
+
+    def test_dynamic_phase_first_error_is_terminal_and_cannot_retry(self) -> None:
+        root = self.tmp / "dynamic-error"
+        root.mkdir()
+        (root / "dynamic").mkdir()
+        capability = work5_runner.ResultsRootCapability(root=root, resume=True, fresh=False)
+        args = type("Args", (), {"resume": True, "build_dir": str(self.build)})()
+        commands = work5_runner.planned_dynamic_commands(self.build, root)
+        run = {
+            "completed_phases": ["toy", "parameters", "real"],
+            "phase_inventory": {"toy": {}, "parameters": {}, "real": {}},
+            "git_dirty": False,
+        }
+        with mock.patch.object(work5_runner, "source_provenance", return_value={}), \
+             mock.patch.object(work5_runner, "executable_map", return_value={}), \
+             mock.patch.object(work5_runner, "resume_validate",
+                               return_value=(run, [{"status": "MEASURED"}] * 61)), \
+             mock.patch.object(work5_runner, "require_prior_receipt"), \
+             mock.patch.object(work5_runner, "bounded_subprocess",
+                               return_value=subprocess.CompletedProcess(
+                                   commands[0][1], 2, b"", b"first failure")):
+            with self.assertRaisesRegex(work5_runner.Work5Error,
+                                        "dynamic updates-1 subprocess failed"):
+                work5_runner.run_dynamic_phase(args, capability, deadline=time.monotonic() + 30)
+            terminal = json.loads((root / "dynamic" / "terminal.json").read_text(encoding="utf-8"))
+            self.assertEqual(terminal["status"], "ERROR")
+            self.assertIn("first failure", terminal["detail"])
+            with self.assertRaisesRegex(work5_runner.Work5Error, "prior artifacts"):
+                work5_runner.run_dynamic_phase(args, capability, deadline=time.monotonic() + 30)
+
+    def test_dynamic_phase_rejects_wrong_lifecycle_before_producer(self) -> None:
+        root = self.tmp / "dynamic-wrong-order"
+        root.mkdir()
+        (root / "dynamic").mkdir()
+        capability = work5_runner.ResultsRootCapability(root=root, resume=True, fresh=False)
+        args = type("Args", (), {"resume": True, "build_dir": str(self.build)})()
+        run = {"completed_phases": ["toy", "parameters"],
+               "phase_inventory": {"toy": {}, "parameters": {}}, "git_dirty": False}
+        with mock.patch.object(work5_runner, "source_provenance", return_value={}), \
+             mock.patch.object(work5_runner, "executable_map", return_value={}), \
+             mock.patch.object(work5_runner, "resume_validate",
+                               return_value=(run, [{"status": "MEASURED"}] * 61)):
+            with self.assertRaisesRegex(work5_runner.Work5Error, "exact ordered"):
+                work5_runner.run_dynamic_phase(args, capability, deadline=time.monotonic() + 30)
+        self.assertEqual(list((root / "dynamic").iterdir()), [])
+
+    def test_dynamic_phase_requires_an_independent_real_receipt_before_writing(self) -> None:
+        root = self.tmp / "dynamic-no-real-receipt"
+        root.mkdir()
+        (root / "dynamic").mkdir()
+        capability = work5_runner.ResultsRootCapability(root=root, resume=True, fresh=False)
+        args = type("Args", (), {"resume": True, "build_dir": str(self.build)})()
+        run = {
+            "completed_phases": ["toy", "parameters", "real"],
+            "phase_inventory": {"toy": {}, "parameters": {}, "real": {}},
+            "git_dirty": False,
+        }
+        with mock.patch.object(work5_runner, "source_provenance", return_value={}), \
+             mock.patch.object(work5_runner, "executable_map", return_value={}), \
+             mock.patch.object(work5_runner, "resume_validate",
+                               return_value=(run, [{"status": "MEASURED"}] * 61)), \
+             mock.patch.object(work5_runner, "require_prior_receipt",
+                               side_effect=work5_runner.Work5Error("missing real receipt")):
+            with self.assertRaisesRegex(work5_runner.Work5Error, "missing real receipt"):
+                work5_runner.run_dynamic_phase(args, capability, deadline=time.monotonic() + 30)
+        self.assertEqual(list((root / "dynamic").iterdir()), [])
 
     def test_parameter_phase_inventory_is_exactly_terminal_and_hashed(self) -> None:
         results = self.tmp / "parameter-inventory"

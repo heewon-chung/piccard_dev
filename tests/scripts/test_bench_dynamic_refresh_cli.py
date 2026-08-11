@@ -3,14 +3,23 @@
 
 import csv
 import io
+import os
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 
-if len(sys.argv) != 2:
-    raise SystemExit("usage: test_bench_dynamic_refresh_cli.py BENCH_DYNAMIC")
-BENCH_DYNAMIC = sys.argv.pop()
+ROOT = Path(__file__).resolve().parents[2]
+# CTest invokes this file directly with the built binary path.  The Phase-6
+# gate also runs it through ``python -m unittest``; in that form unittest owns
+# argv, so use the explicit in-tree Release/default build path (or an override)
+# rather than rejecting the test module during import.
+if len(sys.argv) == 2 and Path(sys.argv[1]).name == "bench_dynamic":
+    BENCH_DYNAMIC = sys.argv.pop()
+else:
+    BENCH_DYNAMIC = os.environ.get("PICCARD_BENCH_DYNAMIC",
+                                   str(ROOT / "build" / "bench_dynamic"))
 
 
 class BenchDynamicRefreshCliTest(unittest.TestCase):
@@ -49,6 +58,14 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["dynamic_scenario"], "refresh")
+        self.assertEqual(row["updates_requested"], "1")
+        self.assertEqual(row["updates_applied"], "1")
+        self.assertEqual(row["initial_epoch"], "0")
+        self.assertEqual(row["final_epoch"], "1")
+        self.assertEqual(row["owner_b_unchanged"], "true")
+        self.assertEqual(row["ciphertext_upload_count"], "1")
+        self.assertEqual(row["local_inner_product"], row["decrypted_inner_product"])
+        self.assertEqual(row["correctness_status"], "PASS")
         self.assertEqual(row["refresh_status"], "applied")
         self.assertEqual(row["refresh_owner_set_id"], "owner-a")
         self.assertEqual(row["refresh_epoch_before"], "0")
@@ -63,10 +80,26 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
         result = self.run_cli(command)
         self.assertEqual(result.returncode, 0, result.stderr)
         row = list(csv.DictReader(io.StringIO(result.stdout)))[0]
+        self.assertEqual(row["updates_requested"], "2")
+        self.assertEqual(row["updates_applied"], "2")
+        self.assertEqual(row["initial_epoch"], "0")
+        self.assertEqual(row["final_epoch"], "2")
+        self.assertEqual(row["owner_b_unchanged"], "true")
+        self.assertEqual(row["ciphertext_upload_count"], "2")
+        self.assertEqual(row["local_inner_product"], row["decrypted_inner_product"])
+        self.assertEqual(row["correctness_status"], "PASS")
         self.assertEqual(row["refresh_updates"], "2")
         self.assertEqual(row["refresh_epoch_before"], "0")
         self.assertEqual(row["refresh_epoch_after"], "2")
         self.assertEqual(row["refresh_ciphertexts_uploaded"], "2")
+
+    def test_accepts_the_frozen_work5_target_jaccard_argv_spelling(self):
+        command = ["--target_jaccard=0.5" if arg == "--target-jaccard=0.5" else arg
+                   for arg in self.base_command()]
+        result = self.run_cli(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = list(csv.DictReader(io.StringIO(result.stdout)))[0]
+        self.assertEqual(row["dynamic_scenario"], "refresh")
 
     def test_rejects_update_counts_outside_frozen_one_or_two(self):
         command = self.base_command()

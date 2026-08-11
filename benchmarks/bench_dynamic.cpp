@@ -748,7 +748,25 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    auto config = BenchmarkConfig::ParseArgs(argc, argv);
+    // The frozen Work #5 dynamic argv historically spells this one evidence
+    // field with an underscore.  Normalize it locally rather than widening
+    // the shared benchmark CLI contract; the canonical parser still owns all
+    // numeric validation and duplicate detection.
+    std::vector<std::string> normalized_args;
+    normalized_args.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg.rfind("--target_jaccard=", 0) == 0) {
+            arg = "--target-jaccard=" + arg.substr(17);
+        }
+        normalized_args.push_back(std::move(arg));
+    }
+    std::vector<char*> normalized_argv;
+    normalized_argv.reserve(normalized_args.size());
+    for (auto& arg : normalized_args) {
+        normalized_argv.push_back(arg.data());
+    }
+    auto config = BenchmarkConfig::ParseArgs(argc, normalized_argv.data());
 
     // Parse dynamic-only flags before rejecting unknown benchmark options.
     uint32_t depth = 5;
@@ -774,7 +792,7 @@ int main(int argc, char** argv) {
         }
     }
     RejectUnknownBenchmarkOptions(
-        argc, argv, {"--depth=", "--scenario=", "--refresh_updates="});
+        argc, normalized_argv.data(), {"--depth=", "--scenario=", "--refresh_updates="});
 
     config.Print();
     std::cerr << "  Depth:     " << depth << "\n";

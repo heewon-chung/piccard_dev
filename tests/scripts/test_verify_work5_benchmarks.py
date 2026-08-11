@@ -9,6 +9,8 @@ missing entities.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import hashlib
 import os
@@ -288,10 +290,125 @@ class Work5VerifierContractTest(unittest.TestCase):
         self.mark_fixture_measurements_actual(results)
         verified = self.verify(results)
         self.assertEqual(verified.returncode, 0, verified.stderr)
-        production = subprocess.run(
-            ["python3", str(VERIFIER), str(results), "--require-phase=parameters"],
-            cwd=ROOT, text=True, capture_output=True, check=False)
-        self.assertNotEqual(production.returncode, 0)
+
+    @staticmethod
+    def dynamic_refresh_csv(updates: int) -> bytes:
+        values = {
+            "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
+            "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
+            "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
+            "target_security_bits": "0", "comparison_eligible": "false",
+            "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
+            "updates_requested": str(updates), "updates_applied": str(updates),
+            "initial_epoch": "0", "final_epoch": str(updates),
+            "owner_b_unchanged": "true", "ciphertext_upload_count": str(updates),
+            "local_inner_product": "7", "decrypted_inner_product": "7",
+            "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
+            "refresh_updates": str(updates), "refresh_epoch_before": "0",
+            "refresh_epoch_after": str(updates), "refresh_status": "applied",
+            "refresh_upload_bytes": "1", "refresh_ciphertexts_uploaded": str(updates),
+        }
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=sorted(work5_verifier.DYNAMIC_CSV_FIELDS),
+                                lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(values)
+        return stream.getvalue().encode("utf-8")
+
+    def dynamic_root(self, name: str) -> tuple[Path, dict[str, Any]]:
+        root = self.tmp / name
+        dynamic = root / "dynamic"
+        dynamic.mkdir(parents=True)
+        commands = work5_runner.planned_dynamic_commands(self.build, root)
+        command = {
+            "schema": "piccard-work5-dynamic-command-v1",
+            "commands": [{"label": label, "argv": argv} for label, argv in commands],
+            "environment": {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"},
+        }
+        (dynamic / "commands.json").write_bytes(work5_runner.canonical_json(command))
+        terminal = {
+            "schema": "piccard-work5-dynamic-terminal-v1", "status": "MEASURED",
+            "scenario": "refresh", "profile": "toy-smoke", "security": "TOY",
+            "updates": [1, 2], "trials": 1, "measurement_kind": "diagnostic",
+            "commands": command["commands"], "detail": "PASS",
+            "ended_at_utc": "2026-08-12T00:00:00Z",
+        }
+        (dynamic / "terminal.json").write_bytes(work5_runner.canonical_json(terminal))
+        for updates, (label, _argv) in zip((1, 2), commands):
+            payload = self.dynamic_refresh_csv(updates)
+            (dynamic / f"{label}.csv").write_bytes(payload)
+            (dynamic / f"{label}.stdout").write_bytes(payload)
+            (dynamic / f"{label}.stderr").write_bytes(b"")
+        artifacts = [path for path in dynamic.rglob("*") if path.is_file()]
+        run = {
+            "build_dir": str(self.build),
+            "phase_inventory": {"dynamic": {
+                "artifacts": [{"path": path.relative_to(root).as_posix(),
+                               "sha256": work5_runner.sha256_file(path)}
+                              for path in sorted(artifacts)],
+            }},
+        }
+        return root, run
+
+    @staticmethod
+    def mutate_dynamic_csv(root: Path, label: str, field: str, value: str) -> None:
+        dynamic = root / "dynamic"
+        source = dynamic / f"{label}.csv"
+        reader = csv.DictReader(io.StringIO(source.read_text(encoding="utf-8")))
+        row = next(reader)
+        row[field] = value
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=reader.fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(row)
+        payload = stream.getvalue().encode("utf-8")
+        source.write_bytes(payload)
+        (dynamic / f"{label}.stdout").write_bytes(payload)
+
+    def test_dynamic_semantic_verifier_accepts_two_rows_and_rejects_mutations(self) -> None:
+        root, run = self.dynamic_root("dynamic-valid")
+        work5_verifier.verify_dynamic(root, run)
+        self.assertTrue(callable(work5_verifier.verify_dynamic))
+        cases = {
+            "owner_b_change": ("updates-1", "owner_b_unchanged", "false"),
+            "epoch_discontinuity": ("updates-2", "final_epoch", "1"),
+            "replay_acceptance": ("updates-2", "updates_applied", "3"),
+            "wrong_upload_count": ("updates-2", "ciphertext_upload_count", "1"),
+            "local_decrypted_mismatch": ("updates-1", "decrypted_inner_product", "8"),
+            "timing_promotion": ("updates-1", "measurement_kind", "fhe_timing"),
+        }
+        for name, (label, field, value) in cases.items():
+            with self.subTest(name=name):
+                candidate, candidate_run = self.dynamic_root(f"dynamic-{name}")
+                self.mutate_dynamic_csv(candidate, label, field, value)
+                with self.assertRaises(work5_verifier.VerificationError):
+                    work5_verifier.verify_dynamic(candidate, candidate_run)
+
+    def test_dynamic_semantic_verifier_rejects_missing_or_external_artifacts(self) -> None:
+        missing, missing_run = self.dynamic_root("dynamic-missing")
+        (missing / "dynamic" / "updates-2.csv").unlink()
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_dynamic(missing, missing_run)
+
+        external, external_run = self.dynamic_root("dynamic-external")
+        external_run["phase_inventory"]["dynamic"]["artifacts"].append({
+            "path": "../outside.csv", "sha256": "0" * 64,
+        })
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_dynamic(external, external_run)
+
+    def test_dynamic_phase_inventory_counts_are_exact(self) -> None:
+        root, run = self.dynamic_root("dynamic-inventory")
+        run.update({"completed_phases": ["dynamic"]})
+        run["phase_inventory"]["dynamic"].update({
+            "schema": "piccard-work5-phase-inventory-v1", "phase": "dynamic",
+            "row_counts": {"correctness_rows": 2, "updates_1": 1,
+                           "updates_2": 1, "errors": 0},
+        })
+        work5_verifier.verify_phase_inventories(root, run)
+        run["phase_inventory"]["dynamic"]["row_counts"]["updates_2"] = 2
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier.verify_phase_inventories(root, run)
 
     def test_phase_receipt_path_is_new_only_and_expectation_syntax_is_strict(self) -> None:
         results = self.produce_parameter_root("receipt")

@@ -116,6 +116,16 @@ TEST(DynamicRefreshBenchmarkTest, AppliesFrozenOneOrTwoOwnerAUpdatesSequentially
         SCOPED_TRACE(updates);
         const DynamicResult row = RunSingleOwnerRefresh(engine, a, b, 5, updates);
         EXPECT_EQ(row.dynamic_scenario, "refresh");
+        EXPECT_EQ(row.updates_requested, updates);
+        EXPECT_EQ(row.updates_applied, updates);
+        EXPECT_EQ(row.initial_epoch, 0u);
+        EXPECT_EQ(row.final_epoch, updates);
+        EXPECT_EQ(row.owner_b_unchanged, "true");
+        EXPECT_EQ(row.ciphertext_upload_count, updates);
+        ASSERT_TRUE(row.local_inner_product.has_value());
+        ASSERT_TRUE(row.decrypted_inner_product.has_value());
+        EXPECT_EQ(*row.local_inner_product, *row.decrypted_inner_product);
+        EXPECT_EQ(row.correctness_status, "PASS");
         EXPECT_EQ(row.refresh_owner_set_id, "owner-a");
         EXPECT_EQ(row.refresh_updates, updates);
         EXPECT_EQ(row.refresh_epoch_before, 0u);
