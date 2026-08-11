@@ -10,6 +10,7 @@
 // benchmarks/real_accuracy_driver.cpp, which this file dispatches to before
 // any FHE code path exists.
 #include "real_accuracy_driver.h"
+#include "real_encoding_driver.h"
 #include "real_timing_driver.h"
 
 #include <cstdint>
@@ -21,8 +22,10 @@
 namespace {
 
 using piccard::bench::RealAccuracyCliArgs;
+using piccard::bench::RealEncodingCliArgs;
 using piccard::bench::RealTimingCliArgs;
 using piccard::bench::RunRealAccuracyMode;
+using piccard::bench::RunRealEncodingMode;
 using piccard::bench::RunRealTimingMode;
 
 void PrintUsage(std::ostream& out) {
@@ -35,6 +38,11 @@ void PrintUsage(std::ostream& out) {
            "  bench_real_datasets --dataset-manifest=<path> --mode=timing\n"
            "      --profile=<id> --k=<uint32> --m=<uint32> --trials=<uint32>\n"
            "      --timing-pair=median --seed=<uint64> --csv=<path>\n"
+           "      --workload-manifest-out=<path>\n"
+           "  bench_real_datasets --dataset-manifest=<path> --mode=encoding\n"
+           "      --profile=work5-std192-t40-single-trial\n"
+           "      --method=piccard_encode|piccard_sqrt_encode --k=128 --m=64\n"
+           "      --trials=1 --timing-pair=median --seed=20260729 --csv=<path>\n"
            "      --workload-manifest-out=<path>\n";
 }
 
@@ -80,7 +88,7 @@ std::string ExtractMode(int argc, char** argv) {
             return argument.substr(equals + 1);
         }
     }
-    throw std::invalid_argument("--mode is required (accuracy|timing)");
+    throw std::invalid_argument("--mode is required (accuracy|timing|encoding)");
 }
 
 RealAccuracyCliArgs ParseAccuracyArguments(int argc, char** argv) {
@@ -224,6 +232,74 @@ RealTimingCliArgs ParseTimingArguments(int argc, char** argv) {
     return args;
 }
 
+RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
+    RealEncodingCliArgs args;
+    bool saw_dataset_manifest = false;
+    bool saw_profile = false;
+    bool saw_method = false;
+    bool saw_k = false;
+    bool saw_m = false;
+    bool saw_trials = false;
+    bool saw_timing_pair = false;
+    bool saw_seed = false;
+    bool saw_csv = false;
+    bool saw_workload_manifest_out = false;
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        const size_t equals = argument.find('=');
+        if (equals == std::string::npos || equals == 0 || equals + 1 == argument.size()) {
+            throw std::invalid_argument("invalid argument: " + argument);
+        }
+        const std::string option = argument.substr(0, equals);
+        const std::string value = argument.substr(equals + 1);
+        if (option == "--mode") {
+            continue;
+        } else if (option == "--dataset-manifest") {
+            args.dataset_manifest_path = value;
+            saw_dataset_manifest = true;
+        } else if (option == "--profile") {
+            args.profile_id = value;
+            saw_profile = true;
+        } else if (option == "--method") {
+            args.method = value;
+            saw_method = true;
+        } else if (option == "--k") {
+            args.k = ParseUint32Option(value, option);
+            saw_k = true;
+        } else if (option == "--m") {
+            args.m = ParseUint32Option(value, option);
+            saw_m = true;
+        } else if (option == "--trials") {
+            args.trials = ParseUint32Option(value, option);
+            saw_trials = true;
+        } else if (option == "--timing-pair") {
+            args.timing_pair = value;
+            saw_timing_pair = true;
+        } else if (option == "--seed") {
+            args.root_seed = ParseUint64Option(value, option);
+            saw_seed = true;
+        } else if (option == "--csv") {
+            args.csv_path = value;
+            saw_csv = true;
+        } else if (option == "--workload-manifest-out") {
+            args.workload_manifest_out_path = value;
+            saw_workload_manifest_out = true;
+        } else {
+            throw std::invalid_argument("unknown option: " + option);
+        }
+    }
+    if (!saw_dataset_manifest || !saw_profile || !saw_method || !saw_k || !saw_m ||
+        !saw_trials || !saw_timing_pair || !saw_seed || !saw_csv ||
+        !saw_workload_manifest_out) {
+        throw std::invalid_argument(
+            "--mode=encoding requires --dataset-manifest, --profile, --method, "
+            "--k, --m, --trials, --timing-pair, --seed, --csv, and "
+            "--workload-manifest-out (all mandatory, no defaults)");
+    }
+    return args;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -236,6 +312,10 @@ int main(int argc, char** argv) {
         if (mode == "timing") {
             const RealTimingCliArgs args = ParseTimingArguments(argc, argv);
             return RunRealTimingMode(args);
+        }
+        if (mode == "encoding") {
+            const RealEncodingCliArgs args = ParseEncodingArguments(argc, argv);
+            return RunRealEncodingMode(args);
         }
         throw std::invalid_argument("unknown --mode: " + mode);
     } catch (const std::exception& error) {

@@ -100,6 +100,18 @@ _ACCURACY_HEADER_FIELDS = EXPECTED_ACCURACY_HEADER_LF.strip("\n").split(",")
 
 _ACCURACY_HASH_DOMAIN = b"piccard-real-crs-v1"
 _TIMING_HASH_DOMAIN = b"piccard-real-timing-crs-v1"
+_ENCODING_HASH_DOMAIN = b"piccard-real-encoding-crs-v1"
+ENCODING_DRIVER_SOURCE = REPO / "benchmarks" / "real_encoding_driver.cpp"
+EXPECTED_ENCODING_HEADER_LF = (
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "comparison_scope,primitive,protocol_model,cost_scope,"
+    "secure_division_included,measurement_kind,dataset,variant,"
+    "dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,"
+    "label,record_a,record_b,k,m,method,timing_trials,timing_pair,root_seed,"
+    "hash_seed,encoder_warmup_calls,timed_encoder_calls,"
+    "correctness_encoder_calls,signature_derivation_timed,phase_encode_ms,"
+    "encoded_slots,correctness_status,measurement_status\n"
+)
 
 # The driver TU's #include set is a closed allowlist [FA2][FA9]: no
 # BFV/OpenFHE header may appear, directly or transitively, so KeyGen can
@@ -183,6 +195,20 @@ def derive_timing_hash_seed(root_seed: int, dataset_manifest_sha256_raw: bytes,
     )
     digest = hashlib.sha256(buffer).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def derive_encoding_hash_seed(root_seed: int, dataset_manifest_sha256_raw: bytes,
+                              k: int, m: int, profile_id: str,
+                              method: str) -> int:
+    profile = profile_id.encode("utf-8")
+    method_bytes = method.encode("utf-8")
+    buffer = (
+        _ENCODING_HASH_DOMAIN + b"\x00" + root_seed.to_bytes(8, "big")
+        + dataset_manifest_sha256_raw + k.to_bytes(4, "big")
+        + m.to_bytes(4, "big") + len(profile).to_bytes(4, "big") + profile
+        + len(method_bytes).to_bytes(4, "big") + method_bytes
+    )
+    return int.from_bytes(hashlib.sha256(buffer).digest()[:8], "big")
 
 
 def parse_records_tsv(path: Path) -> dict:
@@ -585,6 +611,118 @@ class RealDatasetPipelineTimingTest(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["measurement_kind"], "fhe-timing")
             self.assertEqual(row["profile_id"], "toy-smoke")
+
+
+class RealDatasetPipelineEncodingTest(unittest.TestCase):
+    """The Work #5 STD192 path times only the core encoder.
+
+    It runs against the tracked small fixture, never a production source or
+    processed directory, and asserts both the exact separate schema and the
+    absence of every context/key/ciphertext phase field.
+    """
+
+    def setUp(self):
+        require_binary()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out_dir = Path(self.temp.name)
+
+    def run_encoding(self, method: str):
+        csv_path = self.out_dir / f"{method}.csv"
+        workload = self.out_dir / f"{method}.manifest.tsv"
+        result = subprocess.run(
+            [
+                str(BINARY), f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
+                "--mode=encoding", "--profile=work5-std192-t40-single-trial",
+                f"--method={method}", "--k=128", "--m=64", "--trials=1",
+                "--timing-pair=median", "--seed=20260729", f"--csv={csv_path}",
+                f"--workload-manifest-out={workload}",
+            ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        return csv_path, workload
+
+    def test_explicit_encoding_methods_have_core_only_schema_and_counters(self):
+        forbidden = {
+            "phase_minhash_ms", "phase_encrypt_ms", "phase_cloud_multiply_ms",
+            "phase_cloud_rotate_ms", "phase_sanitize_ms", "phase_decrypt_ms",
+            "phase_bias_correction_ms", "total_query_ms", "actual_ring_dim",
+            "log_q_bits", "plaintext_modulus", "num_limbs", "openfhe_version",
+            "sanitizer_model", "sanitizer_assurance", "ciphertext_bytes",
+            "upload_bytes", "download_bytes",
+        }
+        raw_hash = hashlib.sha256(QUICK_FIXTURE_MANIFEST.read_bytes()).digest()
+        for method, primitive, model, slots in (
+                ("piccard_encode", "onehot-encoding", "piccard-local-encoding", 8192),
+                ("piccard_sqrt_encode", "sqrt-encoding",
+                 "piccard-sqrt-local-encoding", 2048)):
+            csv_path, workload = self.run_encoding(method)
+            self.assertEqual(csv_path.read_text(encoding="utf-8").split("\n", 1)[0] + "\n",
+                             EXPECTED_ENCODING_HEADER_LF)
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertFalse(forbidden.intersection(row))
+            self.assertEqual(row["comparison_scope"], "encoding-only-diagnostic")
+            self.assertEqual(row["primitive"], primitive)
+            self.assertEqual(row["protocol_model"], model)
+            self.assertEqual(row["cost_scope"], "encoding-only")
+            self.assertEqual(row["comparison_eligible"], "false")
+            self.assertEqual(row["secure_division_included"], "false")
+            self.assertEqual(row["timing_trials"], "1")
+            self.assertEqual(row["encoder_warmup_calls"], "1")
+            self.assertEqual(row["timed_encoder_calls"], "1")
+            self.assertEqual(row["correctness_encoder_calls"], "1")
+            self.assertEqual(row["signature_derivation_timed"], "false")
+            self.assertEqual(row["correctness_status"], "PASS")
+            self.assertEqual(int(row["encoded_slots"]), slots)
+            self.assertGreaterEqual(float(row["phase_encode_ms"]), 0.0)
+            manifest = parse_two_column_tsv(workload)
+            self.assertEqual(manifest["schema_version"], "piccard-real-encoding-workload-v1")
+            self.assertEqual(manifest["method"], method)
+            self.assertEqual(manifest["encoded_slots"], str(slots))
+            self.assertEqual(
+                int(manifest["hash_seed"]),
+                derive_encoding_hash_seed(20260729, raw_hash, 128, 64,
+                                          "work5-std192-t40-single-trial", method))
+
+    def test_encoding_rejects_nonfrozen_seed_before_output(self):
+        csv_path = self.out_dir / "wrong-seed.csv"
+        result = subprocess.run(
+            [
+                str(BINARY), f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
+                "--mode=encoding", "--profile=work5-std192-t40-single-trial",
+                "--method=piccard_encode", "--k=128", "--m=64", "--trials=1",
+                "--timing-pair=median", "--seed=7", f"--csv={csv_path}",
+                f"--workload-manifest-out={self.out_dir / 'wrong-seed.tsv'}",
+            ], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("seed=20260729", result.stderr)
+        self.assertFalse(csv_path.exists())
+
+    def test_encoding_refuses_existing_terminal_output_without_overwrite(self):
+        csv_path = self.out_dir / "existing.csv"
+        workload = self.out_dir / "existing.manifest.tsv"
+        csv_path.write_bytes(b"do not replace this terminal artifact\n")
+        result = subprocess.run(
+            [
+                str(BINARY), f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
+                "--mode=encoding", "--profile=work5-std192-t40-single-trial",
+                "--method=piccard_encode", "--k=128", "--m=64", "--trials=1",
+                "--timing-pair=median", "--seed=20260729", f"--csv={csv_path}",
+                f"--workload-manifest-out={workload}",
+            ], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("overwrite", result.stderr)
+        self.assertEqual(csv_path.read_bytes(), b"do not replace this terminal artifact\n")
+        self.assertFalse(workload.exists(), "failed publication must not leave a retryable workload")
+
+    def test_encoding_driver_has_no_fhe_dependency(self):
+        source = ENCODING_DRIVER_SOURCE.read_text(encoding="utf-8").casefold()
+        for forbidden in ("openfhe", "lbcrypto", "bfv_context", "keygen(",
+                          "encrypt(", "decrypt(", "eval"):
+            self.assertNotIn(forbidden, source)
 
 
 class SummarizeRealDatasetsTest(unittest.TestCase):

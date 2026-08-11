@@ -573,6 +573,57 @@ class QuickCliValidationTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class SingleTrialValidationCliTest(unittest.TestCase):
+    """Parser and quarantine gates for the final DBLP-ACM mode.
+
+    These tests intentionally stop before preprocessing or benchmark launch;
+    Phase 5 must not make a production real-data timing claim.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tmp = pathlib.Path(self.temp.name)
+        self.source = ROOT / "datasets" / "manifests" / "dblp_acm.source.tsv"
+
+    def invoke(self, source, dataset, *extra):
+        return run_runner(
+            "--single-trial-validation", f"--source-manifest={source}",
+            f"--dataset-manifest={dataset}", "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'build'}", f"--results-root={self.tmp / 'results'}",
+            *extra,
+        )
+
+    def test_seed_threads_and_profile_are_frozen_before_any_input_load(self):
+        for argument, expected in (("--seed=7", "freezes --seed=20260729"),
+                                   ("--threads=1", "freezes --threads=2"),
+                                   ("--profile=std128-t40-primary", "do not pass --profile")):
+            with self.subTest(argument=argument):
+                result = run_runner(
+                    "--single-trial-validation", f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+                    f"--dataset-manifest={QUICK_DATASET_MANIFEST}", argument,
+                    "--seed=20260729" if argument != "--seed=7" else "--threads=2",
+                    "--threads=2" if argument != "--threads=1" else "--seed=20260729",
+                    f"--build-dir={self.tmp / 'build'}",
+                    f"--results-root={self.tmp / 'results'}",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+                self.assertFalse((self.tmp / "results").exists())
+
+    def test_unapproved_source_and_prior_processed_directory_are_rejected(self):
+        wrong_source = self.invoke(QUICK_SOURCE_MANIFEST, QUICK_DATASET_MANIFEST, "--dry-run")
+        self.assertNotEqual(wrong_source.returncode, 0)
+        self.assertIn("requires exactly", wrong_source.stderr)
+        legacy_manifest = (ROOT / "datasets" / "data" / "processed" /
+                           "dblp_acm_u65536" / "dataset.manifest.tsv")
+        self.assertTrue(legacy_manifest.is_file(), "quarantined prior run must remain available for rejection")
+        legacy = self.invoke(self.source, legacy_manifest, "--dry-run")
+        self.assertNotEqual(legacy.returncode, 0)
+        self.assertIn("quarantined prior processed", legacy.stderr)
+        self.assertFalse((self.tmp / "results").exists())
+
+
 class DryRunTest(unittest.TestCase):
     """Dry-run prints the exact matrix before any directory creation
     (Phase 6 RED list: "dry-run has zero side effects")."""

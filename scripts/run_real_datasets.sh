@@ -37,7 +37,12 @@ from dataclasses import dataclass, field
 SCRIPT_DIR = pathlib.Path(sys.argv.pop(1)).resolve()
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from prepare_real_datasets import parse_two_column_tsv, sha256_file  # noqa: E402
+from prepare_real_datasets import (  # noqa: E402
+    ManifestError,
+    parse_two_column_tsv,
+    sha256_file,
+    validate_source_manifest,
+)
 
 
 SCHEMA = "piccard-real-run-v1"
@@ -51,6 +56,26 @@ QUICK_DATASET_MANIFEST = (
     / "dataset.manifest.tsv"
 )
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
+SINGLE_TRIAL_PROFILES = (
+    "work5-std128-t40-single-trial",
+    "work5-std192-t40-single-trial",
+)
+SINGLE_TRIAL_SEED = 20260729
+SINGLE_TRIAL_THREADS = 2
+SINGLE_TRIAL_DATASET = "dblp_acm"
+SINGLE_TRIAL_VARIANT = "dblp_acm_u65536"
+SINGLE_TRIAL_PAIR_COUNT = 10000
+SINGLE_TRIAL_SOURCE_MANIFEST = (
+    REPO_ROOT / "datasets" / "manifests" / "dblp_acm.source.tsv"
+).resolve()
+_LEGACY_PROCESSED_DIR = (
+    REPO_ROOT / "datasets" / "data" / "processed" / "dblp_acm_u65536"
+).resolve()
+_SINGLE_TRIAL_SOURCE_HASHES = {
+    "dblp_records": "32863e8b4e7e18e5254c3e0e05cbc282af2e1e6e9d58e124605ebcbaa178ae7f",
+    "acm_records": "32055f1dfa619a4fdca33e7de729c66686a2fb3c71589921a6a3bd3af389120e",
+    "dblp_acm_mapping": "d9d7c9feaba3d19a2e73ba8bd6ae08407d8b16082881f6e55abc2d703682d53a",
+}
 ACCURACY_K = 128
 ACCURACY_M = 64
 HASH_RANDOMNESS = "resampled"
@@ -62,6 +87,7 @@ QUICK_TIMING_TRIALS = 1
 PAPER_MAX_PAIRS = 10000
 PAPER_ACCURACY_TRIALS = 1
 PAPER_TIMING_TRIALS = 30
+SINGLE_TRIAL_TIMING_TRIALS = 1
 
 
 class RunnerError(ValueError):
@@ -174,12 +200,29 @@ class ManifestPair:
     variant: str
 
 
+def _is_under(path: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _reject_legacy_processed_path(path: pathlib.Path, label: str) -> None:
+    if _is_under(path, _LEGACY_PROCESSED_DIR):
+        fail(f"{label} resolves within the quarantined prior processed DBLP-ACM directory")
+
+
 def load_manifest_pair(source_manifest: pathlib.Path,
                         dataset_manifest: pathlib.Path) -> ManifestPair:
     if not source_manifest.is_absolute() or not dataset_manifest.is_absolute():
         fail("--source-manifest and --dataset-manifest must be absolute paths")
     source_manifest = source_manifest.resolve(strict=True)
     dataset_manifest = dataset_manifest.resolve(strict=True)
+    # This is deliberately before parsing dataset.manifest.tsv: the old
+    # 4448-pair run is not admissible even as a rejected configuration input.
+    _reject_legacy_processed_path(source_manifest, "source manifest")
+    _reject_legacy_processed_path(dataset_manifest, "dataset manifest")
     values = read_kv(dataset_manifest)
     dataset = values.get("dataset")
     variant = values.get("variant")
@@ -188,6 +231,50 @@ def load_manifest_pair(source_manifest: pathlib.Path,
     return ManifestPair(source_manifest=source_manifest,
                         dataset_manifest=dataset_manifest,
                         dataset=dataset, variant=variant)
+
+
+def validate_single_trial_pair(pair: ManifestPair) -> None:
+    """Bind validation mode to the immutable DBLP-ACM source and a fresh run.
+
+    This runs source hashing before any real-data producer is launched.  The
+    parser itself performs the required hash-before-UTF-8-decode check; this
+    outer gate additionally freezes all three published source digests and
+    rejects the old 4448-pair directory as either a source or a destination.
+    """
+    if pair.source_manifest != SINGLE_TRIAL_SOURCE_MANIFEST:
+        fail("single-trial-validation requires exactly "
+             f"{SINGLE_TRIAL_SOURCE_MANIFEST}")
+    if pair.dataset != SINGLE_TRIAL_DATASET or pair.variant != SINGLE_TRIAL_VARIANT:
+        fail("single-trial-validation requires dataset=dblp_acm and "
+             "variant=dblp_acm_u65536")
+    try:
+        source = validate_source_manifest(pair.source_manifest, "dblp_acm")
+    except ManifestError as error:
+        fail(f"single-trial-validation source manifest validation failed: {error}")
+    source_hashes = {entry.role: entry.sha256 for entry in source.inputs}
+    if source_hashes != _SINGLE_TRIAL_SOURCE_HASHES:
+        fail("single-trial-validation source input hashes are not the frozen DBLP-ACM hashes")
+    values = read_kv(pair.dataset_manifest)
+    expected = {
+        "schema_version": "piccard-real-processed-v1",
+        "dataset": SINGLE_TRIAL_DATASET,
+        "variant": SINGLE_TRIAL_VARIANT,
+        "universe_size": "65536",
+        "seed": str(SINGLE_TRIAL_SEED),
+        "record_count": "4910",
+        "pair_count": str(SINGLE_TRIAL_PAIR_COUNT),
+        "requested_pair_count": str(SINGLE_TRIAL_PAIR_COUNT),
+        "original_positive_count": "2224",
+        "retained_positive_count": "2224",
+    }
+    mismatches = [key for key, value in expected.items() if values.get(key) != value]
+    if mismatches:
+        fail("single-trial-validation processed manifest mismatch: " +
+             ", ".join(mismatches))
+    copied_source = pair.dataset_manifest.parent / "source.manifest.tsv"
+    if (not copied_source.is_file() or sha256_file(copied_source) !=
+            sha256_file(pair.source_manifest)):
+        fail("single-trial-validation processed manifest is not bound to the supplied source manifest")
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +368,37 @@ def timing_cell(pair: ManifestPair, results_root: pathlib.Path, processed_root_i
     )
 
 
+def encoding_cell(pair: ManifestPair, results_root: pathlib.Path,
+                  processed_root_id: str, processed_root: pathlib.Path,
+                  profile: str, method: str, seed: int, threads: int) -> Cell:
+    csv_path = results_root / "csv" / (
+        f"real_encoding_{pair.variant}_{profile}_{method}.csv")
+    wm_path = results_root / "workloads" / (
+        f"encoding_{pair.variant}_{profile}_{method}.manifest.tsv")
+    display_argv = [
+        "bench_real_datasets",
+        f"--dataset-manifest={pair.dataset_manifest}",
+        "--mode=encoding",
+        f"--profile={profile}",
+        f"--method={method}",
+        f"--k={ACCURACY_K}", f"--m={ACCURACY_M}",
+        f"--trials={SINGLE_TRIAL_TIMING_TRIALS}",
+        f"--timing-pair={TIMING_PAIR}",
+        f"--seed={seed}",
+        f"--csv={csv_path}",
+        f"--workload-manifest-out={wm_path}",
+    ]
+    dataset_manifest_rel = pair.dataset_manifest.relative_to(processed_root).as_posix()
+    return Cell(
+        cell_id=f"{pair.variant}:encoding:{profile}:{method}", variant=pair.variant,
+        display_argv=display_argv, exec_argv=None,
+        env={"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": str(threads)},
+        input_specs=[("processed-manifest", processed_root_id, processed_root,
+                     dataset_manifest_rel)],
+        output_paths=[csv_path, wm_path],
+    )
+
+
 def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, threads,
                 profiles):
     cells = []
@@ -301,6 +419,15 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
             cells.append(timing_cell(
                 pair, results_root, processed_root_id, processed_root,
                 QUICK_TIMING_PROFILE, seed, threads, QUICK_TIMING_TRIALS))
+        elif evidence_mode == "single-trial-validation":
+            cells.append(timing_cell(
+                pair, results_root, processed_root_id, processed_root,
+                "work5-std128-t40-single-trial", seed, threads,
+                SINGLE_TRIAL_TIMING_TRIALS))
+            for method in ("piccard_encode", "piccard_sqrt_encode"):
+                cells.append(encoding_cell(
+                    pair, results_root, processed_root_id, processed_root,
+                    "work5-std192-t40-single-trial", method, seed, threads))
         else:
             for profile in profiles:
                 cells.append(timing_cell(
@@ -501,12 +628,12 @@ def execute(args, project: pathlib.Path) -> int:
         fail("scripts/summarize_real_datasets.py is missing from the committed source root")
 
     commit, dirty = source_identity(project)
-    if args.evidence_mode == "paper":
+    if args.evidence_mode in ("paper", "single-trial-validation"):
         if dirty:
-            fail("evidence_mode=paper requires a clean source tree")
+            fail(f"evidence_mode={args.evidence_mode} requires a clean source tree")
         build_type = read_build_type(build_dir)
         if build_type != "Release":
-            fail("evidence_mode=paper requires CMAKE_BUILD_TYPE=Release")
+            fail(f"evidence_mode={args.evidence_mode} requires CMAKE_BUILD_TYPE=Release")
     else:
         build_type = read_build_type(build_dir)
 
@@ -515,6 +642,8 @@ def execute(args, project: pathlib.Path) -> int:
 
     roots_by_variant = {}
     for pair in args.pairs:
+        if args.evidence_mode == "single-trial-validation":
+            validate_single_trial_pair(pair)
         roots_by_variant[pair.variant] = {
             "source": pair.source_manifest.parent,
             "processed": pair.dataset_manifest.parent,
@@ -745,6 +874,7 @@ def parse_args(argv):
     parser.add_argument("--dataset-manifest", action="append", default=[])
     parser.add_argument("--profile", action="append", default=[])
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--single-trial-validation", action="store_true")
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--threads", required=True, type=int)
     parser.add_argument("--build-dir", required=True)
@@ -765,9 +895,9 @@ def parse_args(argv):
         parser.error("--results-root must be an absolute path")
 
     has_manifests = bool(args.source_manifest) or bool(args.dataset_manifest)
-    if args.quick and (has_manifests or args.profile):
+    if args.quick and (has_manifests or args.profile or args.single_trial_validation):
         parser.error("--quick cannot be combined with --source-manifest/"
-                     "--dataset-manifest/--profile")
+                     "--dataset-manifest/--profile/--single-trial-validation")
     if not args.quick and not has_manifests:
         parser.error("specify --quick or at least one --source-manifest/"
                      "--dataset-manifest pair")
@@ -779,6 +909,21 @@ def parse_args(argv):
         args.evidence_mode = "quick"
         args.pairs = [load_manifest_pair(QUICK_SOURCE_MANIFEST, QUICK_DATASET_MANIFEST)]
         args.profiles = ()
+    elif args.single_trial_validation:
+        if args.profile:
+            parser.error("--single-trial-validation pins its two Work #5 profiles; "
+                         "do not pass --profile")
+        if len(args.source_manifest) != 1 or len(args.dataset_manifest) != 1:
+            parser.error("--single-trial-validation requires exactly one "
+                         "--source-manifest/--dataset-manifest pair")
+        if args.seed != SINGLE_TRIAL_SEED:
+            parser.error(f"--single-trial-validation freezes --seed={SINGLE_TRIAL_SEED}")
+        if args.threads != SINGLE_TRIAL_THREADS:
+            parser.error(f"--single-trial-validation freezes --threads={SINGLE_TRIAL_THREADS}")
+        args.evidence_mode = "single-trial-validation"
+        args.pairs = [load_manifest_pair(pathlib.Path(args.source_manifest[0]),
+                                         pathlib.Path(args.dataset_manifest[0]))]
+        args.profiles = SINGLE_TRIAL_PROFILES
     else:
         args.evidence_mode = "paper"
         seen = set()
@@ -806,6 +951,8 @@ def main(argv=None) -> int:
     if args.dry_run:
         results_root = pathlib.Path(args.results_root)
         build_dir = pathlib.Path(args.build_dir)
+        if args.evidence_mode == "single-trial-validation":
+            validate_single_trial_pair(args.pairs[0])
         roots_by_variant = {
             pair.variant: {"source": pair.source_manifest.parent,
                           "processed": pair.dataset_manifest.parent}

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Independent fail-closed verifier for Work #5 evidence roots.
 
-The verifier has no mutation path.  In particular, it never repairs a hash,
-fills in a terminal row, or converts an ERROR into a skip.  ``verification.json``
-and ``SHA256SUMS`` are Phase-7 seal artifacts and are intentionally not made by
-this Phase-3 verifier.
+The verifier never repairs a hash, fills in a terminal row, or converts an
+ERROR into a skip.  It can write one new phase receipt only after successful
+verification when the caller supplies a phase-specific output path.
 """
 
 from __future__ import annotations
@@ -39,6 +38,12 @@ CONTEXT_SPECS = {
     "context_onehot": ("onehot", "piccard-work5-piccard-context-preflight-v1"),
     "context_sqrt": ("sqrt", "piccard-work5-piccard-context-preflight-v1"),
     "context_fhe_ind": ("fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),
+}
+PHASE_ORDERS = {
+    "toy": ["toy"],
+    "parameters": ["toy", "parameters"],
+    "real": ["toy", "parameters", "real"],
+    "dynamic": ["toy", "parameters", "real", "dynamic"],
 }
 PARAMETERS = {"k": (16, 32, 64, 128, 256, 512),
               "m": (16, 32, 64, 128, 256),
@@ -501,6 +506,75 @@ def verify_matrix(root: Path, run: dict[str, Any], expected: list[dict[str, Any]
         require(actual == target, "matrix cell membership/order mismatch")
 
 
+def phase_inventory_sha256(inventory: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(inventory)).hexdigest()
+
+
+def verify_phase_inventories(root: Path, run: dict[str, Any]) -> None:
+    """Validate each completed phase's local, hashed, non-overlapping files."""
+    completed = run.get("completed_phases")
+    inventories = run.get("phase_inventory")
+    require(isinstance(completed, list) and isinstance(inventories, dict) and
+            set(inventories) == set(completed),
+            "phase inventory does not exactly match completed phases")
+    seen: set[str] = set()
+    for phase in completed:
+        inventory = inventories.get(phase)
+        require(isinstance(inventory, dict) and
+                inventory.get("schema") == "piccard-work5-phase-inventory-v1" and
+                inventory.get("phase") == phase and
+                isinstance(inventory.get("artifacts"), list) and inventory["artifacts"] and
+                isinstance(inventory.get("row_counts"), dict),
+                f"{phase} phase inventory schema mismatch")
+        paths: list[str] = []
+        for artifact in inventory["artifacts"]:
+            require(isinstance(artifact, dict) and set(artifact) == {"path", "sha256"},
+                    f"{phase} phase inventory artifact schema mismatch")
+            relative = artifact["path"]
+            require(isinstance(relative, str) and relative not in paths,
+                    f"{phase} phase inventory has duplicate artifact path")
+            path = relative_file(root, relative, f"{phase} inventory artifact")
+            require(path.is_file() and not path.is_symlink() and
+                    isinstance(artifact["sha256"], str) and len(artifact["sha256"]) == 64 and
+                    sha256_file(path) == artifact["sha256"],
+                    f"{phase} phase inventory artifact hash mismatch: {relative}")
+            paths.append(relative)
+            require(relative not in seen,
+                    f"phase inventory artifact belongs to multiple phases: {relative}")
+            seen.add(relative)
+        require(paths == sorted(paths), f"{phase} phase inventory artifact order is not canonical")
+        if phase == "toy":
+            require(inventory["row_counts"] == {"terminal_cells": 0, "measured": 1,
+                                                "skipped": 0, "errors": 0},
+                    "toy phase inventory row counts mismatch")
+        elif phase == "parameters":
+            counts = inventory["row_counts"]
+            require(set(counts) == {"terminal_cells", "measured", "skipped", "errors"} and
+                    all(isinstance(value, int) and value >= 0 for value in counts.values()) and
+                    counts["terminal_cells"] == 61 and
+                    counts["measured"] + counts["skipped"] + counts["errors"] == 61,
+                    "parameter phase inventory row counts mismatch")
+            if not run.get("test_fixture_mode"):
+                require(counts == {"terminal_cells": 61, "measured": 49,
+                                   "skipped": 12, "errors": 0},
+                        "production parameter phase counts must be 49/12/0")
+        elif phase == "real":
+            require(inventory["row_counts"] == {"datasets": 1,
+                                                "accuracy_rows": runner.REAL_PAIR_COUNT,
+                                                "std128_timing_rows": 1,
+                                                "std192_encoding_rows": 2,
+                                                "errors": 0},
+                    "real phase inventory row counts mismatch")
+
+
+def verify_phase_inventory_membership(root: Path, run: dict[str, Any], phase: str,
+                                      expected_paths: set[str]) -> None:
+    inventory = run["phase_inventory"][phase]
+    actual_paths = {artifact["path"] for artifact in inventory["artifacts"]}
+    require(actual_paths == expected_paths,
+            f"{phase} phase inventory does not bind its exact lifecycle artifacts")
+
+
 def verify_run(root: Path, run: dict[str, Any]) -> None:
     require(run.get("schema") == RUNNER_SCHEMA and isinstance(run.get("created_at_utc"), str) and
             isinstance(run.get("source_root"), str) and isinstance(run.get("git_sha"), str) and
@@ -551,8 +625,11 @@ def verify_run(root: Path, run: dict[str, Any]) -> None:
     if test_fixture:
         require(completed == ["parameters"], "fixture root has an invalid completed-phase declaration")
     else:
-        require(completed in (["toy"], ["toy", "parameters"]),
+        require(completed in (["toy"], ["toy", "parameters"],
+                              ["toy", "parameters", "real"],
+                              ["toy", "parameters", "real", "dynamic"]),
                 "production root has an invalid completed-phase declaration")
+    verify_phase_inventories(root, run)
 
 
 def verify_toy(root: Path, run: dict[str, Any]) -> dict[str, Any]:
@@ -682,6 +759,10 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
                     f"trial payload hashes diverge for jointly measured cell {key}")
     require(not any(record["status"] == "ERROR" for record in records),
             "parameter evidence contains ERROR terminal record")
+    if not run.get("test_fixture_mode"):
+        require(sum(record["status"] == "MEASURED" for record in records) == 49 and
+                sum(record["status"] == "SKIPPED_PRECHECK" for record in records) == 12,
+                "production parameter matrix must contain exactly 49 measured and 12 skipped cells")
 
     required_skips = {
         ("work5-std128-sj16", "U", 65536): "PROJECTED_RUNTIME_CAP",
@@ -712,8 +793,63 @@ def verify_records(root: Path, run: dict[str, Any], expected: list[dict[str, Any
     return records
 
 
+def verify_real(root: Path, run: dict[str, Any]) -> None:
+    """Validate the real phase as a DBLP contract, never as a timing claim."""
+    real_root = root / "real"
+    require(real_root.is_dir() and not real_root.is_symlink(),
+            "real phase directory is missing or unsafe")
+    command_path = real_root / "commands.json"
+    terminal_path = real_root / "terminal.json"
+    require(command_path.is_file() and terminal_path.is_file(),
+            "real phase command/terminal artifact is missing")
+    commands = runner.planned_real_commands(Path(run["build_dir"]), root)
+    expected_commands = [{"label": label, "argv": argv} for label, argv in commands]
+    command = load_object(command_path, "real command artifact")
+    require(command == {"schema": "piccard-work5-real-command-v1",
+                        "commands": expected_commands,
+                        "environment": {"OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"}},
+            "real command artifact does not bind the frozen producer argv")
+    terminal = load_object(terminal_path, "real terminal artifact")
+    require(terminal.get("schema") == "piccard-work5-real-terminal-v1" and
+            terminal.get("status") == "MEASURED" and terminal.get("detail") == "PASS" and
+            terminal.get("dataset") == runner.REAL_DATASET and
+            terminal.get("variant") == runner.REAL_VARIANT and
+            terminal.get("source_manifest") == str(runner.REAL_SOURCE_MANIFEST) and
+            terminal.get("pairs") == runner.REAL_PAIR_COUNT and
+            terminal.get("seed") == runner.REAL_SEED and terminal.get("threads") == runner.REAL_THREADS and
+            terminal.get("profiles") == list(runner.REAL_PROFILES) and
+            terminal.get("accuracy_trials") == 1 and terminal.get("timing_trials") == 1 and
+            terminal.get("timing_pair") == "median" and
+            terminal.get("commands") == expected_commands and
+            isinstance(terminal.get("ended_at_utc"), str),
+            "real terminal contract mismatch")
+    for label, _argv in commands:
+        require((real_root / f"{label}.stdout").is_file() and
+                (real_root / f"{label}.stderr").is_file(),
+                f"real {label} logs are missing")
+    measurements = real_root / "measurements"
+    processed = real_root / runner.REAL_VARIANT
+    require(measurements.is_dir() and processed.is_dir() and
+            (processed / "dataset.manifest.tsv").is_file(),
+            "real processed dataset or measurement root is missing")
+    try:
+        import verify_real_dataset_outputs as real_verifier
+        real_verifier.verify(measurements)
+    except Exception as exc:  # noqa: BLE001 - every real verifier failure is terminal
+        raise VerificationError(f"real dataset semantic verification failed: {exc}") from exc
+    bad_path_words = ("context", "calibration", "keygen", "encrypt", "decrypt", "eval")
+    for path in real_root.rglob("*"):
+        require(not path.is_symlink(), "real phase contains a symlink")
+        if path.is_file():
+            require(not any(word in path.name.casefold() for word in bad_path_words),
+                    "real phase contains a forbidden STD192 FHE artifact name")
+    expected_paths = {path.relative_to(root).as_posix()
+                      for path in real_root.rglob("*") if path.is_file()}
+    verify_phase_inventory_membership(root, run, "real", expected_paths)
+
+
 def verify_inventory(root: Path, records: list[dict[str, Any]],
-                     toy: dict[str, Any] | None) -> None:
+                     toy: dict[str, Any] | None, run: dict[str, Any]) -> None:
     """Every on-disk artifact must be referenced exactly once by the lifecycle."""
     expected = {"run.json", "matrix.json", "cells.jsonl"}
     if toy is not None:
@@ -735,6 +871,22 @@ def verify_inventory(root: Path, records: list[dict[str, Any]],
             require(relative not in owners, f"artifact referenced by multiple terminal cells: {relative}")
             owners.add(relative)
             expected.add(relative)
+    for inventory in run["phase_inventory"].values():
+        for artifact in inventory["artifacts"]:
+            expected.add(artifact["path"])
+    receipt_dir = root / "verification"
+    if receipt_dir.exists():
+        require(receipt_dir.is_dir() and not receipt_dir.is_symlink(),
+                "verification receipt path is malformed")
+        for receipt in receipt_dir.iterdir():
+            require(receipt.is_file() and not receipt.is_symlink() and
+                    receipt.suffix == ".json" and
+                    receipt.stem in run["completed_phases"],
+                    "verification receipt inventory is malformed")
+            expected.add(receipt.relative_to(root).as_posix())
+    for optional in ("verification.json", "SHA256SUMS"):
+        if (root / optional).is_file():
+            expected.add(optional)
     actual: set[str] = set()
     for path in root.rglob("*"):
         relative = path.relative_to(root).as_posix()
@@ -762,6 +914,65 @@ def verify_existing_seal(root: Path, run: dict[str, Any]) -> None:
                 f"SHA256SUMS mismatch: {relative}")
 
 
+def _expected_toy_inventory_paths(toy: dict[str, Any]) -> set[str]:
+    return {"toy.json", *(toy[f"{name}_path"] for name in
+                           ("command", "stdout", "stderr", "workload", "trace", "csv"))}
+
+
+def _expected_parameter_inventory_paths(records: list[dict[str, Any]]) -> set[str]:
+    paths = {"cells.jsonl"}
+    for record in records:
+        for name in ("command", "stdout", "stderr", *CONTEXT_LABELS,
+                     "workload", "trace", "csv"):
+            relative = record.get(f"{name}_path")
+            if relative is not None:
+                paths.add(relative)
+    return paths
+
+
+def _parse_expected_completed(value: str) -> list[str]:
+    phases = value.split(",") if value else []
+    require(phases and all(phase in PHASE_ORDERS for phase in phases) and
+            len(phases) == len(set(phases)) and
+            phases == PHASE_ORDERS.get(phases[-1]),
+            "--expect-completed-phases must be one exact ordered lifecycle prefix")
+    return phases
+
+
+def write_receipt(root: Path, run: dict[str, Any], phase: str, output: Path,
+                  terminal_cells: int) -> None:
+    output = output.resolve(strict=False)
+    expected = ((root / "verification.json").resolve() if phase == "complete" else
+                (root / "verification" / f"{phase}.json").resolve())
+    require(output.resolve(strict=False) == expected,
+            "--verification-out must be the exact new path for this verified phase")
+    try:
+        output.resolve(strict=False).relative_to(root.resolve())
+    except ValueError as exc:
+        raise VerificationError("--verification-out escapes results root") from exc
+    if output.parent.exists():
+        require(output.parent.is_dir() and not output.parent.is_symlink(),
+                "--verification-out parent is unsafe")
+    else:
+        require(output.parent == root / "verification",
+                "--verification-out parent is not the canonical receipt directory")
+    require(not output.exists() and not output.is_symlink(),
+            "--verification-out already exists or is unsafe")
+    inventory = (run["phase_inventory"].get(phase) if phase != "complete" else
+                 {"schema": "piccard-work5-complete-inventory-v1",
+                  "phases": run["completed_phases"]})
+    require(isinstance(inventory, dict), "receipt phase inventory is missing")
+    receipt = {
+        "schema": "piccard-work5-verification-receipt-v1", "verdict": "PASS",
+        "phase": phase, "results_root": str(root.resolve()),
+        "run_sha256": sha256_file(root / "run.json"), "git_sha": run["git_sha"],
+        "completed_phases": run["completed_phases"],
+        "phase_inventory_sha256": phase_inventory_sha256(inventory),
+        "terminal_cells": terminal_cells,
+    }
+    runner.atomic_write(output, canonical_json(receipt), new=True)
+
+
 def process(args: argparse.Namespace) -> int:
     root = Path(args.results_root).resolve()
     require(root.is_dir(), "results root does not exist")
@@ -779,21 +990,43 @@ def process(args: argparse.Namespace) -> int:
                 "toy verification requires a production root sealed before parameters")
         toy = verify_toy(root, run)
         require(read_records(root) == [], "toy evidence has parameter terminal records")
-        verify_inventory(root, [], toy)
+        verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
+        verify_inventory(root, [], toy, run)
         result_phase, terminal_cells = "toy", 0
     else:
-        if args.require_phase and args.require_phase != "parameters":
-            raise VerificationError(f"Phase-4 verifier cannot verify {args.require_phase!r} evidence")
+        if args.require_phase and args.require_phase not in ("parameters", "real"):
+            raise VerificationError(f"Phase-5 verifier cannot verify {args.require_phase!r} evidence")
         toy = None if fixture else verify_toy(root, run)
         records = verify_records(root, run, expected)
-        verify_inventory(root, records, toy)
-        result_phase, terminal_cells = "parameters", 61
+        if toy is not None:
+            verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
+        verify_phase_inventory_membership(root, run, "parameters",
+                                          _expected_parameter_inventory_paths(records))
+        if args.require_phase == "real":
+            require(not fixture and run.get("completed_phases") == PHASE_ORDERS["real"],
+                    "real verification requires the exact toy,parameters,real lifecycle")
+            verify_real(root, run)
+            result_phase, terminal_cells = "real", 61
+        else:
+            require((fixture and run.get("completed_phases") == ["parameters"]) or
+                    (not fixture and run.get("completed_phases") == PHASE_ORDERS["parameters"]),
+                    "parameter verification requires the exact completed phase state")
+            result_phase, terminal_cells = "parameters", 61
+        verify_inventory(root, records, toy, run)
     if args.require_complete:
         verify_existing_seal(root, run)
-    print(json.dumps({"schema": "piccard-work5-verification-v1", "verdict": "PASS",
-                      "phase": result_phase, "terminal_cells": terminal_cells,
-                      "test_fixture_mode": bool(run.get("test_fixture_mode"))},
-                     sort_keys=True))
+        result_phase = "complete"
+    if args.expect_git_sha is not None:
+        require(args.expect_git_sha == run["git_sha"], "--expect-git-sha mismatch")
+    if args.expect_completed_phases is not None:
+        require(_parse_expected_completed(args.expect_completed_phases) == run["completed_phases"],
+                "--expect-completed-phases mismatch")
+    if args.verification_out is not None:
+        write_receipt(root, run, result_phase, Path(args.verification_out), terminal_cells)
+    result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
+              "phase": result_phase, "terminal_cells": terminal_cells,
+              "test_fixture_mode": bool(run.get("test_fixture_mode"))}
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 
@@ -802,6 +1035,9 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("results_root")
     parser.add_argument("--require-phase", choices=("toy", "parameters", "real", "dynamic"))
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--expect-git-sha")
+    parser.add_argument("--expect-completed-phases")
+    parser.add_argument("--verification-out")
     parser.add_argument("--allow-test-fixture", action="store_true",
                         help="test-only: inspect a root explicitly marked fixture mode")
     return parser.parse_args(list(argv))

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed lifecycle for the executed Work #5 toy and parameter phases.
+"""Fail-closed lifecycle for the executed Work #5 toy, parameter, and real phases.
 
 This file deliberately orchestrates evidence; it does not estimate a result,
 retry a command, or manufacture a production measurement.  The toy smoke is
 recorded and independently verifiable before the production parameter matrix
-may be resumed in the same evidence root.  Real-data and dynamic phases remain
-outside this implementation boundary.
+may be resumed in the same evidence root.  The real phase is source-bound to
+the DBLP-ACM single-trial contract; dynamic remains outside this implementation
+boundary.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ ACCURACY_TRIALS = 1
 EXECUTED_TRIALS = 3  # one discarded warmup, one timing, one accuracy trial
 CELL_TIMEOUT_SECONDS = 1800
 PARAMETER_TIMEOUT_SECONDS = 14400
+REAL_PHASE_TIMEOUT_SECONDS = 7200
 SJ16_ADMISSION_CAP_MS = 1_800_000.0
 BFV_CAPS = {"realized_ring_dim": 32768, "provisioned_depth": 4,
             "log_q_bits": 240.0}
@@ -48,6 +50,16 @@ AXES = ("k", "m", "n", "U")
 STAGE_FLAGS = ("preflight_started", "context_started", "workload_started",
                "keygen_started", "measurement_started")
 EXPECTED_KEY_SHA256 = "b123e80e3a0e5bf6d599a18e637085c8cf26f14966ec362afb72707d7b2d8f9e"
+
+REAL_DATASET = "dblp_acm"
+REAL_VARIANT = "dblp_acm_u65536"
+REAL_SOURCE_MANIFEST = (SOURCE_ROOT / "datasets" / "manifests" /
+                        "dblp_acm.source.tsv").resolve()
+REAL_SEED = 20260729
+REAL_THREADS = 2
+REAL_PAIR_COUNT = 10000
+REAL_PROFILES = ("work5-std128-t40-single-trial",
+                 "work5-std192-t40-single-trial")
 
 CONTROL = {"k": 128, "m": 64, "n": 1000, "U": 16384}
 TOY_CELL = {
@@ -686,7 +698,7 @@ def is_test_fixture_mode() -> bool:
 def required_executable_names(test_fixture: bool) -> tuple[str, ...]:
     return (("bench_review_comparison", "bench_fhe_ind", "bench_comparison") if test_fixture else
             ("bench_review_comparison", "bench_fhe_ind", "bench_comparison",
-             "bench_std_security_evidence"))
+             "bench_std_security_evidence", "bench_real_datasets"))
 
 
 def executable_map(build_dir: Path, *, test_fixture: bool) -> dict[str, str]:
@@ -882,6 +894,77 @@ def write_toy_document(root: Path, document: dict[str, Any]) -> str:
     return sha256_file(path)
 
 
+def root_relative_file(root: Path, path: Path, label: str) -> str:
+    """Return one non-link, regular artifact path bound inside ``root``."""
+    resolved_root = root.resolve()
+    try:
+        relative = path.resolve(strict=True).relative_to(resolved_root).as_posix()
+    except (OSError, ValueError) as exc:
+        raise Work5Error(f"{label} is not a regular artifact inside results root: {path}") from exc
+    if path.is_symlink() or not path.is_file():
+        raise Work5Error(f"{label} must be a non-symlink regular file: {path}")
+    return relative
+
+
+def phase_inventory_document(root: Path, phase: str, paths: Iterable[Path], *,
+                             row_counts: dict[str, int]) -> dict[str, Any]:
+    """Seal exact phase-local paths before appending the lifecycle state.
+
+    The inventory is intentionally independent of a later verifier receipt:
+    a receipt validates this immutable list, but is never retroactively added
+    to it.  That avoids both a receipt/self-hash cycle and an unclaimed-output
+    loophole.
+    """
+    artifacts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for path in paths:
+        relative = root_relative_file(root, path, f"{phase} artifact")
+        if relative in seen:
+            raise Work5Error(f"duplicate {phase} phase artifact: {relative}")
+        seen.add(relative)
+        artifacts.append({"path": relative, "sha256": sha256_file(path)})
+    if not artifacts:
+        raise Work5Error(f"{phase} phase inventory cannot be empty")
+    return {"schema": "piccard-work5-phase-inventory-v1", "phase": phase,
+            "artifacts": sorted(artifacts, key=lambda item: item["path"]),
+            "row_counts": row_counts}
+
+
+def phase_inventory_sha256(inventory: dict[str, Any]) -> str:
+    return sha256_bytes(canonical_json(inventory))
+
+
+def install_phase_inventory(run: dict[str, Any], phase: str,
+                            inventory: dict[str, Any]) -> None:
+    completed = run.get("completed_phases")
+    inventories = run.get("phase_inventory")
+    if not isinstance(completed, list) or not isinstance(inventories, dict):
+        raise Work5Error("run lifecycle state is malformed")
+    if phase in completed or phase in inventories:
+        raise Work5Error(f"{phase} phase is terminal and cannot be rerun")
+    if inventory.get("phase") != phase:
+        raise Work5Error("phase inventory phase mismatch")
+    completed.append(phase)
+    inventories[phase] = inventory
+
+
+def require_prior_receipt(root: Path, run: dict[str, Any], phase: str,
+                          expected_completed: list[str]) -> None:
+    """Require the prior independent verifier receipt before a new producer."""
+    receipt_path = root / "verification" / f"{phase}.json"
+    receipt = read_json(receipt_path, f"{phase} verification receipt")
+    inventory = run.get("phase_inventory", {}).get(phase)
+    if (receipt.get("schema") != "piccard-work5-verification-receipt-v1" or
+            receipt.get("verdict") != "PASS" or receipt.get("phase") != phase or
+            receipt.get("results_root") != str(root.resolve()) or
+            receipt.get("run_sha256") != sha256_file(root / "run.json") or
+            receipt.get("git_sha") != run.get("git_sha") or
+            receipt.get("completed_phases") != expected_completed or
+            not isinstance(inventory, dict) or
+            receipt.get("phase_inventory_sha256") != phase_inventory_sha256(inventory)):
+        raise Work5Error(f"missing or invalid independent {phase} verification receipt")
+
+
 def discard_toy_staging(root: Path) -> None:
     for path in toy_staging_paths(root).values():
         try:
@@ -966,7 +1049,10 @@ def run_toy_phase(args: argparse.Namespace, root_capability: ResultsRootCapabili
             root, argv, status="MEASURED", reason_code=None, reason_detail=None,
             exit_code=0, started_at_utc=started, trial_payload_sha256=payload))
         run["toy_sha256"] = toy_sha
-        run["completed_phases"].append("toy")
+        install_phase_inventory(run, "toy", phase_inventory_document(
+            root, "toy", [root / "toy.json", *final.values()],
+            row_counts={"terminal_cells": 0, "measured": 1, "skipped": 0,
+                        "errors": 0}))
         atomic_write(root / "run.json", canonical_json(run))
         return 0
     except BaseException as exc:
@@ -1534,13 +1620,20 @@ def command_template_sha256() -> str:
         "--target-jaccard=0.5", "--trials=1", "--accuracy-trials=1", "--seed=7",
         "--methods", "--sj16-key-bits=3072", "security-policy", "--manifest-out",
         "--execution-trace-out"], "frozen_suites": [entry[0] for entry in SUITES],
+        "real": {"mode": "single-trial-validation", "dataset": REAL_DATASET,
+                 "variant": REAL_VARIANT, "pairs": REAL_PAIR_COUNT,
+                 "seed": REAL_SEED, "threads": REAL_THREADS,
+                 "profiles": list(REAL_PROFILES), "accuracy_trials": 1,
+                 "timing_trials": 1, "timing_pair": "median"},
         "no_shell": True}
     return sha256_bytes(canonical_json(template))
 
 
 def script_hashes() -> dict[str, str]:
     scripts = ("run_work5_benchmarks.py", "verify_work5_benchmarks.py",
-               "verify_review_comparison.py", "verify_benchmark_provenance.py")
+               "verify_review_comparison.py", "verify_benchmark_provenance.py",
+               "prepare_real_datasets.py", "run_real_datasets.sh",
+               "verify_real_dataset_outputs.py", "summarize_real_datasets.py")
     return {name: sha256_file(SOURCE_ROOT / "scripts" / name) for name in scripts}
 
 
@@ -1568,9 +1661,9 @@ def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: 
         "cell_timeout_seconds": CELL_TIMEOUT_SECONDS,
         "phase_timeout_seconds": {"toy": CELL_TIMEOUT_SECONDS,
                                   "parameters": PARAMETER_TIMEOUT_SECONDS,
-                                  "real": 7200, "dynamic": 600},
+                                  "real": REAL_PHASE_TIMEOUT_SECONDS, "dynamic": 600},
         "disclaimer": DISCLAIMER, "test_fixture_mode": test_fixture,
-        "completed_phases": [], "cells_sha256": None,
+        "completed_phases": [], "phase_inventory": {}, "cells_sha256": None,
     }
 
 
@@ -1632,8 +1725,128 @@ def claim_fresh_root(capability: ResultsRootCapability) -> None:
     capability.claimed_by_runner = True
 
 
-def write_run_level_timeout(capability: ResultsRootCapability, *, phase_seconds: float,
-                            reason_code: str, detail: str) -> None:
+def planned_real_commands(build_dir: Path, root: Path) -> list[tuple[str, list[str]]]:
+    """Return the only production DBLP-ACM real-phase argv arrays.
+
+    Keeping this list centrally reconstructable prevents a real-phase record
+    from silently choosing a different source, profile, seed, or timing mode.
+    The output locations must not exist before the first producer starts.
+    """
+    processed = root / "real" / REAL_VARIANT
+    measurements = root / "real" / "measurements"
+    return [
+        ("prepare", [
+            sys.executable, str(SOURCE_ROOT / "scripts" / "prepare_real_datasets.py"),
+            "dblp-acm", "--source-manifest", str(REAL_SOURCE_MANIFEST),
+            "--output-dir", str(processed), "--universe", "65536", "--pairs",
+            str(REAL_PAIR_COUNT), "--seed", str(REAL_SEED), "--strict",
+        ]),
+        ("measure", [
+            str(SOURCE_ROOT / "scripts" / "run_real_datasets.sh"),
+            "--single-trial-validation", "--source-manifest", str(REAL_SOURCE_MANIFEST),
+            "--dataset-manifest", str(processed / "dataset.manifest.tsv"),
+            f"--seed={REAL_SEED}", f"--threads={REAL_THREADS}",
+            f"--build-dir={build_dir}", f"--results-root={measurements}",
+        ]),
+        ("verify", [
+            sys.executable, str(SOURCE_ROOT / "scripts" / "verify_real_dataset_outputs.py"),
+            str(measurements),
+        ]),
+    ]
+
+
+def _write_real_terminal(root: Path, *, status: str, detail: str,
+                         commands: list[tuple[str, list[str]]]) -> Path:
+    path = root / "real" / "terminal.json"
+    if path.exists():
+        raise Work5Error("real phase already has a terminal record")
+    atomic_write(path, canonical_json({
+        "schema": "piccard-work5-real-terminal-v1", "status": status,
+        "dataset": REAL_DATASET, "variant": REAL_VARIANT,
+        "source_manifest": str(REAL_SOURCE_MANIFEST), "pairs": REAL_PAIR_COUNT,
+        "seed": REAL_SEED, "threads": REAL_THREADS, "profiles": list(REAL_PROFILES),
+        "accuracy_trials": 1, "timing_trials": 1, "timing_pair": "median",
+        "commands": [{"label": label, "argv": argv} for label, argv in commands],
+        "detail": detail, "ended_at_utc": utc_now(),
+    }), new=True)
+    return path
+
+
+def _real_phase_artifacts(root: Path) -> list[Path]:
+    real_root = root / "real"
+    return sorted((path for path in real_root.rglob("*") if path.is_file()),
+                  key=lambda path: path.as_posix())
+
+
+def run_real_phase(args: argparse.Namespace, root_capability: ResultsRootCapability,
+                   *, deadline: float) -> int:
+    """Execute exactly one production DBLP-ACM real phase after Phase 4 state.
+
+    This function is intentionally never called by Phase-5 pre-live checks.
+    It has no fixture branch, no alternate dataset switch, and no retry path:
+    once a real artifact or terminal record exists, the root is permanently
+    ineligible for another real producer attempt.
+    """
+    if is_test_fixture_mode():
+        raise Work5Error("fixture mode cannot produce production real evidence")
+    if not args.resume:
+        raise Work5Error("production real evidence requires --resume after toy and parameters")
+    root, build_dir = root_capability.root, Path(args.build_dir).resolve()
+    source_provenance(deadline)
+    executable_hashes = executable_map(build_dir, test_fixture=False)
+    matrix = matrix_document(frozen_cells())
+    run, records = resume_validate(root, build_dir, executable_hashes, matrix, deadline=deadline)
+    if run.get("git_dirty"):
+        raise Work5Error("production real evidence requires a clean tracked source tree")
+    if run.get("completed_phases") != ["toy", "parameters"]:
+        raise Work5Error("real phase requires the exact ordered toy,parameters lifecycle")
+    if len(records) != 61 or any(record.get("status") == "ERROR" for record in records):
+        raise Work5Error("real phase requires a terminal error-free parameter matrix")
+    require_prior_receipt(root, run, "parameters", ["toy", "parameters"])
+    real_root = root / "real"
+    if any(real_root.iterdir()):
+        raise Work5Error("real phase has prior artifacts and cannot be retried or overwritten")
+    commands = planned_real_commands(build_dir, root)
+    for _label, argv in commands:
+        if not argv or not all(isinstance(item, str) and item for item in argv):
+            raise Work5Error("real phase argv construction failed")
+    command_path = real_root / "commands.json"
+    atomic_write(command_path, canonical_json({
+        "schema": "piccard-work5-real-command-v1",
+        "commands": [{"label": label, "argv": argv} for label, argv in commands],
+        "environment": command_environment(),
+    }), new=True)
+    try:
+        for label, argv in commands:
+            result = bounded_subprocess(argv, deadline=deadline, cwd=SOURCE_ROOT,
+                                        env=process_environment())
+            stdout_path, stderr_path = (real_root / f"{label}.stdout",
+                                        real_root / f"{label}.stderr")
+            atomic_write(stdout_path, result.stdout or b"", new=True)
+            atomic_write(stderr_path, result.stderr or b"", new=True)
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
+                raise Work5Error(f"real {label} subprocess failed: {detail}")
+        terminal = _write_real_terminal(root, status="MEASURED", detail="PASS", commands=commands)
+        artifacts = _real_phase_artifacts(root)
+        if terminal not in artifacts:
+            raise Work5Error("real terminal artifact is missing")
+        install_phase_inventory(run, "real", phase_inventory_document(
+            root, "real", artifacts,
+            row_counts={"datasets": 1, "accuracy_rows": REAL_PAIR_COUNT,
+                        "std128_timing_rows": 1, "std192_encoding_rows": 2,
+                        "errors": 0}))
+        atomic_write(root / "run.json", canonical_json(run))
+        return 0
+    except BaseException as exc:
+        if not (real_root / "terminal.json").exists():
+            _write_real_terminal(root, status="ERROR",
+                                 detail=f"{type(exc).__name__}: {exc}", commands=commands)
+        raise
+
+
+def write_run_level_timeout(capability: ResultsRootCapability, *, phase: str,
+                            phase_seconds: float, reason_code: str, detail: str) -> None:
     """Record a pre-cell deadline failure without fabricating a terminal cell."""
     if not capability.fresh:
         return
@@ -1653,7 +1866,7 @@ def write_run_level_timeout(capability: ResultsRootCapability, *, phase_seconds:
         return
     atomic_write(path, canonical_json({
         "schema": "piccard-work5-run-level-timeout-v1",
-        "phase": "parameters",
+        "phase": phase,
         "status": "ERROR",
         "reason_code": reason_code,
         "reason_detail": detail,
@@ -1667,7 +1880,9 @@ def process(args: argparse.Namespace) -> int:
     # The phase clock begins before provenance, binary identity, matrix, root,
     # or metadata work.  No preflight subprocess may borrow time from it.
     test_fixture = is_test_fixture_mode()
-    phase_seconds = PARAMETER_TIMEOUT_SECONDS
+    phase_seconds = {"toy": CELL_TIMEOUT_SECONDS, "parameters": PARAMETER_TIMEOUT_SECONDS,
+                     "real": REAL_PHASE_TIMEOUT_SECONDS, "dynamic": 600,
+                     "all": PARAMETER_TIMEOUT_SECONDS}[args.phase]
     if test_fixture and os.environ.get("PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"):
         phase_seconds = float(os.environ["PICCARD_WORK5_TEST_PHASE_TIMEOUT_SECONDS"])
     if phase_seconds <= 0:
@@ -1687,6 +1902,8 @@ def process(args: argparse.Namespace) -> int:
         phase_timeout(deadline)
         if args.phase == "toy":
             return run_toy_phase(args, root_capability, deadline=deadline)
+        if args.phase == "real":
+            return run_real_phase(args, root_capability, deadline=deadline)
         if args.phase != "parameters":
             raise Work5Error(f"--phase={args.phase!r} is not live yet")
         if not test_fixture and not args.resume:
@@ -1711,6 +1928,7 @@ def process(args: argparse.Namespace) -> int:
                 toy = read_json(toy_path, "toy.json")
                 if toy.get("schema") != "piccard-work5-toy-v1" or toy.get("status") != "MEASURED":
                     raise Work5Error("production parameter evidence requires a measured toy smoke")
+                require_prior_receipt(root, run, "toy", ["toy"])
         else:
             run = create_initial_root(root_capability, build_dir, executable_hashes, matrix,
                                      test_fixture=test_fixture, deadline=deadline)
@@ -1766,14 +1984,28 @@ def process(args: argparse.Namespace) -> int:
         if any(record["status"] == "ERROR" for record in records):
             raise Work5Error("parameter phase contains terminal ERROR")
         if "parameters" not in run["completed_phases"]:
-            run["completed_phases"].append("parameters")
+            parameter_paths: list[Path] = [root / "cells.jsonl"]
+            for record in records:
+                for label in ("command", "stdout", "stderr", "context_onehot",
+                              "context_sqrt", "context_fhe_ind", "workload", "trace", "csv"):
+                    relative = record.get(f"{label}_path")
+                    if relative is not None:
+                        parameter_paths.append(root / relative)
+            status_counts = {status: sum(record["status"] == status for record in records)
+                             for status in ("MEASURED", "SKIPPED_PRECHECK", "ERROR")}
+            install_phase_inventory(run, "parameters", phase_inventory_document(
+                root, "parameters", parameter_paths,
+                row_counts={"terminal_cells": len(records),
+                            "measured": status_counts["MEASURED"],
+                            "skipped": status_counts["SKIPPED_PRECHECK"],
+                            "errors": status_counts["ERROR"]}))
             atomic_write(root / "run.json", canonical_json(run))
         return 0
     except (PhaseBudgetExpired, SubprocessTimedOut) as exc:
         reason_code = timeout_reason_code(exc)
         detail = (str(exc) if reason_code == "PHASE_CAP_EXHAUSTED" else
                   f"subprocess wall timeout before any cell began: {exc}")
-        write_run_level_timeout(root_capability, phase_seconds=phase_seconds,
+        write_run_level_timeout(root_capability, phase=args.phase, phase_seconds=phase_seconds,
                                 reason_code=reason_code, detail=detail)
         raise
 

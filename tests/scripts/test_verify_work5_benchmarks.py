@@ -105,6 +105,12 @@ class Work5VerifierContractTest(unittest.TestCase):
         run_path = root / "run.json"
         run = json.loads(run_path.read_text(encoding="utf-8"))
         run["cells_sha256"] = hashlib.sha256((root / "cells.jsonl").read_bytes()).hexdigest()
+        # Fixture mutations deliberately recompute the attacker-controlled
+        # parameter inventory too, so each assertion reaches the independent
+        # semantic verifier rather than failing only at an obsolete hash.
+        inventory = run.get("phase_inventory", {}).get("parameters", {})
+        for artifact in inventory.get("artifacts", []):
+            artifact["sha256"] = work5_runner.sha256_file(root / artifact["path"])
         run_path.write_text(json.dumps(run, sort_keys=True, separators=(",", ":")) + "\n",
                             encoding="utf-8")
 
@@ -286,6 +292,34 @@ class Work5VerifierContractTest(unittest.TestCase):
             ["python3", str(VERIFIER), str(results), "--require-phase=parameters"],
             cwd=ROOT, text=True, capture_output=True, check=False)
         self.assertNotEqual(production.returncode, 0)
+
+    def test_phase_receipt_path_is_new_only_and_expectation_syntax_is_strict(self) -> None:
+        results = self.produce_parameter_root("receipt")
+        self.mark_fixture_measurements_actual(results)
+        output = results / "verification" / "parameters.json"
+        command = [
+            "python3", str(VERIFIER), str(results), "--require-phase=parameters",
+            "--allow-test-fixture", f"--verification-out={output}",
+        ]
+        first = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        run = json.loads((results / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["schema"], "piccard-work5-verification-receipt-v1")
+        self.assertEqual(receipt["verdict"], "PASS")
+        self.assertEqual(receipt["phase"], "parameters")
+        self.assertEqual(receipt["run_sha256"], hashlib.sha256(
+            (results / "run.json").read_bytes()).hexdigest())
+        self.assertEqual(receipt["phase_inventory_sha256"],
+                         work5_verifier.phase_inventory_sha256(
+                             run["phase_inventory"]["parameters"]))
+        second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("already exists", second.stderr)
+        self.assertEqual(work5_verifier._parse_expected_completed("toy,parameters"),
+                         ["toy", "parameters"])
+        with self.assertRaises(work5_verifier.VerificationError):
+            work5_verifier._parse_expected_completed("parameters,toy")
 
     def test_status_aware_payload_commitments_accept_mixed_groups_and_reject_forgery(self) -> None:
         """Mixed real-payload/skip-commitment groups are valid only status-aware.

@@ -106,8 +106,19 @@ _TIMING_SUFFIX = (
     "total_query_ms,result_value,ciphertext_bytes,upload_bytes,"
     "download_bytes"
 )
+_ENCODING_HEADER = (
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "comparison_scope,primitive,protocol_model,cost_scope,"
+    "secure_division_included,measurement_kind,dataset,variant,"
+    "dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,"
+    "label,record_a,record_b,k,m,method,timing_trials,timing_pair,root_seed,"
+    "hash_seed,encoder_warmup_calls,timed_encoder_calls,"
+    "correctness_encoder_calls,signature_derivation_timed,phase_encode_ms,"
+    "encoded_slots,correctness_status,measurement_status"
+)
 ACCURACY_HEADER_FIELDS = tuple((_PREFIX_HEADER + "," + _ACCURACY_SUFFIX).split(","))
 TIMING_HEADER_FIELDS = tuple((_PREFIX_HEADER + "," + _TIMING_SUFFIX).split(","))
+ENCODING_HEADER_FIELDS = tuple(_ENCODING_HEADER.split(","))
 
 SUMMARY_HEADER_FIELDS = (
     "dataset", "variant", "jaccard_bucket", "n", "mae", "sample_sd",
@@ -187,6 +198,23 @@ def _processed_manifest_key_order(dataset: str) -> tuple:
 QUICK_VARIANT = "dblp_acm_u65536"
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
 QUICK_TIMING_PROFILE = "toy-smoke"
+SINGLE_TRIAL_PROFILES = (
+    "work5-std128-t40-single-trial",
+    "work5-std192-t40-single-trial",
+)
+SINGLE_TRIAL_SEED = 20260729
+SINGLE_TRIAL_VARIANT = "dblp_acm_u65536"
+SINGLE_TRIAL_SOURCE_MANIFEST = (
+    REPO_ROOT / "datasets" / "manifests" / "dblp_acm.source.tsv"
+).resolve()
+_LEGACY_PROCESSED_DIR = (
+    REPO_ROOT / "datasets" / "data" / "processed" / "dblp_acm_u65536"
+).resolve()
+_SINGLE_TRIAL_SOURCE_HASHES = {
+    "input.0.sha256": "32863e8b4e7e18e5254c3e0e05cbc282af2e1e6e9d58e124605ebcbaa178ae7f",
+    "input.1.sha256": "32055f1dfa619a4fdca33e7de729c66686a2fb3c71589921a6a3bd3af389120e",
+    "input.2.sha256": "d9d7c9feaba3d19a2e73ba8bd6ae08407d8b16082881f6e55abc2d703682d53a",
+}
 
 _FIXTURE_ROOT = (
     REPO_ROOT / "tests" / "fixtures" / "real_datasets" / "quick" / QUICK_VARIANT
@@ -419,6 +447,8 @@ def _parse_artifacts(values: dict, results_root: Path) -> list:
 _ACCURACY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy$")
 _SUMMARY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy-summary$")
 _TIMING_ID_RE = re.compile(r"^([A-Za-z0-9_]+):timing:([A-Za-z0-9-]+)$")
+_ENCODING_ID_RE = re.compile(
+    r"^([A-Za-z0-9_]+):encoding:([A-Za-z0-9-]+):(piccard_encode|piccard_sqrt_encode)$")
 
 
 def _expected_input_root_id(role: str, cell_id: str) -> str:
@@ -529,7 +559,7 @@ def _parse_cells(values: dict, results_root: Path, roots: dict) -> list:
 
 
 def _cell_variant(cell_id: str) -> str:
-    for pattern in (_ACCURACY_ID_RE, _SUMMARY_ID_RE, _TIMING_ID_RE):
+    for pattern in (_ACCURACY_ID_RE, _SUMMARY_ID_RE, _TIMING_ID_RE, _ENCODING_ID_RE):
         match = pattern.match(cell_id)
         if match:
             return match.group(1)
@@ -552,6 +582,17 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
                 f"{QUICK_VARIANT}:accuracy",
                 f"{QUICK_VARIANT}:accuracy-summary",
                 f"{QUICK_VARIANT}:timing:{QUICK_TIMING_PROFILE}",
+            }
+        }
+    elif evidence_mode == "single-trial-validation":
+        expected_variants = {SINGLE_TRIAL_VARIANT}
+        expected_by_variant = {
+            SINGLE_TRIAL_VARIANT: {
+                f"{SINGLE_TRIAL_VARIANT}:accuracy",
+                f"{SINGLE_TRIAL_VARIANT}:accuracy-summary",
+                f"{SINGLE_TRIAL_VARIANT}:timing:work5-std128-t40-single-trial",
+                f"{SINGLE_TRIAL_VARIANT}:encoding:work5-std192-t40-single-trial:piccard_encode",
+                f"{SINGLE_TRIAL_VARIANT}:encoding:work5-std192-t40-single-trial:piccard_sqrt_encode",
             }
         }
     else:
@@ -645,6 +686,11 @@ _ACCURACY_WORKLOAD_KEY_ORDER = (
 _TIMING_WORKLOAD_KEY_PREFIX = (
     "schema_version", "dataset_manifest_sha256", "pair_id", "k", "m",
     "profile_id", "root_seed", "hash_seed", "trials", "input_pair_count")
+_ENCODING_WORKLOAD_KEY_ORDER = (
+    "schema_version", "dataset_manifest_sha256", "pair_id", "k", "m",
+    "profile_id", "method", "root_seed", "hash_seed", "trials",
+    "timing_pair", "encoder_warmup_calls", "timed_encoder_calls",
+    "correctness_encoder_calls", "signature_derivation_timed", "encoded_slots")
 _ACCURACY_ROWS_HEADER = "pair_id\ttrial_index\thash_seed\trecord_a\trecord_b"
 
 
@@ -727,6 +773,17 @@ def _derive_timing_hash_seed(root_seed: int, dataset_sha_raw: bytes, k: int,
     payload = (b"piccard-real-timing-crs-v1\x00" + struct.pack(">Q", root_seed)
                + dataset_sha_raw + struct.pack(">I", k) + struct.pack(">I", m)
                + struct.pack(">I", len(profile_bytes)) + profile_bytes)
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _derive_encoding_hash_seed(root_seed: int, dataset_sha_raw: bytes, k: int,
+                               m: int, profile_id: str, method: str) -> int:
+    profile_bytes = profile_id.encode("utf-8")
+    method_bytes = method.encode("utf-8")
+    payload = (b"piccard-real-encoding-crs-v1\x00" + struct.pack(">Q", root_seed)
+               + dataset_sha_raw + struct.pack(">I", k) + struct.pack(">I", m)
+               + struct.pack(">I", len(profile_bytes)) + profile_bytes
+               + struct.pack(">I", len(method_bytes)) + method_bytes)
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
@@ -923,6 +980,106 @@ def _validate_timing_workload(cell: dict, variant: str, profile: str,
                  "pairs.tsv for the median pair")
 
 
+def _validate_encoding_workload(cell: dict, variant: str, profile: str,
+                                method: str, csv_rows: list) -> None:
+    """Validate the local-encoder-only STD192 row without accepting FHE shape.
+
+    The schema is intentionally independent from RealTimingHeader: a context,
+    calibration, key, ciphertext, or end-to-end timing field is a hard
+    failure, not an optional empty value.
+    """
+    cell_id = cell["id"]
+    forbidden = {
+        "phase_minhash_ms", "phase_encrypt_ms", "phase_cloud_multiply_ms",
+        "phase_cloud_rotate_ms", "phase_sanitize_ms", "phase_decrypt_ms",
+        "phase_bias_correction_ms", "total_query_ms", "ciphertext_bytes",
+        "upload_bytes", "download_bytes", "actual_ring_dim", "log_q_bits",
+        "plaintext_modulus", "num_limbs", "openfhe_version", "sanitizer_model",
+        "sanitizer_assurance", "transcript_stat_bits", "max_queries",
+        "query_stat_bits", "coefficient_stat_bits", "flood_margin_bits",
+        "eval_noise_bits", "flood_noise_bits",
+    }
+    if forbidden.intersection(ENCODING_HEADER_FIELDS):
+        fail(f"cell {cell_id!r} encoding schema contains a forbidden FHE field")
+    manifest_path = _output_path_for(
+        cell, f"encoding_{variant}_{profile}_{method}.manifest.tsv")
+    pairs = parse_two_column_tsv(manifest_path)
+    if tuple(key for key, _ in pairs) != _ENCODING_WORKLOAD_KEY_ORDER:
+        fail(f"cell {cell_id!r} encoding workload key order mismatch")
+    wl = dict(pairs)
+    if wl["schema_version"] != "piccard-real-encoding-workload-v1":
+        fail(f"cell {cell_id!r} encoding workload schema mismatch")
+    for key, flag in (("k", "k"), ("m", "m"), ("root_seed", "seed"),
+                      ("trials", "trials"), ("profile_id", "profile"),
+                      ("method", "method"), ("timing_pair", "timing-pair")):
+        if wl[key] != _argv_value(cell, flag):
+            fail(f"cell {cell_id!r} encoding workload {key!r} does not bind argv")
+    if wl["dataset_manifest_sha256"] != _cell_processed_sha(cell):
+        fail(f"cell {cell_id!r} encoding workload dataset manifest mismatch")
+    if (wl["encoder_warmup_calls"], wl["timed_encoder_calls"],
+            wl["correctness_encoder_calls"], wl["signature_derivation_timed"]) != \
+            ("1", "1", "1", "false"):
+        fail(f"cell {cell_id!r} encoding call-count/timing boundary mismatch")
+    if profile != "work5-std192-t40-single-trial" or method not in {
+            "piccard_encode", "piccard_sqrt_encode"}:
+        fail(f"cell {cell_id!r} encoding method/profile mismatch")
+    if (wl["k"], wl["m"], wl["trials"], wl["timing_pair"], wl["root_seed"]) != \
+            ("128", "64", "1", "median", str(SINGLE_TRIAL_SEED)):
+        fail(f"cell {cell_id!r} encoding frozen parameter mismatch")
+    derived = _derive_encoding_hash_seed(
+        int(wl["root_seed"]), bytes.fromhex(_cell_processed_sha(cell)),
+        int(wl["k"]), int(wl["m"]), profile, method)
+    if wl["hash_seed"] != str(derived):
+        fail(f"cell {cell_id!r} encoding hash seed does not recompute")
+
+    processed_values = _validate_processed_manifest(
+        next(i for i in cell["inputs"]
+             if i["role"] == "processed-manifest")["resolved"], "dblp_acm")
+    expected_pair = _median_pair_id(_cell_processed_dir(cell), processed_values)
+    records = {pair_id: (record_a, record_b) for pair_id, record_a, record_b in
+               _read_processed_pairs(_cell_processed_dir(cell), processed_values)}
+    if wl["pair_id"] != expected_pair:
+        fail(f"cell {cell_id!r} encoding pair is not the recomputed median pair")
+    if len(csv_rows) != 1:
+        fail(f"cell {cell_id!r} encoding CSV must contain exactly one row")
+    row = csv_rows[0]
+    expected = {
+        "profile_id": profile, "run_class": "smoke", "target_security_bits": "192",
+        "comparison_eligible": "false", "comparison_scope": "encoding-only-diagnostic",
+        "primitive": "onehot-encoding" if method == "piccard_encode" else "sqrt-encoding",
+        "protocol_model": "piccard-local-encoding" if method == "piccard_encode"
+        else "piccard-sqrt-local-encoding",
+        "cost_scope": "encoding-only", "secure_division_included": "false",
+        "measurement_kind": "local-encoder", "dataset": "dblp_acm",
+        "variant": variant, "dataset_manifest_sha256": _cell_processed_sha(cell),
+        "records_sha256": processed_values["records_sha256"],
+        "pairs_sha256": processed_values["pairs_sha256"], "pair_id": expected_pair,
+        "method": method, "k": "128", "m": "64", "timing_trials": "1",
+        "timing_pair": "median", "root_seed": str(SINGLE_TRIAL_SEED),
+        "hash_seed": str(derived), "encoder_warmup_calls": "1",
+        "timed_encoder_calls": "1", "correctness_encoder_calls": "1",
+        "signature_derivation_timed": "false", "correctness_status": "PASS",
+        "measurement_status": "measured",
+    }
+    for key, value in expected.items():
+        if str(row.get(key)) != value:
+            fail(f"cell {cell_id!r} encoding CSV {key!r} mismatch")
+    if (str(row.get("record_a")), str(row.get("record_b"))) != records[expected_pair]:
+        fail(f"cell {cell_id!r} encoding CSV endpoints do not match pairs.tsv")
+    if str(row.get("pair_kind")) not in {"known_match", "sampled_nonmatch"} or \
+            str(row.get("label")) not in {"0", "1"}:
+        fail(f"cell {cell_id!r} encoding CSV pair provenance is invalid")
+    try:
+        measured = float(str(row.get("phase_encode_ms")))
+        slots = int(str(row.get("encoded_slots")))
+    except ValueError as error:
+        raise VerificationError(f"cell {cell_id!r} encoding numeric field is malformed") from error
+    if not math.isfinite(measured) or measured < 0 or slots != (8192 if method == "piccard_encode" else 2048):
+        fail(f"cell {cell_id!r} encoding timing/shape field is invalid")
+    if wl["encoded_slots"] != str(slots):
+        fail(f"cell {cell_id!r} encoding workload output shape mismatch")
+
+
 def _validate_summary_recomputation(cell: dict, summary_path: Path) -> None:
     """The summary is a pure function of the accuracy CSV; regenerate it
     with the real summarizer and demand byte identity."""
@@ -1064,7 +1221,7 @@ def verify(results_root: Path) -> str:
         fail(f"unexpected run_metadata.tsv schema_version: {schema_version!r}")
 
     evidence_mode = _require(values, "evidence_mode")
-    if evidence_mode not in ("paper", "quick"):
+    if evidence_mode not in ("paper", "quick", "single-trial-validation"):
         fail(f"unexpected evidence_mode: {evidence_mode!r}")
 
     source_commit = _require(values, "source_commit")
@@ -1073,11 +1230,11 @@ def verify(results_root: Path) -> str:
     git_dirty = _require(values, "git_dirty")
     if git_dirty not in ("true", "false"):
         fail(f"git_dirty must be 'true'/'false': {git_dirty!r}")
-    if evidence_mode == "paper" and git_dirty != "false":
-        fail("evidence_mode=paper requires a clean source tree (git_dirty=false)")
+    if evidence_mode in ("paper", "single-trial-validation") and git_dirty != "false":
+        fail(f"evidence_mode={evidence_mode} requires a clean source tree (git_dirty=false)")
     build_type = _require(values, "build_type")
-    if evidence_mode == "paper" and build_type != "Release":
-        fail(f"evidence_mode=paper requires build_type=Release, got {build_type!r}")
+    if evidence_mode in ("paper", "single-trial-validation") and build_type != "Release":
+        fail(f"evidence_mode={evidence_mode} requires build_type=Release, got {build_type!r}")
 
     roots = _parse_roots(values, results_root, evidence_mode)
     artifacts = _parse_artifacts(values, results_root)
@@ -1132,6 +1289,13 @@ def verify(results_root: Path) -> str:
             rows = _read_rows(csv_path, TIMING_HEADER_FIELDS, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
             _validate_timing_workload(cell, variant, profile, rows)
+        elif ":encoding:" in cell["id"]:
+            _variant, _marker, profile, method = cell["id"].split(":", 3)
+            csv_path = _output_path_for(
+                cell, f"real_encoding_{variant}_{profile}_{method}.csv")
+            rows = _read_rows(csv_path, ENCODING_HEADER_FIELDS, cell["id"])
+            _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
+            _validate_encoding_workload(cell, variant, profile, method, rows)
         elif cell["id"].endswith(":accuracy-summary"):
             csv_path = _output_path_for(cell, f"real_accuracy_summary_{variant}.csv")
             with csv_path.open(newline="", encoding="utf-8") as handle:
@@ -1143,7 +1307,7 @@ def verify(results_root: Path) -> str:
         else:
             fail(f"unrecognized cell id shape: {cell['id']!r}")
 
-    if evidence_mode == "paper":
+    if evidence_mode in ("paper", "single-trial-validation"):
         for variant, processed_values in processed_manifest_cache.items():
             if variant not in source_values_by_variant:
                 fail(f"no copied source manifest artifact found for variant "
@@ -1152,7 +1316,9 @@ def verify(results_root: Path) -> str:
             source_root_id = f"source-root-{variant}"
             if source_root_id not in roots:
                 fail(f"no {source_root_id!r} root recorded for variant {variant!r}")
-            original_source_path = roots[source_root_id] / "source.manifest.tsv"
+            original_source_path = roots[source_root_id] / (
+                "dblp_acm.source.tsv" if evidence_mode == "single-trial-validation"
+                else "source.manifest.tsv")
             if not original_source_path.is_file():
                 fail(f"original source manifest is missing for re-validation: "
                      f"{original_source_path}")
@@ -1168,6 +1334,23 @@ def verify(results_root: Path) -> str:
                 fail(f"source manifest re-validation failed for variant "
                      f"{variant!r}: {exc}")
             _validate_no_fixture_masquerade(processed_values, source_values)
+            if evidence_mode == "single-trial-validation":
+                if original_source_path.resolve() != SINGLE_TRIAL_SOURCE_MANIFEST:
+                    fail("single-trial-validation source manifest path is not frozen")
+                if {key: source_values.get(key) for key in _SINGLE_TRIAL_SOURCE_HASHES} != \
+                        _SINGLE_TRIAL_SOURCE_HASHES:
+                    fail("single-trial-validation source hashes do not match frozen DBLP-ACM bytes")
+                if _LEGACY_PROCESSED_DIR == roots[f"processed-dataset-{variant}"] or \
+                        _LEGACY_PROCESSED_DIR in roots[f"processed-dataset-{variant}"].parents:
+                    fail("single-trial-validation processed root is the forbidden prior run")
+                expected_processed = {
+                    "record_count": "4910", "pair_count": "10000",
+                    "requested_pair_count": "10000", "seed": str(SINGLE_TRIAL_SEED),
+                    "original_positive_count": "2224", "retained_positive_count": "2224",
+                }
+                if any(processed_values.get(key) != value
+                       for key, value in expected_processed.items()):
+                    fail("single-trial-validation processed manifest contract mismatch")
 
     status_bytes = _canonical_status_bytes(run_metadata_sha256)
     status_path = results_root / "verification_status.tsv"

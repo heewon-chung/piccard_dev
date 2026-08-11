@@ -1422,6 +1422,27 @@ class DblpAcmTests(unittest.TestCase):
                                      pairs=6, seed=7)
             self.assertFalse(output_dir.exists())
 
+    def test_cmd_dblp_acm_rejects_the_quarantined_prior_run_as_output(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            manifest_path = self._build_manifest(tmp_dir)
+            with self.assertRaisesRegex(module.ManifestError, "forbidden prior-run"):
+                module.cmd_dblp_acm(
+                    source_manifest=manifest_path,
+                    output_dir=module._LEGACY_DBLP_ACM_PROCESSED_DIR,
+                    universe=65536, pairs=6, seed=7)
+
+    def test_cmd_dblp_acm_rejects_the_quarantined_prior_run_as_input(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(module.ManifestError, "forbidden prior-run"):
+                module.cmd_dblp_acm(
+                    source_manifest=(module._LEGACY_DBLP_ACM_PROCESSED_DIR /
+                                     "source.manifest.tsv"),
+                    output_dir=Path(tmp) / "out", universe=65536,
+                    pairs=6, seed=7)
+
     # ------------------------------------------------------------------
     # CLI end-to-end
     # ------------------------------------------------------------------

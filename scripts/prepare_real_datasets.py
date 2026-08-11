@@ -733,6 +733,28 @@ _DBLP_ACM_RECORD_CSV_HEADER = ("id", "title", "authors", "venue", "year")
 _DBLP_ACM_MAPPING_CSV_HEADER = ("idDBLP", "idACM")
 _DBLP_ACM_FEATURE_FIELD_ORDER = ("title", "authors", "venue", "year")
 _DBLP_NEGATIVE_HASH_DOMAIN = b"piccard-dblp-negative-v1"
+# This checked-out directory is a deliberately quarantined prior run
+# (pair_count=4448, seed=7).  It is not an input cache and must never become
+# an implicit source for the Work #5 source-bound path.  Keep the guard here,
+# at the lowest writer/parser layer, so callers cannot bypass it by invoking
+# this module directly instead of its CLI.
+_LEGACY_DBLP_ACM_PROCESSED_DIR = (
+    Path(__file__).resolve().parents[1] / "datasets" / "data" / "processed"
+    / "dblp_acm_u65536"
+)
+
+
+def _reject_legacy_dblp_acm_processed_path(path, label: str) -> None:
+    """Reject the quarantined old DBLP-ACM processed tree as input or output."""
+    candidate = Path(path).resolve(strict=False)
+    legacy = _LEGACY_DBLP_ACM_PROCESSED_DIR.resolve(strict=False)
+    try:
+        candidate.relative_to(legacy)
+    except ValueError:
+        return
+    raise ManifestError(
+        f"{label} resolves within the forbidden prior-run DBLP-ACM directory: "
+        f"{candidate}")
 
 
 def _strip_utf8_bom(raw: bytes) -> bytes:
@@ -927,6 +949,9 @@ def cmd_dblp_acm(*, source_manifest, output_dir, universe: int, pairs: int,
         raise ManifestError(f"pairs must be non-negative: {pairs!r}")
     if seed < 0:
         raise ManifestError(f"seed must be non-negative: {seed!r}")
+
+    _reject_legacy_dblp_acm_processed_path(source_manifest, "source manifest")
+    _reject_legacy_dblp_acm_processed_path(output_dir, "output directory")
 
     manifest = validate_source_manifest(source_manifest, "dblp_acm")
     inputs_by_role = {i.role: i for i in manifest.inputs}

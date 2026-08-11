@@ -23,6 +23,7 @@ import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -920,6 +921,77 @@ class Work5RunnerContractTest(unittest.TestCase):
         lifecycle = load_contract()["lifecycle"]
         self.assertTrue(lifecycle["resume_rejects_hash_mismatch"])
         self.assertTrue(lifecycle["terminal_cells_never_rerun"])
+
+    def test_real_phase_argv_is_source_bound_and_fixture_mode_cannot_start_it(self) -> None:
+        root = self.tmp / "future-final-root"
+        commands = work5_runner.planned_real_commands(self.build, root)
+        self.assertEqual([label for label, _ in commands], ["prepare", "measure", "verify"])
+        prepare, measure, verify = (argv for _label, argv in commands)
+        self.assertEqual(prepare, [
+            sys.executable, str(ROOT / "scripts" / "prepare_real_datasets.py"),
+            "dblp-acm", "--source-manifest",
+            str(ROOT / "datasets" / "manifests" / "dblp_acm.source.tsv"),
+            "--output-dir", str(root / "real" / "dblp_acm_u65536"),
+            "--universe", "65536", "--pairs", "10000", "--seed", "20260729", "--strict",
+        ])
+        self.assertIn("--single-trial-validation", measure)
+        self.assertIn("--seed=20260729", measure)
+        self.assertIn("--threads=2", measure)
+        self.assertIn(str(root / "real" / "dblp_acm_u65536" / "dataset.manifest.tsv"), measure)
+        self.assertEqual(verify[1], str(ROOT / "scripts" / "verify_real_dataset_outputs.py"))
+        self.assertNotIn(str(ROOT / "datasets" / "data" / "processed" /
+                              "dblp_acm_u65536"), "\n".join(sum((argv for _, argv in commands), [])))
+
+        denied = self.run_runner("real", self.tmp / "fixture-real")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("fixture mode", denied.stderr)
+        self.assertFalse((self.tmp / "fixture-real").exists(),
+                         "fixture-mode real call must not create a Work #5 root")
+        self.assertFalse(self.events.exists(), "fixture-mode real call started a producer")
+
+    def test_parameter_phase_inventory_is_exactly_terminal_and_hashed(self) -> None:
+        results = self.tmp / "parameter-inventory"
+        completed = self.run_runner("parameters", results)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        run = json.loads((results / "run.json").read_text(encoding="utf-8"))
+        inventory = run["phase_inventory"]["parameters"]
+        self.assertEqual(run["completed_phases"], ["parameters"])
+        self.assertEqual(inventory["row_counts"]["terminal_cells"], 61)
+        self.assertEqual(sum(inventory["row_counts"][name]
+                             for name in ("measured", "skipped", "errors")), 61)
+        artifacts = {entry["path"]: entry["sha256"] for entry in inventory["artifacts"]}
+        self.assertIn("cells.jsonl", artifacts)
+        self.assertEqual(artifacts["cells.jsonl"],
+                         hashlib.sha256((results / "cells.jsonl").read_bytes()).hexdigest())
+
+    def test_real_first_subprocess_error_is_terminal_and_cannot_retry(self) -> None:
+        root = self.tmp / "real-terminal"
+        root.mkdir()
+        (root / "real").mkdir()
+        capability = work5_runner.ResultsRootCapability(
+            root=root, resume=True, fresh=False)
+        run = {
+            "completed_phases": ["toy", "parameters"],
+            "phase_inventory": {"toy": {}, "parameters": {}},
+            "git_dirty": False,
+        }
+        args = type("Args", (), {"resume": True, "build_dir": str(self.build)})()
+        commands = [("prepare", ["/test/failing-prepare"])]
+        with mock.patch.object(work5_runner, "source_provenance", return_value={}), \
+             mock.patch.object(work5_runner, "executable_map", return_value={}), \
+             mock.patch.object(work5_runner, "resume_validate", return_value=(run, [{"status": "MEASURED"}] * 61)), \
+             mock.patch.object(work5_runner, "require_prior_receipt"), \
+             mock.patch.object(work5_runner, "planned_real_commands", return_value=commands), \
+             mock.patch.object(work5_runner, "bounded_subprocess",
+                               return_value=subprocess.CompletedProcess(commands[0][1], 2, b"", b"first failure")):
+            with self.assertRaisesRegex(work5_runner.Work5Error, "real prepare subprocess failed"):
+                work5_runner.run_real_phase(args, capability, deadline=time.monotonic() + 30)
+            terminal = json.loads((root / "real" / "terminal.json").read_text(encoding="utf-8"))
+            self.assertEqual(terminal["status"], "ERROR")
+            self.assertIn("first failure", terminal["detail"])
+            self.assertEqual(run["completed_phases"], ["toy", "parameters"])
+            with self.assertRaisesRegex(work5_runner.Work5Error, "prior artifacts"):
+                work5_runner.run_real_phase(args, capability, deadline=time.monotonic() + 30)
 
 
 if __name__ == "__main__":

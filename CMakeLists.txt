@@ -1153,6 +1153,7 @@ if(BUILD_BENCHMARKS)
         bench_real_datasets
         benchmarks/bench_real_datasets.cpp
         benchmarks/real_accuracy_driver.cpp
+        benchmarks/real_encoding_driver.cpp
         ${REAL_TIMING_DRIVER_SOURCE}
     )
     target_link_libraries(
