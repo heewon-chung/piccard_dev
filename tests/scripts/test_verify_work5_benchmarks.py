@@ -147,6 +147,42 @@ class Work5VerifierContractTest(unittest.TestCase):
         self.rebind_cells(root, rows)
         return rows
 
+    def rebind_copied_parameter_root(self, source: Path, candidate: Path) -> list[dict[str, Any]]:
+        """Copy a valid fixture root while preserving its root-bound contract.
+
+        A raw A->B copy is intentionally invalid: ``run.json`` binds the
+        canonical results-root and every frozen producer argv embeds B's
+        staging paths.  This test-only helper first updates those dependent
+        values and their hashes, then proves the copied baseline verifies
+        before a semantic mutation is introduced.  It never changes the
+        production verifier's identity checks.
+        """
+        shutil.copytree(source, candidate)
+        rows = read_jsonl(candidate / "cells.jsonl")
+        run_path = candidate / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        expected_by_id = {cell["cell_id"]: cell for cell in work5_runner.frozen_cells()}
+        self.assertEqual({row["cell_id"] for row in rows}, set(expected_by_id))
+        build_dir = Path(run["build_dir"])
+        canonical_root = candidate.resolve()
+        for row in rows:
+            expected = expected_by_id[row["cell_id"]]
+            row["argv"] = work5_runner.planned_argv(build_dir, canonical_root, expected)
+            command_path = candidate / row["command_path"]
+            command_path.write_bytes(work5_runner.canonical_json({
+                "schema": "piccard-work5-command-v1", "cell_id": row["cell_id"],
+                "argv": row["argv"], "environment": row["environment"],
+            }))
+            row["command_sha256"] = work5_runner.sha256_file(command_path)
+        self.rebind_cells(candidate, rows)
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run["results_root"] = str(canonical_root)
+        run["results_root_sha256"] = work5_runner.results_root_digest(canonical_root)
+        run_path.write_bytes(work5_runner.canonical_json(run))
+        verified = self.verify(candidate)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        return rows
+
     def test_semantic_verifier_registers_both_piccard_m_extra_suites(self) -> None:
         expected = {
             "work5-std128-piccard-m-extra":
@@ -304,27 +340,35 @@ class Work5VerifierContractTest(unittest.TestCase):
 
         source = mixed_roots["STD128"]
 
-        def mutate(name: str, change: Callable[[list[dict[str, Any]], Path], None]) -> None:
+        def mutate(name: str, expected_error: str,
+                   change: Callable[[list[dict[str, Any]], Path], None]) -> None:
             candidate = self.tmp / name
-            shutil.copytree(source, candidate)
-            rows = read_jsonl(candidate / "cells.jsonl")
+            rows = self.rebind_copied_parameter_root(source, candidate)
             change(rows, candidate)
             self.rebind_cells(candidate, rows)
-            self.assertNotEqual(self.verify(candidate).returncode, 0, name)
+            verified = self.verify(candidate)
+            self.assertNotEqual(verified.returncode, 0, name)
+            self.assertIn(expected_error, verified.stderr, verified.stderr)
+            self.assertNotIn("canonical results-root identity mismatch", verified.stderr,
+                             verified.stderr)
 
         def u65536(rows: list[dict[str, Any]], methods: list[str]) -> dict[str, Any]:
             return next(row for row in rows if row["security"] == "STD128" and
                         row["axis"] == "U" and row["axis_value"] == 65536 and
                         row["methods"] == methods)
 
-        mutate("measured-planned-commitment", lambda rows, _: u65536(
+        mutate("measured-planned-commitment",
+               "work5-std128-piccard::U=65536: measured cell carries a skip commitment",
+               lambda rows, _: u65536(
             rows, ["piccard", "piccard_sqrt"]).__setitem__(
                 "trial_payload_sha256", work5_runner.planned_payload_sha256(
                     u65536(rows, ["piccard", "piccard_sqrt"]))))
-        mutate("skipped-actual-payload", lambda rows, _: u65536(
+        mutate("skipped-actual-payload",
+               "work5-std128-fhe-ind::U=65536: skip planned-payload commitment mismatch",
+               lambda rows, _: u65536(
             rows, ["fhe_ind"]).__setitem__(
-                "trial_payload_sha256", self.fixture_actual_payload(
-                    u65536(rows, ["fhe_ind"]))))
+                "trial_payload_sha256", u65536(
+                    rows, ["piccard", "piccard_sqrt"])["trial_payload_sha256"]))
 
         skip = next(row for row in read_jsonl(source / "cells.jsonl")
                     if row["methods"] == ["fhe_ind"] and row["axis"] == "U" and
@@ -335,7 +379,9 @@ class Work5VerifierContractTest(unittest.TestCase):
             "executed_trials": 4,
         }
         for field, value in changed.items():
-            mutate(f"skip-commitment-{field}", lambda rows, _, field=field, value=value:
+            mutate(f"skip-commitment-{field}",
+                   "work5-std128-fhe-ind::U=65536: skip planned-payload commitment mismatch",
+                   lambda rows, _, field=field, value=value:
                    u65536(rows, ["fhe_ind"]).__setitem__(
                        "trial_payload_sha256",
                        self.forged_skip_commitment(skip, **{field: value})))
@@ -352,8 +398,24 @@ class Work5VerifierContractTest(unittest.TestCase):
             self.assertGreaterEqual(len(controls), 2)
             controls[1]["trial_payload_sha256"] = "d" * 64
 
-        mutate("skipped-workload-artifact", skipped_workload)
-        mutate("jointly-measured-divergence", divergent_measured)
+        def measured_to_skipped(rows: list[dict[str, Any]], _: Path) -> None:
+            u65536(rows, ["piccard", "piccard_sqrt"])["status"] = "SKIPPED_PRECHECK"
+
+        def skipped_to_measured(rows: list[dict[str, Any]], _: Path) -> None:
+            u65536(rows, ["fhe_ind"])["status"] = "MEASURED"
+
+        mutate("skipped-workload-artifact",
+               "work5-std128-fhe-ind::U=65536: preflight skip has output artifact",
+               skipped_workload)
+        mutate("measured-to-skipped",
+               "work5-std128-piccard::U=65536: skip planned-payload commitment mismatch",
+               measured_to_skipped)
+        mutate("skipped-to-measured",
+               "work5-std128-fhe-ind::U=65536: measured cell carries a skip commitment",
+               skipped_to_measured)
+        mutate("jointly-measured-divergence",
+               "trial payload hashes diverge for jointly measured cell",
+               divergent_measured)
 
     def test_root_binding_exact_argv_and_orphan_inventory_fail_even_when_rehashed(self) -> None:
         source = self.produce_parameter_root("identity-source")
