@@ -1647,6 +1647,32 @@ class QuickEndToEndTest(unittest.TestCase):
             self.assertIn(f"root.{index:03d}.id", metadata)
         self.assertNotIn(f"root.{root_count:03d}.id", metadata)
 
+    def test_quick_metadata_preserves_legacy_v1_key_order_and_set(self):
+        self.run_quick()
+        keys = [line.split("\t", 1)[0]
+                for line in (self.results_root / "run_metadata.tsv").read_text(
+                    encoding="utf-8").splitlines()[1:]]
+        self.assertEqual(keys[:7], [
+            "schema_version", "evidence_mode", "source_commit", "git_dirty",
+            "build_type", "bench_real_datasets_sha256",
+            "summarize_real_datasets_sha256",
+        ])
+        self.assertNotIn("bench_real_threshold_sha256", keys)
+
+    def test_legacy_quick_metadata_without_threshold_key_verifies_and_resumes(self):
+        self.run_quick()
+        metadata_path = self.results_root / "run_metadata.tsv"
+        lines = [line for line in metadata_path.read_text(
+            encoding="utf-8").splitlines()
+                 if not line.startswith("bench_real_threshold_sha256\t")]
+        metadata_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        verify_result = run_verifier(self.results_root)
+        self.assertEqual(verify_result.returncode, 0, verify_result.stderr)
+        resumed = self.run_quick(extra=("--resume",))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("nothing to do", resumed.stdout)
+
     def test_cell_id_enumeration_exactly_three_quick_cells(self):
         self.run_quick()
         metadata = read_kv_file(self.results_root / "run_metadata.tsv")

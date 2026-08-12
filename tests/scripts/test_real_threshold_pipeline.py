@@ -59,13 +59,13 @@ class RealThresholdPipelineTest(unittest.TestCase):
 
     def run_threshold(self, *, suffix="", k=128, m=64, trials=1,
                       manifest=FIXTURE, max_pairs=4, seed=20260729,
-                      binary=BINARY):
+                      binary=BINARY, mode_args=("--mode=threshold",)):
         csv_path = self.root / f"threshold{suffix}.csv"
         manifest_path = self.root / f"threshold{suffix}.manifest.tsv"
         rows_path = self.root / f"threshold{suffix}.rows.tsv"
         result = subprocess.run(
             [str(binary), f"--dataset-manifest={manifest}",
-             "--mode=threshold", f"--k={k}", f"--m={m}",
+             *mode_args, f"--k={k}", f"--m={m}",
              f"--max-pairs={max_pairs}", f"--threshold-trials={trials}",
              f"--seed={seed}", "--hash_randomness=resampled",
              f"--csv={csv_path}",
@@ -74,6 +74,20 @@ class RealThresholdPipelineTest(unittest.TestCase):
             capture_output=True, text=True,
         )
         return result, csv_path, manifest_path, rows_path
+
+    def test_isolated_threshold_cli_requires_exactly_one_threshold_mode(self):
+        for mode_args, label in (
+                ((), "missing"),
+                (("--mode=not-threshold",), "wrong"),
+                (("--mode=threshold", "--mode=threshold"), "duplicate")):
+            with self.subTest(mode=label):
+                result, csv_path, manifest_path, rows_path = self.run_threshold(
+                    suffix=f"-mode-{label}", binary=THRESHOLD_BINARY,
+                    mode_args=mode_args)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(csv_path.exists())
+                self.assertFalse(manifest_path.exists())
+                self.assertFalse(rows_path.exists())
 
     def test_threshold_executable_is_link_free_from_openfhe(self):
         self.assertTrue(THRESHOLD_BINARY.is_file(),

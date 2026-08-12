@@ -613,8 +613,11 @@ def validate_resume(existing: dict, results_root: pathlib.Path, evidence_mode: s
         fail("resume build_type mismatch")
     if existing.get("bench_real_datasets_sha256") != binary_sha:
         fail("resume bench_real_datasets binary SHA-256 mismatch")
-    if existing.get("bench_real_threshold_sha256") != threshold_binary_sha:
-        fail("resume bench_real_threshold binary SHA-256 mismatch")
+    threshold_cells = [cell for cell in cells
+                       if cell.display_argv[0] == "bench_real_threshold"]
+    if evidence_mode == "paper" and threshold_cells:
+        if existing.get("bench_real_threshold_sha256") != threshold_binary_sha:
+            fail("resume bench_real_threshold binary SHA-256 mismatch")
 
     cell_count = int(existing.get("cell_count", "-1"))
     if cell_count < 0:
@@ -905,9 +908,12 @@ def _write_run_metadata(results_root, args, commit, dirty, build_type, binary_sh
         ("git_dirty", "true" if dirty else "false"),
         ("build_type", build_type),
         ("bench_real_datasets_sha256", binary_sha),
-        ("bench_real_threshold_sha256", threshold_binary_sha),
-        ("summarize_real_datasets_sha256", summarizer_sha),
     ]
+    threshold_cells = [cell for cell in cells
+                       if cell.display_argv[0] == "bench_real_threshold"]
+    if args.evidence_mode == "paper" and threshold_cells:
+        pairs.append(("bench_real_threshold_sha256", threshold_binary_sha))
+    pairs.append(("summarize_real_datasets_sha256", summarizer_sha))
     pairs.extend(root_pairs)
 
     artifacts = []

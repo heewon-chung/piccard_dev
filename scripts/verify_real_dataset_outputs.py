@@ -2182,10 +2182,10 @@ def verify(results_root: Path) -> str:
     if not cells:
         fail("run_metadata.tsv declares zero cells")
     _validate_cell_id_enumeration(cells, evidence_mode)
-    threshold_binary_sha = _require(values, "bench_real_threshold_sha256")
     threshold_cells = [cell for cell in cells
                        if cell["id"].endswith(":threshold")]
     if threshold_cells:
+        threshold_binary_sha = _require(values, "bench_real_threshold_sha256")
         if not _SHA256_RE.match(threshold_binary_sha):
             fail("paper threshold cell requires a 64-hex bench_real_threshold "
                  "SHA-256")
@@ -2200,9 +2200,6 @@ def verify(results_root: Path) -> str:
         if actual_threshold_sha != threshold_binary_sha:
             fail("bench_real_threshold binary SHA-256 does not match "
                  "run_metadata.tsv")
-    elif threshold_binary_sha != "not-used":
-        fail("run_metadata.tsv must declare bench_real_threshold_sha256=not-used "
-             "when no threshold cell is present")
     # Codex stop-gate round 2: root presence is bound to the cell
     # enumeration in BOTH modes -- deleting a variant's source/processed
     # root entries (and adjusting root_count) must fail, not silently skip

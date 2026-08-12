@@ -42,8 +42,16 @@ void SetOption(const std::string& option, const std::string& value,
                piccard::bench::RealThresholdCliArgs& args,
                bool& dataset_manifest, bool& k, bool& m, bool& max_pairs,
                bool& trials, bool& seed, bool& hash_randomness, bool& csv,
-               bool& manifest_out, bool& rows_out) {
-    if (option == "--dataset-manifest") {
+               bool& manifest_out, bool& rows_out, bool& mode) {
+    if (option == "--mode") {
+        if (mode) {
+            throw std::invalid_argument("duplicate --mode");
+        }
+        if (value != "threshold") {
+            throw std::invalid_argument("--mode must be exactly threshold");
+        }
+        mode = true;
+    } else if (option == "--dataset-manifest") {
         args.dataset_manifest_path = value;
         dataset_manifest = true;
     } else if (option == "--k") {
@@ -73,7 +81,7 @@ void SetOption(const std::string& option, const std::string& value,
     } else if (option == "--workload-rows-out") {
         args.workload_rows_out_path = value;
         rows_out = true;
-    } else if (option != "--mode") {
+    } else {
         throw std::invalid_argument("unknown option: " + option);
     }
 }
@@ -90,6 +98,7 @@ piccard::bench::RealThresholdCliArgs ParseArguments(int argc, char** argv) {
     bool csv = false;
     bool manifest_out = false;
     bool rows_out = false;
+    bool mode = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
@@ -110,12 +119,14 @@ piccard::bench::RealThresholdCliArgs ParseArguments(int argc, char** argv) {
             value = argument.substr(equals + 1);
         }
         SetOption(option, value, args, dataset_manifest, k, m, max_pairs,
-                  trials, seed, hash_randomness, csv, manifest_out, rows_out);
+                  trials, seed, hash_randomness, csv, manifest_out, rows_out,
+                  mode);
     }
-    if (!dataset_manifest || !k || !m || !max_pairs || !trials || !seed ||
-        !hash_randomness || !csv || !manifest_out || !rows_out) {
+    if (!mode || !dataset_manifest || !k || !m || !max_pairs || !trials ||
+        !seed || !hash_randomness || !csv || !manifest_out || !rows_out) {
         throw std::invalid_argument(
-            "threshold requires --dataset-manifest, --k, --m, --max-pairs, "
+            "threshold requires exactly one --mode=threshold plus "
+            "--dataset-manifest, --k, --m, --max-pairs, "
             "--threshold-trials, --seed, --hash_randomness, --csv, "
             "--workload-manifest-out, and --workload-rows-out");
     }
