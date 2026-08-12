@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Hermetic Phase 6C journal and exact CTest-exception contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import verify_work5_benchmarks as verifier
+
+
+FROZEN_REASON = "check_work6_scope: FAIL: include/fhe/bfv_context.h changes preexisting content"
+SUBTESTS = (
+    "condition", "body", "comment_prefix", "include_comment", "include_string",
+    "helper_string", "helper_comment_decoy", "helper_char", "helper_nested",
+    "helper_moved_body", "helper_moved_namespace", "attribute_prefix", "define_prefix",
+    "duplicate", "brace_comment", "brace_string", "escaped_brace",
+)
+
+# The accepted CTest exception is bound to the complete numbered test/name
+# sequence, not merely to its exit code and one failed test.  Keep this local
+# oracle independent from the production classifier.
+CTEST_TEST_NAMES = (
+    "NoiseCalibrationCutoverProbeCurrent", "NoiseCalibrationCutoverProbeV2",
+    "DeletionSurvival", "DeletionMonteCarlo", "Params", "SecurityProfile",
+    "MinHash", "RealDataset", "RealDatasetMetrics", "ComparisonWorkload",
+    "EstimatorDiagnostic", "OneHotEncoder", "SqrtEncoder", "BottomStructure",
+    "ThresholdPoly", "ThresholdTruth", "Paillier", "SJ16", "BFVContext",
+    "BaselineEngine", "NoiseCalibrationProbe", "PublicCiphertextCodec",
+    "DynamicCiphertextStore", "DynamicRefreshE2E", "PiccardEngine",
+    "PiccardEngineLegacyCompile", "DynamicEngine", "ThresholdEngine", "SqrtPiccard",
+    "RealDatasetTiming", "PiccardGrownRing", "BenchmarkUtils",
+    "EstimatorProvenanceSerializers", "DynamicRefreshBenchmark", "BenchmarkProfile",
+    "BaselineProfile", "NoiseCalibrationSchema", "ThresholdProfileCompat", "PiccardE2E",
+    "Group", "Dgt12PsiCa", "Bcg12", "StdSecurityEvidenceSchema", "DeletionSurvivalCli",
+    "VerifyWorkApproval", "Work7StateGuard", "Work7ClaimContract", "Work7IntegrationRunner",
+    "Work7ResponseCandidate", "SanitizerRunnerForwarding", "NoiseProfileRunner",
+    "CalibrationTableGenerator", "CalibrationCutover", "CalibrationArchive",
+    "ReportingTaxonomy", "PreThresholdProfileRunner", "RunStdSecurityEvidence",
+    "RunWork5Benchmarks", "VerifyWork5Benchmarks", "SummarizeStdSecurityEvidence",
+    "VerifyReviewComparison", "VerifyBenchmarkProvenance", "CheckWork6Scope",
+    "VerifySJ16Extrapolation",
+    "RealDatasetPreprocess", "RunRealDatasets", "RealDatasetPipeline",
+    "BenchmarkProfileExecutables", "ReviewComparisonCli", "BenchDynamicProbeIsolation",
+    "BenchDynamicRefreshCli", "FheIndCli", "Work5ContextPreflight", "StdSecurityEvidenceE2E",
+    "NoiseStrictMeasurementCleanup", "NoiseCandidatePlaintextCompatibility",
+    "NoiseDetailIdentityMapping", "NoisePreThresholdCoverage",
+    "NoisePreThresholdRejectsThreshold", "NoisePreThresholdSmoke",
+    "NoisePreThresholdRejectsNonNaturalFirstRing", "NoisePreThresholdGrownSmoke",
+    "NoisePreThresholdRejectsProfilePolicyMismatch",
+)
+
+
+def known_ctest_stdout() -> bytes:
+    lines = ["Test project /fixture"]
+    for number in range(1, 84):
+        name = CTEST_TEST_NAMES[number - 1]
+        lines.append(f"      Start {number:2d}: {name}")
+        if number == 63:
+            lines.append("63/83 Test #63: CheckWork6Scope ........................***Failed   25.00 sec")
+            lines.append("test_bfv_production_shaped_mutations_fail_after_subtraction (...) ...")
+            for subtest in SUBTESTS:
+                lines.append(f"  test_bfv_production_shaped_mutations_fail_after_subtraction (...) (name='{subtest}') ... FAIL")
+                lines.append(FROZEN_REASON)
+            lines.extend(["Ran 18 tests in 0.001s", "FAILED (failures=17)"])
+        else:
+            lines.append(f"{number}/83 Test #{number}: {name} ...........................   Passed    0.00 sec")
+    lines.extend(["99% tests passed, 1 tests failed out of 83", "",
+                  "The following tests FAILED:", "\t 63 - CheckWork6Scope (Failed)"])
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+class Work5CtestExceptionTest(unittest.TestCase):
+    def test_only_the_hash_bound_known_signature_is_accepted(self) -> None:
+        stdout = known_ctest_stdout()
+        receipt = verifier.classify_work6_scope_ctest(8, stdout, b"Errors while running CTest\n")
+        self.assertEqual(receipt["classification"], "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH")
+        self.assertEqual(receipt["test_count"], 83)
+        self.assertEqual(receipt["failed_subtests"], list(SUBTESTS))
+        cases = {
+            "unexpected_green": (0, stdout.replace(b"1 tests failed", b"0 tests failed")),
+            "wrong_exit": (1, stdout),
+            "wrong_reason": (8, stdout.replace(FROZEN_REASON.encode(), b"accepted mutation")),
+            "extra_failure": (8, stdout.replace(b"1 tests failed out of 83", b"2 tests failed out of 83")),
+            "subtest_order": (8, stdout.replace(b"condition", b"zz_condition", 1)),
+        }
+        for name, (exit_code, candidate) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(verifier.VerificationError):
+                    verifier.classify_work6_scope_ctest(exit_code, candidate,
+                                                        b"Errors while running CTest\n")
+
+    def test_test_name_sequence_and_raw_log_shape_are_frozen(self) -> None:
+        stdout = known_ctest_stdout()
+        mutations = {
+            "changed_passed_name": stdout.replace(
+                b"1/83 Test #1: NoiseCalibrationCutoverProbeCurrent",
+                b"1/83 Test #1: RenamedTest", 1),
+            "changed_start_name": stdout.replace(
+                b"Start  2: NoiseCalibrationCutoverProbeV2",
+                b"Start  2: RenamedTest", 1),
+            "truncated_result": stdout.rsplit(b"99% tests passed", 1)[0],
+            "duplicate_result": stdout.replace(
+                b"99% tests passed, 1 tests failed out of 83\n",
+                b"1/83 Test #1: NoiseCalibrationCutoverProbeCurrent ........ Passed 0.00 sec\n"
+                b"99% tests passed, 1 tests failed out of 83\n", 1),
+        }
+        for name, candidate in mutations.items():
+            with self.subTest(name=name):
+                with self.assertRaises(verifier.VerificationError):
+                    verifier.classify_work6_scope_ctest(
+                        8, candidate, b"Errors while running CTest\n")
+
+
+class JournalContractTest(unittest.TestCase):
+    def test_complete_pairs_are_monotone_and_incomplete_pairs_fail(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "logs").mkdir()
+            stdout_payload = b"stdout\n"
+            stderr_payload = b"stderr\n"
+            (root / "logs/1.stdout").write_bytes(stdout_payload)
+            (root / "logs/1.stderr").write_bytes(stderr_payload)
+            events = [
+                {"schema": "piccard-work5-command-event-v1", "event": "START", "sequence": 1,
+                 "command_id": "first", "argv": ["true"], "cwd": "/fixture", "environment": {},
+                 "git_sha": "a" * 40, "stdout_path": "logs/1.stdout", "stderr_path": "logs/1.stderr",
+                 "started_at_utc": "2026-08-12T00:00:00Z"},
+                {"schema": "piccard-work5-command-event-v1", "event": "END", "sequence": 1,
+                 "command_id": "first", "argv": ["true"], "cwd": "/fixture", "environment": {},
+                 "git_sha": "a" * 40, "stdout_path": "logs/1.stdout", "stderr_path": "logs/1.stderr",
+                 "started_at_utc": "2026-08-12T00:00:00Z", "ended_at_utc": "2026-08-12T00:00:01Z",
+                 "exit_code": 0, "stdout_sha256": hashlib.sha256(stdout_payload).hexdigest(),
+                 "stderr_sha256": hashlib.sha256(stderr_payload).hexdigest(),
+                 "classification": "PASS"},
+            ]
+            journal = root / "commands.jsonl"
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+                               encoding="utf-8")
+            self.assertEqual(capture.journal_events(journal), events)
+            journal.write_text(json.dumps(events[0], sort_keys=True) + "\n", encoding="utf-8")
+            with self.assertRaises(capture.CaptureError):
+                capture.journal_events(journal)
+
+
+if __name__ == "__main__":
+    unittest.main()

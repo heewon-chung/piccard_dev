@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -41,16 +43,86 @@ CONTEXT_SPECS = {
     "context_sqrt": ("sqrt", "piccard-work5-piccard-context-preflight-v1"),
     "context_fhe_ind": ("fhe_ind", "piccard-work5-fhe-ind-context-preflight-v1"),
 }
-DYNAMIC_CSV_FIELDS = frozenset({
-    "label", "k", "m", "set_size", "depth", "trials", "hash_seed",
-    "accuracy_trials", "profile_id", "run_class", "target_security_bits",
-    "comparison_eligible", "measurement_kind", "dynamic_scenario",
-    "updates_requested", "updates_applied", "initial_epoch", "final_epoch",
-    "owner_b_unchanged", "ciphertext_upload_count", "local_inner_product",
-    "decrypted_inner_product", "correctness_status", "refresh_owner_set_id",
-    "refresh_updates", "refresh_epoch_before", "refresh_epoch_after",
-    "refresh_status", "refresh_upload_bytes", "refresh_ciphertexts_uploaded",
-})
+# Keep this literal independent from the runner.  This verifier must reject a
+# producer's accidental or adversarial schema expansion rather than inheriting
+# that expansion through an import or a shared CSV helper.
+DYNAMIC_CSV_HEADER = tuple(
+    "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
+    "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+    "ops_insert_per_sec,ops_delete_per_sec,trials,total_ms_sd,total_ms_median,"
+    "phase_init_ms_sd,phase_init_ms_median,phase_insert_ms_sd,"
+    "phase_insert_ms_median,phase_delete_ms_sd,phase_delete_ms_median,"
+    "phase_signature_ms_sd,phase_signature_ms_median,phase_encode_ms_sd,"
+    "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+    "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "scaling_mod_size,sanitizer_model,sanitizer_assurance,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+    "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+    "local_inner_product,decrypted_inner_product,correctness_status,"
+    "refresh_owner_set_id,refresh_updates,refresh_epoch_before,"
+    "refresh_epoch_after,refresh_status,phase_refresh_update_ms,"
+    "phase_refresh_signature_ms,phase_refresh_encode_ms,"
+    "phase_refresh_encrypt_ms,phase_refresh_serialize_ms,"
+    "phase_cloud_replace_ms,refresh_total_ms,refresh_upload_bytes,"
+    "refresh_ciphertexts_uploaded,refresh_context_fingerprint,"
+    "refresh_public_key_fingerprint".split(",")
+)
+DYNAMIC_CSV_FIELDS = frozenset(DYNAMIC_CSV_HEADER)
+DYNAMIC_OPENFHE_VERSION = "1.5.0"
+FROZEN_WORK6_HASHES = {
+    "include/fhe/bfv_context.h": "bbf14f741dc5e6a4a97e33b4d7bdb00964bcf5f701428482490e63e8996ebbc5",
+    "src/fhe/bfv_context.cpp": "22fe21a5dbe24e2679f668bbafe49854af1026140e60fabceadcedce6af6e382",
+    "scripts/check_work6_scope.py": "017a98e8ef763795fb47838b1ae95fbf244e04d067acf621dfe752a9de2989cf",
+    "scripts/work6_allowed_paths.txt": "f0b12d5f3b8f3e957944653bc237d5de6892b1660738197e02b2c79c4de8d26c",
+    "tests/scripts/test_check_work6_scope.py": "3e9e518f34ba6db48def91dafc7447742046eebd893357d7a7562f5fa55714ae",
+    "CMakeLists.txt": "2a53a2812af89b6b9058137548037ab04dbf2fc506a390340b707e360d7ef8d7",
+}
+WORK6_FAILURE_SUBTESTS = (
+    "condition", "body", "comment_prefix", "include_comment", "include_string",
+    "helper_string", "helper_comment_decoy", "helper_char", "helper_nested",
+    "helper_moved_body", "helper_moved_namespace", "attribute_prefix", "define_prefix",
+    "duplicate", "brace_comment", "brace_string", "escaped_brace",
+)
+WORK6_FIRST_REASON = "check_work6_scope: FAIL: include/fhe/bfv_context.h changes preexisting content"
+# The accepted diagnostic is bound to the complete CTest topology, including
+# every numbered test name.  A changed test name or a truncated/duplicated
+# result line is a different run and must not be accepted as the exception.
+WORK6_CTEST_TEST_NAMES = (
+    "NoiseCalibrationCutoverProbeCurrent", "NoiseCalibrationCutoverProbeV2",
+    "DeletionSurvival", "DeletionMonteCarlo", "Params", "SecurityProfile",
+    "MinHash", "RealDataset", "RealDatasetMetrics", "ComparisonWorkload",
+    "EstimatorDiagnostic", "OneHotEncoder", "SqrtEncoder", "BottomStructure",
+    "ThresholdPoly", "ThresholdTruth", "Paillier", "SJ16", "BFVContext",
+    "BaselineEngine", "NoiseCalibrationProbe", "PublicCiphertextCodec",
+    "DynamicCiphertextStore", "DynamicRefreshE2E", "PiccardEngine",
+    "PiccardEngineLegacyCompile", "DynamicEngine", "ThresholdEngine", "SqrtPiccard",
+    "RealDatasetTiming", "PiccardGrownRing", "BenchmarkUtils",
+    "EstimatorProvenanceSerializers", "DynamicRefreshBenchmark", "BenchmarkProfile",
+    "BaselineProfile", "NoiseCalibrationSchema", "ThresholdProfileCompat", "PiccardE2E",
+    "Group", "Dgt12PsiCa", "Bcg12", "StdSecurityEvidenceSchema", "DeletionSurvivalCli",
+    "VerifyWorkApproval", "Work7StateGuard", "Work7ClaimContract", "Work7IntegrationRunner",
+    "Work7ResponseCandidate", "SanitizerRunnerForwarding", "NoiseProfileRunner",
+    "CalibrationTableGenerator", "CalibrationCutover", "CalibrationArchive",
+    "ReportingTaxonomy", "PreThresholdProfileRunner", "RunStdSecurityEvidence",
+    "RunWork5Benchmarks", "VerifyWork5Benchmarks", "SummarizeStdSecurityEvidence",
+    "VerifyReviewComparison", "VerifyBenchmarkProvenance", "CheckWork6Scope",
+    "VerifySJ16Extrapolation", "RealDatasetPreprocess", "RunRealDatasets",
+    "RealDatasetPipeline", "BenchmarkProfileExecutables", "ReviewComparisonCli",
+    "BenchDynamicProbeIsolation", "BenchDynamicRefreshCli", "FheIndCli",
+    "Work5ContextPreflight", "StdSecurityEvidenceE2E", "NoiseStrictMeasurementCleanup",
+    "NoiseCandidatePlaintextCompatibility", "NoiseDetailIdentityMapping",
+    "NoisePreThresholdCoverage", "NoisePreThresholdRejectsThreshold", "NoisePreThresholdSmoke",
+    "NoisePreThresholdRejectsNonNaturalFirstRing", "NoisePreThresholdGrownSmoke",
+    "NoisePreThresholdRejectsProfilePolicyMismatch",
+)
 PHASE_ORDERS = {
     "toy": ["toy"],
     "parameters": ["toy", "parameters"],
@@ -304,6 +376,93 @@ def source_provenance() -> dict[str, Any]:
             "git_tree": git("rev-parse", "HEAD^{tree}"),
             "repository_root": str(Path(git("rev-parse", "--show-toplevel")).resolve()),
             "git_dirty": bool(git("status", "--porcelain=v1", "--untracked-files=no"))}
+
+
+def frozen_work6_hashes() -> dict[str, str]:
+    """Return the immutable topology binding for the lone CTest exception."""
+    observed: dict[str, str] = {}
+    for relative, expected in FROZEN_WORK6_HASHES.items():
+        path = SOURCE_ROOT / relative
+        require(path.is_file() and not path.is_symlink(),
+                f"frozen Work6 topology path is missing or unsafe: {relative}")
+        digest = sha256_file(path)
+        require(digest == expected, f"frozen Work6 topology hash mismatch: {relative}")
+        observed[relative] = digest
+    return observed
+
+
+def classify_work6_scope_ctest(exit_code: int, stdout: bytes, stderr: bytes) -> dict[str, Any]:
+    """Accept exactly the reviewed 83/82/#63 diagnostic signature.
+
+    This is intentionally a semantic parser, not a historical-log hash or an
+    exit-code exception.  Any extra failure, changed mutation reason, altered
+    ordering, accepted mutation, or all-green result is a hard failure.
+    """
+    hashes = frozen_work6_hashes()
+    require(exit_code == 8, "full CTest exit code is not the frozen diagnostic value 8")
+    try:
+        stdout_text = stdout.decode("utf-8", "strict")
+        stderr_text = stderr.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise VerificationError("full CTest raw log is not strict UTF-8") from exc
+    require("\x00" not in stdout_text and "\x00" not in stderr_text,
+            "full CTest raw log contains NUL")
+    require(stderr_text.strip() in ("", "Errors while running CTest"),
+            "full CTest stderr is not the canonical one-failure diagnostic")
+    require(len(WORK6_CTEST_TEST_NAMES) == 83,
+            "internal frozen CTest test-name list is malformed")
+    started = re.findall(r"(?m)^\s*Start\s+(\d+):\s*(.*?)\s*$", stdout_text)
+    require([(int(number), name) for number, name in started] ==
+            list(enumerate(WORK6_CTEST_TEST_NAMES, start=1)),
+            "full CTest did not execute the exact frozen numbered test/name sequence")
+    result_lines = re.findall(r"(?m)^\s*(\d+)/83 Test\s+#\s*(\d+):.*$", stdout_text)
+    require(len(result_lines) == 83,
+            "full CTest did not report exactly 83 numbered result lines")
+    for position, (shown_number, test_number) in enumerate(result_lines, start=1):
+        require((int(shown_number), int(test_number)) == (position, position),
+                "full CTest result numbering/order is not frozen")
+        expected_name = WORK6_CTEST_TEST_NAMES[position - 1]
+        result_prefix = re.compile(
+            rf"^\s*{position}/83 Test\s+#\s*{position}:\s+{re.escape(expected_name)}\s+")
+        matching = [line for line in stdout_text.splitlines()
+                    if result_prefix.match(line)]
+        require(len(matching) == 1,
+                "full CTest result test number/name differs from the frozen topology")
+        line = matching[0]
+        if position == 63:
+            require("***Failed" in line,
+                    "full CTest failure is not exactly #63 CheckWork6Scope")
+        else:
+            require("Passed" in line and "Failed" not in line,
+                    "full CTest has a non-#63 failure or accepted #63 result")
+    failed = re.findall(r"(?m)^\s*63/83 Test\s+#\s*63:\s+CheckWork6Scope\b.*\*\*\*Failed", stdout_text)
+    require(len(failed) == 1, "full CTest failure is not exactly #63 CheckWork6Scope")
+    passed = [line for line in stdout_text.splitlines()
+              if re.match(r"^\s*\d+/83 Test\s+#\s*\d+:", line) and "Passed" in line]
+    require(len(passed) == 82, "full CTest did not report exactly 82 passes")
+    require(stdout_text.count("99% tests passed, 1 tests failed out of 83") == 1 and
+            stdout_text.count("63 - CheckWork6Scope (Failed)") == 1,
+            "full CTest summary is not exactly one failed CheckWork6Scope test")
+    require(stdout_text.count("Ran 18 tests") == 1 and stdout_text.count("FAILED (failures=17)") == 1,
+            "CheckWork6Scope did not report exactly 18 tests and 17 failures")
+    subtests = re.findall(r"\(name='([^']+)'\)\s+\.\.\.\s+FAIL", stdout_text)
+    require(tuple(subtests) == WORK6_FAILURE_SUBTESTS,
+            "CheckWork6Scope failing mutation set/order differs from the frozen signature")
+    require(stdout_text.count(WORK6_FIRST_REASON) == 17,
+            "CheckWork6Scope mutation first-reason signature differs from the frozen diagnostic")
+    return {
+        "schema": "piccard-work5-ctest-gate-receipt-v1",
+        "verdict": "PASS", "classification": "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH",
+        "ctest_exit_code": exit_code, "test_count": 83, "passed": 82, "failed": 1,
+        "failed_test": {"number": 63, "name": "CheckWork6Scope"},
+        "failed_subtests": list(WORK6_FAILURE_SUBTESTS),
+        "check_work6_scope": {"ran": 18, "failures": 17,
+                              "failed_subtests": list(WORK6_FAILURE_SUBTESTS),
+                              "first_reason": WORK6_FIRST_REASON},
+        "frozen_work6_hashes": hashes,
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+    }
 
 
 def results_root_digest(root: Path) -> str:
@@ -878,6 +1037,24 @@ def _dynamic_canonical_integer(row: dict[str, str], key: str) -> int:
     return parsed
 
 
+def _dynamic_decimal(row: dict[str, str], key: str, *, nonnegative: bool = True) -> Decimal:
+    value = row.get(key)
+    require(isinstance(value, str) and value and "e" not in value.casefold(),
+            f"dynamic CSV field is not a canonical finite decimal: {key}")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise VerificationError(f"dynamic CSV field is not a decimal: {key}") from exc
+    require(parsed.is_finite() and (not nonnegative or parsed >= 0),
+            f"dynamic CSV decimal is out of range: {key}")
+    return parsed
+
+
+def _dynamic_same_millis(left: Decimal, right: Decimal) -> bool:
+    quantum = Decimal("0.001")
+    return left.quantize(quantum) == right.quantize(quantum)
+
+
 def verify_dynamic_csv(path: Path, updates: int) -> None:
     """Independently verify one dynamic correctness row, never its timing.
 
@@ -890,25 +1067,30 @@ def verify_dynamic_csv(path: Path, updates: int) -> None:
         text = path.read_text(encoding="utf-8")
         reader = csv.DictReader(io.StringIO(text))
         fieldnames = reader.fieldnames
-        require(fieldnames is not None and len(fieldnames) == len(set(fieldnames)) and
-                DYNAMIC_CSV_FIELDS.issubset(fieldnames),
-                "dynamic CSV header misses frozen correctness fields")
+        require(fieldnames == list(DYNAMIC_CSV_HEADER),
+                "dynamic CSV header is not the exact frozen 97-column schema")
         rows = list(reader)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise VerificationError(f"cannot parse dynamic CSV: {exc}") from exc
     require(len(rows) == 1 and None not in rows[0],
             "dynamic phase requires exactly one well-formed CSV row per update")
     row = rows[0]
-    require(all(row.get(name) not in (None, "") for name in DYNAMIC_CSV_FIELDS),
-            "dynamic CSV contains an empty frozen correctness field")
+    require(all(row.get(name) not in (None, "") for name in DYNAMIC_CSV_HEADER),
+            "dynamic CSV contains an empty frozen schema field")
     expected_text = {
         "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
-        "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
-        "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
+        "set_size": "100", "ring_dim": "1024", "depth": "5", "trials": "1",
+        "hash_seed": "7", "hash_root_seed": "7", "accuracy_trials": "0",
+        "profile_id": "toy-smoke", "run_class": "smoke",
         "target_security_bits": "0", "comparison_eligible": "false",
         "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
         "owner_b_unchanged": "true", "correctness_status": "PASS",
         "refresh_owner_set_id": "owner-a", "refresh_status": "applied",
+        "hash_randomness": "fixed", "sanitizer_model": "phase-smudging-enc0-poc-v1",
+        "sanitizer_assurance": "empirical-phase-statistical+ciphertext-computational",
+        "estimator_model": "sha256-random-ranking-poc-v1", "actual_ring_dim": "1024",
+        "plaintext_modulus": "12289", "num_limbs": "4",
+        "openfhe_version": DYNAMIC_OPENFHE_VERSION,
     }
     require(all(row[name] == value for name, value in expected_text.items()),
             "dynamic CSV violates the frozen correctness/provenance contract")
@@ -921,13 +1103,61 @@ def verify_dynamic_csv(path: Path, updates: int) -> None:
     }
     observed = {key: _dynamic_canonical_integer(row, key)
                 for key in (*expected_numbers, "local_inner_product",
-                            "decrypted_inner_product", "refresh_upload_bytes")}
+                            "decrypted_inner_product", "refresh_upload_bytes", "ct_size_bytes",
+                            "memory_bytes", "rel_error_eligible_n", "transcript_stat_bits",
+                            "max_queries", "query_stat_bits", "coefficient_stat_bits",
+                            "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
+                            "scaling_mod_size")}
     require(all(observed[key] == value for key, value in expected_numbers.items()),
             "dynamic CSV update/epoch/upload counters are inconsistent")
     require(observed["local_inner_product"] == observed["decrypted_inner_product"],
             "dynamic CSV local/decrypted inner products differ")
     require(observed["refresh_upload_bytes"] > 0,
             "dynamic CSV upload must contain one non-empty ciphertext")
+    require(observed["refresh_upload_bytes"] == observed["ct_size_bytes"],
+            "dynamic CSV upload bytes must equal ciphertext bytes")
+    fixed_numbers = {
+        "local_inner_product": 7, "decrypted_inner_product": 7, "rel_error_eligible_n": 1,
+        "transcript_stat_bits": 40, "max_queries": 1048576, "query_stat_bits": 60,
+        "coefficient_stat_bits": 70, "flood_margin_bits": 8, "eval_noise_bits": 56,
+        "flood_noise_bits": 134, "scaling_mod_size": 40,
+    }
+    require(all(observed[name] == value for name, value in fixed_numbers.items()),
+            "dynamic CSV fixed numeric provenance mismatch")
+    diagnostic_decimals = (
+        "phase_init_ms", "phase_insert_ms", "phase_delete_ms", "phase_signature_ms",
+        "phase_encode_ms", "phase_encrypt_ms", "phase_compute_ms", "phase_decrypt_ms",
+        "total_ms", "phase_refresh_update_ms", "phase_refresh_signature_ms",
+        "phase_refresh_encode_ms", "phase_refresh_encrypt_ms", "phase_refresh_serialize_ms",
+        "phase_cloud_replace_ms", "refresh_total_ms", "jaccard_computed", "jaccard_expected",
+        "jaccard_error", "jaccard_rel_error", "log_q_bits",
+    )
+    decimals = {name: _dynamic_decimal(row, name) for name in diagnostic_decimals}
+    require(decimals["jaccard_computed"] <= 1 and decimals["jaccard_expected"] <= 1,
+            "dynamic CSV Jaccard diagnostic is outside [0,1]")
+    require(decimals["log_q_bits"] > 0, "dynamic CSV log_q_bits must be positive")
+    require(decimals["refresh_total_ms"] == decimals["total_ms"],
+            "dynamic CSV refresh total must equal diagnostic total")
+    for phase in ("total", "phase_init", "phase_insert", "phase_delete", "phase_signature",
+                  "phase_encode", "phase_encrypt", "phase_compute", "phase_decrypt"):
+        value = decimals["total_ms"] if phase == "total" else decimals[f"{phase}_ms"]
+        median = _dynamic_decimal(row, f"{phase}_ms_median")
+        require(_dynamic_same_millis(value, median),
+                f"dynamic CSV median does not match diagnostic phase: {phase}")
+    for name in ("total_ms_sd", "phase_init_ms_sd", "phase_insert_ms_sd",
+                 "phase_delete_ms_sd", "phase_signature_ms_sd", "phase_encode_ms_sd",
+                 "phase_encrypt_ms_sd", "phase_compute_ms_sd", "phase_decrypt_ms_sd"):
+        require(row[name] == "-1.000",
+                f"dynamic CSV legacy standard deviation is not disabled: {name}")
+    require((row["phase_flood_ms"], row["phase_flood_ms_sd"], row["phase_flood_ms_median"]) ==
+            ("0.000", "-1.000", "0.000"), "dynamic CSV flood timing contract mismatch")
+    require((row["ops_insert_per_sec"], row["ops_delete_per_sec"]) == ("0.0", "0.0"),
+            "dynamic CSV operation rates must remain non-performance diagnostics")
+    for name in ("refresh_context_fingerprint", "refresh_public_key_fingerprint"):
+        value = row[name]
+        require(len(value) == 64 and all(ch in "0123456789abcdef" for ch in value),
+                f"dynamic CSV fingerprint is not lowercase SHA-256: {name}")
+    return row
 
 
 def verify_dynamic(root: Path, run: dict[str, Any]) -> None:
@@ -957,6 +1187,7 @@ def verify_dynamic(root: Path, run: dict[str, Any]) -> None:
             isinstance(terminal.get("ended_at_utc"), str),
             "dynamic terminal contract mismatch")
     expected_paths = {"dynamic/commands.json", "dynamic/terminal.json"}
+    rows: list[dict[str, str]] = []
     for updates, (label, _argv) in zip((1, 2), commands):
         csv_path = dynamic_root / f"{label}.csv"
         stdout_path = dynamic_root / f"{label}.stdout"
@@ -967,7 +1198,7 @@ def verify_dynamic(root: Path, run: dict[str, Any]) -> None:
                 f"dynamic {label} CSV or logs are missing or unsafe")
         require(csv_path.read_bytes() == stdout_path.read_bytes(),
                 f"dynamic {label} CSV must be the exact producer stdout")
-        verify_dynamic_csv(csv_path, updates)
+        rows.append(verify_dynamic_csv(csv_path, updates))
         expected_paths.update({f"dynamic/{label}.csv", f"dynamic/{label}.stdout",
                                f"dynamic/{label}.stderr"})
     observed_paths: set[str] = set()
@@ -977,6 +1208,10 @@ def verify_dynamic(root: Path, run: dict[str, Any]) -> None:
             observed_paths.add(path.relative_to(root).as_posix())
     require(observed_paths == expected_paths,
             "dynamic phase contains an unexpected or missing artifact")
+    require(rows[0]["refresh_context_fingerprint"] == rows[1]["refresh_context_fingerprint"],
+            "dynamic rows do not bind one refresh context")
+    require(rows[0]["refresh_public_key_fingerprint"] != rows[1]["refresh_public_key_fingerprint"],
+            "dynamic rows reuse a public-key fingerprint across distinct commands")
     verify_phase_inventory_membership(root, run, "dynamic", expected_paths)
 
 
@@ -1011,12 +1246,12 @@ def verify_inventory(root: Path, records: list[dict[str, Any]],
         require(receipt_dir.is_dir() and not receipt_dir.is_symlink(),
                 "verification receipt path is malformed")
         for receipt in receipt_dir.iterdir():
+            allowed = {*run["completed_phases"], "full-ctest", "pre-seal-receipt"}
             require(receipt.is_file() and not receipt.is_symlink() and
-                    receipt.suffix == ".json" and
-                    receipt.stem in run["completed_phases"],
+                    receipt.suffix == ".json" and receipt.stem in allowed,
                     "verification receipt inventory is malformed")
             expected.add(receipt.relative_to(root).as_posix())
-    for optional in ("verification.json", "SHA256SUMS"):
+    for optional in ("SHA256SUMS", "SHA256SUMS.sha256"):
         if (root / optional).is_file():
             expected.add(optional)
     actual: set[str] = set()
@@ -1105,6 +1340,140 @@ def write_receipt(root: Path, run: dict[str, Any], phase: str, output: Path,
     runner.atomic_write(output, canonical_json(receipt), new=True)
 
 
+def verify_phase_mode(root: Path, run: dict[str, Any], fixture: bool,
+                      requested_phase: str) -> tuple[str, int]:
+    """Run one phase semantic verifier without creating a receipt."""
+    expected = expected_cells()
+    verify_matrix(root, run, expected)
+    if requested_phase == "toy":
+        require(not fixture and run.get("completed_phases") == ["toy"],
+                "toy verification requires the exact initial lifecycle")
+        toy = verify_toy(root, run)
+        require(read_records(root) == [], "toy evidence has parameter terminal records")
+        verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
+        verify_inventory(root, [], toy, run)
+        return "toy", 0
+    require(requested_phase in ("parameters", "real", "dynamic"),
+            f"verifier cannot verify {requested_phase!r} evidence")
+    toy = None if fixture else verify_toy(root, run)
+    records = verify_records(root, run, expected)
+    if toy is not None:
+        verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
+    verify_phase_inventory_membership(root, run, "parameters",
+                                      _expected_parameter_inventory_paths(records))
+    if requested_phase == "dynamic":
+        require(not fixture and run.get("completed_phases") == PHASE_ORDERS["dynamic"],
+                "dynamic verification requires the exact toy,parameters,real,dynamic lifecycle")
+        verify_real(root, run)
+        verify_dynamic(root, run)
+    elif requested_phase == "real":
+        require(not fixture and run.get("completed_phases") == PHASE_ORDERS["real"],
+                "real verification requires the exact toy,parameters,real lifecycle")
+        verify_real(root, run)
+    else:
+        require((fixture and run.get("completed_phases") == ["parameters"]) or
+                (not fixture and run.get("completed_phases") == PHASE_ORDERS["parameters"]),
+                "parameter verification requires the exact completed phase state")
+    verify_inventory(root, records, toy, run)
+    return requested_phase, 61
+
+
+def _check_common_expectations(args: argparse.Namespace, run: dict[str, Any]) -> None:
+    if args.expect_git_sha is not None:
+        require(args.expect_git_sha == run["git_sha"], "--expect-git-sha mismatch")
+    if args.expect_completed_phases is not None:
+        require(_parse_expected_completed(args.expect_completed_phases) == run["completed_phases"],
+                "--expect-completed-phases mismatch")
+
+
+def write_ctest_gate_receipt(root: Path, run: dict[str, Any], output: Path,
+                             exit_code: int, stdout_path: Path, stderr_path: Path) -> None:
+    expected = root / "verification" / "full-ctest.json"
+    require(output.resolve(strict=False) == expected.resolve(strict=False),
+            "--verification-out must be the exact new full-ctest receipt path")
+    require(not output.exists() and not output.is_symlink(),
+            "full-ctest receipt already exists or is unsafe")
+    for path, relative in ((stdout_path, "gates/full-ctest.stdout"),
+                           (stderr_path, "gates/full-ctest.stderr")):
+        require(path.resolve(strict=False) == (root / relative).resolve(strict=False) and
+                path.is_file() and not path.is_symlink(),
+                "full CTest raw log path is not canonical or safe")
+    receipt = classify_work6_scope_ctest(exit_code, stdout_path.read_bytes(), stderr_path.read_bytes())
+    receipt.update({"results_root": str(root.resolve()), "run_sha256": sha256_file(root / "run.json"),
+                    "git_sha": run["git_sha"], "completed_phases": run["completed_phases"],
+                    "created_at_utc": runner.utc_now()})
+    runner.atomic_write(output, canonical_json(receipt), new=True)
+
+
+def verify_ctest_gate_receipt(root: Path, run: dict[str, Any]) -> tuple[Path, str]:
+    path = root / "verification" / "full-ctest.json"
+    receipt = load_object(path, "full CTest gate receipt")
+    require(receipt.get("schema") == "piccard-work5-ctest-gate-receipt-v1" and
+            receipt.get("verdict") == "PASS" and
+            receipt.get("classification") == "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH" and
+            receipt.get("results_root") == str(root.resolve()) and
+            receipt.get("git_sha") == run["git_sha"] and
+            receipt.get("completed_phases") == ["toy"] and
+            receipt.get("frozen_work6_hashes") == frozen_work6_hashes(),
+            "full CTest gate receipt contract mismatch")
+    return path, sha256_file(path)
+
+
+def _phase_receipt_hashes(root: Path, run: dict[str, Any]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for phase in run["completed_phases"]:
+        path = root / "verification" / f"{phase}.json"
+        receipt = load_object(path, f"{phase} verification receipt")
+        require(receipt.get("schema") == "piccard-work5-verification-receipt-v1" and
+                receipt.get("verdict") == "PASS" and receipt.get("phase") == phase and
+                receipt.get("results_root") == str(root.resolve()) and
+                receipt.get("git_sha") == run["git_sha"] and
+                receipt.get("completed_phases") == PHASE_ORDERS[phase],
+                f"{phase} verification receipt contract mismatch")
+        hashes[phase] = sha256_file(path)
+    return hashes
+
+
+def write_pre_seal_receipt(root: Path, run: dict[str, Any], output: Path) -> None:
+    """Write the pre-manifest semantic receipt using an exclusive link install."""
+    import seal_work5_benchmarks as sealer
+
+    expected = root / "verification" / "pre-seal-receipt.json"
+    require(output.resolve(strict=False) == expected.resolve(strict=False),
+            "--receipt-out must be the exact new pre-seal receipt path")
+    for path in (expected, root / "SHA256SUMS", root / "SHA256SUMS.sha256"):
+        require(not path.exists() and not path.is_symlink(),
+                "pre-seal requires all receipt and seal artifacts to be absent")
+    if list(expected.parent.glob(f".{expected.name}.tmp.*")):
+        raise VerificationError("pre-seal receipt has a stale temporary")
+    ctest_path, ctest_hash = verify_ctest_gate_receipt(root, run)
+    phase_hashes = _phase_receipt_hashes(root, run)
+    inventory = sealer.inventory(root, exclude={"verification/pre-seal-receipt.json",
+                                                "SHA256SUMS", "SHA256SUMS.sha256"})
+    directories = sealer.directory_inventory(root)
+    parameter_counts = run["phase_inventory"]["parameters"]["row_counts"]
+    require(parameter_counts == {"terminal_cells": 61, "measured": 49, "skipped": 12, "errors": 0},
+            "pre-seal parameter counts are not the frozen 61/49/12/0 inventory")
+    receipt = {
+        "schema": "piccard-work5-pre-seal-receipt-v1", "semantic_verdict": "PASS",
+        "created_at_utc": runner.utc_now(), "results_root": str(root.resolve()),
+        "root_identity": sealer.root_identity(root), "git_sha": run["git_sha"],
+        "tracked_clean": run["git_dirty"] is False, "run_sha256": sha256_file(root / "run.json"),
+        "build_dir": run["build_dir"], "executables": run["executables"],
+        "scripts": run["scripts"], "matrix_sha256": run["matrix_sha256"],
+        "command_template_sha256": run["command_template_sha256"],
+        "completed_phases": run["completed_phases"], "phase_receipt_sha256": phase_hashes,
+        "full_ctest_receipt": {"path": ctest_path.relative_to(root).as_posix(), "sha256": ctest_hash},
+        "parameter_counts": parameter_counts, "real_semantic_verdict": "PASS",
+        "dynamic_semantic_verdict": "PASS", "inventory": inventory,
+        "inventory_sha256": hashlib.sha256(sealer.canonical_json(inventory)).hexdigest(),
+        "directories": directories,
+        "directories_sha256": hashlib.sha256(sealer.canonical_json(directories)).hexdigest(),
+    }
+    sealer.atomic_no_replace(output, sealer.canonical_json(receipt),
+                              expected_root=sealer.root_identity(root))
+
+
 def process(args: argparse.Namespace) -> int:
     root = Path(args.results_root).resolve()
     require(root.is_dir(), "results root does not exist")
@@ -1114,62 +1483,49 @@ def process(args: argparse.Namespace) -> int:
         raise VerificationError("fixture-mode roots are not production evidence")
     if args.allow_test_fixture and not run.get("test_fixture_mode"):
         raise VerificationError("--allow-test-fixture is valid only for fixture-mode roots")
-    expected = expected_cells()
-    verify_matrix(root, run, expected)
+    _check_common_expectations(args, run)
     fixture = bool(run.get("test_fixture_mode"))
-    requested_phase = args.require_phase
-    # A complete seal must also independently traverse the final dynamic
-    # phase; otherwise a valid four-phase declaration could bypass its own
-    # correctness receipt checks by omitting --require-phase.
-    if args.require_complete and requested_phase is None:
-        requested_phase = "dynamic"
-    if requested_phase == "toy":
+    if args.mode == "phase":
+        require(args.require_phase is not None, "--mode=phase requires --require-phase")
+        phase, terminal_cells = verify_phase_mode(root, run, fixture, args.require_phase)
+        if args.verification_out is not None:
+            write_receipt(root, run, phase, Path(args.verification_out), terminal_cells)
+        result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
+                  "phase": phase, "terminal_cells": terminal_cells,
+                  "test_fixture_mode": fixture}
+    elif args.mode == "ctest-gate":
         require(not fixture and run.get("completed_phases") == ["toy"],
-                "toy verification requires a production root sealed before parameters")
-        toy = verify_toy(root, run)
-        require(read_records(root) == [], "toy evidence has parameter terminal records")
-        verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
-        verify_inventory(root, [], toy, run)
-        result_phase, terminal_cells = "toy", 0
-    else:
-        if requested_phase and requested_phase not in ("parameters", "real", "dynamic"):
-            raise VerificationError(f"verifier cannot verify {requested_phase!r} evidence")
-        toy = None if fixture else verify_toy(root, run)
-        records = verify_records(root, run, expected)
-        if toy is not None:
-            verify_phase_inventory_membership(root, run, "toy", _expected_toy_inventory_paths(toy))
-        verify_phase_inventory_membership(root, run, "parameters",
-                                          _expected_parameter_inventory_paths(records))
-        if requested_phase == "dynamic":
-            require(not fixture and run.get("completed_phases") == PHASE_ORDERS["dynamic"],
-                    "dynamic verification requires the exact toy,parameters,real,dynamic lifecycle")
-            verify_real(root, run)
-            verify_dynamic(root, run)
-            result_phase, terminal_cells = "dynamic", 61
-        elif requested_phase == "real":
-            require(not fixture and run.get("completed_phases") == PHASE_ORDERS["real"],
-                    "real verification requires the exact toy,parameters,real lifecycle")
-            verify_real(root, run)
-            result_phase, terminal_cells = "real", 61
-        else:
-            require((fixture and run.get("completed_phases") == ["parameters"]) or
-                    (not fixture and run.get("completed_phases") == PHASE_ORDERS["parameters"]),
-                    "parameter verification requires the exact completed phase state")
-            result_phase, terminal_cells = "parameters", 61
-        verify_inventory(root, records, toy, run)
-    if args.require_complete:
-        verify_existing_seal(root, run)
-        result_phase = "complete"
-    if args.expect_git_sha is not None:
-        require(args.expect_git_sha == run["git_sha"], "--expect-git-sha mismatch")
-    if args.expect_completed_phases is not None:
-        require(_parse_expected_completed(args.expect_completed_phases) == run["completed_phases"],
-                "--expect-completed-phases mismatch")
-    if args.verification_out is not None:
-        write_receipt(root, run, result_phase, Path(args.verification_out), terminal_cells)
-    result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
-              "phase": result_phase, "terminal_cells": terminal_cells,
-              "test_fixture_mode": bool(run.get("test_fixture_mode"))}
+                "ctest gate requires the exact production toy lifecycle")
+        require(args.ctest_exit_code is not None and args.ctest_stdout and args.ctest_stderr and
+                args.verification_out, "ctest-gate requires exit code, canonical raw logs, and receipt output")
+        write_ctest_gate_receipt(root, run, Path(args.verification_out), args.ctest_exit_code,
+                                 Path(args.ctest_stdout), Path(args.ctest_stderr))
+        result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
+                  "phase": "ctest-gate", "test_fixture_mode": False}
+    elif args.mode == "pre-seal":
+        require(not fixture and run.get("git_dirty") is False and
+                run.get("completed_phases") == PHASE_ORDERS["dynamic"],
+                "pre-seal requires a clean complete production lifecycle")
+        require(args.receipt_out, "pre-seal requires --receipt-out")
+        verify_phase_mode(root, run, False, "dynamic")
+        write_pre_seal_receipt(root, run, Path(args.receipt_out))
+        result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
+                  "phase": "pre-seal", "test_fixture_mode": False}
+    else:  # post-seal
+        import seal_work5_benchmarks as sealer
+
+        require(not fixture and run.get("git_dirty") is False and
+                run.get("completed_phases") == PHASE_ORDERS["dynamic"],
+                "post-seal requires a clean complete production lifecycle")
+        require(args.receipt and args.manifest and args.manifest_digest,
+                "post-seal requires receipt, manifest, and manifest digest")
+        before = sealer.snapshot(root)
+        sealer.verify_post_seal(root, Path(args.receipt), Path(args.manifest),
+                                Path(args.manifest_digest))
+        verify_phase_mode(root, run, False, "dynamic")
+        require(sealer.snapshot(root) == before, "post-seal semantic verification wrote evidence")
+        result = {"schema": "piccard-work5-verification-v1", "verdict": "PASS",
+                  "phase": "post-seal", "test_fixture_mode": False}
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -1177,11 +1533,18 @@ def process(args: argparse.Namespace) -> int:
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_root")
+    parser.add_argument("--mode", choices=("phase", "ctest-gate", "pre-seal", "post-seal"), required=True)
     parser.add_argument("--require-phase", choices=("toy", "parameters", "real", "dynamic"))
-    parser.add_argument("--require-complete", action="store_true")
     parser.add_argument("--expect-git-sha")
     parser.add_argument("--expect-completed-phases")
     parser.add_argument("--verification-out")
+    parser.add_argument("--ctest-exit-code", type=int)
+    parser.add_argument("--ctest-stdout")
+    parser.add_argument("--ctest-stderr")
+    parser.add_argument("--receipt-out")
+    parser.add_argument("--receipt")
+    parser.add_argument("--manifest")
+    parser.add_argument("--manifest-digest")
     parser.add_argument("--allow-test-fixture", action="store_true",
                         help="test-only: inspect a root explicitly marked fixture mode")
     return parser.parse_args(list(argv))

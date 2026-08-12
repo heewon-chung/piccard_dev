@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
@@ -1645,6 +1646,7 @@ def command_template_sha256() -> str:
 
 def script_hashes() -> dict[str, str]:
     scripts = ("run_work5_benchmarks.py", "verify_work5_benchmarks.py",
+               "capture_work5_phase6_prelive.py", "seal_work5_benchmarks.py",
                "verify_review_comparison.py", "verify_benchmark_provenance.py",
                "prepare_real_datasets.py", "run_real_datasets.sh",
                "verify_real_dataset_outputs.py", "summarize_real_datasets.py")
@@ -1664,7 +1666,7 @@ def initial_run(build_dir: Path, executable_hashes: dict[str, str], matrix_sha: 
         "build_dir": str(build_dir), "compiler": compiler_descriptor(deadline),
         "build_identity": {"cmake_cache_sha256": sha256_file(cache) if cache.is_file() else None},
         "results_root": str(root.resolve()), "results_root_sha256": results_root_digest(root),
-        "openfhe_version": os.environ.get("PICCARD_OPENFHE_VERSION", "recorded-by-live-producer"),
+        "openfhe_version": os.environ.get("PICCARD_OPENFHE_VERSION", DYNAMIC_OPENFHE_VERSION),
         "host": host_descriptor(), "environment": command_environment(),
         "executables": executable_hashes,
         "executable_paths": executable_paths(build_dir, executable_hashes),
@@ -1793,16 +1795,41 @@ def planned_dynamic_commands(build_dir: Path, root: Path) -> list[tuple[str, lis
     ]
 
 
-DYNAMIC_CSV_FIELDS = frozenset({
-    "label", "k", "m", "set_size", "depth", "trials", "hash_seed",
-    "accuracy_trials", "profile_id", "run_class", "target_security_bits",
-    "comparison_eligible", "measurement_kind", "dynamic_scenario",
-    "updates_requested", "updates_applied", "initial_epoch", "final_epoch",
-    "owner_b_unchanged", "ciphertext_upload_count", "local_inner_product",
-    "decrypted_inner_product", "correctness_status", "refresh_owner_set_id",
-    "refresh_updates", "refresh_epoch_before", "refresh_epoch_after",
-    "refresh_status", "refresh_upload_bytes", "refresh_ciphertexts_uploaded",
-})
+# This is intentionally an ordered tuple, not a set.  The dynamic producer
+# is a correctness diagnostic only; admitting a future/ranking column would
+# make it possible to promote it into a performance artifact after the fact.
+DYNAMIC_CSV_HEADER = tuple(
+    "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
+    "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+    "ops_insert_per_sec,ops_delete_per_sec,trials,total_ms_sd,total_ms_median,"
+    "phase_init_ms_sd,phase_init_ms_median,phase_insert_ms_sd,"
+    "phase_insert_ms_median,phase_delete_ms_sd,phase_delete_ms_median,"
+    "phase_signature_ms_sd,phase_signature_ms_median,phase_encode_ms_sd,"
+    "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+    "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "scaling_mod_size,sanitizer_model,sanitizer_assurance,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+    "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+    "local_inner_product,decrypted_inner_product,correctness_status,"
+    "refresh_owner_set_id,refresh_updates,refresh_epoch_before,"
+    "refresh_epoch_after,refresh_status,phase_refresh_update_ms,"
+    "phase_refresh_signature_ms,phase_refresh_encode_ms,"
+    "phase_refresh_encrypt_ms,phase_refresh_serialize_ms,"
+    "phase_cloud_replace_ms,refresh_total_ms,refresh_upload_bytes,"
+    "refresh_ciphertexts_uploaded,refresh_context_fingerprint,"
+    "refresh_public_key_fingerprint".split(",")
+)
+# Retain a named set for non-schema callers, but never use it for admission.
+DYNAMIC_CSV_FIELDS = frozenset(DYNAMIC_CSV_HEADER)
+DYNAMIC_OPENFHE_VERSION = "1.5.0"
 
 
 def _dynamic_canonical_integer(row: dict[str, str], key: str) -> int:
@@ -1816,6 +1843,24 @@ def _dynamic_canonical_integer(row: dict[str, str], key: str) -> int:
     if str(parsed) != value:
         raise Work5Error(f"dynamic CSV integer is not canonical: {key}")
     return parsed
+
+
+def _dynamic_decimal(row: dict[str, str], key: str, *, nonnegative: bool = True) -> Decimal:
+    value = row.get(key)
+    if not isinstance(value, str) or not value or "e" in value.casefold():
+        raise Work5Error(f"dynamic CSV field is not a canonical finite decimal: {key}")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise Work5Error(f"dynamic CSV field is not a decimal: {key}") from exc
+    if not parsed.is_finite() or (nonnegative and parsed < 0):
+        raise Work5Error(f"dynamic CSV decimal is out of range: {key}")
+    return parsed
+
+
+def _dynamic_same_millis(left: Decimal, right: Decimal) -> bool:
+    quantum = Decimal("0.001")
+    return left.quantize(quantum) == right.quantize(quantum)
 
 
 def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
@@ -1832,9 +1877,8 @@ def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
         text = raw.decode("utf-8", "strict")
         reader = csv.DictReader(io.StringIO(text))
         fieldnames = reader.fieldnames
-        if (not fieldnames or len(fieldnames) != len(set(fieldnames)) or
-                not DYNAMIC_CSV_FIELDS.issubset(fieldnames)):
-            raise Work5Error("dynamic CSV header misses frozen correctness fields")
+        if fieldnames != list(DYNAMIC_CSV_HEADER):
+            raise Work5Error("dynamic CSV header is not the exact frozen 97-column schema")
         rows = list(reader)
     except UnicodeDecodeError as exc:
         raise Work5Error("dynamic CSV is not strict UTF-8") from exc
@@ -1843,18 +1887,23 @@ def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
     if len(rows) != 1 or any(None in row for row in rows):
         raise Work5Error("dynamic phase requires exactly one well-formed CSV row per update")
     row = rows[0]
-    if any(row.get(name) in (None, "") for name in DYNAMIC_CSV_FIELDS):
-        raise Work5Error("dynamic CSV contains an empty frozen correctness field")
+    if any(row.get(name) in (None, "") for name in DYNAMIC_CSV_HEADER):
+        raise Work5Error("dynamic CSV contains an empty frozen schema field")
     expected_text = {
         "label": f"refresh_owner_a_0_to_{updates}", "k": str(DYNAMIC_K),
-        "m": str(DYNAMIC_M), "set_size": str(DYNAMIC_SET_SIZE),
+        "m": str(DYNAMIC_M), "set_size": str(DYNAMIC_SET_SIZE), "ring_dim": "1024",
         "depth": str(DYNAMIC_DEPTH), "trials": "1", "hash_seed": str(SEED),
-        "accuracy_trials": "0", "profile_id": DYNAMIC_PROFILE,
+        "hash_root_seed": str(SEED), "accuracy_trials": "0", "profile_id": DYNAMIC_PROFILE,
         "run_class": "smoke", "target_security_bits": "0",
         "comparison_eligible": "false", "measurement_kind": "diagnostic",
         "dynamic_scenario": "refresh", "owner_b_unchanged": "true",
         "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
-        "refresh_status": "applied",
+        "refresh_status": "applied", "hash_randomness": "fixed",
+        "sanitizer_model": "phase-smudging-enc0-poc-v1",
+        "sanitizer_assurance": "empirical-phase-statistical+ciphertext-computational",
+        "estimator_model": "sha256-random-ranking-poc-v1", "actual_ring_dim": "1024",
+        "plaintext_modulus": "12289", "num_limbs": "4",
+        "openfhe_version": DYNAMIC_OPENFHE_VERSION,
     }
     if any(row[name] != value for name, value in expected_text.items()):
         raise Work5Error("dynamic CSV violates the frozen correctness/provenance contract")
@@ -1867,13 +1916,62 @@ def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
     }
     observed = {key: _dynamic_canonical_integer(row, key)
                 for key in (*expected_numbers, "local_inner_product",
-                            "decrypted_inner_product", "refresh_upload_bytes")}
+                            "decrypted_inner_product", "refresh_upload_bytes", "ct_size_bytes",
+                            "memory_bytes", "rel_error_eligible_n", "transcript_stat_bits",
+                            "max_queries", "query_stat_bits", "coefficient_stat_bits",
+                            "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
+                            "scaling_mod_size")}
     if any(observed[key] != value for key, value in expected_numbers.items()):
         raise Work5Error("dynamic CSV update/epoch/upload counters are inconsistent")
     if observed["local_inner_product"] != observed["decrypted_inner_product"]:
         raise Work5Error("dynamic CSV local/decrypted inner products differ")
     if observed["refresh_upload_bytes"] <= 0:
         raise Work5Error("dynamic CSV upload must contain one non-empty ciphertext")
+    if observed["refresh_upload_bytes"] != observed["ct_size_bytes"]:
+        raise Work5Error("dynamic CSV upload bytes must equal ciphertext bytes")
+    expected_fixed_numbers = {
+        "local_inner_product": 7, "decrypted_inner_product": 7, "rel_error_eligible_n": 1,
+        "transcript_stat_bits": 40, "max_queries": 1048576, "query_stat_bits": 60,
+        "coefficient_stat_bits": 70, "flood_margin_bits": 8, "eval_noise_bits": 56,
+        "flood_noise_bits": 134, "scaling_mod_size": 40,
+    }
+    if any(observed[name] != value for name, value in expected_fixed_numbers.items()):
+        raise Work5Error("dynamic CSV fixed numeric provenance mismatch")
+    diagnostic_decimals = (
+        "phase_init_ms", "phase_insert_ms", "phase_delete_ms", "phase_signature_ms",
+        "phase_encode_ms", "phase_encrypt_ms", "phase_compute_ms", "phase_decrypt_ms",
+        "total_ms", "phase_refresh_update_ms", "phase_refresh_signature_ms",
+        "phase_refresh_encode_ms", "phase_refresh_encrypt_ms", "phase_refresh_serialize_ms",
+        "phase_cloud_replace_ms", "refresh_total_ms", "jaccard_computed", "jaccard_expected",
+        "jaccard_error", "jaccard_rel_error", "log_q_bits",
+    )
+    decimals = {name: _dynamic_decimal(row, name) for name in diagnostic_decimals}
+    if decimals["jaccard_computed"] > 1 or decimals["jaccard_expected"] > 1:
+        raise Work5Error("dynamic CSV Jaccard diagnostic is outside [0,1]")
+    if decimals["log_q_bits"] <= 0:
+        raise Work5Error("dynamic CSV log_q_bits must be positive")
+    if decimals["refresh_total_ms"] != decimals["total_ms"]:
+        raise Work5Error("dynamic CSV refresh total must equal diagnostic total")
+    for phase in ("total", "phase_init", "phase_insert", "phase_delete", "phase_signature",
+                  "phase_encode", "phase_encrypt", "phase_compute", "phase_decrypt"):
+        value = decimals["total_ms"] if phase == "total" else decimals[f"{phase}_ms"]
+        median = _dynamic_decimal(row, f"{phase}_ms_median")
+        if not _dynamic_same_millis(value, median):
+            raise Work5Error(f"dynamic CSV median does not match diagnostic phase: {phase}")
+    for name in ("total_ms_sd", "phase_init_ms_sd", "phase_insert_ms_sd",
+                 "phase_delete_ms_sd", "phase_signature_ms_sd", "phase_encode_ms_sd",
+                 "phase_encrypt_ms_sd", "phase_compute_ms_sd", "phase_decrypt_ms_sd"):
+        if row[name] != "-1.000":
+            raise Work5Error(f"dynamic CSV legacy standard deviation is not disabled: {name}")
+    if (row["phase_flood_ms"], row["phase_flood_ms_sd"], row["phase_flood_ms_median"]) != \
+            ("0.000", "-1.000", "0.000"):
+        raise Work5Error("dynamic CSV flood timing contract mismatch")
+    if (row["ops_insert_per_sec"], row["ops_delete_per_sec"]) != ("0.0", "0.0"):
+        raise Work5Error("dynamic CSV operation rates must remain non-performance diagnostics")
+    for name in ("refresh_context_fingerprint", "refresh_public_key_fingerprint"):
+        value = row[name]
+        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise Work5Error(f"dynamic CSV fingerprint is not lowercase SHA-256: {name}")
     return row
 
 
@@ -2028,6 +2126,7 @@ def run_dynamic_phase(args: argparse.Namespace, root_capability: ResultsRootCapa
         "commands": [{"label": label, "argv": argv} for label, argv in commands],
         "environment": command_environment(),
     }), new=True)
+    validated_rows: list[dict[str, str]] = []
     try:
         for updates, (label, argv) in zip(DYNAMIC_UPDATES, commands):
             result = bounded_subprocess(argv, deadline=deadline, cwd=SOURCE_ROOT,
@@ -2039,8 +2138,14 @@ def run_dynamic_phase(args: argparse.Namespace, root_capability: ResultsRootCapa
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
                 raise Work5Error(f"dynamic {label} subprocess failed: {detail}")
-            validate_dynamic_csv(result.stdout or b"", updates)
+            validated_rows.append(validate_dynamic_csv(result.stdout or b"", updates))
             atomic_write(dynamic_root / f"{label}.csv", result.stdout or b"", new=True)
+        if (len(validated_rows) != 2 or
+                validated_rows[0]["refresh_context_fingerprint"] !=
+                validated_rows[1]["refresh_context_fingerprint"] or
+                validated_rows[0]["refresh_public_key_fingerprint"] ==
+                validated_rows[1]["refresh_public_key_fingerprint"]):
+            raise Work5Error("dynamic CSV fingerprint binding is inconsistent across commands")
         terminal = _write_dynamic_terminal(root, status="MEASURED", detail="PASS",
                                            commands=commands)
         artifacts = _dynamic_phase_artifacts(root)

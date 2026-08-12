@@ -34,6 +34,73 @@ VERIFIER = ROOT / "scripts" / "verify_work5_benchmarks.py"
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "work5" / "single_trial_contract.json"
 
+# Independent Phase 6A test oracle.  Do not import the runner's definition:
+# the verifier must reject schema drift even if the producer is compromised.
+DYNAMIC_CSV_HEADER = tuple(
+    "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
+    "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+    "ops_insert_per_sec,ops_delete_per_sec,trials,total_ms_sd,total_ms_median,"
+    "phase_init_ms_sd,phase_init_ms_median,phase_insert_ms_sd,"
+    "phase_insert_ms_median,phase_delete_ms_sd,phase_delete_ms_median,"
+    "phase_signature_ms_sd,phase_signature_ms_median,phase_encode_ms_sd,"
+    "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+    "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "scaling_mod_size,sanitizer_model,sanitizer_assurance,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+    "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+    "local_inner_product,decrypted_inner_product,correctness_status,"
+    "refresh_owner_set_id,refresh_updates,refresh_epoch_before,"
+    "refresh_epoch_after,refresh_status,phase_refresh_update_ms,"
+    "phase_refresh_signature_ms,phase_refresh_encode_ms,"
+    "phase_refresh_encrypt_ms,phase_refresh_serialize_ms,"
+    "phase_cloud_replace_ms,refresh_total_ms,refresh_upload_bytes,"
+    "refresh_ciphertexts_uploaded,refresh_context_fingerprint,"
+    "refresh_public_key_fingerprint".split(",")
+)
+
+
+def dynamic_refresh_values(updates: int) -> dict[str, str]:
+    values = {name: "0.000" for name in DYNAMIC_CSV_HEADER}
+    values.update({
+        "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
+        "set_size": "100", "ring_dim": "1024", "depth": "5", "memory_bytes": "0",
+        "ct_size_bytes": "1", "trials": "1", "rel_error_eligible_n": "1",
+        "hash_randomness": "fixed", "hash_seed": "7", "hash_root_seed": "7",
+        "accuracy_trials": "0", "transcript_stat_bits": "40", "max_queries": "1048576",
+        "query_stat_bits": "60", "coefficient_stat_bits": "70", "flood_margin_bits": "8",
+        "eval_noise_bits": "56", "flood_noise_bits": "134", "scaling_mod_size": "40",
+        "sanitizer_model": "phase-smudging-enc0-poc-v1",
+        "sanitizer_assurance": "empirical-phase-statistical+ciphertext-computational",
+        "estimator_model": "sha256-random-ranking-poc-v1", "profile_id": "toy-smoke",
+        "run_class": "smoke", "target_security_bits": "0", "comparison_eligible": "false",
+        "measurement_kind": "diagnostic", "actual_ring_dim": "1024", "log_q_bits": "160.000",
+        "plaintext_modulus": "12289", "num_limbs": "4", "openfhe_version": "1.5.0",
+        "dynamic_scenario": "refresh", "updates_requested": str(updates),
+        "updates_applied": str(updates), "initial_epoch": "0", "final_epoch": str(updates),
+        "owner_b_unchanged": "true", "ciphertext_upload_count": str(updates),
+        "local_inner_product": "7", "decrypted_inner_product": "7", "correctness_status": "PASS",
+        "refresh_owner_set_id": "owner-a", "refresh_updates": str(updates),
+        "refresh_epoch_before": "0", "refresh_epoch_after": str(updates),
+        "refresh_status": "applied", "refresh_upload_bytes": "1",
+        "refresh_ciphertexts_uploaded": str(updates), "refresh_context_fingerprint": "a" * 64,
+        "refresh_public_key_fingerprint": "b" * 63 + str(updates),
+    })
+    for name in ("total_ms_sd", "phase_init_ms_sd", "phase_insert_ms_sd",
+                 "phase_delete_ms_sd", "phase_signature_ms_sd", "phase_encode_ms_sd",
+                 "phase_encrypt_ms_sd", "phase_compute_ms_sd", "phase_decrypt_ms_sd",
+                 "phase_flood_ms_sd"):
+        values[name] = "-1.000"
+    values["ops_insert_per_sec"] = values["ops_delete_per_sec"] = "0.0"
+    return values
+
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
@@ -96,7 +163,7 @@ class Work5VerifierContractTest(unittest.TestCase):
 
     def verify(self, results: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(VERIFIER), str(results), "--require-phase=parameters",
+            ["python3", str(VERIFIER), str(results), "--mode=phase", "--require-phase=parameters",
              "--allow-test-fixture"],
             cwd=ROOT, text=True, capture_output=True, check=False,
         )
@@ -293,23 +360,9 @@ class Work5VerifierContractTest(unittest.TestCase):
 
     @staticmethod
     def dynamic_refresh_csv(updates: int) -> bytes:
-        values = {
-            "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
-            "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
-            "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
-            "target_security_bits": "0", "comparison_eligible": "false",
-            "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
-            "updates_requested": str(updates), "updates_applied": str(updates),
-            "initial_epoch": "0", "final_epoch": str(updates),
-            "owner_b_unchanged": "true", "ciphertext_upload_count": str(updates),
-            "local_inner_product": "7", "decrypted_inner_product": "7",
-            "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
-            "refresh_updates": str(updates), "refresh_epoch_before": "0",
-            "refresh_epoch_after": str(updates), "refresh_status": "applied",
-            "refresh_upload_bytes": "1", "refresh_ciphertexts_uploaded": str(updates),
-        }
+        values = dynamic_refresh_values(updates)
         stream = io.StringIO()
-        writer = csv.DictWriter(stream, fieldnames=sorted(work5_verifier.DYNAMIC_CSV_FIELDS),
+        writer = csv.DictWriter(stream, fieldnames=DYNAMIC_CSV_HEADER,
                                 lineterminator="\n")
         writer.writeheader()
         writer.writerow(values)
@@ -384,6 +437,28 @@ class Work5VerifierContractTest(unittest.TestCase):
                 with self.assertRaises(work5_verifier.VerificationError):
                     work5_verifier.verify_dynamic(candidate, candidate_run)
 
+    def test_dynamic_verifier_rejects_future_and_performance_header_mutations(self) -> None:
+        root, run = self.dynamic_root("dynamic-header-valid")
+        work5_verifier.verify_dynamic(root, run)
+        for name in ("future_column", "performance_eligible", "performance_rank", "ranking",
+                     "speedup", "throughput_rank", "primary_metric", "paper_value",
+                     "aggregate_total_ms"):
+            with self.subTest(name=name):
+                candidate, candidate_run = self.dynamic_root(f"dynamic-header-{name}")
+                source = candidate / "dynamic" / "updates-1.csv"
+                row = next(csv.DictReader(io.StringIO(source.read_text(encoding="utf-8"))))
+                header = [*DYNAMIC_CSV_HEADER, name]
+                row[name] = "1"
+                stream = io.StringIO()
+                writer = csv.DictWriter(stream, fieldnames=header, lineterminator="\n")
+                writer.writeheader()
+                writer.writerow(row)
+                payload = stream.getvalue().encode("utf-8")
+                source.write_bytes(payload)
+                (candidate / "dynamic" / "updates-1.stdout").write_bytes(payload)
+                with self.assertRaises(work5_verifier.VerificationError):
+                    work5_verifier.verify_dynamic(candidate, candidate_run)
+
     def test_dynamic_semantic_verifier_rejects_missing_or_external_artifacts(self) -> None:
         missing, missing_run = self.dynamic_root("dynamic-missing")
         (missing / "dynamic" / "updates-2.csv").unlink()
@@ -415,7 +490,7 @@ class Work5VerifierContractTest(unittest.TestCase):
         self.mark_fixture_measurements_actual(results)
         output = results / "verification" / "parameters.json"
         command = [
-            "python3", str(VERIFIER), str(results), "--require-phase=parameters",
+            "python3", str(VERIFIER), str(results), "--mode=phase", "--require-phase=parameters",
             "--allow-test-fixture", f"--verification-out={output}",
         ]
         first = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)

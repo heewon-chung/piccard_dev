@@ -33,6 +33,78 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import run_work5_benchmarks as work5_runner
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "work5" / "single_trial_contract.json"
+
+# Phase 6A deliberately keeps this test oracle local.  The runner and the
+# verifier each carry their own literal production tuple, so a shared test
+# fixture must not silently become their schema source.
+DYNAMIC_CSV_HEADER = tuple(
+    "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
+    "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+    "ops_insert_per_sec,ops_delete_per_sec,trials,total_ms_sd,total_ms_median,"
+    "phase_init_ms_sd,phase_init_ms_median,phase_insert_ms_sd,"
+    "phase_insert_ms_median,phase_delete_ms_sd,phase_delete_ms_median,"
+    "phase_signature_ms_sd,phase_signature_ms_median,phase_encode_ms_sd,"
+    "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+    "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "scaling_mod_size,sanitizer_model,sanitizer_assurance,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+    "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+    "local_inner_product,decrypted_inner_product,correctness_status,"
+    "refresh_owner_set_id,refresh_updates,refresh_epoch_before,"
+    "refresh_epoch_after,refresh_status,phase_refresh_update_ms,"
+    "phase_refresh_signature_ms,phase_refresh_encode_ms,"
+    "phase_refresh_encrypt_ms,phase_refresh_serialize_ms,"
+    "phase_cloud_replace_ms,refresh_total_ms,refresh_upload_bytes,"
+    "refresh_ciphertexts_uploaded,refresh_context_fingerprint,"
+    "refresh_public_key_fingerprint".split(",")
+)
+
+
+def dynamic_refresh_values(updates: int) -> dict[str, str]:
+    """Return one syntactically complete, non-performance dynamic row."""
+    values = {name: "0.000" for name in DYNAMIC_CSV_HEADER}
+    values.update({
+        "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
+        "set_size": "100", "ring_dim": "1024", "depth": "5",
+        "memory_bytes": "0", "ct_size_bytes": "1", "trials": "1",
+        "rel_error_eligible_n": "1", "hash_randomness": "fixed",
+        "hash_seed": "7", "hash_root_seed": "7", "accuracy_trials": "0",
+        "transcript_stat_bits": "40", "max_queries": "1048576",
+        "query_stat_bits": "60", "coefficient_stat_bits": "70",
+        "flood_margin_bits": "8", "eval_noise_bits": "56", "flood_noise_bits": "134",
+        "scaling_mod_size": "40", "sanitizer_model": "phase-smudging-enc0-poc-v1",
+        "sanitizer_assurance": "empirical-phase-statistical+ciphertext-computational",
+        "estimator_model": "sha256-random-ranking-poc-v1", "profile_id": "toy-smoke",
+        "run_class": "smoke", "target_security_bits": "0",
+        "comparison_eligible": "false", "measurement_kind": "diagnostic",
+        "actual_ring_dim": "1024", "log_q_bits": "160.000", "plaintext_modulus": "12289",
+        "num_limbs": "4", "openfhe_version": "1.5.0", "dynamic_scenario": "refresh",
+        "updates_requested": str(updates), "updates_applied": str(updates),
+        "initial_epoch": "0", "final_epoch": str(updates), "owner_b_unchanged": "true",
+        "ciphertext_upload_count": str(updates), "local_inner_product": "7",
+        "decrypted_inner_product": "7", "correctness_status": "PASS",
+        "refresh_owner_set_id": "owner-a", "refresh_updates": str(updates),
+        "refresh_epoch_before": "0", "refresh_epoch_after": str(updates),
+        "refresh_status": "applied", "refresh_upload_bytes": "1",
+        "refresh_ciphertexts_uploaded": str(updates),
+        "refresh_context_fingerprint": "a" * 64,
+        "refresh_public_key_fingerprint": "b" * 63 + str(updates),
+    })
+    for name in ("total_ms_sd", "phase_init_ms_sd", "phase_insert_ms_sd",
+                 "phase_delete_ms_sd", "phase_signature_ms_sd", "phase_encode_ms_sd",
+                 "phase_encrypt_ms_sd", "phase_compute_ms_sd", "phase_decrypt_ms_sd",
+                 "phase_flood_ms_sd"):
+        values[name] = "-1.000"
+    values["ops_insert_per_sec"] = values["ops_delete_per_sec"] = "0.0"
+    return values
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
 
 
@@ -966,24 +1038,10 @@ class Work5RunnerContractTest(unittest.TestCase):
 
     @staticmethod
     def dynamic_refresh_csv(updates: int) -> bytes:
-        """A minimal valid producer row for lifecycle-only unit tests."""
-        values = {
-            "label": f"refresh_owner_a_0_to_{updates}", "k": "16", "m": "16",
-            "set_size": "100", "depth": "5", "trials": "1", "hash_seed": "7",
-            "accuracy_trials": "0", "profile_id": "toy-smoke", "run_class": "smoke",
-            "target_security_bits": "0", "comparison_eligible": "false",
-            "measurement_kind": "diagnostic", "dynamic_scenario": "refresh",
-            "updates_requested": str(updates), "updates_applied": str(updates),
-            "initial_epoch": "0", "final_epoch": str(updates),
-            "owner_b_unchanged": "true", "ciphertext_upload_count": str(updates),
-            "local_inner_product": "7", "decrypted_inner_product": "7",
-            "correctness_status": "PASS", "refresh_owner_set_id": "owner-a",
-            "refresh_updates": str(updates), "refresh_epoch_before": "0",
-            "refresh_epoch_after": str(updates), "refresh_status": "applied",
-            "refresh_upload_bytes": "1", "refresh_ciphertexts_uploaded": str(updates),
-        }
+        """A complete frozen producer row for lifecycle-only unit tests."""
+        values = dynamic_refresh_values(updates)
         stream = io.StringIO()
-        writer = csv.DictWriter(stream, fieldnames=sorted(work5_runner.DYNAMIC_CSV_FIELDS),
+        writer = csv.DictWriter(stream, fieldnames=DYNAMIC_CSV_HEADER,
                                 lineterminator="\n")
         writer.writeheader()
         writer.writerow(values)
@@ -1012,6 +1070,36 @@ class Work5RunnerContractTest(unittest.TestCase):
                 writer.writerow(row)
                 with self.assertRaises(work5_runner.Work5Error):
                     work5_runner.validate_dynamic_csv(stream.getvalue().encode("utf-8"), 2)
+
+    def test_dynamic_csv_header_is_exact_and_rejects_future_or_promotion_columns(self) -> None:
+        """RED: subset admission must not permit future performance semantics."""
+        self.assertEqual(len(DYNAMIC_CSV_HEADER), 97)
+        baseline = self.dynamic_refresh_csv(1)
+        self.assertEqual(work5_runner.validate_dynamic_csv(baseline, 1)["correctness_status"], "PASS")
+        row = next(csv.DictReader(io.StringIO(baseline.decode("utf-8"))))
+        mutations = [
+            ("future_column", [*DYNAMIC_CSV_HEADER, "future_column"]),
+            ("performance_eligible", [*DYNAMIC_CSV_HEADER, "performance_eligible"]),
+            ("performance_rank", [*DYNAMIC_CSV_HEADER, "performance_rank"]),
+            ("ranking", [*DYNAMIC_CSV_HEADER, "ranking"]),
+            ("speedup", [*DYNAMIC_CSV_HEADER, "speedup"]),
+            ("throughput_rank", [*DYNAMIC_CSV_HEADER, "throughput_rank"]),
+            ("primary_metric", [*DYNAMIC_CSV_HEADER, "primary_metric"]),
+            ("paper_value", [*DYNAMIC_CSV_HEADER, "paper_value"]),
+            ("aggregate_total_ms", [*DYNAMIC_CSV_HEADER, "aggregate_total_ms"]),
+            ("reordered", [DYNAMIC_CSV_HEADER[1], DYNAMIC_CSV_HEADER[0], *DYNAMIC_CSV_HEADER[2:]]),
+        ]
+        for name, header in mutations:
+            with self.subTest(name=name):
+                values = dict(row)
+                if len(header) == 98:
+                    values[header[-1]] = "1"
+                stream = io.StringIO()
+                writer = csv.DictWriter(stream, fieldnames=header, lineterminator="\n")
+                writer.writeheader()
+                writer.writerow(values)
+                with self.assertRaises(work5_runner.Work5Error):
+                    work5_runner.validate_dynamic_csv(stream.getvalue().encode("utf-8"), 1)
 
     def test_dynamic_phase_requires_real_receipt_order_and_is_terminal(self) -> None:
         root = self.tmp / "dynamic-terminal"
