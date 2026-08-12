@@ -90,6 +90,8 @@ class Work5CtestExceptionTest(unittest.TestCase):
             "wrong_reason": (8, stdout.replace(FROZEN_REASON.encode(), b"accepted mutation")),
             "extra_failure": (8, stdout.replace(b"1 tests failed out of 83", b"2 tests failed out of 83")),
             "subtest_order": (8, stdout.replace(b"condition", b"zz_condition", 1)),
+            "appended_pass_diagnostic": (8, stdout + b"check_work6_scope: PASS: accepted mutation\n"),
+            "appended_extra_reason": (8, stdout + b"check_work6_scope: FAIL: accepted mutation\n"),
         }
         for name, (exit_code, candidate) in cases.items():
             with self.subTest(name=name):
@@ -200,6 +202,32 @@ class JournalContractTest(unittest.TestCase):
             journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
                                            for event in (start, end)), encoding="utf-8")
             (root / "logs/1.stdout").unlink()
+            with self.assertRaises(capture.CaptureError):
+                capture.journal_events(journal)
+
+    def test_journal_pass_requires_zero_exit_and_known_ctest_is_exact(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "logs").mkdir()
+            payload = b"stdout\n"
+            (root / "logs/1.stdout").write_bytes(payload)
+            (root / "logs/1.stderr").write_bytes(b"")
+            start = {
+                "schema": "piccard-work5-command-event-v1", "event": "START", "sequence": 1,
+                "command_id": "first", "argv": ["true"], "cwd": "/fixture", "environment": {},
+                "git_sha": "a" * 40, "stdout_path": "logs/1.stdout", "stderr_path": "logs/1.stderr",
+                "started_at_utc": "2026-08-12T00:00:00Z",
+            }
+            end = {
+                **start, "event": "END", "ended_at_utc": "2026-08-12T00:00:01Z",
+                "exit_code": 9, "stdout_sha256": hashlib.sha256(payload).hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(), "classification": "PASS",
+            }
+            journal = root / "commands.jsonl"
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
+                                           for event in (start, end)), encoding="utf-8")
             with self.assertRaises(capture.CaptureError):
                 capture.journal_events(journal)
 

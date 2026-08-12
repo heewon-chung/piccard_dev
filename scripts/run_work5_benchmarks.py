@@ -1921,6 +1921,10 @@ def validate_dynamic_csv(raw: bytes, updates: int) -> dict[str, str]:
                             "max_queries", "query_stat_bits", "coefficient_stat_bits",
                             "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
                             "scaling_mod_size")}
+    resource_integer_fields = ("memory_bytes", "ct_size_bytes", "refresh_upload_bytes",
+                               "ciphertext_upload_count", "refresh_ciphertexts_uploaded")
+    if any(observed[name] < 0 for name in resource_integer_fields):
+        raise Work5Error("dynamic CSV resource integer is negative")
     if any(observed[key] != value for key, value in expected_numbers.items()):
         raise Work5Error("dynamic CSV update/epoch/upload counters are inconsistent")
     if observed["local_inner_product"] != observed["decrypted_inner_product"]:

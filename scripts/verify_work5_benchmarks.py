@@ -448,8 +448,9 @@ def classify_work6_scope_ctest(exit_code: int, stdout: bytes, stderr: bytes) -> 
     subtests = re.findall(r"\(name='([^']+)'\)\s+\.\.\.\s+FAIL", stdout_text)
     require(tuple(subtests) == WORK6_FAILURE_SUBTESTS,
             "CheckWork6Scope failing mutation set/order differs from the frozen signature")
-    require(stdout_text.count(WORK6_FIRST_REASON) == 17,
-            "CheckWork6Scope mutation first-reason signature differs from the frozen diagnostic")
+    diagnostic_lines = re.findall(r"(?m)^\s*check_work6_scope:\s+[^\n]*$", stdout_text)
+    require(diagnostic_lines == [WORK6_FIRST_REASON] * len(WORK6_FAILURE_SUBTESTS),
+            "CheckWork6Scope diagnostic lines differ from the frozen raw-log shape")
     return {
         "schema": "piccard-work5-ctest-gate-receipt-v1",
         "verdict": "PASS", "classification": "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH",
@@ -1108,6 +1109,10 @@ def verify_dynamic_csv(path: Path, updates: int) -> None:
                             "max_queries", "query_stat_bits", "coefficient_stat_bits",
                             "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
                             "scaling_mod_size")}
+    resource_integer_fields = ("memory_bytes", "ct_size_bytes", "refresh_upload_bytes",
+                               "ciphertext_upload_count", "refresh_ciphertexts_uploaded")
+    require(all(observed[name] >= 0 for name in resource_integer_fields),
+            "dynamic CSV resource integer is negative")
     require(all(observed[key] == value for key, value in expected_numbers.items()),
             "dynamic CSV update/epoch/upload counters are inconsistent")
     require(observed["local_inner_product"] == observed["decrypted_inner_product"],

@@ -428,6 +428,7 @@ class Work5VerifierContractTest(unittest.TestCase):
             "replay_acceptance": ("updates-2", "updates_applied", "3"),
             "wrong_upload_count": ("updates-2", "ciphertext_upload_count", "1"),
             "local_decrypted_mismatch": ("updates-1", "decrypted_inner_product", "8"),
+            "negative_memory": ("updates-1", "memory_bytes", "-1"),
             "timing_promotion": ("updates-1", "measurement_kind", "fhe_timing"),
         }
         for name, (label, field, value) in cases.items():

@@ -1056,6 +1056,7 @@ class Work5RunnerContractTest(unittest.TestCase):
             "epoch_discontinuity": ("final_epoch", "1"),
             "wrong_upload_count": ("ciphertext_upload_count", "1"),
             "local_decrypted_mismatch": ("decrypted_inner_product", "8"),
+            "negative_memory": ("memory_bytes", "-1"),
             "timing_promotion": ("measurement_kind", "fhe_timing"),
         }
         for name, (field, value) in cases.items():

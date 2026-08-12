@@ -226,10 +226,17 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
                                               ("command_id", "argv", "cwd", "environment", "git_sha",
                                                "stdout_path", "stderr_path", "started_at_utc")),
                     "journal END does not bind its START")
+            classification = event.get("classification")
             require(isinstance(event.get("exit_code"), int) and isinstance(event.get("ended_at_utc"), str) and
-                    event.get("classification") in ("PASS", "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH"),
+                    classification in ("PASS", "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH"),
                     "journal END result is malformed")
             require(type(event.get("exit_code")) is int, "journal END exit code is malformed")
+            if classification == "PASS":
+                require(event["exit_code"] == 0,
+                        "journal PASS event has a nonzero exit code")
+            else:
+                require(event["command_id"] == "full-ctest" and event["exit_code"] == 8,
+                        "journal known CTest classification has the wrong command or exit code")
             validate_journal_timestamp(event.get("ended_at_utc"))
             for key in ("stdout_sha256", "stderr_sha256"):
                 value = event.get(key)
@@ -243,6 +250,13 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
                 seen_output_paths.add(output_relative)
                 require(sha256_file(output_path) == value,
                         "journal output hash drifted")
+            if classification == "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH":
+                import verify_work5_benchmarks as verifier
+
+                verifier.classify_work6_scope_ctest(
+                    event["exit_code"],
+                    (path.parent / event["stdout_path"]).read_bytes(),
+                    (path.parent / event["stderr_path"]).read_bytes())
             active_sequence = None
         else:
             raise CaptureError("journal event type is malformed")
