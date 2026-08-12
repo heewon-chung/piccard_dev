@@ -1610,7 +1610,7 @@ class EnronRecordTests(unittest.TestCase):
         self.assertIn("ids/first-id.eml", paths)
         self.assertNotIn("ids/second-id.eml", paths)
         self.assertIn("ids/different-envelope.eml", paths)
-        self.assertEqual(len(candidates), 9)
+        self.assertEqual(len(candidates), 10)
         self.assertEqual(
             dropped,
             {
@@ -1645,7 +1645,7 @@ class EnronRecordTests(unittest.TestCase):
     def test_each_required_mime_or_charset_cause_is_counted(self):
         module = self.require_module()
         candidates, dropped = self.build_fixture_candidates(module)
-        self.assertEqual(candidates and len(candidates), 9)
+        self.assertEqual(candidates and len(candidates), 10)
         self.assertEqual(dropped["dropped.charset_or_mime"], 4)
         for relative in (
                 "drops/parser_defect.eml", "drops/invalid_transfer.eml",
@@ -1906,6 +1906,38 @@ class EnronSelectionTests(unittest.TestCase):
             {path: expected_ids[path] for path in expected_paths},
         )
 
+    def test_document_rank_tie_break_uses_byte_path_order_with_equal_digest(self):
+        rank_and_select = self.require_api("rank_and_select_documents")
+        candidates = [
+            self.stub("enron:z", "", path="z-path.eml"),
+            self.stub("enron:a", "", path="a-path.eml"),
+        ]
+        real_sha256 = hashlib.sha256
+        rank_domain = b"piccard-enron-document-v1"
+        forced_digest = b"\x00" * 32
+
+        def fake_sha256(data=b"", *args, **kwargs):
+            if data.startswith(rank_domain):
+                return SimpleNamespace(digest=lambda: forced_digest)
+            return real_sha256(data, *args, **kwargs)
+
+        with mock.patch.object(self.module.hashlib, "sha256",
+                               side_effect=fake_sha256):
+            selected = rank_and_select(candidates, seed=20260729,
+                                       max_documents=2)
+
+        self.assertEqual(
+            [record.relative_path for record in selected],
+            ["a-path.eml", "z-path.eml"],
+        )
+        self.assertEqual(
+            [record.record_id for record in selected],
+            [
+                "enron:" + real_sha256(b"a-path.eml").hexdigest(),
+                "enron:" + real_sha256(b"z-path.eml").hexdigest(),
+            ],
+        )
+
     def test_repeated_subject_prefixes_and_empty_subject_are_pair_inputs(self):
         self.assertIsNotNone(self.enron)
         canonical_subject = self.enron.canonical_subject
@@ -1948,6 +1980,68 @@ class EnronSelectionTests(unittest.TestCase):
                 "enron-pair:06e2645133947049aaadf03598174353e9b37b4d99a8960e5aab10491742249a",
             ],
         )
+
+    def test_related_rank_domain_and_pair_ids_are_independently_literal(self):
+        build_pairs = self.require_api("build_enron_pairs")
+        records = [
+            self.stub("enron:a", "topic"),
+            self.stub("enron:b", "topic"),
+            self.stub("enron:c", "topic"),
+            self.stub("enron:d", "topic"),
+        ]
+        seed = 20260729
+        domain = b"piccard-enron-related-v1"
+        kind = b"thread_related"
+        expected = [
+            (
+                "enron:c", "enron:d",
+                "14408a8ad7d327878cfa0efa5f45c65f11333fb6e6b5fa1acfddae831f7a627a",
+                "enron-pair:900ad10fda60dbccbeb2bbc4cef3fe881f04e911c81581d02317df28848d3afd",
+            ),
+            (
+                "enron:a", "enron:d",
+                "172610424933aff50cecaf259a9582814690127464427b39372428852a18e7ca",
+                "enron-pair:99112e0d8a173b274761afe7fab20ae12c0f04d9e6e44fd38075ad51b3f39d62",
+            ),
+        ]
+        independent_ranks = []
+        expected_rank_by_pair = {
+            (record_a, record_b): rank_digest
+            for record_a, record_b, rank_digest, _ in expected
+        }
+        for record_a, record_b, _, pair_id in expected:
+            endpoint_a = record_a.encode("utf-8")
+            endpoint_b = record_b.encode("utf-8")
+            rank_payload = (
+                domain + b"\x00" + seed.to_bytes(8, "big")
+                + len(endpoint_a).to_bytes(4, "big") + endpoint_a
+                + len(endpoint_b).to_bytes(4, "big") + endpoint_b
+            )
+            rank_digest = hashlib.sha256(rank_payload).hexdigest()
+            pair_payload = (kind + b"\x00" + endpoint_a + b"\x00" + endpoint_b)
+            self.assertEqual(
+                rank_digest,
+                expected_rank_by_pair[(record_a, record_b)],
+            )
+            self.assertEqual(
+                "enron-pair:" + hashlib.sha256(pair_payload).hexdigest(),
+                pair_id,
+            )
+            independent_ranks.append((rank_digest, record_a, record_b))
+        self.assertEqual(
+            sorted(independent_ranks),
+            [
+                (expected[0][2], expected[0][0], expected[0][1]),
+                (expected[1][2], expected[1][0], expected[1][1]),
+            ],
+        )
+        pairs = build_pairs(records, seed=seed, pairs=2, min_related_pairs=2)
+        self.assertEqual(
+            [(pair.record_a, pair.record_b) for pair in pairs],
+            [("enron:c", "enron:d"), ("enron:a", "enron:d")],
+        )
+        self.assertEqual([pair.pair_id for pair in pairs],
+                         [expected[0][3], expected[1][3]])
 
     def test_related_minimum_is_a_hard_failure(self):
         build_pairs = self.require_api("build_enron_pairs")
@@ -2106,13 +2200,13 @@ class SourceManifestTests(unittest.TestCase):
             hasattr(module, "scan_directory_tree"),
             "scan_directory_tree is required by the Phase 1 contract")
         inventory = module.scan_directory_tree(ENRON_FIXTURE_DIR / "inbox")
-        self.assertEqual(inventory.file_count, 8)
+        self.assertEqual(inventory.file_count, 9)
         self.assertEqual(inventory.directory_count_including_root, 1)
-        self.assertEqual(inventory.logical_bytes, 2496)
+        self.assertEqual(inventory.logical_bytes, 2751)
         self.assertEqual(inventory.symlink_count, 0)
         self.assertEqual(
             inventory.tree_sha256,
-            "b133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0")
+            "16c81442e519295a2166a63ef80ce86e1392b03204f43bb209c0a900b9832193")
 
     def test_validate_source_emits_exact_header_and_row_without_writes(self):
         def topology(root: Path):
@@ -2131,7 +2225,7 @@ class SourceManifestTests(unittest.TestCase):
         self.assertEqual(
             result.stdout,
             "dataset\tfile_count\tdirectory_count_including_root\tlogical_bytes\tsymlink_count\ttree_sha256\tstatus\n"
-            "enron\t8\t1\t2496\t0\tb133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0\tPASS\n")
+            "enron\t9\t1\t2751\t0\t16c81442e519295a2166a63ef80ce86e1392b03204f43bb209c0a900b9832193\tPASS\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(before, after)
 

@@ -10,4 +10,4 @@ parsing_schema	enron-maildir-rfc5322-v1
 preprocessing_profile	enron-shingle5-v2
 input.0.role	maildir_root
 input.0.path	inbox
-input.0.sha256	b133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0
+input.0.sha256	16c81442e519295a2166a63ef80ce86e1392b03204f43bb209c0a900b9832193
