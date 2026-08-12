@@ -79,6 +79,17 @@ _TIMING_SUFFIX = (
 )
 ACCURACY_HEADER_FIELDS = (_PREFIX_HEADER + "," + _ACCURACY_SUFFIX).split(",")
 TIMING_HEADER_FIELDS = (_PREFIX_HEADER + "," + _TIMING_SUFFIX).split(",")
+THRESHOLD_HEADER_FIELDS = [
+    "schema_version", "dataset", "variant", "dataset_manifest_sha256",
+    "records_sha256", "pairs_sha256", "pair_id", "pair_kind", "label",
+    "record_a", "record_b", "k", "m", "hash_randomness", "root_seed",
+    "split", "rank_position", "threshold_trial_index", "hash_seed",
+    "match_count", "decision", "label_truth", "label_outcome",
+    "exact_j_truth", "exact_j_outcome", "exact_jaccard_bucketed",
+    "requested_j_threshold", "tau_count", "realized_j_tau",
+    "calibration_fpr", "calibration_fnr", "calibration_balanced_error",
+    "calibration_digest", "evaluation_digest", "threshold_workload_sha256",
+]
 
 
 def load_verifier_module():
@@ -121,6 +132,7 @@ import sys
 
 ACCURACY_HEADER = %(accuracy_header)r
 TIMING_HEADER = %(timing_header)r
+THRESHOLD_HEADER = %(threshold_header)r
 
 
 def parse_opts(argv):
@@ -341,7 +353,231 @@ def main():
     root_seed = int(opts["seed"])
     csv_path = opts["csv"]
 
-    if mode == "accuracy":
+    if mode == "threshold":
+        # The paper-mode scratch repository uses this deterministic stand-in
+        # so the real runner/verifier topology can exercise the DBLP-only
+        # threshold cell without invoking a production benchmark binary.
+        import math
+
+        k = int(opts["k"])
+        m = int(opts["m"])
+        max_pairs = int(opts["max-pairs"])
+        threshold_trials = int(opts["threshold-trials"])
+
+        def exact_jaccard(pair):
+            left = records_by_id[pair["record_a"]]["bucketed"]
+            right = records_by_id[pair["record_b"]]["bucketed"]
+            union = len(left | right)
+            assert union > 0
+            return len(left & right) / union
+
+        def split_rank(pair_id):
+            return int.from_bytes(hashlib.sha256(
+                b"piccard-dblp-threshold-split-v1\x00" +
+                pair_id.encode("utf-8")).digest()[:8], "big")
+
+        requested_count = min(len(real_pairs), max_pairs)
+        by_label = {
+            0: [pair for pair in real_pairs if int(pair["label"]) == 0],
+            1: [pair for pair in real_pairs if int(pair["label"]) == 1],
+        }
+        selected = []
+        if (requested_count >= 4 and len(by_label[0]) >= 2 and
+                len(by_label[1]) >= 2):
+            take_zero = requested_count // 2
+            take_one = requested_count - take_zero
+            if take_zero > len(by_label[0]):
+                take_zero = len(by_label[0])
+                take_one = requested_count - take_zero
+            if take_one > len(by_label[1]):
+                take_one = len(by_label[1])
+                take_zero = requested_count - take_one
+            if (take_zero <= len(by_label[0]) and
+                    take_one <= len(by_label[1])):
+                selected = by_label[0][:take_zero] + by_label[1][:take_one]
+        if len(selected) != requested_count:
+            selected = real_pairs[:requested_count]
+
+        split_pairs = []
+        for label in (0, 1):
+            group = [pair for pair in selected if int(pair["label"]) == label]
+            group.sort(key=lambda pair: (split_rank(pair["pair_id"]),
+                                         pair["pair_id"]))
+            for rank, pair in enumerate(group):
+                item = dict(pair)
+                item["label"] = int(item["label"])
+                item["split"] = "calibration" if rank %% 2 == 0 else "evaluation"
+                item["rank_position"] = rank
+                item["exact_jaccard_bucketed"] = exact_jaccard(item)
+                split_pairs.append(item)
+
+        calibration_values = sorted({pair["exact_jaccard_bucketed"]
+                                     for pair in split_pairs
+                                     if pair["split"] == "calibration"})
+        candidates = sorted(set(calibration_values + [
+            (left + right) / 2.0
+            for left, right in zip(calibration_values, calibration_values[1:])
+        ]))
+        assert calibration_values and candidates
+
+        def tau_count(requested):
+            return max(1, min(k, math.ceil(
+                k * (1.0 / m + (1.0 - 1.0 / m) * requested))))
+
+        def realized_boundary(tau):
+            return (tau / k - 1.0 / m) / (1.0 - 1.0 / m)
+
+        best = None
+        calibration = [pair for pair in split_pairs
+                       if pair["split"] == "calibration"]
+        negatives = sum(pair["label"] == 0 for pair in calibration)
+        positives = sum(pair["label"] == 1 for pair in calibration)
+        assert negatives and positives
+        for requested_threshold in candidates:
+            false_positive = sum(
+                pair["label"] == 0 and
+                pair["exact_jaccard_bucketed"] >= requested_threshold
+                for pair in calibration)
+            false_negative = sum(
+                pair["label"] == 1 and
+                pair["exact_jaccard_bucketed"] < requested_threshold
+                for pair in calibration)
+            candidate = {
+                "requested": requested_threshold,
+                "tau": tau_count(requested_threshold),
+                "realized": realized_boundary(tau_count(requested_threshold)),
+                "fpr": false_positive / negatives,
+                "fnr": false_negative / positives,
+            }
+            candidate["balanced_error"] = (candidate["fpr"] +
+                                            candidate["fnr"]) / 2.0
+            if (best is None or candidate["balanced_error"] < best["balanced_error"] or
+                    (candidate["balanced_error"] == best["balanced_error"] and
+                     candidate["requested"] > best["requested"])):
+                best = candidate
+
+        def canonical_partition(split):
+            return "".join("\t".join((
+                pair["pair_id"], str(pair["label"]), str(pair["rank_position"]),
+                format_real17(pair["exact_jaccard_bucketed"]))) + "\n"
+                            for pair in split_pairs if pair["split"] == split)
+
+        calibration_digest = hashlib.sha256(
+            canonical_partition("calibration").encode()).hexdigest()
+        evaluation_digest = hashlib.sha256(
+            canonical_partition("evaluation").encode()).hexdigest()
+        rows_path = opts["workload-rows-out"]
+        workload_rows = (
+            "pair_id\tlabel\tsplit\trank_position\trecord_a\trecord_b\t"
+            "exact_jaccard_bucketed\n" + "".join("\t".join((
+                pair["pair_id"], str(pair["label"]), pair["split"],
+                str(pair["rank_position"]), pair["record_a"], pair["record_b"],
+                format_real17(pair["exact_jaccard_bucketed"]))) + "\n"
+                for pair in split_pairs))
+        with open(rows_path, "w", encoding="utf-8") as handle:
+            handle.write(workload_rows)
+
+        manifest_pairs = [
+            ("schema_version", "piccard-real-threshold-workload-v1"),
+            ("dataset_manifest_sha256", manifest_sha),
+            ("rows_sha256", hashlib.sha256(workload_rows.encode()).hexdigest()),
+            ("calibration_rows_sha256", calibration_digest),
+            ("evaluation_rows_sha256", evaluation_digest),
+            ("k", opts["k"]), ("m", opts["m"]), ("root_seed", opts["seed"]),
+            ("max_pairs", opts["max-pairs"]),
+            ("threshold_trials", opts["threshold-trials"]),
+            ("hash_randomness", "resampled"),
+            ("pair_selection", "balanced-label-prefix"),
+            ("split_domain", "piccard-dblp-threshold-split-v1"),
+            ("trial_seed_domain", "piccard-dblp-threshold-eval-v1"),
+            ("calibration_pair_count", str(len(calibration))),
+            ("evaluation_pair_count", str(sum(
+                pair["split"] == "evaluation" for pair in split_pairs))),
+            ("candidate_count", str(len(candidates))),
+        ]
+        for index, value in enumerate(candidates):
+            manifest_pairs.append((f"candidate.{index}", format_real17(value)))
+        manifest_pairs.extend((
+            ("selected_requested_j_threshold", format_real17(best["requested"])),
+            ("tau_count", str(best["tau"])),
+            ("realized_j_tau", format_real17(best["realized"])),
+            ("calibration_fpr", format_real17(best["fpr"])),
+            ("calibration_fnr", format_real17(best["fnr"])),
+            ("calibration_balanced_error", format_real17(best["balanced_error"])),
+        ))
+        write_kv_file(opts["workload-manifest-out"], manifest_pairs)
+        workload_sha = sha256_file(opts["workload-manifest-out"])
+
+        def trial_seed(pair_id, trial_index):
+            pair_bytes = pair_id.encode("utf-8")
+            payload = (b"piccard-dblp-threshold-eval-v1\x00" +
+                       root_seed.to_bytes(8, "big") +
+                       len(pair_bytes).to_bytes(4, "big") + pair_bytes +
+                       trial_index.to_bytes(8, "big"))
+            return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+        def match_count(pair, seed):
+            def signature(values):
+                return [min(int.from_bytes(hashlib.sha256(
+                    b"piccard-minhash-poc-v1" + seed.to_bytes(8, "big") +
+                    coordinate.to_bytes(4, "big") + element.to_bytes(8, "big")
+                ).digest()[:8], "big") for element in values)
+                        for coordinate in range(k)]
+            left = signature(records_by_id[pair["record_a"]]["bucketed"])
+            right = signature(records_by_id[pair["record_b"]]["bucketed"])
+            return sum(left[index] %% m == right[index] %% m
+                       for index in range(k))
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            import csv as csv_module
+            writer = csv_module.writer(handle, lineterminator="\n")
+            writer.writerow(THRESHOLD_HEADER)
+            for pair in split_pairs:
+                if pair["split"] != "evaluation":
+                    continue
+                for trial in range(threshold_trials):
+                    hash_seed = trial_seed(pair["pair_id"], trial)
+                    matches = match_count(pair, hash_seed)
+                    decision = int(matches >= best["tau"])
+                    label_truth = int(pair["label"] == 1)
+                    exact_truth = int(pair["exact_jaccard_bucketed"] >= best["realized"])
+                    def outcome(truth):
+                        return ("TP" if decision and truth else
+                                "TN" if not decision and not truth else
+                                "FP" if decision else "FN")
+                    row = {
+                        "schema_version": "piccard-real-threshold-v1",
+                        "dataset": manifest.get("dataset", ""),
+                        "variant": manifest.get("variant", ""),
+                        "dataset_manifest_sha256": manifest_sha,
+                        "records_sha256": manifest["records_sha256"],
+                        "pairs_sha256": manifest["pairs_sha256"],
+                        "pair_id": pair["pair_id"], "pair_kind": pair["pair_kind"],
+                        "label": pair["label"], "record_a": pair["record_a"],
+                        "record_b": pair["record_b"], "k": k, "m": m,
+                        "hash_randomness": "resampled", "root_seed": root_seed,
+                        "split": pair["split"], "rank_position": pair["rank_position"],
+                        "threshold_trial_index": trial, "hash_seed": hash_seed,
+                        "match_count": matches, "decision": decision,
+                        "label_truth": pair["label"],
+                        "label_outcome": outcome(label_truth),
+                        "exact_j_truth": exact_truth,
+                        "exact_j_outcome": outcome(exact_truth),
+                        "exact_jaccard_bucketed": format_real17(
+                            pair["exact_jaccard_bucketed"]),
+                        "requested_j_threshold": format_real17(best["requested"]),
+                        "tau_count": best["tau"],
+                        "realized_j_tau": format_real17(best["realized"]),
+                        "calibration_fpr": format_real17(best["fpr"]),
+                        "calibration_fnr": format_real17(best["fnr"]),
+                        "calibration_balanced_error": format_real17(
+                            best["balanced_error"]),
+                        "calibration_digest": calibration_digest,
+                        "evaluation_digest": evaluation_digest,
+                        "threshold_workload_sha256": workload_sha,
+                    }
+                    writer.writerow([row[field] for field in THRESHOLD_HEADER])
+    elif mode == "accuracy":
         max_pairs = int(opts["max-pairs"])
         accuracy_trials = int(opts["accuracy_trials"])
         selected = real_pairs[:min(len(real_pairs), max_pairs)]
@@ -464,6 +700,7 @@ def write_fake_bench_real_datasets(build_dir: pathlib.Path) -> pathlib.Path:
     body = _FAKE_BENCH_BODY % {
         "accuracy_header": ACCURACY_HEADER_FIELDS,
         "timing_header": TIMING_HEADER_FIELDS,
+        "threshold_header": THRESHOLD_HEADER_FIELDS,
     }
     make_executable(path, body)
     (build_dir / "CMakeCache.txt").write_text(
@@ -751,10 +988,11 @@ class Phase3RealDataContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                      if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 9)
+        self.assertEqual(len(run_lines), 10)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
-            self.assertEqual(len(variant_lines), 3)
+            self.assertEqual(len(variant_lines),
+                             4 if variant == "dblp_acm_u65536" else 3)
             self.assertTrue(any("--mode=accuracy" in line for line in variant_lines))
             self.assertTrue(any("summarize_real_datasets.py" in line
                                 for line in variant_lines))
@@ -762,6 +1000,13 @@ class Phase3RealDataContractTest(unittest.TestCase):
                                 for line in variant_lines))
             self.assertFalse(any("--profile=std192-t40-primary" in line
                                  for line in variant_lines))
+            if variant == "dblp_acm_u65536":
+                self.assertTrue(any("--mode=threshold" in line and
+                                    "--threshold-trials=50" in line
+                                    for line in variant_lines))
+            else:
+                self.assertFalse(any("--mode=threshold" in line
+                                     for line in variant_lines))
 
     def test_paper_dry_run_rejects_incomplete_frozen_variant_set(self):
         result = run_runner(
@@ -1167,7 +1412,7 @@ class DryRunTest(unittest.TestCase):
                             "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_paper_dry_run_pins_exactly_three_cells_per_variant(self):
+    def test_paper_dry_run_pins_threshold_only_for_dblp(self):
         manifests = prepare_paper_manifests(self.tmp / "paper-manifests")
         arguments = [
             argument
@@ -1185,15 +1430,23 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                     if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 9)
+        self.assertEqual(len(run_lines), 10)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
-            self.assertEqual(len(variant_lines), 3)
+            self.assertEqual(len(variant_lines),
+                             4 if variant == "dblp_acm_u65536" else 3)
             self.assertTrue(any("--max-pairs=10000" in line for line in variant_lines))
             self.assertTrue(any("--profile=std128-t40-primary" in line
                                 for line in variant_lines))
             self.assertFalse(any("--profile=std192-t40-primary" in line
                                  for line in variant_lines))
+            if variant == "dblp_acm_u65536":
+                self.assertTrue(any("--mode=threshold" in line and
+                                    "--threshold-trials=50" in line
+                                    for line in variant_lines))
+            else:
+                self.assertFalse(any("--mode=threshold" in line
+                                     for line in variant_lines))
 
 
 class PathSafetyTest(unittest.TestCase):
@@ -2156,19 +2409,20 @@ class PaperModeScratchRepoTest(unittest.TestCase):
         self.assertIn("clean", result.stderr)
         self.assertFalse(results_root.exists())
 
-    def test_paper_mode_structurally_succeeds_with_three_cells_per_variant(self):
+    def test_paper_mode_structurally_succeeds_with_dblp_threshold_cell(self):
         results_root = self.tmp / "results"
         result = self.run_paper(results_root)
         self.assertEqual(result.returncode, 0, result.stderr)
         metadata = read_kv_file(results_root / "run_metadata.tsv")
         self.assertEqual(metadata["evidence_mode"], "paper")
         self.assertEqual(metadata["git_dirty"], "false")
-        self.assertEqual(metadata["cell_count"], "9")
-        ids = {metadata[f"cell.{i:03d}.id"] for i in range(9)}
+        self.assertEqual(metadata["cell_count"], "10")
+        ids = {metadata[f"cell.{i:03d}.id"] for i in range(10)}
         self.assertEqual(ids, {
             "dblp_acm_u65536:accuracy",
             "dblp_acm_u65536:accuracy-summary",
             "dblp_acm_u65536:timing:std128-t40-primary",
+            "dblp_acm_u65536:threshold",
             "enron_u65536:accuracy",
             "enron_u65536:accuracy-summary",
             "enron_u65536:timing:std128-t40-primary",

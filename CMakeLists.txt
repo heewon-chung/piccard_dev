@@ -1114,6 +1114,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_real_datasets
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RealThresholdPipeline
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_real_threshold_pipeline
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
@@ -1159,6 +1163,7 @@ if(BUILD_BENCHMARKS)
         benchmarks/bench_real_datasets.cpp
         benchmarks/real_accuracy_driver.cpp
         benchmarks/real_encoding_driver.cpp
+        benchmarks/real_threshold_driver.cpp
         ${REAL_TIMING_DRIVER_SOURCE}
     )
     target_link_libraries(

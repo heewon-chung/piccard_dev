@@ -99,6 +99,15 @@ std::string RealAccuracyHeader();
 // columns, newline-terminated.
 std::string RealTimingHeader();
 
+// Dedicated plaintext DBLP calibration/evaluation schema.  It is intentionally
+// separate from the Work-5 accuracy/timing schemas: calibration metadata is
+// provenance, while rows contain only held-out evaluation trials.
+std::string RealThresholdHeader();
+
+// Workload rows carry the complete label-stratified split, including
+// calibration rows that must never be emitted as evaluation CSV rows.
+std::string RealThresholdWorkloadRowsHeader();
+
 // Builds the fixed, non-row-varying prefix for a plaintext-estimator
 // accuracy row (normative §Phase 5 "Field-complete values", plaintext
 // accuracy). `target_jaccard` and the three `realized_*` fields are left

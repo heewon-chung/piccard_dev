@@ -89,6 +89,7 @@ QUICK_TIMING_TRIALS = 1
 PAPER_MAX_PAIRS = 10000
 PAPER_ACCURACY_TRIALS = 1
 PAPER_TIMING_TRIALS = 30
+PAPER_THRESHOLD_TRIALS = 50
 SINGLE_TRIAL_TIMING_TRIALS = 1
 
 
@@ -420,6 +421,36 @@ def encoding_cell(pair: ManifestPair, results_root: pathlib.Path,
     )
 
 
+def threshold_cell(pair: ManifestPair, results_root: pathlib.Path,
+                   processed_root_id: str, processed_root: pathlib.Path,
+                   seed: int, max_pairs: int, threshold_trials: int) -> Cell:
+    csv_path = results_root / "csv" / f"real_threshold_{pair.variant}.csv"
+    wm_path = results_root / "workloads" / f"threshold_{pair.variant}.manifest.tsv"
+    wr_path = results_root / "workloads" / f"threshold_{pair.variant}.rows.tsv"
+    display_argv = [
+        "bench_real_datasets",
+        f"--dataset-manifest={pair.dataset_manifest}",
+        "--mode=threshold",
+        "--k=128", "--m=64",
+        f"--max-pairs={max_pairs}",
+        f"--threshold-trials={threshold_trials}",
+        f"--seed={seed}",
+        f"--hash_randomness={HASH_RANDOMNESS}",
+        f"--csv={csv_path}",
+        f"--workload-manifest-out={wm_path}",
+        f"--workload-rows-out={wr_path}",
+    ]
+    dataset_manifest_rel = pair.dataset_manifest.relative_to(processed_root).as_posix()
+    return Cell(
+        cell_id=f"{pair.variant}:threshold", variant=pair.variant,
+        display_argv=display_argv, exec_argv=None,
+        env={"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"},
+        input_specs=[("processed-manifest", processed_root_id, processed_root,
+                     dataset_manifest_rel)],
+        output_paths=[csv_path, wm_path, wr_path],
+    )
+
+
 def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, threads,
                 profiles):
     cells = []
@@ -456,6 +487,10 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
             cells.append(timing_cell(
                 pair, results_root, processed_root_id, processed_root,
                 "std128-t40-primary", seed, threads, PAPER_TIMING_TRIALS))
+            if pair.variant == QUICK_VARIANT:
+                cells.append(threshold_cell(
+                    pair, results_root, processed_root_id, processed_root,
+                    seed, PAPER_MAX_PAIRS, PAPER_THRESHOLD_TRIALS))
     return cells
 
 

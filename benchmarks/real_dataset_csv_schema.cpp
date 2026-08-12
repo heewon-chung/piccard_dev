@@ -94,6 +94,23 @@ std::string RealTimingHeader() {
         "download_bytes\n";
 }
 
+std::string RealThresholdHeader() {
+    return
+        "schema_version,dataset,variant,dataset_manifest_sha256,records_sha256,"
+        "pairs_sha256,pair_id,pair_kind,label,record_a,record_b,k,m,"
+        "hash_randomness,root_seed,split,rank_position,threshold_trial_index,"
+        "hash_seed,match_count,decision,label_truth,label_outcome,"
+        "exact_j_truth,exact_j_outcome,exact_jaccard_bucketed,"
+        "requested_j_threshold,tau_count,realized_j_tau,calibration_fpr,"
+        "calibration_fnr,calibration_balanced_error,calibration_digest,"
+        "evaluation_digest,threshold_workload_sha256\n";
+}
+
+std::string RealThresholdWorkloadRowsHeader() {
+    return "pair_id\tlabel\tsplit\trank_position\trecord_a\trecord_b\t"
+           "exact_jaccard_bucketed\n";
+}
+
 std::string SerializeRealDatasetPrefix(const RealDatasetPrefixValues& v) {
     RequireNonEmpty(v.profile_id, "profile_id");
     RequireNonEmpty(v.run_class, "run_class");

@@ -88,6 +88,24 @@ _ACCURACY_SUFFIX = (
 )
 ACCURACY_HEADER_FIELDS = tuple((_PREFIX_HEADER + "," + _ACCURACY_SUFFIX).split(","))
 
+THRESHOLD_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant", "dataset_manifest_sha256",
+    "records_sha256", "pairs_sha256", "pair_id", "pair_kind", "label",
+    "record_a", "record_b", "k", "m", "hash_randomness", "root_seed",
+    "split", "rank_position", "threshold_trial_index", "hash_seed",
+    "match_count", "decision", "label_truth", "label_outcome",
+    "exact_j_truth", "exact_j_outcome", "exact_jaccard_bucketed",
+    "requested_j_threshold", "tau_count", "realized_j_tau",
+    "calibration_fpr", "calibration_fnr", "calibration_balanced_error",
+    "calibration_digest", "evaluation_digest", "threshold_workload_sha256",
+)
+THRESHOLD_SUMMARY_SCHEMA_VERSION = "piccard-real-threshold-summary-v1"
+THRESHOLD_SUMMARY_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant", "section", "truth_basis",
+    "category", "jaccard_bucket", "count", "denominator", "rate",
+    "ci95_low", "ci95_high",
+)
+
 # Exact summary header, normative plan §Phase 5 "The exact summary header
 # is:".
 SUMMARY_HEADER_FIELDS = (
@@ -238,6 +256,104 @@ def _read_accuracy_csv_rows(input_path: Path):
             yield parsed
 
 
+def _read_threshold_csv_rows(input_path: Path):
+    with input_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != list(THRESHOLD_HEADER_FIELDS):
+            raise SummarizerError(
+                "input CSV header does not match the expected threshold schema")
+        rows = []
+        expected_identity = None
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                for field in ("label", "decision", "label_truth", "exact_j_truth",
+                              "k", "m", "match_count", "tau_count"):
+                    row[field] = int(row[field])
+                for field in ("exact_jaccard_bucketed", "realized_j_tau",
+                              "requested_j_threshold"):
+                    row[field] = float(row[field])
+            except (KeyError, ValueError) as exc:
+                raise SummarizerError(
+                    f"threshold row {row_number} has malformed numeric fields") from exc
+            if not all(math.isfinite(row[field]) for field in
+                       ("exact_jaccard_bucketed", "realized_j_tau",
+                        "requested_j_threshold")):
+                raise SummarizerError(f"threshold row {row_number} has non-finite fields")
+            if row["label"] not in (0, 1) or row["label_truth"] not in (0, 1):
+                raise SummarizerError(f"threshold row {row_number} has a non-binary label")
+            if (row["decision"] not in (0, 1) or row["exact_j_truth"] not in (0, 1) or
+                    row["k"] != 128 or row["m"] != 64):
+                raise SummarizerError(
+                    f"threshold row {row_number} has invalid frozen parameters")
+            if (row["label_outcome"] not in {"TP", "TN", "FP", "FN"} or
+                    row["exact_j_outcome"] not in {"TP", "TN", "FP", "FN"}):
+                raise SummarizerError(
+                    f"threshold row {row_number} has an invalid confusion outcome")
+            identity = (row["dataset"], row["variant"])
+            if expected_identity is None:
+                expected_identity = identity
+            elif identity != expected_identity:
+                raise SummarizerError(
+                    f"threshold row {row_number} changes dataset identity")
+            if row["split"] != "evaluation":
+                raise SummarizerError(
+                    f"threshold row {row_number} is not an evaluation row")
+            rows.append(row)
+        if not rows:
+            raise SummarizerError("threshold input contains no evaluation rows")
+        return rows
+
+
+def _binomial_interval(count: int, denominator: int) -> tuple[float, float]:
+    if denominator <= 0:
+        raise SummarizerError("threshold confusion denominator is zero")
+    rate = count / denominator
+    margin = 1.96 * math.sqrt(rate * (1.0 - rate) / denominator)
+    return max(0.0, rate - margin), min(1.0, rate + margin)
+
+
+def build_threshold_summary_rows(input_path: Path):
+    rows = _read_threshold_csv_rows(input_path)
+    dataset = rows[0]["dataset"]
+    variant = rows[0]["variant"]
+    if dataset != "dblp_acm" or variant != "dblp_acm_u65536":
+        raise SummarizerError("threshold summary accepts only dblp_acm_u65536")
+    output = []
+
+    def add_confusion(truth_basis: str, outcomes):
+        for category in ("TP", "TN", "FP", "FN"):
+            count = sum(outcome == category for outcome in outcomes)
+            denominator = sum(outcome in (("TP", "FN") if category in ("TP", "FN")
+                                          else ("TN", "FP")) for outcome in outcomes)
+            low, high = _binomial_interval(count, denominator)
+            output.append([
+                THRESHOLD_SUMMARY_SCHEMA_VERSION, dataset, variant, "confusion",
+                truth_basis, category, "", str(count), str(denominator),
+                format_float(count / denominator), format_float(low), format_float(high),
+            ])
+
+    add_confusion("label", [row["label_outcome"] for row in rows])
+    add_confusion("exact_j", [row["exact_j_outcome"] for row in rows])
+
+    # The third section keeps the exact-J distribution conditional on each
+    # DBLP label, independent of the decision confusion matrices.
+    for label in (0, 1):
+        subset = [row for row in rows if row["label"] == label]
+        for bucket in _BUCKET_ORDER:
+            count = sum(jaccard_bucket_label(row["exact_jaccard_bucketed"]) == bucket
+                        for row in subset)
+            denominator = len(subset)
+            if denominator == 0:
+                raise SummarizerError("threshold label-conditioned denominator is zero")
+            rate = count / denominator
+            output.append([
+                THRESHOLD_SUMMARY_SCHEMA_VERSION, dataset, variant,
+                "distribution", "label-conditioned-exact-j", str(label), bucket,
+                str(count), str(denominator), format_float(rate), "", "",
+            ])
+    return output
+
+
 def read_accuracy_rows(input_path: Path):
     """Validate the exact RealAccuracyHeader() and yield the legacy four
     summary inputs. Enron callers use the richer internal row representation
@@ -381,16 +497,29 @@ def _write_atomic(output_path: Path, rows, header) -> None:
         raise
 
 
-def run(input_path: Path, output_path: Path) -> None:
-    rows = build_summary_rows(input_path)
-    header = SUMMARY_HEADER_FIELDS
-    if rows and rows[0] and rows[0][0] == ENRON_SUMMARY_SCHEMA_VERSION:
-        header = ENRON_SUMMARY_HEADER_FIELDS
+def run(input_path: Path, output_path: Path, mode=None) -> None:
+    with input_path.open("r", encoding="utf-8", newline="") as probe:
+        first_line = probe.readline().rstrip("\n")
+    threshold_input = first_line == ",".join(THRESHOLD_HEADER_FIELDS)
+    if mode == "threshold" and not threshold_input:
+        raise SummarizerError("--mode=threshold requires a threshold CSV input")
+    if mode == "accuracy" and threshold_input:
+        raise SummarizerError(
+            "threshold CSV input requires --mode=threshold")
+    if threshold_input:
+        rows = build_threshold_summary_rows(input_path)
+        header = THRESHOLD_SUMMARY_HEADER_FIELDS
+    else:
+        rows = build_summary_rows(input_path)
+        header = SUMMARY_HEADER_FIELDS
+        if rows and rows[0] and rows[0][0] == ENRON_SUMMARY_SCHEMA_VERSION:
+            header = ENRON_SUMMARY_HEADER_FIELDS
     _write_atomic(output_path, rows, header)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="summarize_real_datasets.py")
+    parser.add_argument("--mode", choices=("accuracy", "threshold"), default="accuracy")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     return parser
@@ -400,7 +529,7 @@ def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     try:
-        run(Path(args.input), Path(args.output))
+        run(Path(args.input), Path(args.output), args.mode)
     except (SummarizerError, OSError) as exc:
         sys.stderr.write(f"summarize_real_datasets: {exc}\n")
         return 1

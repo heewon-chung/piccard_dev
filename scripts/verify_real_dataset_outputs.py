@@ -37,6 +37,7 @@ citation/acquisition metadata or filenames were attached to it.
 from __future__ import annotations
 
 import csv
+import argparse
 import hashlib
 import math
 import os
@@ -117,6 +118,25 @@ _ENCODING_HEADER = (
     "correctness_encoder_calls,signature_derivation_timed,phase_encode_ms,"
     "encoded_slots,correctness_status,measurement_status"
 )
+THRESHOLD_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant", "dataset_manifest_sha256",
+    "records_sha256", "pairs_sha256", "pair_id", "pair_kind", "label",
+    "record_a", "record_b", "k", "m", "hash_randomness", "root_seed",
+    "split", "rank_position", "threshold_trial_index", "hash_seed",
+    "match_count", "decision", "label_truth", "label_outcome",
+    "exact_j_truth", "exact_j_outcome", "exact_jaccard_bucketed",
+    "requested_j_threshold", "tau_count", "realized_j_tau",
+    "calibration_fpr", "calibration_fnr", "calibration_balanced_error",
+    "calibration_digest", "evaluation_digest", "threshold_workload_sha256",
+)
+THRESHOLD_ROWS_HEADER = (
+    "pair_id", "label", "split", "rank_position", "record_a", "record_b",
+    "exact_jaccard_bucketed",
+)
+THRESHOLD_SCHEMA_VERSION = "piccard-real-threshold-v1"
+THRESHOLD_WORKLOAD_SCHEMA_VERSION = "piccard-real-threshold-workload-v1"
+THRESHOLD_SPLIT_DOMAIN = b"piccard-dblp-threshold-split-v1"
+THRESHOLD_TRIAL_DOMAIN = b"piccard-dblp-threshold-eval-v1"
 ACCURACY_HEADER_FIELDS = tuple((_PREFIX_HEADER + "," + _ACCURACY_SUFFIX).split(","))
 TIMING_HEADER_FIELDS = tuple((_PREFIX_HEADER + "," + _TIMING_SUFFIX).split(","))
 ENCODING_HEADER_FIELDS = tuple(_ENCODING_HEADER.split(","))
@@ -461,6 +481,7 @@ def _parse_artifacts(values: dict, results_root: Path) -> list:
 
 _ACCURACY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy$")
 _SUMMARY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy-summary$")
+_THRESHOLD_ID_RE = re.compile(r"^([A-Za-z0-9_]+):threshold$")
 _TIMING_ID_RE = re.compile(r"^([A-Za-z0-9_]+):timing:([A-Za-z0-9-]+)$")
 _ENCODING_ID_RE = re.compile(
     r"^([A-Za-z0-9_]+):encoding:([A-Za-z0-9-]+):(piccard_encode|piccard_sqrt_encode)$")
@@ -477,6 +498,10 @@ def _expected_input_root_id(role: str, cell_id: str) -> str:
     if role == "processed-manifest":
         return f"processed-dataset-{variant}"
     if role == "accuracy-csv":
+        return "results-root"
+    if role == "threshold-csv":
+        return "results-root"
+    if role == "threshold-workload":
         return "results-root"
     fail(f"cell {cell_id!r} has an unrecognized input role: {role!r}")
 
@@ -574,7 +599,8 @@ def _parse_cells(values: dict, results_root: Path, roots: dict) -> list:
 
 
 def _cell_variant(cell_id: str) -> str:
-    for pattern in (_ACCURACY_ID_RE, _SUMMARY_ID_RE, _TIMING_ID_RE, _ENCODING_ID_RE):
+    for pattern in (_ACCURACY_ID_RE, _SUMMARY_ID_RE, _THRESHOLD_ID_RE,
+                    _TIMING_ID_RE, _ENCODING_ID_RE):
         match = pattern.match(cell_id)
         if match:
             return match.group(1)
@@ -620,6 +646,8 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
                 f"{variant}:accuracy-summary",
                 *(f"{variant}:timing:{profile}" for profile in timing_profiles),
             }
+            if variant == QUICK_VARIANT:
+                expected_by_variant[variant].add(f"{variant}:threshold")
 
     if set(by_variant) != expected_variants:
         fail(f"unexpected variant set for evidence_mode={evidence_mode!r}: "
@@ -854,6 +882,367 @@ def _load_bound_processed_dataset(processed_dir: Path, processed_values: dict) -
     if positive_count != expected_positive_count:
         fail("processed pairs.tsv positive count does not match dataset.manifest.tsv")
     return {"records": records, "pairs": pairs}
+
+
+# ---------------------------------------------------------------------------
+# Direct DBLP threshold artifact verification
+# ---------------------------------------------------------------------------
+
+def _threshold_digest_u64(payload: bytes) -> int:
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _threshold_split_rank(pair_id: str) -> int:
+    return _threshold_digest_u64(THRESHOLD_SPLIT_DOMAIN + b"\x00" +
+                                pair_id.encode("utf-8"))
+
+
+def _threshold_trial_seed(root_seed: int, pair_id: str, trial_index: int) -> int:
+    pair_bytes = pair_id.encode("utf-8")
+    payload = (THRESHOLD_TRIAL_DOMAIN + b"\x00" +
+               struct.pack(">Q", root_seed) + struct.pack(">I", len(pair_bytes)) +
+               pair_bytes + struct.pack(">Q", trial_index))
+    return _threshold_digest_u64(payload)
+
+
+def _threshold_exact_jaccard(left: tuple, right: tuple) -> float:
+    intersection, union = _truth_overlap(left, right)
+    if union == 0:
+        fail("DBLP threshold exact-J denominator is zero")
+    return intersection / union
+
+
+def _threshold_select_pairs(processed_dataset: dict, max_pairs: int) -> list:
+    if max_pairs <= 0:
+        fail("DBLP threshold max_pairs must be positive")
+    all_pairs = []
+    records = processed_dataset["records"]
+    for pair in processed_dataset["pairs"]:
+        if pair["label"] not in (0, 1):
+            fail("DBLP threshold labels must be binary")
+        left = records[pair["record_a"]]
+        right = records[pair["record_b"]]
+        all_pairs.append({
+            **pair,
+            "exact_jaccard_bucketed": _threshold_exact_jaccard(
+                left["bucketed"], right["bucketed"]),
+        })
+    if not all_pairs:
+        fail("DBLP threshold dataset has no pairs")
+    requested = min(len(all_pairs), max_pairs)
+    by_label = {0: [pair for pair in all_pairs if pair["label"] == 0],
+                1: [pair for pair in all_pairs if pair["label"] == 1]}
+    selected = []
+    if (requested >= 4 and len(by_label[0]) >= 2 and len(by_label[1]) >= 2):
+        take_zero = requested // 2
+        take_one = requested - take_zero
+        if take_zero > len(by_label[0]):
+            take_zero = len(by_label[0])
+            take_one = requested - take_zero
+        if take_one > len(by_label[1]):
+            take_one = len(by_label[1])
+            take_zero = requested - take_one
+        if take_zero <= len(by_label[0]) and take_one <= len(by_label[1]):
+            selected = by_label[0][:take_zero] + by_label[1][:take_one]
+    if len(selected) != requested:
+        selected = all_pairs[:requested]
+
+    split_pairs = []
+    for label in (0, 1):
+        group = [pair for pair in selected if pair["label"] == label]
+        group.sort(key=lambda pair: (_threshold_split_rank(pair["pair_id"]),
+                                     pair["pair_id"]))
+        for rank, pair in enumerate(group):
+            item = dict(pair)
+            item["split"] = "calibration" if rank % 2 == 0 else "evaluation"
+            item["rank_position"] = rank
+            split_pairs.append(item)
+    return split_pairs
+
+
+def _threshold_require_split_class_denominators(split_pairs: list) -> None:
+    for split in ("calibration", "evaluation"):
+        negative = sum(pair["split"] == split and pair["label"] == 0
+                       for pair in split_pairs)
+        positive = sum(pair["split"] == split and pair["label"] == 1
+                       for pair in split_pairs)
+        if not negative or not positive:
+            fail(f"DBLP threshold zero {split} class denominator")
+
+
+def _threshold_candidates(split_pairs: list) -> list:
+    values = sorted({pair["exact_jaccard_bucketed"]
+                     for pair in split_pairs if pair["split"] == "calibration"})
+    if not values:
+        fail("DBLP threshold calibration split is empty")
+    candidates = set(values)
+    candidates.update((left + right) / 2.0
+                       for left, right in zip(values, values[1:]))
+    return sorted(candidates)
+
+
+def _threshold_tau(requested: float, k: int, m: int) -> int:
+    tau = math.ceil(k * (1.0 / m + (1.0 - 1.0 / m) * requested))
+    return max(1, min(k, tau))
+
+
+def _threshold_realized_boundary(tau: int, k: int, m: int) -> float:
+    return (tau / k - 1.0 / m) / (1.0 - 1.0 / m)
+
+
+def _threshold_choice(split_pairs: list, candidates: list, k: int, m: int) -> dict:
+    best = None
+    for requested in candidates:
+        calibration = [pair for pair in split_pairs if pair["split"] == "calibration"]
+        negatives = sum(pair["label"] == 0 for pair in calibration)
+        positives = sum(pair["label"] == 1 for pair in calibration)
+        if not negatives or not positives:
+            fail("DBLP threshold calibration class denominator is zero")
+        false_positive = sum(
+            pair["label"] == 0 and pair["exact_jaccard_bucketed"] >= requested
+            for pair in calibration)
+        false_negative = sum(
+            pair["label"] == 1 and pair["exact_jaccard_bucketed"] < requested
+            for pair in calibration)
+        fpr = false_positive / negatives
+        fnr = false_negative / positives
+        candidate = {
+            "requested": requested,
+            "tau_count": _threshold_tau(requested, k, m),
+            "realized": _threshold_realized_boundary(
+                _threshold_tau(requested, k, m), k, m),
+            "fpr": fpr,
+            "fnr": fnr,
+            "balanced_error": (fpr + fnr) / 2.0,
+        }
+        if (best is None or candidate["balanced_error"] < best["balanced_error"] or
+                (candidate["balanced_error"] == best["balanced_error"] and
+                 candidate["requested"] > best["requested"])):
+            best = candidate
+    return best
+
+
+def _threshold_minhash_match_count(pair: dict, records: dict, seed: int,
+                                   k: int, m: int) -> int:
+    def signature(values: tuple) -> list:
+        output = []
+        for coordinate in range(k):
+            ranks = [int.from_bytes(hashlib.sha256(
+                b"piccard-minhash-poc-v1" + struct.pack(">Q", seed) +
+                struct.pack(">I", coordinate) + struct.pack(">Q", element)
+            ).digest()[:8], "big") for element in values]
+            output.append(min(ranks))
+        return output
+    left = signature(records[pair["record_a"]]["bucketed"])
+    right = signature(records[pair["record_b"]]["bucketed"])
+    return sum(left[index] % m == right[index] % m for index in range(k))
+
+
+def _threshold_outcome(decision: bool, truth: bool) -> str:
+    if decision and truth:
+        return "TP"
+    if not decision and not truth:
+        return "TN"
+    if decision:
+        return "FP"
+    return "FN"
+
+
+def _threshold_canonical_partition(split_pairs: list, split: str) -> str:
+    output = []
+    for pair in split_pairs:
+        if pair["split"] == split:
+            output.append("\t".join((
+                pair["pair_id"], str(pair["label"]), str(pair["rank_position"]),
+                format_float(pair["exact_jaccard_bucketed"]))))
+    return "".join(line + "\n" for line in output)
+
+
+def _read_threshold_csv(path: Path) -> list:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            fail("threshold CSV is empty")
+        if header != list(THRESHOLD_HEADER_FIELDS):
+            fail("threshold CSV header does not match piccard-real-threshold-v1")
+        rows = []
+        int_fields = {"label", "k", "m", "root_seed", "rank_position",
+                      "threshold_trial_index", "hash_seed", "match_count",
+                      "decision", "label_truth", "exact_j_truth", "tau_count"}
+        float_fields = {"exact_jaccard_bucketed", "requested_j_threshold",
+                        "realized_j_tau", "calibration_fpr", "calibration_fnr",
+                        "calibration_balanced_error"}
+        for row_number, values in enumerate(reader, start=2):
+            if len(values) != len(THRESHOLD_HEADER_FIELDS):
+                fail(f"threshold CSV row {row_number} has wrong column count")
+            row = dict(zip(THRESHOLD_HEADER_FIELDS, values))
+            for field in int_fields:
+                try:
+                    row[field] = int(row[field])
+                except ValueError:
+                    fail(f"threshold CSV row {row_number} field {field} is not an integer")
+            for field in float_fields:
+                try:
+                    row[field] = float(row[field])
+                except ValueError:
+                    fail(f"threshold CSV row {row_number} field {field} is not a float")
+                if not math.isfinite(row[field]):
+                    fail(f"threshold CSV row {row_number} field {field} is not finite")
+            rows.append(row)
+        return rows
+
+
+def verify_threshold_artifacts(dataset_manifest: Path, csv_path: Path,
+                               workload_manifest_path: Path,
+                               workload_rows_path: Path, *, root_seed: int,
+                               threshold_trials: int, max_pairs: int,
+                               k: int = 128, m: int = 64) -> None:
+    """Independently verify one plaintext DBLP threshold artifact set."""
+    if k != 128 or m != 64:
+        fail("DBLP threshold verifier freezes k=128,m=64")
+    if threshold_trials <= 0:
+        fail("DBLP threshold verifier requires positive threshold_trials")
+    dataset_manifest = Path(dataset_manifest).resolve(strict=True)
+    if sha256_file(dataset_manifest) == "":
+        fail("DBLP threshold dataset manifest digest is empty")
+    values = _validate_processed_manifest(dataset_manifest, "dblp_acm")
+    if values.get("variant") != "dblp_acm_u65536" or values.get("universe_size") != "65536":
+        fail("DBLP threshold verifier accepts only dblp_acm_u65536")
+    processed = _load_bound_processed_dataset(dataset_manifest.parent, values)
+    split_pairs = _threshold_select_pairs(processed, max_pairs)
+    _threshold_require_split_class_denominators(split_pairs)
+    candidates = _threshold_candidates(split_pairs)
+    choice = _threshold_choice(split_pairs, candidates, k, m)
+
+    manifest_pairs = parse_two_column_tsv(workload_manifest_path)
+    seen_manifest_keys = set()
+    for key, _value in manifest_pairs:
+        if key in seen_manifest_keys:
+            fail(f"threshold workload manifest duplicates key {key!r}")
+        seen_manifest_keys.add(key)
+    manifest = dict(manifest_pairs)
+    if manifest.get("schema_version") != THRESHOLD_WORKLOAD_SCHEMA_VERSION:
+        fail("threshold workload schema_version mismatch")
+    expected_dataset_sha = sha256_file(dataset_manifest)
+    if manifest.get("dataset_manifest_sha256") != expected_dataset_sha:
+        fail("threshold workload dataset manifest digest mismatch")
+    for key, expected in (("k", str(k)), ("m", str(m)),
+                          ("root_seed", str(root_seed)),
+                          ("max_pairs", str(max_pairs)),
+                          ("threshold_trials", str(threshold_trials)),
+                          ("hash_randomness", "resampled"),
+                          ("pair_selection", "balanced-label-prefix"),
+                          ("split_domain", "piccard-dblp-threshold-split-v1"),
+                          ("trial_seed_domain", "piccard-dblp-threshold-eval-v1")):
+        if manifest.get(key) != expected:
+            fail(f"threshold workload {key} mismatch")
+
+    rows_bytes = workload_rows_path.read_bytes()
+    if manifest.get("rows_sha256") != hashlib.sha256(rows_bytes).hexdigest():
+        fail("threshold workload rows digest mismatch")
+    lines = rows_bytes.decode("utf-8").split("\n")
+    if lines[-1] != "" or lines[0].split("\t") != list(THRESHOLD_ROWS_HEADER):
+        fail("threshold workload rows header/termination mismatch")
+    expected_rows = ["\t".join((
+        pair["pair_id"], str(pair["label"]), pair["split"],
+        str(pair["rank_position"]), pair["record_a"], pair["record_b"],
+        format_float(pair["exact_jaccard_bucketed"])))
+                     for pair in split_pairs]
+    if lines[1:-1] != expected_rows:
+        fail("threshold workload rows do not match the independent split")
+    calibration_payload = _threshold_canonical_partition(split_pairs, "calibration")
+    evaluation_payload = _threshold_canonical_partition(split_pairs, "evaluation")
+    if manifest.get("calibration_rows_sha256") != hashlib.sha256(
+            calibration_payload.encode()).hexdigest():
+        fail("threshold calibration digest mismatch")
+    if manifest.get("evaluation_rows_sha256") != hashlib.sha256(
+            evaluation_payload.encode()).hexdigest():
+        fail("threshold evaluation digest mismatch")
+    expected_calibration_count = sum(
+        pair["split"] == "calibration" for pair in split_pairs)
+    expected_evaluation_count = sum(
+        pair["split"] == "evaluation" for pair in split_pairs)
+    if manifest.get("calibration_pair_count") != str(expected_calibration_count):
+        fail("threshold calibration pair count mismatch")
+    if manifest.get("evaluation_pair_count") != str(expected_evaluation_count):
+        fail("threshold evaluation pair count mismatch")
+    if manifest.get("candidate_count") != str(len(candidates)):
+        fail("threshold candidate count mismatch")
+    for index, candidate in enumerate(candidates):
+        if manifest.get(f"candidate.{index}") != format_float(candidate):
+            fail(f"threshold candidate.{index} mismatch")
+    if manifest.get("selected_requested_j_threshold") != format_float(choice["requested"]):
+        fail("threshold selected requested J mismatch")
+    if manifest.get("tau_count") != str(choice["tau_count"]):
+        fail("threshold tau_count mismatch")
+    choice_fields = {
+        "realized_j_tau": "realized",
+        "calibration_fpr": "fpr",
+        "calibration_fnr": "fnr",
+        "calibration_balanced_error": "balanced_error",
+    }
+    for key, choice_key in choice_fields.items():
+        if manifest.get(key) != format_float(choice[choice_key]):
+            fail(f"threshold workload {key} mismatch")
+
+    rows = _read_threshold_csv(csv_path)
+    evaluation_pairs = [pair for pair in split_pairs if pair["split"] == "evaluation"]
+    if any(row.get("split") != "evaluation" for row in rows):
+        fail("calibration row entered evaluation output")
+    if len(rows) != len(evaluation_pairs) * threshold_trials:
+        fail("threshold CSV row count does not equal evaluation pairs times trials")
+    if not rows:
+        fail("threshold CSV has no evaluation rows")
+    workload_sha = hashlib.sha256(workload_manifest_path.read_bytes()).hexdigest()
+    expected_index = 0
+    for pair in evaluation_pairs:
+        for trial in range(threshold_trials):
+            row = rows[expected_index]
+            expected_index += 1
+            expected_seed = _threshold_trial_seed(root_seed, pair["pair_id"], trial)
+            match_count = _threshold_minhash_match_count(pair, processed["records"],
+                                                         expected_seed, k, m)
+            decision = match_count >= choice["tau_count"]
+            label_truth = pair["label"] == 1
+            exact_truth = pair["exact_jaccard_bucketed"] >= choice["realized"]
+            identities = {
+                "schema_version": THRESHOLD_SCHEMA_VERSION,
+                "dataset": "dblp_acm", "variant": "dblp_acm_u65536",
+                "dataset_manifest_sha256": expected_dataset_sha,
+                "records_sha256": values["records_sha256"],
+                "pairs_sha256": values["pairs_sha256"],
+                "pair_id": pair["pair_id"], "pair_kind": pair["pair_kind"],
+                "label": pair["label"], "record_a": pair["record_a"],
+                "record_b": pair["record_b"], "k": k, "m": m,
+                "hash_randomness": "resampled", "root_seed": root_seed,
+                "split": "evaluation", "rank_position": pair["rank_position"],
+                "threshold_trial_index": trial, "hash_seed": expected_seed,
+                "match_count": match_count, "decision": int(decision),
+                "label_truth": pair["label"],
+                "label_outcome": _threshold_outcome(decision, label_truth),
+                "exact_j_truth": int(exact_truth),
+                "exact_j_outcome": _threshold_outcome(decision, exact_truth),
+                "exact_jaccard_bucketed": pair["exact_jaccard_bucketed"],
+                "requested_j_threshold": choice["requested"],
+                "tau_count": choice["tau_count"], "realized_j_tau": choice["realized"],
+                "calibration_fpr": choice["fpr"], "calibration_fnr": choice["fnr"],
+                "calibration_balanced_error": choice["balanced_error"],
+                "calibration_digest": manifest["calibration_rows_sha256"],
+                "evaluation_digest": manifest["evaluation_rows_sha256"],
+                "threshold_workload_sha256": workload_sha,
+            }
+            for field, expected in identities.items():
+                observed = row[field]
+                if isinstance(expected, float):
+                    if not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12):
+                        fail(f"threshold row {expected_index + 1} field {field} mismatch")
+                elif str(observed) != str(expected):
+                    fail(f"threshold row {expected_index + 1} field {field} mismatch")
+
+
+verify_threshold = verify_threshold_artifacts
 
 
 def _truth_overlap(left: tuple, right: tuple) -> tuple:
@@ -1666,6 +2055,25 @@ def verify(results_root: Path) -> str:
             _validate_accuracy_workload(cell, variant, rows,
                                         processed_manifest_cache[variant],
                                         processed_dataset_cache[variant])
+        elif cell["id"].endswith(":threshold"):
+            if variant != QUICK_VARIANT:
+                fail(f"cell {cell['id']!r} threshold mode is DBLP-only")
+            processed_input = next(
+                (i for i in cell["inputs"] if i["role"] == "processed-manifest"),
+                None)
+            if processed_input is None:
+                fail(f"cell {cell['id']!r} threshold input manifest is missing")
+            csv_path = _output_path_for(cell, f"real_threshold_{variant}.csv")
+            manifest_path = _output_path_for(
+                cell, f"threshold_{variant}.manifest.tsv")
+            rows_path = _output_path_for(cell, f"threshold_{variant}.rows.tsv")
+            verify_threshold_artifacts(
+                processed_input["resolved"], csv_path, manifest_path, rows_path,
+                root_seed=int(_argv_value(cell, "seed")),
+                threshold_trials=int(_argv_value(cell, "threshold-trials")),
+                max_pairs=int(_argv_value(cell, "max-pairs")),
+                k=int(_argv_value(cell, "k")),
+                m=int(_argv_value(cell, "m")))
         elif ":timing:" in cell["id"]:
             profile = cell["id"].split(":timing:", 1)[1]
             csv_path = _output_path_for(cell, f"real_timing_{variant}_{profile}.csv")
@@ -1775,15 +2183,41 @@ def verify(results_root: Path) -> str:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 1:
-        sys.stderr.write("usage: verify_real_dataset_outputs.py <results-root>\n")
-        return 2
-    try:
-        verify(Path(argv[0]))
-    except (VerificationError, OSError) as exc:
-        sys.stderr.write(f"verify_real_dataset_outputs: FAIL: {exc}\n")
-        return 1
-    return 0
+    if (len(argv) == 1 and not argv[0].startswith("--")):
+        try:
+            verify(Path(argv[0]))
+        except (VerificationError, OSError) as exc:
+            sys.stderr.write(f"verify_real_dataset_outputs: FAIL: {exc}\n")
+            return 1
+        return 0
+    if "--mode=threshold" in argv or "--mode" in argv:
+        parser = argparse.ArgumentParser(prog="verify_real_dataset_outputs.py")
+        parser.add_argument("--mode", choices=("threshold",), required=True)
+        parser.add_argument("--dataset-manifest", required=True)
+        parser.add_argument("--threshold-csv", required=True)
+        parser.add_argument("--threshold-manifest", required=True)
+        parser.add_argument("--threshold-rows", required=True)
+        parser.add_argument("--seed", required=True, type=int)
+        parser.add_argument("--threshold-trials", required=True, type=int)
+        parser.add_argument("--max-pairs", required=True, type=int)
+        args = parser.parse_args(argv)
+        try:
+            verify_threshold_artifacts(
+                Path(args.dataset_manifest), Path(args.threshold_csv),
+                Path(args.threshold_manifest), Path(args.threshold_rows),
+                root_seed=args.seed, threshold_trials=args.threshold_trials,
+                max_pairs=args.max_pairs)
+        except (VerificationError, OSError) as exc:
+            sys.stderr.write(f"verify_real_dataset_outputs: FAIL: {exc}\n")
+            return 1
+        return 0
+    sys.stderr.write(
+        "usage: verify_real_dataset_outputs.py <results-root>\n"
+        "   or: verify_real_dataset_outputs.py --mode=threshold "
+        "--dataset-manifest=... --threshold-csv=... "
+        "--threshold-manifest=... --threshold-rows=... --seed=... "
+        "--threshold-trials=... --max-pairs=...\n")
+    return 2
 
 
 if __name__ == "__main__":

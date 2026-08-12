@@ -11,6 +11,7 @@
 // any FHE code path exists.
 #include "real_accuracy_driver.h"
 #include "real_encoding_driver.h"
+#include "real_threshold_driver.h"
 #include "real_timing_driver.h"
 
 #include <cstdint>
@@ -23,9 +24,11 @@ namespace {
 
 using piccard::bench::RealAccuracyCliArgs;
 using piccard::bench::RealEncodingCliArgs;
+using piccard::bench::RealThresholdCliArgs;
 using piccard::bench::RealTimingCliArgs;
 using piccard::bench::RunRealAccuracyMode;
 using piccard::bench::RunRealEncodingMode;
+using piccard::bench::RunRealThresholdMode;
 using piccard::bench::RunRealTimingMode;
 
 void PrintUsage(std::ostream& out) {
@@ -43,7 +46,12 @@ void PrintUsage(std::ostream& out) {
            "      --profile=work5-std192-t40-single-trial\n"
            "      --method=piccard_encode|piccard_sqrt_encode --k=128 --m=64\n"
            "      --trials=1 --timing-pair=median --seed=20260729 --csv=<path>\n"
-           "      --workload-manifest-out=<path>\n";
+           "      --workload-manifest-out=<path>\n"
+           "  bench_real_datasets --dataset-manifest=<path> --mode=threshold\n"
+           "      --k=128 --m=64 --max-pairs=<uint64>\n"
+           "      --threshold-trials=1|50 --seed=<uint64>\n"
+           "      --hash_randomness=resampled --csv=<path>\n"
+           "      --workload-manifest-out=<path> --workload-rows-out=<path>\n";
 }
 
 uint64_t ParseUint64Option(const std::string& text, const std::string& option_name) {
@@ -75,7 +83,7 @@ uint32_t ParseUint32Option(const std::string& text, const std::string& option_na
     return static_cast<uint32_t>(value);
 }
 
-// Scans argv for --mode=<value> without validating any other option, so
+// Scans argv for --mode=<value> (or --mode <value>) without validating any other option, so
 // the caller can dispatch to a mode-specific parser before that parser's
 // own required-option checks run. A future --mode=timing branch (Sub-phase
 // 5.4) plugs in at the dispatch site in main() without touching this
@@ -86,6 +94,9 @@ std::string ExtractMode(int argc, char** argv) {
         const size_t equals = argument.find('=');
         if (equals != std::string::npos && argument.substr(0, equals) == "--mode") {
             return argument.substr(equals + 1);
+        }
+        if (argument == "--mode" && index + 1 < argc) {
+            return argv[index + 1];
         }
     }
     throw std::invalid_argument("--mode is required (accuracy|timing|encoding)");
@@ -300,6 +311,84 @@ RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
     return args;
 }
 
+RealThresholdCliArgs ParseThresholdArguments(int argc, char** argv) {
+    RealThresholdCliArgs args;
+    bool saw_dataset_manifest = false;
+    bool saw_k = false;
+    bool saw_m = false;
+    bool saw_max_pairs = false;
+    bool saw_trials = false;
+    bool saw_seed = false;
+    bool saw_hash_randomness = false;
+    bool saw_csv = false;
+    bool saw_workload_manifest_out = false;
+    bool saw_workload_rows_out = false;
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        const size_t equals = argument.find('=');
+        std::string option;
+        std::string value;
+        if (equals == std::string::npos) {
+            option = argument;
+            if (index + 1 >= argc) {
+                throw std::invalid_argument("missing value for argument: " + argument);
+            }
+            value = argv[++index];
+        } else {
+            if (equals == 0 || equals + 1 == argument.size()) {
+                throw std::invalid_argument("invalid argument: " + argument);
+            }
+            option = argument.substr(0, equals);
+            value = argument.substr(equals + 1);
+        }
+        if (option == "--mode") {
+            continue;
+        } else if (option == "--dataset-manifest") {
+            args.dataset_manifest_path = value;
+            saw_dataset_manifest = true;
+        } else if (option == "--k") {
+            args.k = ParseUint32Option(value, option);
+            saw_k = true;
+        } else if (option == "--m") {
+            args.m = ParseUint32Option(value, option);
+            saw_m = true;
+        } else if (option == "--max-pairs") {
+            args.max_pairs = ParseUint64Option(value, option);
+            saw_max_pairs = true;
+        } else if (option == "--threshold-trials") {
+            args.threshold_trials = ParseUint32Option(value, option);
+            saw_trials = true;
+        } else if (option == "--seed") {
+            args.root_seed = ParseUint64Option(value, option);
+            saw_seed = true;
+        } else if (option == "--hash_randomness") {
+            args.hash_randomness = value;
+            saw_hash_randomness = true;
+        } else if (option == "--csv") {
+            args.csv_path = value;
+            saw_csv = true;
+        } else if (option == "--workload-manifest-out") {
+            args.workload_manifest_out_path = value;
+            saw_workload_manifest_out = true;
+        } else if (option == "--workload-rows-out") {
+            args.workload_rows_out_path = value;
+            saw_workload_rows_out = true;
+        } else {
+            throw std::invalid_argument("unknown option: " + option);
+        }
+    }
+    if (!saw_dataset_manifest || !saw_k || !saw_m || !saw_max_pairs ||
+        !saw_trials || !saw_seed || !saw_hash_randomness || !saw_csv ||
+        !saw_workload_manifest_out || !saw_workload_rows_out) {
+        throw std::invalid_argument(
+            "--mode=threshold requires --dataset-manifest, --k, --m, "
+            "--max-pairs, --threshold-trials, --seed, --hash_randomness, "
+            "--csv, --workload-manifest-out, and --workload-rows-out");
+    }
+    return args;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -316,6 +405,10 @@ int main(int argc, char** argv) {
         if (mode == "encoding") {
             const RealEncodingCliArgs args = ParseEncodingArguments(argc, argv);
             return RunRealEncodingMode(args);
+        }
+        if (mode == "threshold") {
+            const RealThresholdCliArgs args = ParseThresholdArguments(argc, argv);
+            return RunRealThresholdMode(args);
         }
         throw std::invalid_argument("unknown --mode: " + mode);
     } catch (const std::exception& error) {
