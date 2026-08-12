@@ -1649,6 +1649,143 @@ class EnronRecordTests(unittest.TestCase):
                 "drops/invalid_rfc2047.eml", "drops/unknown_charset.eml"):
             self.assertNotIn(relative, {c.relative_path for c in candidates})
 
+    def _write_plain_message(self, root: Path, name: str, extra_headers: bytes,
+                             body: bytes = b"alpha bravo charlie delta echo\n"):
+        path = root / name
+        path.write_bytes(
+            b"From: Alice <alice@example.com>\n"
+            b"To: Bob <bob@example.com>\n"
+            + extra_headers
+            + b"Content-Type: text/plain; charset=us-ascii\n\n"
+            + body)
+        return path
+
+    def test_malformed_base64_and_quoted_printable_payloads_drop_strictly(self):
+        module = self.require_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plain_message(
+                root, "bad-base64.eml",
+                b"Subject: okay\n"
+                b"Content-Transfer-Encoding: base64\n",
+                b"YWxwaGEgYnJhdm8gY2hhcmxpZSBkZWx0YSBlY2hv!!!\n")
+            self._write_plain_message(
+                root, "bad-qp.eml",
+                b"Subject: okay\n"
+                b"Content-Transfer-Encoding: quoted-printable\n",
+                b"alpha=ZZ bravo charlie delta echo\n")
+            candidates, dropped = module.build_record_candidates(root)
+            self.assertEqual(candidates, [])
+            self.assertEqual(dropped["dropped.charset_or_mime"], 2)
+
+    def test_rfc2047_requires_nonempty_strict_q_grammar_and_declared_charset(self):
+        module = self.require_module()
+        cases = {
+            "empty-b64.eml": b"Subject: =?utf-8?B??=\n",
+            "space-q.eml": b"Subject: =?utf-8?Q?abc def?=\n",
+            "bad-utf8.eml": b"Subject: =?utf-8?B?/w==?=\n",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, subject in cases.items():
+                self._write_plain_message(root, name, subject)
+            candidates, dropped = module.build_record_candidates(root)
+            self.assertEqual(candidates, [])
+            self.assertEqual(dropped["dropped.charset_or_mime"], 3)
+
+    def test_candidate_does_not_construct_phase2_record_id(self):
+        module = self.require_module()
+        candidates, _ = self.build_fixture_candidates(module)
+        candidate = next(c for c in candidates if c.relative_path == "inbox/ascii.eml")
+        self.assertFalse(
+            hasattr(candidate, "record_id"),
+            "record IDs are assigned by Phase 2, not Enron record preprocessing")
+
+    def test_pre_quote_body_fingerprint_is_distinct_from_cleaned_body(self):
+        module = self.require_module()
+        pre_quote_body = (
+            "alpha bravo charlie delta echo\n"
+            "> quoted material\n"
+            "-----Original Message-----\n"
+            "old alpha bravo charlie delta echo\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plain_message(
+                root, "quoted-copy.eml",
+                b"Subject: Prequote KAT\nMessage-ID: <prequote@example.com>\n",
+                pre_quote_body.encode("ascii"))
+            candidates, _ = module.build_record_candidates(root)
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate.body, "alpha bravo charlie delta echo\n")
+        # Independent BE32-framed copy KAT over the parsed body before quote
+        # removal; this must differ from a digest over candidate.body.
+        fields = ("", "Alice <alice@example.com>", "Bob <bob@example.com>",
+                  "", "", "Prequote KAT", pre_quote_body)
+        digest = hashlib.sha256(b"piccard-enron-copy-v1\x00")
+        for field in fields:
+            encoded = field.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+        self.assertEqual(
+            digest.hexdigest(),
+            "a7eed285b8c25627923e0ed473ce633bcf1eac87029a4294d288983a8d2c0fc0")
+        self.assertEqual(candidate.copy_fingerprint, digest.hexdigest())
+        cleaned_digest = hashlib.sha256(b"piccard-enron-copy-v1\x00")
+        for field in (*fields[:-1], candidate.body):
+            encoded = field.encode("utf-8")
+            cleaned_digest.update(len(encoded).to_bytes(4, "big"))
+            cleaned_digest.update(encoded)
+        self.assertNotEqual(candidate.copy_fingerprint, cleaned_digest.hexdigest())
+
+    def test_original_message_and_on_wrote_tail_branches_are_independent(self):
+        module = self.require_module()
+        cases = {
+            "original.eml": (
+                b"alpha bravo charlie delta echo\n"
+                b"Original Message\n"
+                b"old alpha bravo charlie delta echo\n"),
+            "on-wrote.eml": (
+                b"alpha bravo charlie delta echo\n"
+                b"On Tue, Bob wrote:\n"
+                b"old alpha bravo charlie delta echo\n"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, body in cases.items():
+                message_id = (
+                    "original@example.com" if name == "original.eml"
+                    else "on-wrote@example.com")
+                self._write_plain_message(
+                    root, name,
+                    f"Subject: {name}\nMessage-ID: <{message_id}>\n".encode("ascii"),
+                    body)
+            candidates, _ = module.build_record_candidates(root)
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(
+            {candidate.body for candidate in candidates},
+            {"alpha bravo charlie delta echo\n"})
+
+    def test_defect_free_nonmatching_message_id_is_absent_for_deduplication(self):
+        module = self.require_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plain_message(
+                root, "not-an-id.eml",
+                b"Subject: No ID\nMessage-ID: <a@b> (comment)\n")
+            candidates, dropped = module.build_record_candidates(root)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].message_id, "<a@b> (comment)")
+        self.assertEqual(dropped["dropped.duplicate_message_id"], 0)
+
+    def test_raw_features_match_literal_shingle_hashes(self):
+        module = self.require_module()
+        candidates, _ = self.build_fixture_candidates(module)
+        candidate = next(c for c in candidates if c.relative_path == "inbox/ascii.eml")
+        self.assertEqual(
+            candidate.raw_features,
+            (6747757901913873495, 11866603913081688669))
+
 
 class SourceManifestTests(unittest.TestCase):
     """REDs for the single-pass source inventory and non-writing validator."""
@@ -1701,13 +1838,18 @@ class SourceManifestTests(unittest.TestCase):
             "b133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0")
 
     def test_validate_source_emits_exact_header_and_row_without_writes(self):
-        before = sorted(
-            str(path.relative_to(ENRON_FIXTURE_DIR))
-            for path in ENRON_FIXTURE_DIR.rglob("*") if path.is_file())
+        def topology(root: Path):
+            entries = [("D", ".")]
+            entries.extend(
+                ("D" if path.is_dir() else "F",
+                 str(path.relative_to(root)))
+                for path in root.rglob("*")
+                if path.is_dir() or path.is_file())
+            return sorted(entries)
+
+        before = topology(ENRON_FIXTURE_DIR)
         result = self._run_validate(ENRON_FIXTURE_SOURCE_MANIFEST)
-        after = sorted(
-            str(path.relative_to(ENRON_FIXTURE_DIR))
-            for path in ENRON_FIXTURE_DIR.rglob("*") if path.is_file())
+        after = topology(ENRON_FIXTURE_DIR)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout,

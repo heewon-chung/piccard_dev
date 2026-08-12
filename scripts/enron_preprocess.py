@@ -9,8 +9,10 @@ drop.
 """
 
 import base64
+import binascii
 import codecs
 import hashlib
+import quopri
 import re
 import stat
 import unicodedata
@@ -63,7 +65,6 @@ class EnronRecordCandidate:
     """An eligible, deduplicated document before universe bucketing/pairing."""
 
     relative_path: str
-    record_id: str
     date: str
     from_header: str
     to: str
@@ -118,19 +119,36 @@ def _header_has_encoded_word_error(raw_value: str) -> bool:
         if len(parts) != 3:
             return True
         charset, encoding, encoded = parts
-        if not charset or encoding.casefold() not in ("b", "q"):
+        if (not re.fullmatch(r"[A-Za-z0-9!#$%&+\-^_`{}~.]+", charset)
+                or encoding.casefold() not in ("b", "q")):
+            return True
+        if not encoded:
+            return True
+        if any(ord(character) < 33 or ord(character) > 126
+               for character in encoded):
             return True
         try:
-            codecs.lookup(charset)
+            codec = codecs.lookup(charset)
         except LookupError:
             return True
         if encoding.casefold() == "b":
             try:
-                base64.b64decode(encoded.encode("ascii"), validate=True)
-            except (ValueError, UnicodeEncodeError):
+                decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
+                decoded.decode(codec.name, errors="strict")
+            except (binascii.Error, UnicodeDecodeError, UnicodeEncodeError,
+                    ValueError):
                 return True
         else:
+            if any(character.isspace() for character in encoded):
+                return True
             if re.search(r"=(?![0-9A-Fa-f]{2})", encoded):
+                return True
+            try:
+                decoded = quopri.decodestring(
+                    encoded.replace("_", " ").encode("ascii"))
+                decoded.decode(codec.name, errors="strict")
+            except (binascii.Error, UnicodeDecodeError, UnicodeEncodeError,
+                    ValueError):
                 return True
         start = match.end()
 
@@ -196,7 +214,37 @@ def _decode_text_leaf(part) -> str | None:
         raise EnronMessageError(
             f"invalid transfer encoding: {transfer_header!r}")
 
+    raw_payload = part.get_payload(decode=False)
+    if transfer in ("base64", "quoted-printable"):
+        if raw_payload is None:
+            raw_payload = ""
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload_bytes = raw_payload.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise EnronMessageError(
+                    "non-ASCII transfer-encoded payload") from exc
+        elif isinstance(raw_payload, bytes):
+            raw_payload_bytes = raw_payload
+        else:
+            raise EnronMessageError("MIME payload is not bytes or text")
+    else:
+        raw_payload_bytes = b""
+    if transfer == "base64":
+        compact = re.sub(rb"[ \t\r\n]", b"", raw_payload_bytes)
+        try:
+            base64.b64decode(compact, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise EnronMessageError("invalid base64 transfer payload") from exc
+    elif transfer == "quoted-printable":
+        if re.search(rb"=(?![0-9A-Fa-f]{2}|\r\n|\n|\r)",
+                     raw_payload_bytes):
+            raise EnronMessageError("invalid quoted-printable transfer payload")
+
     payload = part.get_payload(decode=True)
+    # email.policy.default materializes base64 defects when decode=True, so
+    # this check must occur after decoding as well as before it.
+    _validate_message_defects(part)
     if payload is None:
         payload = b""
     if not isinstance(payload, bytes):
@@ -356,11 +404,8 @@ def _candidate_from_message(message: EnronParsedMessage,
     if not shingles:
         return None
     raw_features = tuple(sorted({_feature_hash(shingle) for shingle in shingles}))
-    record_id = "enron:" + hashlib.sha256(
-        message.relative_path.encode("utf-8")).hexdigest()
     return EnronRecordCandidate(
         relative_path=message.relative_path,
-        record_id=record_id,
         date=message.date,
         from_header=message.from_header,
         to=message.to,
