@@ -307,6 +307,7 @@ set(PICCARD_CORE_SOURCES
     src/core/sqrt_encoder.cpp
     src/core/bottom_structure.cpp
     src/core/threshold_poly.cpp
+    src/core/threshold_truth.cpp
 )
 
 add_library(piccard_core ${PICCARD_CORE_SOURCES})
@@ -1020,6 +1021,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_verify_work_approval
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME ThresholdPipeline
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_threshold_pipeline
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME Work7StateGuard
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_work7_state_guard
@@ -1279,7 +1284,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                          $<TARGET_FILE:bench_dynamic>)
     endif()
 
-    add_executable(bench_threshold benchmarks/bench_threshold.cpp)
+    add_executable(
+        bench_threshold
+        benchmarks/bench_threshold.cpp
+        benchmarks/threshold_fpfn_schema.cpp
+    )
     target_link_libraries(
         bench_threshold
         piccard_fhe

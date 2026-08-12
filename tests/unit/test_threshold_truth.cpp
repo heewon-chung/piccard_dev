@@ -143,3 +143,63 @@ TEST(ThresholdTruth, SigmaMatchesExactQFormula) {
         }
     }
 }
+
+TEST(ThresholdTruth, SyntheticThresholdLiterals) {
+    const std::vector<uint32_t> expected_k = {64u, 128u, 256u, 512u};
+    const std::vector<uint32_t> expected_tau = {38u, 76u, 153u, 307u};
+    ASSERT_EQ(expected_k.size(), kSyntheticThresholdK.size());
+    for (size_t i = 0; i < expected_k.size(); ++i) {
+        EXPECT_EQ(kSyntheticThresholdK[i], expected_k[i]);
+        EXPECT_EQ(SyntheticThresholdTauCount(expected_k[i]), expected_tau[i]);
+        const double expected_j_tau =
+            (static_cast<double>(expected_tau[i]) / expected_k[i] - 1.0 / 64.0) /
+            (1.0 - 1.0 / 64.0);
+        EXPECT_NEAR(JaccardThreshold(expected_tau[i], expected_k[i], 64),
+                    expected_j_tau, 1e-15);
+    }
+
+    const auto grid = SyntheticThresholdGridIndices();
+    ASSERT_EQ(grid.size(), 21u);
+    for (size_t i = 0; i < grid.size(); ++i) {
+        EXPECT_EQ(grid[i], static_cast<int32_t>(i) - 10);
+    }
+}
+
+TEST(ThresholdTruth, SyntheticThresholdGeometryAndRowSeedKats) {
+    const auto center = MakeSyntheticThresholdPoint(128u, 0);
+    EXPECT_EQ(center.tau_count, 76u);
+    EXPECT_NEAR(center.j_tau, 0.5873015873015873, 1e-15);
+    EXPECT_NEAR(center.target_j, center.j_tau, 1e-15);
+    EXPECT_EQ(center.realized_intersection, 740u);
+    EXPECT_EQ(center.realized_union, 1260u);
+    EXPECT_NEAR(center.realized_j, 740.0 / 1260.0, 1e-15);
+    EXPECT_EQ(SyntheticThresholdRowSeed(20260729u, 128u, 0, 0),
+              4449377846872528327ull);
+
+    const auto lower = MakeSyntheticThresholdPoint(64u, -10);
+    EXPECT_EQ(lower.realized_intersection, 655u);
+    EXPECT_EQ(lower.realized_union, 1345u);
+    EXPECT_NEAR(lower.realized_j, 655.0 / 1345.0, 1e-15);
+    EXPECT_EQ(SyntheticThresholdRowSeed(20260729u, 64u, -10, 0),
+              8053640992355589680ull);
+
+    const auto upper = MakeSyntheticThresholdPoint(512u, 10);
+    EXPECT_EQ(upper.realized_intersection, 818u);
+    EXPECT_EQ(upper.realized_union, 1182u);
+    EXPECT_NEAR(upper.realized_j, 818.0 / 1182.0, 1e-15);
+}
+
+TEST(ThresholdTruth, SyntheticThresholdTheoryAndOutcomeKats) {
+    EXPECT_NEAR(
+        SyntheticThresholdBinomialDecisionProbability(128u, 76u, 0.59375),
+        0.5380497333771499, 1e-15);
+    EXPECT_NEAR(SyntheticThresholdGaussianErrorApprox(
+                    740.0 / 1260.0, 128u, 64u),
+                0.5, 1e-15);
+    EXPECT_EQ(SyntheticThresholdDecision(76, 76), 1);
+    EXPECT_EQ(SyntheticThresholdDecision(75, 76), 0);
+    EXPECT_STREQ(SyntheticThresholdOutcome(1, 1), "TP");
+    EXPECT_STREQ(SyntheticThresholdOutcome(1, 0), "FN");
+    EXPECT_STREQ(SyntheticThresholdOutcome(0, 1), "FP");
+    EXPECT_STREQ(SyntheticThresholdOutcome(0, 0), "TN");
+}

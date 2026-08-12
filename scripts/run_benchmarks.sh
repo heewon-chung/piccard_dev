@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
             SECURITY_LEVELS=("TOY")
             TIMING_TRIALS=2
             ACCURACY_TRIALS=5
-            FPFN_TRIALS=50
+            FPFN_TRIALS=1
             TAG="quick"
             ;;
         --transcript_stat_bits=*)
@@ -119,6 +119,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+if [[ "$TAG" == "quick" ]]; then
+    FPFN_PROFILE="readiness-toy-v1"
+else
+    FPFN_PROFILE="paper-v1"
+fi
 SANITIZER_FLAGS=(
     "--transcript_stat_bits=$TRANSCRIPT_STAT_BITS"
     "--max_queries=$MAX_QUERIES"
@@ -243,7 +248,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
         echo "  bench_dynamic --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000${DYNAMIC_EXTRA_FLAGS:+ $DYNAMIC_EXTRA_FLAGS} ${SANITIZER_FLAGS[*]}"
         echo "  bench_threshold --mode=timing --security=$SECURITY --trials=$TIMING_TRIALS --set_size=1000"
         echo "  bench_threshold --mode=accuracy --security=$SECURITY --trials=$ACCURACY_TRIALS --set_size=1000"
-        echo "  bench_threshold --mode=fpfn --security=$SECURITY --trials=$FPFN_TRIALS --set_size=1000"
+        echo "  python3 $SCRIPT_DIR/run_threshold_fpfn_grid.py --binary $BUILD_DIR/bench_threshold --profile $FPFN_PROFILE --security $SECURITY --seed 20260729 --trials $FPFN_TRIALS --output $CSV_DIR/threshold_fpfn_${SECURITY}.csv"
         echo "  bench_threshold --mode=spec --security=$SECURITY"
     done
     echo "Resolved sanitizer profile: transcript_stat_bits=$TRANSCRIPT_STAT_BITS max_queries=$MAX_QUERIES"
@@ -392,10 +397,18 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
             --mode=accuracy --security="$SECURITY" --trials="$ACCURACY_TRIALS" --set_size=1000
 
         # ── 8b. bench_threshold: boundary FP/FN (true-Jaccard, R3-4) ─
+        # The point producer is plaintext-only; this runner invokes the
+        # fixed 84-point orchestrator with an explicit profile and root seed.
         run_bench "Threshold boundary FP/FN ($SECURITY)" \
-            "$BUILD_DIR/bench_threshold" \
+            "$(command -v python3)" \
             "$CSV_DIR/threshold_fpfn_${SECURITY}.csv" \
-            --mode=fpfn --security="$SECURITY" --trials="$FPFN_TRIALS" --set_size=1000
+            "$SCRIPT_DIR/run_threshold_fpfn_grid.py" \
+            --binary "$BUILD_DIR/bench_threshold" \
+            --profile "$FPFN_PROFILE" \
+            --security "$SECURITY" \
+            --seed 20260729 \
+            --trials "$FPFN_TRIALS" \
+            --output "$CSV_DIR/threshold_fpfn_${SECURITY}.csv"
 
         # ── 8c. bench_threshold: u_tau spec dump (paper table, R3-4) ─
         run_bench "Threshold u_tau spec ($SECURITY)" \

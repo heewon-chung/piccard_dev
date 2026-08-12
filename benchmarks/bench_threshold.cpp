@@ -1,5 +1,6 @@
 #include "benchmark_utils.h"
 #include "threshold_csv_schema.h"
+#include "threshold_fpfn_schema.h"
 #include "protocol/threshold_piccard.h"
 #include "protocol/piccard.h"
 #include "core/threshold_truth.h"
@@ -13,9 +14,11 @@
 #include "key/key-ser.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -109,6 +112,272 @@ static TruthContext MakeTruthContext(const ThresholdPiccard& engine,
 static const char* OutcomeName(int truth, int decision) {
     if (truth == 1) return decision == 1 ? "TP" : "FN";
     return decision == 1 ? "FP" : "TN";
+}
+
+// ============================================================================
+// Synthetic FP/FN point path (Phase 4)
+//
+// This path deliberately has its own parser and writer.  It is entered before
+// BenchmarkConfig::ParseArgs so a plaintext threshold row cannot accidentally
+// resolve a legacy FHE profile or construct an OpenFHE context.
+// ============================================================================
+
+struct FpfnConfig {
+    std::string profile;
+    std::string security;
+    std::string hash_randomness = "resampled";
+    uint64_t root_seed = 0;
+    size_t trials = 0;
+    uint32_t m = kSyntheticThresholdM;
+    uint32_t set_size = kSyntheticThresholdSetSize;
+    uint32_t point_k = 0;
+    int32_t grid_index = 0;
+    bool saw_profile = false;
+    bool saw_seed = false;
+    bool saw_trials = false;
+    bool saw_point_k = false;
+    bool saw_grid_index = false;
+    bool saw_security = false;
+    bool saw_m = false;
+    bool saw_set_size = false;
+    bool saw_hash_randomness = false;
+};
+
+static uint64_t ParseFpfnUnsigned(const std::string& value,
+                                  const char* flag) {
+    if (value.empty() || value.front() == '-' || value.front() == '+') {
+        throw std::invalid_argument(std::string("invalid ") + flag + ": " +
+                                    value);
+    }
+    uint64_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(),
+                                        parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+        throw std::invalid_argument(std::string("invalid ") + flag + ": " +
+                                    value);
+    }
+    return parsed;
+}
+
+static int32_t ParseFpfnSigned(const std::string& value, const char* flag) {
+    if (value.empty() || value.front() == '+') {
+        throw std::invalid_argument(std::string("invalid ") + flag + ": " +
+                                    value);
+    }
+    int32_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(),
+                                        parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+        throw std::invalid_argument(std::string("invalid ") + flag + ": " +
+                                    value);
+    }
+    return parsed;
+}
+
+static void RejectFpfnDuplicate(bool& seen, const char* flag) {
+    if (seen) throw std::invalid_argument(std::string("duplicate ") + flag);
+    seen = true;
+}
+
+static FpfnConfig ParseFpfnArgs(int argc, char** argv) {
+    FpfnConfig config;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--help" || arg == "-h") {
+            throw std::invalid_argument("help requested");
+        } else if (arg.rfind("--mode=", 0) == 0) {
+            if (arg.substr(7) != "fpfn") {
+                throw std::invalid_argument(
+                    "synthetic threshold path requires --mode=fpfn");
+            }
+        } else if (arg.rfind("--profile=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_profile, "--profile");
+            config.profile = arg.substr(10);
+        } else if (arg.rfind("--security=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_security, "--security");
+            config.security = arg.substr(11);
+            if (config.security != "TOY" && config.security != "STD128" &&
+                config.security != "STD192" && config.security != "STD256") {
+                throw std::invalid_argument("invalid --security: " +
+                                            config.security);
+            }
+        } else if (arg.rfind("--m=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_m, "--m");
+            const uint64_t value = ParseFpfnUnsigned(arg.substr(4), "--m");
+            if (value > std::numeric_limits<uint32_t>::max()) {
+                throw std::invalid_argument("invalid --m");
+            }
+            config.m = static_cast<uint32_t>(value);
+        } else if (arg.rfind("--set_size=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_set_size, "--set_size");
+            const uint64_t value =
+                ParseFpfnUnsigned(arg.substr(11), "--set_size");
+            if (value > std::numeric_limits<uint32_t>::max()) {
+                throw std::invalid_argument("invalid --set_size");
+            }
+            config.set_size = static_cast<uint32_t>(value);
+        } else if (arg.rfind("--trials=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_trials, "--trials");
+            config.trials = static_cast<size_t>(
+                ParseFpfnUnsigned(arg.substr(9), "--trials"));
+        } else if (arg.rfind("--seed=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_seed, "--seed");
+            config.root_seed = ParseFpfnUnsigned(arg.substr(7), "--seed");
+        } else if (arg.rfind("--point-k=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_point_k, "--point-k");
+            const uint64_t value =
+                ParseFpfnUnsigned(arg.substr(10), "--point-k");
+            if (value > std::numeric_limits<uint32_t>::max()) {
+                throw std::invalid_argument("invalid --point-k");
+            }
+            config.point_k = static_cast<uint32_t>(value);
+        } else if (arg.rfind("--grid-index=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_grid_index, "--grid-index");
+            config.grid_index = ParseFpfnSigned(arg.substr(13), "--grid-index");
+        } else if (arg.rfind("--hash_randomness=", 0) == 0) {
+            RejectFpfnDuplicate(config.saw_hash_randomness,
+                                "--hash_randomness");
+            config.hash_randomness = arg.substr(18);
+            if (config.hash_randomness != "resampled") {
+                throw std::invalid_argument(
+                    "synthetic threshold rows require --hash_randomness=resampled");
+            }
+        } else {
+            throw std::invalid_argument("unknown synthetic threshold option: " +
+                                        arg);
+        }
+    }
+
+    if (!config.saw_profile ||
+        (config.profile != "readiness-toy-v1" && config.profile != "paper-v1")) {
+        throw std::invalid_argument(
+            "--profile must be readiness-toy-v1 or paper-v1");
+    }
+    if (!config.saw_seed || config.root_seed == 0) {
+        throw std::invalid_argument("--seed must be a positive uint64");
+    }
+    if (!config.saw_trials || config.trials == 0) {
+        throw std::invalid_argument("--trials must be a positive integer");
+    }
+    if (config.profile == "readiness-toy-v1") {
+        if (config.trials != 1) {
+            throw std::invalid_argument(
+                "readiness-toy-v1 requires exactly one trial");
+        }
+        if (!config.saw_security) config.security = "TOY";
+        if (config.saw_security && config.security != "TOY") {
+            throw std::invalid_argument(
+                "readiness-toy-v1 requires TOY security metadata");
+        }
+    } else {
+        if (config.trials < 1000) {
+            throw std::invalid_argument("paper-v1 requires at least 1000 trials");
+        }
+        if (!config.saw_security) config.security = "STD128";
+        if (config.saw_security && config.security == "TOY") {
+            throw std::invalid_argument(
+                "paper-v1 does not permit TOY security metadata");
+        }
+    }
+    if (config.m != kSyntheticThresholdM) {
+        throw std::invalid_argument("synthetic threshold requires --m=64");
+    }
+    if (config.set_size != kSyntheticThresholdSetSize) {
+        throw std::invalid_argument(
+            "synthetic threshold requires --set_size=1000");
+    }
+    if (!config.saw_point_k || !IsSyntheticThresholdK(config.point_k)) {
+        throw std::invalid_argument(
+            "--point-k must be one of 64, 128, 256, 512");
+    }
+    if (!config.saw_grid_index ||
+        !IsSyntheticThresholdGridIndex(config.grid_index)) {
+        throw std::invalid_argument(
+            "--grid-index must be in the signed range [-10,10]");
+    }
+    return config;
+}
+
+static std::pair<std::vector<uint64_t>, std::vector<uint64_t>>
+MakeSyntheticThresholdSets(uint32_t intersection) {
+    std::vector<uint64_t> a;
+    std::vector<uint64_t> b;
+    a.reserve(kSyntheticThresholdSetSize);
+    b.reserve(kSyntheticThresholdSetSize);
+    for (uint32_t value = 0; value < kSyntheticThresholdSetSize; ++value) {
+        a.push_back(value);
+    }
+    for (uint32_t value = 0; value < intersection; ++value) {
+        b.push_back(value);
+    }
+    for (uint32_t value = 0;
+         value < kSyntheticThresholdSetSize - intersection; ++value) {
+        b.push_back(kSyntheticThresholdSetSize + value);
+    }
+    return {std::move(a), std::move(b)};
+}
+
+static void WriteSyntheticThresholdRow(const FpfnConfig& config,
+                                       const SyntheticThresholdPoint& point,
+                                       uint64_t trial_index,
+                                       uint64_t row_seed,
+                                       int64_t match_count,
+                                       int decision,
+                                       int exact_j_truth,
+                                       double predicted_decision_probability,
+                                       double predicted_error_probability,
+                                       double gaussian_error_approx) {
+    std::cout << kThresholdFpfnSchemaVersion << ',' << config.profile << ','
+              << config.security << ',' << MinHasher::ModelName() << ','
+              << config.hash_randomness << ',' << config.root_seed << ','
+              << point.k << ',' << point.m << ',' << kSyntheticThresholdSetSize
+              << ',' << point.tau_count << ',' << std::setprecision(17)
+              << point.j_tau << ',' << point.grid_index << ',' << point.target_j
+              << ',' << point.signed_delta << ',' << point.absolute_delta << ','
+              << point.alpha << ',' << point.realized_intersection << ','
+              << point.realized_union << ',' << point.realized_j << ','
+              << trial_index << ',' << row_seed << ',' << match_count << ','
+              << decision << ',' << exact_j_truth << ','
+              << SyntheticThresholdOutcome(exact_j_truth, decision) << ','
+              << predicted_decision_probability << ','
+              << predicted_error_probability << ',' << gaussian_error_approx
+              << '\n';
+}
+
+static int RunSyntheticThresholdPoint(const FpfnConfig& config) {
+    const SyntheticThresholdPoint point =
+        MakeSyntheticThresholdPoint(config.point_k, config.grid_index);
+    const auto sets = MakeSyntheticThresholdSets(point.realized_intersection);
+    std::cout << ThresholdFpfnCSVHeader();
+
+    const double p = point.realized_j +
+                     (1.0 - point.realized_j) /
+                         static_cast<double>(point.m);
+    const double predicted_decision_probability =
+        SyntheticThresholdBinomialDecisionProbability(point.k,
+                                                      point.tau_count, p);
+    const int exact_j_truth = point.realized_j >= point.j_tau ? 1 : 0;
+    const double predicted_error_probability =
+        exact_j_truth == 1 ? 1.0 - predicted_decision_probability
+                           : predicted_decision_probability;
+    const double gaussian_error_approx = SyntheticThresholdGaussianErrorApprox(
+        point.realized_j, point.k, point.m);
+
+    for (uint64_t trial_index = 0; trial_index < config.trials; ++trial_index) {
+        const uint64_t row_seed = SyntheticThresholdRowSeed(
+            config.root_seed, point.k, point.grid_index, trial_index);
+        MinHasher hasher(point.k, std::numeric_limits<uint64_t>::max(), row_seed);
+        const auto sig_a = hasher.ComputeSignature(sets.first);
+        const auto sig_b = hasher.ComputeSignature(sets.second);
+        const int64_t match_count = BucketMatchCount(sig_a, sig_b, point.m);
+        const int decision =
+            SyntheticThresholdDecision(match_count, point.tau_count);
+        WriteSyntheticThresholdRow(
+            config, point, trial_index, row_seed, match_count, decision,
+            exact_j_truth, predicted_decision_probability,
+            predicted_error_probability, gaussian_error_approx);
+    }
+    return 0;
 }
 
 // ============================================================================
@@ -1220,6 +1489,14 @@ static void BenchSpecDump(const BenchmarkConfig& config) {
 // Main
 // ============================================================================
 
+static bool IsSyntheticThresholdMode(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg.rfind("--mode=", 0) == 0) return arg.substr(7) == "fpfn";
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cout << "Usage: bench_threshold [options]\n"
@@ -1233,7 +1510,38 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    auto config = BenchmarkConfig::ParseArgs(argc, argv);
+    if (IsSyntheticThresholdMode(argc, argv)) {
+        try {
+            return RunSyntheticThresholdPoint(ParseFpfnArgs(argc, argv));
+        } catch (const std::invalid_argument& error) {
+            if (std::string(error.what()) == "help requested") {
+                std::cout << "Usage: bench_threshold --mode=fpfn "
+                             "--profile=readiness-toy-v1|paper-v1 "
+                             "--seed=N --trials=N --point-k=K "
+                             "--grid-index=J [--security=LEVEL] "
+                             "[--m=64 --set_size=1000]\n";
+                return 0;
+            }
+            std::cerr << "bench_threshold: " << error.what() << "\n";
+            return 2;
+        } catch (const std::exception& error) {
+            std::cerr << "bench_threshold: " << error.what() << "\n";
+            return 2;
+        }
+    }
+
+    BenchmarkConfig config;
+    try {
+        config = BenchmarkConfig::ParseArgs(argc, argv);
+        if (config.mode == "combined") {
+            throw std::invalid_argument(
+                "bench_threshold does not emit combined mode; select timing, "
+                "accuracy, spec, or the dedicated fpfn point path");
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "bench_threshold: " << error.what() << "\n";
+        return 2;
+    }
     config.Print();
 
     ThresholdCSVWriter csv;
