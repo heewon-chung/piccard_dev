@@ -198,6 +198,7 @@ class ThresholdPipelineContractTest(unittest.TestCase):
             "k": {**row, "k": "64"},
             "grid": {**row, "grid_index": "1"},
             "row seed": {**row, "row_seed": str(int(row["row_seed"]) + 1)},
+            "security": {**row, "security": "STD128"},
             "outcome": {**row, "outcome": "TP"},
             "probability": {
                 **row,
@@ -327,6 +328,29 @@ class ThresholdPipelineContractTest(unittest.TestCase):
                         "--trials=1",
                     )
                     self.assertNotEqual(result.returncode, 0)
+
+    def test_summarizer_rejects_toy_security_mutation(self):
+        valid = self._verified_toy_csv()
+        with tempfile.TemporaryDirectory() as tmp:
+            mutated = Path(tmp) / "security-mutated.csv"
+            with valid.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames
+                rows = list(reader)
+            self.assertIsNotNone(fieldnames)
+            rows[0]["security"] = "STD128"
+            with mutated.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            result = self._summarizer_command(
+                mutated,
+                "--mode=toy",
+                f"--seed={SEED}",
+                "--trials=1",
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_verifier_module_exposes_independent_literal_checks(self):
         # The verifier is a separate executable module, not a subprocess shim

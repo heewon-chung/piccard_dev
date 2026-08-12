@@ -215,6 +215,7 @@ def _expect_float(actual: float, expected: float, field: str) -> None:
 
 def _validate_row(row: Mapping[str, str], mode: str, root_seed: int) -> tuple[int, int, int]:
     profile = "readiness-toy-v1" if mode == "toy" else "paper-v1"
+    expected_security = "TOY" if profile == "readiness-toy-v1" else "STD128"
     if row.get("schema_version") != SCHEMA_VERSION:
         raise VerificationError("schema_version mismatch")
     if row.get("profile") != profile:
@@ -223,8 +224,11 @@ def _validate_row(row: Mapping[str, str], mode: str, root_seed: int) -> tuple[in
         raise VerificationError("estimator_model mismatch")
     if row.get("hash_randomness") != "resampled":
         raise VerificationError("hash_randomness must be resampled")
-    if row.get("security") not in {"TOY", "STD128", "STD192", "STD256"}:
-        raise VerificationError("invalid security metadata")
+    if row.get("security") != expected_security:
+        raise VerificationError(
+            f"security mismatch: got {row.get('security')!r}, "
+            f"expected {expected_security!r}"
+        )
 
     if _int(row, "root_seed") != root_seed:
         raise VerificationError("root_seed mismatch")
