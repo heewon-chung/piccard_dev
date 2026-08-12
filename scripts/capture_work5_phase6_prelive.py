@@ -307,10 +307,14 @@ def build(source_root: Path, build_dir: Path, journal: Journal) -> None:
     journal.run("build-release", ["cmake", "--build", str(build_dir), "-j2"], cwd=source_root)
     # PreThresholdProfileRunner is an existing CTest test whose provenance
     # helper intentionally reads the repository's conventional build/ path.
-    # Refresh that ignored helper build inside the journal before CTest so a
-    # prior-commit local build cannot make a source-bound gate look green.
+    # Reconfigure and refresh that ignored helper build inside the journal
+    # before CTest so configure-time provenance cannot remain bound to a
+    # prior commit and make a source-bound gate fail or look green incorrectly.
     workspace_build = source_root / "build"
     require(workspace_build.is_dir(), "source workspace build directory is missing")
+    journal.run("workspace-configure",
+                configure_command(source_root, workspace_build),
+                cwd=source_root)
     journal.run("workspace-build", workspace_build_command(source_root), cwd=source_root)
 
 

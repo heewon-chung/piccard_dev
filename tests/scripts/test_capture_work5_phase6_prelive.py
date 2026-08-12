@@ -173,6 +173,33 @@ class JournalContractTest(unittest.TestCase):
         self.assertEqual(capture.workspace_build_command(Path("/source")),
                          ["cmake", "--build", "/source/build", "-j2"])
 
+    def test_build_reconfigures_workspace_before_provenance_helper_rebuild(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        class RecordingJournal:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def run(self, command_id, argv, *, cwd):
+                self.calls.append((command_id, argv, cwd))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source_root = Path(temporary) / "source"
+            build_dir = Path(temporary) / "fresh-build"
+            (source_root / "build").mkdir(parents=True)
+            journal = RecordingJournal()
+
+            capture.build(source_root, build_dir, journal)
+
+        self.assertEqual([call[0] for call in journal.calls], [
+            "configure-release", "build-release", "workspace-configure",
+            "workspace-build",
+        ])
+        self.assertEqual(journal.calls[2][1],
+                         capture.configure_command(source_root,
+                                                   source_root / "build"))
+        self.assertEqual(journal.calls[2][2], source_root)
+
     def test_macos_loader_path_is_explicitly_journaled(self) -> None:
         import capture_work5_phase6_prelive as capture
 
