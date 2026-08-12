@@ -151,6 +151,44 @@ class JournalContractTest(unittest.TestCase):
             with self.assertRaises(capture.CaptureError):
                 capture.journal_events(journal)
 
+    def test_journal_end_requires_existing_unique_output_artifacts(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "logs").mkdir()
+            payload = b"stdout\n"
+            (root / "logs/1.stdout").write_bytes(payload)
+            (root / "logs/1.stderr").write_bytes(b"")
+            start = {
+                "schema": "piccard-work5-command-event-v1", "event": "START", "sequence": 1,
+                "command_id": "first", "argv": ["true"], "cwd": "/fixture", "environment": {},
+                "git_sha": "a" * 40, "stdout_path": "logs/1.stdout", "stderr_path": "logs/1.stderr",
+                "started_at_utc": "2026-08-12T00:00:00Z",
+            }
+            end = {
+                **start, "event": "END", "ended_at_utc": "2026-08-12T00:00:01Z",
+                "exit_code": 0, "stdout_sha256": hashlib.sha256(payload).hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(), "classification": "PASS",
+            }
+            journal = root / "commands.jsonl"
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
+                                           for event in (start, end)), encoding="utf-8")
+            (root / "logs/1.stdout").unlink()
+            with self.assertRaises(capture.CaptureError):
+                capture.journal_events(journal)
+
+            # A second command cannot reuse either output path, even if both
+            # files and hashes are otherwise self-consistent.
+            (root / "logs/1.stdout").write_bytes(payload)
+            duplicate_start = {**start, "sequence": 2, "command_id": "second"}
+            duplicate_end = {**end, "sequence": 2, "command_id": "second"}
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
+                                           for event in (start, end, duplicate_start, duplicate_end)),
+                               encoding="utf-8")
+            with self.assertRaises(capture.CaptureError):
+                capture.journal_events(journal)
+
 
 if __name__ == "__main__":
     unittest.main()

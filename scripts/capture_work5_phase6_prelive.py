@@ -51,6 +51,12 @@ def require(condition: bool, message: str) -> None:
 def journal_output_path(journal: Path, relative: Any) -> Path:
     validate_journal_relative_path(relative)
     candidate = journal.parent / relative
+    # The journal itself can never be a command output: hashing it while it is
+    # being appended would make the END record self-referential and would
+    # invalidate the event stream.  Resolve only after rejecting links so a
+    # path alias cannot smuggle the journal in through a symlink.
+    require(candidate.resolve(strict=False) != journal.resolve(strict=False),
+            "journal output artifact aliases the command journal")
     require(not candidate.is_symlink() and candidate.is_file(),
             "journal output artifact is missing or unsafe")
     resolved = candidate.resolve(strict=True)
@@ -91,6 +97,22 @@ def output_path(root: Path, relative: str) -> Path:
     require(path.resolve(strict=False).is_relative_to(resolved_root), "journal output path escapes evidence root")
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def write_exclusive(path: Path, payload: bytes) -> None:
+    """Create one regular output artifact without assuming a single write."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise CaptureError("short write creating command output artifact")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class Journal:
@@ -136,12 +158,7 @@ class Journal:
         stdout_path = output_path(self.root, stdout_relative)
         stderr_path = output_path(self.root, stderr_relative)
         for path, data in ((stdout_path, completed.stdout), (stderr_path, completed.stderr)):
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            try:
-                os.write(descriptor, data)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            write_exclusive(path, data)
         permitted = allow_exit if allow_exit is not None else {0}
         observed_classification = classification if completed.returncode in permitted else "FAIL"
         self._append({"event": "END", **base, "ended_at_utc": utc_now(),
@@ -163,6 +180,7 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
     starts: dict[int, dict[str, Any]] = {}
     expected_sequence = 1
     seen_ids: set[str] = set()
+    seen_output_paths: set[str] = set()
     active_sequence: int | None = None
     start_fields = {"schema", "event", "sequence", "command_id", "argv", "cwd",
                     "environment", "git_sha", "stdout_path", "stderr_path", "started_at_utc"}
@@ -218,7 +236,11 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
                 require(isinstance(value, str) and len(value) == 64 and
                         all(ch in "0123456789abcdef" for ch in value),
                         "journal END output hash is malformed")
-                output_path = journal_output_path(path, event.get(f"{key[:-7]}_path"))
+                output_relative = event.get(f"{key[:-7]}_path")
+                require(isinstance(output_relative, str) and output_relative not in seen_output_paths,
+                        "journal output artifact is referenced more than once")
+                output_path = journal_output_path(path, output_relative)
+                seen_output_paths.add(output_relative)
                 require(sha256_file(output_path) == value,
                         "journal output hash drifted")
             active_sequence = None
