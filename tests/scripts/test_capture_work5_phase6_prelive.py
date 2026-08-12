@@ -197,6 +197,67 @@ class JournalContractTest(unittest.TestCase):
             with self.assertRaises(capture.CaptureError):
                 capture.journal_events(journal)
 
+    def test_journal_end_timestamp_cannot_precede_start(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "logs").mkdir()
+            payload = b"output\n"
+            (root / "logs/1.stdout").write_bytes(payload)
+            (root / "logs/1.stderr").write_bytes(b"")
+            start = {
+                "schema": "piccard-work5-command-event-v1", "event": "START", "sequence": 1,
+                "command_id": "first", "argv": ["true"], "cwd": "/fixture", "environment": {},
+                "git_sha": "a" * 40, "stdout_path": "logs/1.stdout", "stderr_path": "logs/1.stderr",
+                "started_at_utc": "2026-08-12T00:00:01Z",
+            }
+            end = {
+                **start, "event": "END", "ended_at_utc": "2026-08-12T00:00:00Z",
+                "exit_code": 0, "stdout_sha256": hashlib.sha256(payload).hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(), "classification": "PASS",
+            }
+            journal = root / "commands.jsonl"
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
+                                           for event in (start, end)), encoding="utf-8")
+            with self.assertRaisesRegex(capture.CaptureError,
+                                        "journal END precedes matching START"):
+                capture.journal_events(journal)
+
+    def test_journal_command_timestamps_are_monotone(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "logs").mkdir()
+            events = []
+            for sequence, command_id, started, ended in (
+                    (1, "first", "2026-08-12T00:00:00Z", "2026-08-12T00:00:02Z"),
+                    (2, "second", "2026-08-12T00:00:01Z", "2026-08-12T00:00:03Z")):
+                payload = f"output-{sequence}\n".encode()
+                stdout_path = f"logs/{sequence}.stdout"
+                stderr_path = f"logs/{sequence}.stderr"
+                (root / stdout_path).write_bytes(payload)
+                (root / stderr_path).write_bytes(b"")
+                start = {
+                    "schema": "piccard-work5-command-event-v1", "event": "START",
+                    "sequence": sequence, "command_id": command_id, "argv": ["true"],
+                    "cwd": "/fixture", "environment": {}, "git_sha": "a" * 40,
+                    "stdout_path": stdout_path, "stderr_path": stderr_path,
+                    "started_at_utc": started,
+                }
+                events.extend((start, {
+                    **start, "event": "END", "ended_at_utc": ended, "exit_code": 0,
+                    "stdout_sha256": hashlib.sha256(payload).hexdigest(),
+                    "stderr_sha256": hashlib.sha256(b"").hexdigest(), "classification": "PASS",
+                }))
+            journal = root / "commands.jsonl"
+            journal.write_text("".join(json.dumps(event, sort_keys=True) + "\n"
+                                           for event in events), encoding="utf-8")
+            with self.assertRaisesRegex(capture.CaptureError,
+                                        "journal START precedes previous END"):
+                capture.journal_events(journal)
+
     def test_journal_end_requires_existing_unique_output_artifacts(self) -> None:
         import capture_work5_phase6_prelive as capture
 

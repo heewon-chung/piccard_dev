@@ -74,14 +74,15 @@ def validate_journal_relative_path(relative: Any) -> None:
             "journal output path is malformed")
 
 
-def validate_journal_timestamp(value: Any) -> None:
+def validate_journal_timestamp(value: Any) -> datetime:
     require(isinstance(value, str) and value.endswith("Z") and len(value) >= 20,
             "journal timestamp is malformed")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise CaptureError("journal timestamp is malformed") from exc
-    require(parsed.tzinfo is not None, "journal timestamp lacks UTC offset")
+    require(parsed.tzinfo == timezone.utc, "journal timestamp lacks UTC offset")
+    return parsed
 
 
 def git(source_root: Path, *args: str) -> str:
@@ -182,6 +183,7 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     seen_output_paths: set[str] = set()
     active_sequence: int | None = None
+    last_ended_at: datetime | None = None
     start_fields = {"schema", "event", "sequence", "command_id", "argv", "cwd",
                     "environment", "git_sha", "stdout_path", "stderr_path", "started_at_utc"}
     end_fields = {*start_fields, "ended_at_utc", "exit_code", "stdout_sha256",
@@ -207,10 +209,12 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
                 "journal git SHA is malformed")
         validate_journal_relative_path(event.get("stdout_path"))
         validate_journal_relative_path(event.get("stderr_path"))
-        validate_journal_timestamp(event.get("started_at_utc"))
+        started_at = validate_journal_timestamp(event.get("started_at_utc"))
         if event.get("event") == "START":
             require(active_sequence is None and sequence == expected_sequence and sequence not in starts,
                     "journal START sequence is not monotone")
+            require(last_ended_at is None or started_at >= last_ended_at,
+                    "journal START precedes previous END")
             expected_sequence += 1
             command_id = event.get("command_id")
             require(isinstance(command_id, str) and command_id and command_id not in seen_ids,
@@ -237,7 +241,9 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
             else:
                 require(event["command_id"] == "full-ctest" and event["exit_code"] == 8,
                         "journal known CTest classification has the wrong command or exit code")
-            validate_journal_timestamp(event.get("ended_at_utc"))
+            ended_at = validate_journal_timestamp(event.get("ended_at_utc"))
+            require(ended_at >= started_at,
+                    "journal END precedes matching START")
             for key in ("stdout_sha256", "stderr_sha256"):
                 value = event.get(key)
                 require(isinstance(value, str) and len(value) == 64 and
@@ -257,6 +263,7 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
                     event["exit_code"],
                     (path.parent / event["stdout_path"]).read_bytes(),
                     (path.parent / event["stderr_path"]).read_bytes())
+            last_ended_at = ended_at
             active_sequence = None
         else:
             raise CaptureError("journal event type is malformed")
