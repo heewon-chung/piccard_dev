@@ -1,0 +1,8 @@
+Date: Thu, 11 Jan 2024 00:00:00 +0000
+From: Different <different@example.com>
+To: Bob <bob@example.com>
+Subject: Different envelope
+Message-ID: <different-id@example.com>
+Content-Type: text/plain; charset=utf-8
+
+duplicate id alpha bravo charlie delta echo

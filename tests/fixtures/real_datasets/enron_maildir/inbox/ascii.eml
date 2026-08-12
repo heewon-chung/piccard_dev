@@ -1,0 +1,11 @@
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Cc: Carol <carol@example.com>
+Bcc: Dan <dan@example.com>
+Subject: Weekly Status
+Message-ID: <ascii@example.com>
+X-Folder: inbox
+Content-Type: text/plain; charset=us-ascii
+
+Alpha bravo charlie delta echo foxtrot.

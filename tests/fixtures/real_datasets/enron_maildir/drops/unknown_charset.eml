@@ -1,0 +1,8 @@
+Date: Mon, 15 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Unknown charset
+Message-ID: <unknown-charset@example.com>
+Content-Type: text/plain; charset=x-piccard-unknown
+
+alpha bravo charlie delta echo foxtrot

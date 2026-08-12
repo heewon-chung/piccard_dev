@@ -1,0 +1,8 @@
+Date: Wed, 3 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: ASCII alias
+Message-ID: <ansi@example.com>
+Content-Type: text/plain; charset=ansi_x3.4-1968
+
+Alpha bravo charlie delta echo foxtrot.

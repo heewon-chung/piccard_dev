@@ -1,0 +1,7 @@
+From: malformed <
+To: Bob <bob@example.com>
+Subject: Parser defect
+Message-ID: <parser-defect@example.com>
+Content-Type: text/plain; charset=utf-8
+
+alpha bravo charlie delta echo foxtrot

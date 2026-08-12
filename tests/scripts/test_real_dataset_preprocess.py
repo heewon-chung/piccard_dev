@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import stat
 import shutil
 import subprocess
 import sys
@@ -57,7 +58,7 @@ _ENRON_PROCESSED_KEY_ORDER = (
     "original_positive_count", "retained_positive_count", "requested_pair_count",
     "max_documents", "min_related_pairs",
     "dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
-    "dropped.duplicate_message_id",
+    "dropped.duplicate_copy", "dropped.duplicate_message_id",
 )
 
 
@@ -90,6 +91,19 @@ def write_csv_lf(path: Path, header, rows) -> None:
 
 QUICK_DBLP_ACM_DIR = (REPO / "tests" / "fixtures" / "real_datasets" / "quick"
                       / "dblp_acm_u65536")
+ENRON_FIXTURE_DIR = REPO / "tests" / "fixtures" / "real_datasets" / "enron_maildir"
+ENRON_FIXTURE_SOURCE_MANIFEST = ENRON_FIXTURE_DIR / "source.manifest.tsv"
+
+
+def load_enron_module():
+    """Load the Phase 1 module, keeping the initial RED an assertion failure."""
+    path = REPO / "scripts" / "enron_preprocess.py"
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("enron_preprocess", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class CoreTests(unittest.TestCase):
@@ -168,7 +182,7 @@ class CoreTests(unittest.TestCase):
             "dataset": dataset,
             "variant": "dblp_acm_u65536" if is_dblp else "enron_u65536",
             "preprocessing_version":
-                "dblp-acm-trigram-v1" if is_dblp else "enron-shingle5-v1",
+                "dblp-acm-trigram-v1" if is_dblp else "enron-shingle5-v2",
             "universe_size": "65536",
             "seed": "7",
             "source_manifest_file": "source.manifest.tsv",
@@ -197,6 +211,7 @@ class CoreTests(unittest.TestCase):
             "dropped.charset_or_mime": "0",
             "dropped.empty_body": "0",
             "dropped.short_body": "0",
+            "dropped.duplicate_copy": "0",
             "dropped.duplicate_message_id": "0",
         }
         if overrides:
@@ -376,7 +391,7 @@ class CoreTests(unittest.TestCase):
                 "license_or_terms_url\thttps://example.invalid/terms",
                 "acquisition_note\tacquired locally on 2026-01-01",
                 "parsing_schema\tenron-maildir-rfc5322-v1",
-                "preprocessing_profile\tenron-shingle5-v1",
+                "preprocessing_profile\tenron-shingle5-v2",
                 "input.0.role\tmaildir_root",
                 "input.0.path\tmaildir",
                 f"input.0.sha256\t{digest}",
@@ -1488,6 +1503,268 @@ class DblpAcmTests(unittest.TestCase):
                     (output_dir / name).read_bytes(),
                     (QUICK_DBLP_ACM_DIR / name).read_bytes(),
                     f"golden mismatch for {name}")
+
+
+class EnronRecordTests(unittest.TestCase):
+    """Independent RED/KATs for the frozen Enron v2 record contract."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_enron_module()
+
+    def require_module(self):
+        self.assertIsNotNone(
+            self.module,
+            "scripts/enron_preprocess.py is required by the Phase 1 contract")
+        return self.module
+
+    def build_fixture_candidates(self, module):
+        """Keep the source manifest (a test control file) outside the raw tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            copied = Path(tmp) / "maildir"
+            shutil.copytree(ENRON_FIXTURE_DIR, copied)
+            (copied / "source.manifest.tsv").unlink()
+            return module.build_record_candidates(copied)
+
+    def test_ascii_message_normalizes_headers_and_body(self):
+        module = self.require_module()
+        message = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "ascii.eml", "inbox/ascii.eml")
+        self.assertEqual(message.relative_path, "inbox/ascii.eml")
+        self.assertEqual(message.date, "Mon, 01 Jan 2024 00:00:00 +0000")
+        self.assertEqual(message.from_header, "Alice <alice@example.com>")
+        self.assertEqual(message.to, "Bob <bob@example.com>")
+        self.assertEqual(message.cc, "Carol <carol@example.com>")
+        self.assertEqual(message.bcc, "Dan <dan@example.com>")
+        self.assertEqual(message.subject, "Weekly Status")
+        self.assertEqual(message.message_id, "<ascii@example.com>")
+        self.assertEqual(message.body, "Alpha bravo charlie delta echo foxtrot.\n")
+
+    def test_quoted_printable_and_ansi_alias_decode_as_ascii_text(self):
+        module = self.require_module()
+        quoted = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "quoted_printable.eml",
+            "inbox/quoted_printable.eml")
+        ansi = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "ansi.eml", "inbox/ansi.eml")
+        expected = "Alpha bravo charlie delta echo foxtrot.\n"
+        self.assertEqual(quoted.body, expected)
+        self.assertEqual(ansi.body, expected)
+
+    def test_multipart_excludes_attachment_and_flattened_text_is_not_reparsed(self):
+        module = self.require_module()
+        multipart = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "multipart.eml", "inbox/multipart.eml")
+        self.assertEqual(multipart.body, "Alpha bravo charlie delta echo foxtrot.")
+        flattened = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "flattened.eml", "inbox/flattened.eml")
+        self.assertIn("Content-Type: multipart/mixed", flattened.body)
+        self.assertIn("SGVsbG8gZnJvbSBhIGZsYXR0ZW5lZCBib2R5", flattened.body)
+
+    def test_quote_and_original_tail_are_removed_only_for_record_body(self):
+        module = self.require_module()
+        parsed = module.parse_message(
+            ENRON_FIXTURE_DIR / "inbox" / "quote_tail.eml", "inbox/quote_tail.eml")
+        self.assertIn("> quoted line must disappear", parsed.body)
+        candidates, _ = self.build_fixture_candidates(module)
+        candidate = next(c for c in candidates if c.relative_path == "inbox/quote_tail.eml")
+        self.assertEqual(candidate.body, "Keep first line.\nKeep second line.\n")
+        self.assertEqual(
+            candidate.shingles,
+            ("keep\x1ffirst\x1fline\x1fkeep\x1fsecond",
+             "first\x1fline\x1fkeep\x1fsecond\x1fline"))
+
+    def test_body_shingles_are_exact_five_word_windows_without_padding(self):
+        module = self.require_module()
+        self.assertEqual(
+            module.body_shingles("One, TWO three four five six!"),
+            ("one\x1ftwo\x1fthree\x1ffour\x1ffive",
+             "two\x1fthree\x1ffour\x1ffive\x1fsix"))
+        self.assertEqual(module.body_shingles("one two three four"), ())
+
+    def test_canonical_subject_removes_repeated_anchored_prefixes(self):
+        module = self.require_module()
+        self.assertEqual(
+            module.canonical_subject(" Fwd: Re[12]: FW: re: Café, status! "),
+            "caf status")
+        self.assertEqual(module.canonical_subject("Re: !!!"), "")
+
+    def test_copy_fingerprint_uses_stable_envelope_before_quote_removal(self):
+        module = self.require_module()
+        message = module.parse_message(
+            ENRON_FIXTURE_DIR / "copies" / "a-copy.eml", "copies/a-copy.eml")
+        self.assertEqual(
+            module.copy_fingerprint(message),
+            "1f9462fa83d456ba55f3fde882ea8b3dc59fd8a7143e3189f21033472d914611")
+
+    def test_record_candidates_deduplicate_copies_and_message_ids_separately(self):
+        module = self.require_module()
+        candidates, dropped = self.build_fixture_candidates(module)
+        paths = [candidate.relative_path for candidate in candidates]
+        self.assertEqual(paths, sorted(paths, key=lambda p: p.encode("utf-8")))
+        self.assertIn("copies/a-copy.eml", paths)
+        self.assertNotIn("copies/z-copy.eml", paths)
+        self.assertIn("ids/first-id.eml", paths)
+        self.assertNotIn("ids/second-id.eml", paths)
+        self.assertIn("ids/different-envelope.eml", paths)
+        self.assertEqual(len(candidates), 9)
+        self.assertEqual(
+            dropped,
+            {
+                "dropped.charset_or_mime": 4,
+                "dropped.empty_body": 1,
+                "dropped.short_body": 1,
+                "dropped.duplicate_copy": 1,
+                "dropped.duplicate_message_id": 1,
+            })
+
+    def test_same_body_with_different_stable_envelope_is_retained(self):
+        module = self.require_module()
+        candidates, _ = self.build_fixture_candidates(module)
+        paths = {candidate.relative_path for candidate in candidates}
+        self.assertIn("ids/different-envelope.eml", paths)
+
+    def test_strict_decode_failure_increments_charset_counter(self):
+        module = self.require_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "bad-utf8.eml"
+            path.write_bytes(
+                b"From: Alice <alice@example.com>\n"
+                b"To: Bob <bob@example.com>\n"
+                b"Subject: Bad bytes\n"
+                b"Content-Type: text/plain; charset=us-ascii\n\n"
+                b"alpha bravo \xff charlie delta echo\n")
+            candidates, dropped = module.build_record_candidates(root)
+            self.assertEqual(candidates, [])
+            self.assertEqual(dropped["dropped.charset_or_mime"], 1)
+
+    def test_each_required_mime_or_charset_cause_is_counted(self):
+        module = self.require_module()
+        candidates, dropped = self.build_fixture_candidates(module)
+        self.assertEqual(candidates and len(candidates), 9)
+        self.assertEqual(dropped["dropped.charset_or_mime"], 4)
+        for relative in (
+                "drops/parser_defect.eml", "drops/invalid_transfer.eml",
+                "drops/invalid_rfc2047.eml", "drops/unknown_charset.eml"):
+            self.assertNotIn(relative, {c.relative_path for c in candidates})
+
+
+class SourceManifestTests(unittest.TestCase):
+    """REDs for the single-pass source inventory and non-writing validator."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def _run_validate(self, manifest: Path):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-source", "--dataset", "enron",
+             "--source-manifest", str(manifest), "--strict"],
+            capture_output=True, text=True)
+
+    def _write_manifest(self, root: Path, *, profile="enron-shingle5-v2",
+                        digest="a" * 64, malformed=False):
+        lines = [
+            "key\tvalue",
+            "schema_version\tpiccard-real-source-v1",
+            "dataset\tenron",
+            "dataset_version\tcmu-2015-05-07",
+            "source_url\thttps://example.invalid/enron",
+            "citation\tExample Citation",
+            "license_or_terms_url\thttps://example.invalid/terms",
+            "acquisition_note\thermetic test fixture",
+            "parsing_schema\tenron-maildir-rfc5322-v1",
+            f"preprocessing_profile\t{profile}",
+            "input.0.role\tmaildir_root",
+            "input.0.path\tmaildir",
+            f"input.0.sha256\t{digest}",
+        ]
+        if malformed:
+            lines[0] = "wrong\theader"
+        path = root / "source.manifest.tsv"
+        write_lf(path, "\n".join(lines) + "\n")
+        return path
+
+    def test_inventory_counts_and_digest_are_literal_and_source_only(self):
+        module = self.module
+        self.assertTrue(
+            hasattr(module, "scan_directory_tree"),
+            "scan_directory_tree is required by the Phase 1 contract")
+        inventory = module.scan_directory_tree(ENRON_FIXTURE_DIR / "inbox")
+        self.assertEqual(inventory.file_count, 8)
+        self.assertEqual(inventory.directory_count_including_root, 1)
+        self.assertEqual(inventory.logical_bytes, 2496)
+        self.assertEqual(inventory.symlink_count, 0)
+        self.assertEqual(
+            inventory.tree_sha256,
+            "b133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0")
+
+    def test_validate_source_emits_exact_header_and_row_without_writes(self):
+        before = sorted(
+            str(path.relative_to(ENRON_FIXTURE_DIR))
+            for path in ENRON_FIXTURE_DIR.rglob("*") if path.is_file())
+        result = self._run_validate(ENRON_FIXTURE_SOURCE_MANIFEST)
+        after = sorted(
+            str(path.relative_to(ENRON_FIXTURE_DIR))
+            for path in ENRON_FIXTURE_DIR.rglob("*") if path.is_file())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "dataset\tfile_count\tdirectory_count_including_root\tlogical_bytes\tsymlink_count\ttree_sha256\tstatus\n"
+            "enron\t8\t1\t2496\t0\tb133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0\tPASS\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(before, after)
+
+    def test_validate_source_rejects_digest_mismatch_and_wrong_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            maildir = root / "maildir"
+            maildir.mkdir()
+            (maildir / "message.eml").write_text("From: a@example.com\n\nbody\n")
+            digest = self.module._directory_tree_digest(maildir)
+            mismatch = self._write_manifest(root, digest="0" * 64)
+            self.assertNotEqual(self._run_validate(mismatch).returncode, 0)
+            wrong = self._write_manifest(root, profile="enron-shingle5-v1", digest=digest)
+            self.assertNotEqual(self._run_validate(wrong).returncode, 0)
+
+    def test_validate_source_rejects_symlink_nonregular_and_unreadable_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for kind in ("symlink", "nonregular", "unreadable"):
+                root = base / kind
+                maildir = root / "maildir"
+                maildir.mkdir(parents=True)
+                if kind == "symlink":
+                    target = root / "outside.txt"
+                    target.write_text("outside")
+                    (maildir / "link").symlink_to(target)
+                elif kind == "nonregular":
+                    os.mkfifo(maildir / "pipe")
+                else:
+                    blocked = maildir / "blocked.eml"
+                    blocked.write_text("blocked")
+                    os.chmod(blocked, 0)
+                try:
+                    manifest = self._write_manifest(root, digest="a" * 64)
+                    self.assertNotEqual(
+                        self._run_validate(manifest).returncode, 0, kind)
+                finally:
+                    if kind == "unreadable":
+                        os.chmod(maildir / "blocked.eml", stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_validate_source_rejects_malformed_manifest_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            maildir = root / "maildir"
+            maildir.mkdir()
+            (maildir / "message.eml").write_text("From: a@example.com\n\nbody\n")
+            manifest = self._write_manifest(root, malformed=True)
+            before = sorted(path.name for path in root.iterdir())
+            result = self._run_validate(manifest)
+            after = sorted(path.name for path in root.iterdir())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

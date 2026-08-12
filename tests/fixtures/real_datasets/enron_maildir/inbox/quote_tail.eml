@@ -1,0 +1,15 @@
+Date: Fri, 5 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Re: Weekly Status
+Message-ID: <quote-tail@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Keep first line.
+> quoted line must disappear
+Keep second line.
+
+-----Original Message-----
+From: Bob <bob@example.com>
+On Thu, someone wrote:
+Old quoted material.

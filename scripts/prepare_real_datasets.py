@@ -29,6 +29,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -43,6 +44,17 @@ class ManifestError(ValueError):
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SourceTreeInventory:
+    """Canonical, source-only inventory and directory-tree digest."""
+
+    file_count: int
+    directory_count_including_root: int
+    logical_bytes: int
+    symlink_count: int
+    tree_sha256: str
+
 
 @dataclass(frozen=True)
 class SourceManifestInput:
@@ -123,7 +135,7 @@ _DATASET_ROLE_TABLES = {
 # dataset -> (parsing_schema, preprocessing_profile)
 _DATASET_SCHEMA_TOKENS = {
     "dblp_acm": ("dblp-acm-csv-v1", "dblp-acm-trigram-v1"),
-    "enron": ("enron-maildir-rfc5322-v1", "enron-shingle5-v1"),
+    "enron": ("enron-maildir-rfc5322-v1", "enron-shingle5-v2"),
 }
 
 _REQUIRED_SCALAR_KEYS = (
@@ -156,7 +168,7 @@ _PROCESSED_MANIFEST_KEY_PREFIX = (
 _PROCESSED_MANIFEST_DROP_KEYS = {
     "dblp_acm": ("dropped.empty_features_dblp", "dropped.empty_features_acm"),
     "enron": ("dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
-              "dropped.duplicate_message_id"),
+              "dropped.duplicate_copy", "dropped.duplicate_message_id"),
 }
 
 
@@ -271,53 +283,78 @@ def _resolve_manifest_relative_path(base_dir: Path, rel: str) -> Path:
     return resolved
 
 
-def _raise_walk_error(error: OSError) -> None:
-    # os.walk's default onerror=None silently skips a subtree it cannot
-    # list (e.g. a permission-denied directory), which would let the tree
-    # digest quietly omit files. Abort instead.
-    raise ManifestError(f"cannot list maildir_root subtree: {error}") from error
+def scan_directory_tree(root: Path) -> SourceTreeInventory:
+    """Scan a directory once and return its canonical inventory and digest.
 
-
-def _directory_tree_digest(root: Path) -> str:
-    """Canonical source-tree digest for a directory-role manifest input
-    (e.g. Enron's `maildir_root`):
-
-    SHA256("piccard-enron-tree-v1" || 0x00 ||
-      for each regular file, sorted by ascending UTF-8 path bytes:
-        BE32(len(path_utf8)) || path_utf8 || BE64(file_size) || raw_sha256)
-
-    Symlinks and non-regular files abort rather than being skipped/dropped.
-    Paths must already be Unicode NFC (normative: "Canonical paths must ...
-    be Unicode NFC already"); a subtree os.walk cannot list, or a file that
-    cannot be read, also aborts rather than being silently omitted.
+    The traversal is deliberately explicit instead of using ``os.walk``:
+    permission errors, symlinks, and non-regular entries must never disappear
+    silently from a source manifest's digest.
     """
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ManifestError(f"maildir_root is not a regular directory: {root}")
+    try:
+        root_mode = root.stat().st_mode
+    except OSError as exc:
+        raise ManifestError(f"cannot stat maildir_root: {root}") from exc
+    if root_mode & 0o555 == 0:
+        raise ManifestError(f"unreadable maildir_root: {root}")
     entries = []
-    for dirpath, dirnames, filenames in os.walk(
-            root, onerror=_raise_walk_error, followlinks=False):
-        current_dir = Path(dirpath)
-        for name in dirnames:
-            if (current_dir / name).is_symlink():
+    file_count = 0
+    directory_count = 1  # The root itself is part of the inventory.
+    logical_bytes = 0
+    symlink_count = 0
+
+    def visit(directory: Path, relative_prefix: str) -> None:
+        nonlocal file_count, directory_count, logical_bytes, symlink_count
+        try:
+            children = sorted(os.scandir(directory),
+                              key=lambda item: item.name.encode("utf-8"))
+        except OSError as exc:
+            raise ManifestError(
+                f"cannot list maildir_root subtree: {directory}: {exc}") from exc
+        for entry in children:
+            relative = (f"{relative_prefix}/{entry.name}"
+                        if relative_prefix else entry.name)
+            if unicodedata.normalize("NFC", relative) != relative:
                 raise ManifestError(
-                    f"symlink not allowed under maildir_root: {current_dir / name}")
-        for name in filenames:
-            full_path = current_dir / name
-            if full_path.is_symlink():
-                raise ManifestError(
-                    f"symlink not allowed under maildir_root: {full_path}")
-            if not full_path.is_file():
-                raise ManifestError(
-                    f"non-regular file not allowed under maildir_root: {full_path}")
-            rel = full_path.relative_to(root).as_posix()
-            if unicodedata.normalize("NFC", rel) != rel:
-                raise ManifestError(
-                    f"maildir_root path is not Unicode NFC: {rel!r}")
+                    f"maildir_root path is not Unicode NFC: {relative!r}")
+            full_path = Path(entry.path)
             try:
-                file_size = full_path.stat().st_size
+                if entry.is_symlink():
+                    symlink_count += 1
+                    raise ManifestError(
+                        f"symlink not allowed under maildir_root: {full_path}")
+                if entry.is_dir(follow_symlinks=False):
+                    directory_stat = entry.stat(follow_symlinks=False)
+                    if directory_stat.st_mode & 0o555 == 0:
+                        raise ManifestError(
+                            f"unreadable directory under maildir_root: {full_path}")
+                    directory_count += 1
+                    visit(full_path, relative)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise ManifestError(
+                        f"non-regular file not allowed under maildir_root: {full_path}")
+                file_stat = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise ManifestError(
+                        f"non-regular file not allowed under maildir_root: {full_path}")
+                if file_stat.st_mode & 0o444 == 0:
+                    raise ManifestError(
+                        f"unreadable file under maildir_root: {full_path}")
                 file_digest = bytes.fromhex(sha256_file(full_path))
+                file_count += 1
+                logical_bytes += file_stat.st_size
+                entries.append((relative.encode("utf-8"), file_stat.st_size,
+                                file_digest))
+            except ManifestError:
+                raise
             except OSError as exc:
                 raise ManifestError(
-                    f"cannot read file under maildir_root: {full_path}: {exc}") from exc
-            entries.append((rel.encode("utf-8"), file_size, file_digest))
+                    f"cannot read maildir_root entry: {full_path}: {exc}") from exc
+
+    visit(root, "")
     entries.sort(key=lambda item: item[0])
     hasher = hashlib.sha256()
     hasher.update(_ENRON_TREE_DOMAIN)
@@ -327,14 +364,37 @@ def _directory_tree_digest(root: Path) -> str:
         hasher.update(path_bytes)
         hasher.update(size.to_bytes(8, "big"))
         hasher.update(digest)
-    return hasher.hexdigest()
+    return SourceTreeInventory(
+        file_count=file_count,
+        directory_count_including_root=directory_count,
+        logical_bytes=logical_bytes,
+        symlink_count=symlink_count,
+        tree_sha256=hasher.hexdigest(),
+    )
+
+
+def _directory_tree_digest(root: Path) -> str:
+    """Compatibility projection of the canonical source-tree scan."""
+    return scan_directory_tree(root).tree_sha256
+
+
+def build_record_candidates(maildir: Path):
+    """Testable Phase 1 entry point delegated to the Enron parser module."""
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    try:
+        from enron_preprocess import build_record_candidates as _build
+    except ImportError as exc:
+        raise ManifestError("Enron preprocessing module is unavailable") from exc
+    return _build(maildir)
 
 
 # ---------------------------------------------------------------------------
 # validate_source_manifest
 # ---------------------------------------------------------------------------
 
-def validate_source_manifest(path, dataset: str) -> SourceManifest:
+def validate_source_manifest(path, dataset: str, *, _inventory_out=None) -> SourceManifest:
     if dataset not in _DATASET_ROLE_TABLES:
         raise ManifestError(f"unknown dataset: {dataset!r}")
     manifest_path = Path(path)
@@ -393,6 +453,7 @@ def validate_source_manifest(path, dataset: str) -> SourceManifest:
     manifest_dir = manifest_path.resolve(strict=True).parent
     inputs = []
     for index, (role_name, role_kind) in enumerate(role_table):
+        inventory = None
         role_key = f"input.{index}.role"
         path_key = f"input.{index}.path"
         sha_key = f"input.{index}.sha256"
@@ -423,7 +484,10 @@ def validate_source_manifest(path, dataset: str) -> SourceManifest:
             if not resolved.is_dir():
                 raise ManifestError(
                     f"input path is not a directory: {declared_path!r}")
-            actual_sha = _directory_tree_digest(resolved)
+            inventory = scan_directory_tree(resolved)
+            actual_sha = inventory.tree_sha256
+            if _inventory_out is not None:
+                _inventory_out[resolved] = inventory
 
         if actual_sha != declared_sha:
             raise ManifestError(
@@ -1081,7 +1145,7 @@ def cmd_dblp_acm(*, source_manifest, output_dir, universe: int, pairs: int,
 
 
 # ---------------------------------------------------------------------------
-# CLI (Phase 3's enron subcommand stays a dormant "not implemented" stub)
+# CLI
 # ---------------------------------------------------------------------------
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1098,6 +1162,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     enron = subparsers.add_parser("enron", add_help=False)
     enron.add_argument("extra", nargs=argparse.REMAINDER)
+
+    validate_source = subparsers.add_parser("validate-source")
+    validate_source.add_argument("--dataset", required=True)
+    validate_source.add_argument("--source-manifest", required=True)
+    validate_source.add_argument("--strict", action="store_true")
 
     return parser
 
@@ -1117,6 +1186,31 @@ def main(argv=None) -> int:
             )
         except ManifestError as exc:
             sys.stderr.write(f"dblp-acm: {exc}\n")
+            return 1
+        return 0
+    if args.command == "validate-source":
+        try:
+            if args.dataset != "enron":
+                raise ManifestError(
+                    f"validate-source only supports dataset='enron', got {args.dataset!r}")
+            inventories = {}
+            manifest = validate_source_manifest(
+                args.source_manifest, args.dataset, _inventory_out=inventories)
+            if len(manifest.inputs) != 1:
+                raise ManifestError("enron source manifest must contain one directory input")
+            inventory = inventories.get(manifest.inputs[0].resolved_path)
+            if inventory is None:
+                raise ManifestError("enron source inventory was not produced")
+            sys.stdout.write(
+                "dataset\tfile_count\tdirectory_count_including_root\tlogical_bytes\t"
+                "symlink_count\ttree_sha256\tstatus\n")
+            sys.stdout.write(
+                f"{manifest.dataset}\t{inventory.file_count}\t"
+                f"{inventory.directory_count_including_root}\t"
+                f"{inventory.logical_bytes}\t{inventory.symlink_count}\t"
+                f"{inventory.tree_sha256}\tPASS\n")
+        except (ManifestError, OSError) as exc:
+            sys.stderr.write(f"validate-source: {exc}\n")
             return 1
         return 0
     sys.stderr.write(f"{args.command}: not implemented\n")

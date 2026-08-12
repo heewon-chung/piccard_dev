@@ -1,0 +1,11 @@
+Date: Mon, 8 Jan 2024 00:00:00 +0000
+From: Same Sender <same@example.com>
+To: Same Receiver <receiver@example.com>
+Cc: cc@example.com
+Bcc: bcc@example.com
+Subject: Stable copy subject
+Message-ID: <copy-z@example.com>
+X-Folder: z-folder
+Content-Type: text/plain; charset=utf-8
+
+copy alpha bravo charlie delta echo foxtrot

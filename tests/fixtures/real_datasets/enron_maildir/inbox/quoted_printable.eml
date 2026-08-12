@@ -1,0 +1,9 @@
+Date: Tue, 2 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Encoded status
+Message-ID: <quoted@example.com>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Alpha=20bravo=20charlie=20delta=20echo=20foxtrot.

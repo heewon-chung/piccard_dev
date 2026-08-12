@@ -1,0 +1,9 @@
+Date: Sat, 13 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Invalid transfer
+Message-ID: <invalid-transfer@example.com>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: x-not-a-real-encoding
+
+alpha bravo charlie delta echo foxtrot

@@ -1,0 +1,13 @@
+key	value
+schema_version	piccard-real-source-v1
+dataset	enron
+dataset_version	cmu-2015-05-07
+source_url	https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz
+citation	B. Klimt and Y. Yang, The Enron Corpus: A New Dataset for Email Classification Research, ECML 2004
+license_or_terms_url	https://www.cs.cmu.edu/~enron/
+acquisition_note	Hermetic fixture; raw data excluded from Git
+parsing_schema	enron-maildir-rfc5322-v1
+preprocessing_profile	enron-shingle5-v2
+input.0.role	maildir_root
+input.0.path	inbox
+input.0.sha256	b133d83288300614f89b0e43d0d7944dd7b964876ecbcf7597cf5e09896471d0

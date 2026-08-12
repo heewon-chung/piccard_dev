@@ -1,0 +1,18 @@
+Date: Thu, 4 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Multipart message
+Message-ID: <multipart@example.com>
+Content-Type: multipart/mixed; boundary="part-boundary"
+
+--part-boundary
+Content-Type: text/plain; charset=utf-8
+
+Alpha bravo charlie delta echo foxtrot.
+--part-boundary
+Content-Type: text/plain; name="ignored.txt"
+Content-Disposition: attachment; filename="ignored.txt"
+Content-Transfer-Encoding: base64
+
+VGhpcyBhdHRhY2htZW50IG11c3QgYmUgaWdub3JlZAo=
+--part-boundary--

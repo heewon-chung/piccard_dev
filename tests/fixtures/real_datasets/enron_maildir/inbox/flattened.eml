@@ -1,0 +1,11 @@
+Date: Fri, 12 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Flattened body
+Message-ID: <flattened@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Content-Type: multipart/mixed; boundary="not-a-real-boundary"
+Content-Transfer-Encoding: base64
+SGVsbG8gZnJvbSBhIGZsYXR0ZW5lZCBib2R5
+flattened alpha bravo charlie delta echo

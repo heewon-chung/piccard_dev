@@ -1,0 +1,8 @@
+Date: Sat, 6 Jan 2024 00:00:00 +0000
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Empty body
+Message-ID: <empty@example.com>
+Content-Type: text/plain; charset=utf-8
+
+!!! ...

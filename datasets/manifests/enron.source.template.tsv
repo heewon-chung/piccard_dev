@@ -7,7 +7,7 @@ citation	TODO
 license_or_terms_url	TODO
 acquisition_note	TODO
 parsing_schema	enron-maildir-rfc5322-v1
-preprocessing_profile	enron-shingle5-v1
+preprocessing_profile	enron-shingle5-v2
 input.0.role	maildir_root
 input.0.path	TODO
 input.0.sha256	TODO
