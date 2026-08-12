@@ -79,7 +79,10 @@ def known_ctest_stdout() -> bytes:
             for subtest, expected_reason in zip(SUBTESTS, EXPECTED_REASONS):
                 lines.extend([
                     "======================================================================",
-                    f"FAIL: test_bfv_production_shaped_mutations_fail_after_subtraction (...) (name='{subtest}')",
+                    "FAIL: test_bfv_production_shaped_mutations_fail_after_subtraction "
+                    "(tests.scripts.test_check_work6_scope.CheckWork6Scope."
+                    "test_bfv_production_shaped_mutations_fail_after_subtraction) "
+                    f"(name='{subtest}')",
                     "----------------------------------------------------------------------",
                     "AssertionError: checker result differs from the expected mutation reason",
                     "- " + FROZEN_REASON,
@@ -96,6 +99,12 @@ def known_ctest_stdout() -> bytes:
 class Work5CtestExceptionTest(unittest.TestCase):
     def test_only_the_hash_bound_known_signature_is_accepted(self) -> None:
         stdout = known_ctest_stdout()
+        condition_header = (
+            "FAIL: test_bfv_production_shaped_mutations_fail_after_subtraction "
+            "(tests.scripts.test_check_work6_scope.CheckWork6Scope."
+            "test_bfv_production_shaped_mutations_fail_after_subtraction) (name='condition')\n"
+        ).encode()
+        body_header = condition_header.replace(b"condition", b"body")
         receipt = verifier.classify_work6_scope_ctest(8, stdout, b"Errors while running CTest\n")
         self.assertEqual(receipt["classification"], "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH")
         self.assertEqual(receipt["test_count"], 83)
@@ -108,6 +117,13 @@ class Work5CtestExceptionTest(unittest.TestCase):
             "subtest_order": (8, stdout.replace(b"condition", b"zz_condition", 1)),
             "appended_pass_diagnostic": (8, stdout + b"check_work6_scope: PASS: accepted mutation\n"),
             "appended_extra_reason": (8, stdout + b"check_work6_scope: FAIL: accepted mutation\n"),
+            "inserted_unrelated_failure_header": (8, stdout.replace(
+                b"Ran 18 tests", b"FAIL: unexpected\nRan 18 tests", 1)),
+            "missing_failure_header": (8, stdout.replace(condition_header, b"", 1)),
+            "reordered_failure_headers": (8, stdout.replace(
+                condition_header, b"FAIL-HEADER-SWAP\n", 1).replace(
+                    body_header, condition_header, 1).replace(
+                        b"FAIL-HEADER-SWAP\n", body_header, 1)),
             "changed_expected_reason": (8, stdout.replace(
                 b"+ check_work6_scope: FAIL: codec definition has wrong scope",
                 b"+ check_work6_scope: FAIL: accepted mutation", 1)),

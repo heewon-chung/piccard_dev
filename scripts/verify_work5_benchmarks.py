@@ -97,6 +97,11 @@ WORK6_EXPECTED_REASONS = (
     *("check_work6_scope: FAIL: codec definition has wrong scope",) * 2,
     *("check_work6_scope: FAIL: src/fhe/bfv_context.cpp changes preexisting content",) * 6,
 )
+WORK6_FAILURE_TEST = "test_bfv_production_shaped_mutations_fail_after_subtraction"
+WORK6_FAILURE_TEST_ID = (
+    "tests.scripts.test_check_work6_scope.CheckWork6Scope."
+    "test_bfv_production_shaped_mutations_fail_after_subtraction"
+)
 # The accepted diagnostic is bound to the complete CTest topology, including
 # every numbered test name.  A changed test name or a truncated/duplicated
 # result line is a different run and must not be accepted as the exception.
@@ -453,6 +458,13 @@ def classify_work6_scope_ctest(exit_code: int, stdout: bytes, stderr: bytes) -> 
     subtests = re.findall(r"\(name='([^']+)'\)\s+\.\.\.\s+FAIL", stdout_text)
     require(tuple(subtests) == WORK6_FAILURE_SUBTESTS,
             "CheckWork6Scope failing mutation set/order differs from the frozen signature")
+    failure_headers = re.findall(r"(?m)^[ \t]*(?:FAIL|ERROR):[^\n]*$", stdout_text)
+    expected_failure_headers = [
+        f"FAIL: {WORK6_FAILURE_TEST} ({WORK6_FAILURE_TEST_ID}) (name='{subtest}')"
+        for subtest in WORK6_FAILURE_SUBTESTS
+    ]
+    require(failure_headers == expected_failure_headers,
+            "CheckWork6Scope unittest failure headers differ from the frozen signature")
     # unittest renders the unexpected checker result as the removed (``-``)
     # side of each AssertionError diff, followed by the mutation-specific
     # expected (``+``) reason.  It does not emit standalone checker lines in
