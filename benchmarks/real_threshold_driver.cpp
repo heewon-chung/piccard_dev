@@ -7,7 +7,6 @@
 #include "core/minhash.h"
 #include "data/real_dataset.h"
 #include "data/real_dataset_metrics.h"
-#include "real_dataset_csv_schema.h"
 
 #include <openssl/evp.h>
 
@@ -45,6 +44,19 @@ constexpr const char* kSplitDomain = "piccard-dblp-threshold-split-v1";
 constexpr const char* kTrialDomain = "piccard-dblp-threshold-eval-v1";
 constexpr const char* kWorkloadSchema = "piccard-real-threshold-workload-v1";
 constexpr const char* kCsvSchema = "piccard-real-threshold-v1";
+
+constexpr const char* kThresholdHeader =
+    "schema_version,dataset,variant,dataset_manifest_sha256,records_sha256,"
+    "pairs_sha256,pair_id,pair_kind,label,record_a,record_b,k,m,"
+    "hash_randomness,root_seed,split,rank_position,threshold_trial_index,"
+    "hash_seed,match_count,decision,label_truth,label_outcome,"
+    "exact_j_truth,exact_j_outcome,exact_jaccard_bucketed,"
+    "requested_j_threshold,tau_count,realized_j_tau,calibration_fpr,"
+    "calibration_fnr,calibration_balanced_error,calibration_digest,"
+    "evaluation_digest,threshold_workload_sha256\n";
+constexpr const char* kThresholdWorkloadRowsHeader =
+    "pair_id\tlabel\tsplit\trank_position\trecord_a\trecord_b\t"
+    "exact_jaccard_bucketed\n";
 
 struct PairData {
     const RealDatasetPair* pair = nullptr;
@@ -176,11 +188,11 @@ void RequireNonEmpty(const std::string& value, const char* name) {
     }
 }
 
-uint64_t PairRank(const std::string& pair_id) {
+std::array<unsigned char, 32> PairRank(const std::string& pair_id) {
     std::string payload(kSplitDomain);
     payload.push_back('\0');
     payload.append(pair_id);
-    return DigestU64(payload);
+    return Sha256Raw(payload);
 }
 
 uint64_t TrialSeed(uint64_t root_seed, const std::string& pair_id,
@@ -295,8 +307,8 @@ std::vector<PairData> BuildSplit(std::vector<PairData> selected) {
     for (uint32_t label = 0; label < 2; ++label) {
         std::sort(by_label[label].begin(), by_label[label].end(),
                   [](const PairData& left, const PairData& right) {
-                      const uint64_t left_rank = PairRank(left.pair->id);
-                      const uint64_t right_rank = PairRank(right.pair->id);
+                      const auto left_rank = PairRank(left.pair->id);
+                      const auto right_rank = PairRank(right.pair->id);
                       if (left_rank != right_rank) return left_rank < right_rank;
                       return left.pair->id < right.pair->id;
                   });
@@ -421,7 +433,7 @@ uint32_t MatchCount(const PairData& pair, uint64_t seed, uint32_t k, uint32_t m)
 
 std::string SerializeRows(const std::vector<PairData>& pairs) {
     std::ostringstream output;
-    output << RealThresholdWorkloadRowsHeader();
+    output << kThresholdWorkloadRowsHeader;
     for (const auto& pair : pairs) {
         output << pair.pair->id << '\t' << pair.label << '\t' << pair.split << '\t'
                << pair.rank_position << '\t' << pair.pair->record_a << '\t'
@@ -543,7 +555,7 @@ int RunRealThresholdMode(const RealThresholdCliArgs& args) {
     const std::string workload_sha = Sha256Hex(workload_manifest);
 
     std::ostringstream csv;
-    csv << RealThresholdHeader();
+    csv << kThresholdHeader;
     for (const auto& pair : pairs) {
         if (pair.split != "evaluation") continue;
         for (uint32_t trial = 0; trial < args.threshold_trials; ++trial) {

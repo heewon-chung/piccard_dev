@@ -266,8 +266,10 @@ def _read_threshold_csv_rows(input_path: Path):
         expected_identity = None
         for row_number, row in enumerate(reader, start=2):
             try:
-                for field in ("label", "decision", "label_truth", "exact_j_truth",
-                              "k", "m", "match_count", "tau_count"):
+                for field in ("label", "root_seed", "rank_position",
+                              "threshold_trial_index", "hash_seed", "match_count",
+                              "decision", "label_truth", "exact_j_truth", "k", "m",
+                              "tau_count"):
                     row[field] = int(row[field])
                 for field in ("exact_jaccard_bucketed", "realized_j_tau",
                               "requested_j_threshold"):
@@ -285,6 +287,13 @@ def _read_threshold_csv_rows(input_path: Path):
                     row["k"] != 128 or row["m"] != 64):
                 raise SummarizerError(
                     f"threshold row {row_number} has invalid frozen parameters")
+            if (row["match_count"] < 0 or row["match_count"] > row["k"] or
+                    row["tau_count"] < 1 or row["tau_count"] > row["k"] or
+                    row["threshold_trial_index"] < 0 or
+                    row["exact_jaccard_bucketed"] < 0.0 or
+                    row["exact_jaccard_bucketed"] > 1.0):
+                raise SummarizerError(
+                    f"threshold row {row_number} has an out-of-range value")
             if (row["label_outcome"] not in {"TP", "TN", "FP", "FN"} or
                     row["exact_j_outcome"] not in {"TP", "TN", "FP", "FN"}):
                 raise SummarizerError(
@@ -301,7 +310,81 @@ def _read_threshold_csv_rows(input_path: Path):
             rows.append(row)
         if not rows:
             raise SummarizerError("threshold input contains no evaluation rows")
+        _validate_threshold_rows(rows)
         return rows
+
+
+def _threshold_outcome(decision: bool, truth: bool) -> str:
+    if decision and truth:
+        return "TP"
+    if not decision and not truth:
+        return "TN"
+    if decision:
+        return "FP"
+    return "FN"
+
+
+def _threshold_tau(requested: float, k: int, m: int) -> int:
+    return max(1, min(k, math.ceil(
+        k * (1.0 / m + (1.0 - 1.0 / m) * requested))))
+
+
+def _threshold_realized_boundary(tau: int, k: int, m: int) -> float:
+    return (tau / k - 1.0 / m) / (1.0 - 1.0 / m)
+
+
+def _validate_threshold_rows(rows):
+    pair_rows = {}
+    trial_indices = {}
+    identity = None
+    for row_number, row in enumerate(rows, start=2):
+        if row["dataset"] != "dblp_acm" or row["variant"] != "dblp_acm_u65536":
+            raise SummarizerError("threshold summary accepts only dblp_acm_u65536")
+        if identity is None:
+            identity = (row["dataset"], row["variant"])
+        if row["label"] not in (0, 1) or row["label_truth"] != row["label"]:
+            raise SummarizerError(
+                f"threshold row {row_number} label truth does not match label")
+        if row["k"] != 128 or row["m"] != 64:
+            raise SummarizerError(f"threshold row {row_number} violates frozen k/m")
+        if row["decision"] != int(row["match_count"] >= row["tau_count"]):
+            raise SummarizerError(f"threshold row {row_number} decision is inconsistent")
+        expected_tau = _threshold_tau(row["requested_j_threshold"], row["k"], row["m"])
+        expected_realized = _threshold_realized_boundary(
+            expected_tau, row["k"], row["m"])
+        if row["tau_count"] != expected_tau or not math.isclose(
+                row["realized_j_tau"], expected_realized, rel_tol=0.0, abs_tol=1e-12):
+            raise SummarizerError(f"threshold row {row_number} boundary is inconsistent")
+        expected_exact_truth = int(
+            row["exact_jaccard_bucketed"] >= row["realized_j_tau"])
+        if row["exact_j_truth"] != expected_exact_truth:
+            raise SummarizerError(f"threshold row {row_number} exact-J truth is inconsistent")
+        if row["label_outcome"] != _threshold_outcome(
+                bool(row["decision"]), bool(row["label_truth"])):
+            raise SummarizerError(f"threshold row {row_number} label outcome is inconsistent")
+        if row["exact_j_outcome"] != _threshold_outcome(
+                bool(row["decision"]), bool(row["exact_j_truth"])):
+            raise SummarizerError(f"threshold row {row_number} exact-J outcome is inconsistent")
+        pair_id = row["pair_id"]
+        identity_fields = (row["label"], row["pair_kind"], row["record_a"],
+                           row["record_b"], row["rank_position"],
+                           row["exact_jaccard_bucketed"])
+        prior = pair_rows.setdefault(pair_id, identity_fields)
+        if prior != identity_fields:
+            raise SummarizerError(f"threshold pair {pair_id!r} changes identity")
+        indices = trial_indices.setdefault(pair_id, set())
+        if row["threshold_trial_index"] in indices:
+            raise SummarizerError(
+                f"threshold pair {pair_id!r} repeats a trial index")
+        indices.add(row["threshold_trial_index"])
+    expected_indices = None
+    for pair_id, indices in trial_indices.items():
+        if expected_indices is None:
+            expected_indices = set(range(len(indices)))
+        if indices != expected_indices:
+            raise SummarizerError(
+                f"threshold pair {pair_id!r} has an incomplete trial sequence")
+    return pair_rows
 
 
 def _binomial_interval(count: int, denominator: int) -> tuple[float, float]:
@@ -335,12 +418,13 @@ def build_threshold_summary_rows(input_path: Path):
     add_confusion("label", [row["label_outcome"] for row in rows])
     add_confusion("exact_j", [row["exact_j_outcome"] for row in rows])
 
+    pair_rows = _validate_threshold_rows(rows)
     # The third section keeps the exact-J distribution conditional on each
-    # DBLP label, independent of the decision confusion matrices.
+    # DBLP label at pair granularity, independent of trial-level confusion.
     for label in (0, 1):
-        subset = [row for row in rows if row["label"] == label]
+        subset = [row for row in pair_rows.values() if row[0] == label]
         for bucket in _BUCKET_ORDER:
-            count = sum(jaccard_bucket_label(row["exact_jaccard_bucketed"]) == bucket
+            count = sum(jaccard_bucket_label(row[5]) == bucket
                         for row in subset)
             denominator = len(subset)
             if denominator == 0:

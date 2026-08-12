@@ -428,7 +428,7 @@ def threshold_cell(pair: ManifestPair, results_root: pathlib.Path,
     wm_path = results_root / "workloads" / f"threshold_{pair.variant}.manifest.tsv"
     wr_path = results_root / "workloads" / f"threshold_{pair.variant}.rows.tsv"
     display_argv = [
-        "bench_real_datasets",
+        "bench_real_threshold",
         f"--dataset-manifest={pair.dataset_manifest}",
         "--mode=threshold",
         "--k=128", "--m=64",
@@ -448,6 +448,26 @@ def threshold_cell(pair: ManifestPair, results_root: pathlib.Path,
         input_specs=[("processed-manifest", processed_root_id, processed_root,
                      dataset_manifest_rel)],
         output_paths=[csv_path, wm_path, wr_path],
+    )
+
+
+def threshold_summary_cell(pair: ManifestPair, results_root: pathlib.Path,
+                           threshold_csv: pathlib.Path) -> Cell:
+    summary_path = results_root / "csv" / (
+        f"real_threshold_summary_{pair.variant}.csv")
+    display_argv = [
+        "summarize_real_datasets.py",
+        "--mode=threshold",
+        f"--input={threshold_csv}",
+        f"--output={summary_path}",
+    ]
+    return Cell(
+        cell_id=f"{pair.variant}:threshold-summary", variant=pair.variant,
+        display_argv=display_argv, exec_argv=None,
+        env={"OMP_DYNAMIC": "FALSE", "OMP_NUM_THREADS": "1"},
+        input_specs=[("threshold-csv", "results-root", results_root,
+                     threshold_csv.relative_to(results_root).as_posix())],
+        output_paths=[summary_path],
     )
 
 
@@ -488,9 +508,12 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
                 pair, results_root, processed_root_id, processed_root,
                 "std128-t40-primary", seed, threads, PAPER_TIMING_TRIALS))
             if pair.variant == QUICK_VARIANT:
-                cells.append(threshold_cell(
+                threshold = threshold_cell(
                     pair, results_root, processed_root_id, processed_root,
-                    seed, PAPER_MAX_PAIRS, PAPER_THRESHOLD_TRIALS))
+                    seed, PAPER_MAX_PAIRS, PAPER_THRESHOLD_TRIALS)
+                cells.append(threshold)
+                cells.append(threshold_summary_cell(
+                    pair, results_root, threshold.output_paths[0]))
     return cells
 
 
@@ -577,7 +600,7 @@ def dry_run(cells) -> int:
 
 def validate_resume(existing: dict, results_root: pathlib.Path, evidence_mode: str,
                     source_commit: str, git_dirty: bool, build_type: str,
-                    binary_sha: str, cells) -> dict:
+                    binary_sha: str, threshold_binary_sha: str, cells) -> dict:
     if existing.get("schema_version") != SCHEMA:
         fail("resume manifest schema_version mismatch")
     if existing.get("evidence_mode") != evidence_mode:
@@ -590,6 +613,8 @@ def validate_resume(existing: dict, results_root: pathlib.Path, evidence_mode: s
         fail("resume build_type mismatch")
     if existing.get("bench_real_datasets_sha256") != binary_sha:
         fail("resume bench_real_datasets binary SHA-256 mismatch")
+    if existing.get("bench_real_threshold_sha256") != threshold_binary_sha:
+        fail("resume bench_real_threshold binary SHA-256 mismatch")
 
     cell_count = int(existing.get("cell_count", "-1"))
     if cell_count < 0:
@@ -718,6 +743,18 @@ def execute(args, project: pathlib.Path) -> int:
     cells = build_cells(args.pairs, results_root, roots_by_variant,
                         args.evidence_mode, args.seed, args.threads, args.profiles)
 
+    threshold_cells = [cell for cell in cells
+                       if cell.display_argv[0] == "bench_real_threshold"]
+    threshold_binary_path = build_dir / "bench_real_threshold"
+    if threshold_cells:
+        if (threshold_binary_path.parent.resolve() != build_dir
+                or not threshold_binary_path.is_file()
+                or not os.access(threshold_binary_path, os.X_OK)):
+            fail("bench_real_threshold executable is missing from --build-dir")
+        threshold_binary_sha = sha256_file(threshold_binary_path)
+    else:
+        threshold_binary_sha = "not-used"
+
     root_pairs, root_ids = build_roots_section(
         results_root, build_dir, args.pairs, roots_by_variant, args.evidence_mode)
 
@@ -729,7 +766,7 @@ def execute(args, project: pathlib.Path) -> int:
         existing = read_kv(run_metadata_path)
         existing_completed = validate_resume(
             existing, results_root, args.evidence_mode, commit, dirty, build_type,
-            binary_sha, cells)
+            binary_sha, threshold_binary_sha, cells)
         already_finalized = (results_root / "run.log").is_file()
         if already_finalized and len(existing_completed) == len(cells):
             print("RESUME already complete and finalized; nothing to do")
@@ -764,6 +801,8 @@ def execute(args, project: pathlib.Path) -> int:
 
         if cell.display_argv[0] == "bench_real_datasets":
             exec_argv = [str(binary_path)] + cell.display_argv[1:]
+        elif cell.display_argv[0] == "bench_real_threshold":
+            exec_argv = [str(threshold_binary_path)] + cell.display_argv[1:]
         else:
             exec_argv = [sys.executable, str(summarizer_path)] + cell.display_argv[1:]
 
@@ -783,8 +822,8 @@ def execute(args, project: pathlib.Path) -> int:
             _write_partial(partial_path, log_lines)
             _write_run_metadata(
                 results_root, args, commit, dirty, build_type, binary_sha,
-                summarizer_sha, root_pairs, cells, existing_completed, cell.cell_id,
-                failed=True)
+                threshold_binary_sha, summarizer_sha, root_pairs, cells,
+                existing_completed, cell.cell_id, failed=True)
             detail = result.stderr.strip() or result.stdout.strip()
             print(f"CELL FAILED {cell.cell_id}: {detail}", file=sys.stderr)
             return 2
@@ -795,7 +834,8 @@ def execute(args, project: pathlib.Path) -> int:
         existing_completed[cell.cell_id] = True
         _write_run_metadata(
             results_root, args, commit, dirty, build_type, binary_sha,
-            summarizer_sha, root_pairs, cells, existing_completed, None, failed=False)
+            threshold_binary_sha, summarizer_sha, root_pairs, cells,
+            existing_completed, None, failed=False)
 
     _write_partial(partial_path, log_lines)
 
@@ -804,8 +844,8 @@ def execute(args, project: pathlib.Path) -> int:
         _finalize_run_log(results_root)
         _write_run_metadata(
             results_root, args, commit, dirty, build_type, binary_sha,
-            summarizer_sha, root_pairs, cells, existing_completed, None, failed=False,
-            finalize=True)
+            threshold_binary_sha, summarizer_sha, root_pairs, cells,
+            existing_completed, None, failed=False, finalize=True)
     return 0
 
 
@@ -855,7 +895,8 @@ def _finalize_run_log(results_root: pathlib.Path) -> None:
 
 
 def _write_run_metadata(results_root, args, commit, dirty, build_type, binary_sha,
-                        summarizer_sha, root_pairs, cells, completed, failed_cell_id,
+                        threshold_binary_sha, summarizer_sha, root_pairs, cells,
+                        completed, failed_cell_id,
                         *, failed: bool, finalize: bool = False) -> None:
     pairs = [
         ("schema_version", SCHEMA),
@@ -864,6 +905,7 @@ def _write_run_metadata(results_root, args, commit, dirty, build_type, binary_sh
         ("git_dirty", "true" if dirty else "false"),
         ("build_type", build_type),
         ("bench_real_datasets_sha256", binary_sha),
+        ("bench_real_threshold_sha256", threshold_binary_sha),
         ("summarize_real_datasets_sha256", summarizer_sha),
     ]
     pairs.extend(root_pairs)

@@ -39,6 +39,7 @@ from __future__ import annotations
 import csv
 import argparse
 import hashlib
+import io
 import math
 import os
 import re
@@ -144,6 +145,12 @@ ENCODING_HEADER_FIELDS = tuple(_ENCODING_HEADER.split(","))
 SUMMARY_HEADER_FIELDS = (
     "dataset", "variant", "jaccard_bucket", "n", "mae", "sample_sd",
     "median", "p95", "max", "ci95_low", "ci95_high",
+)
+THRESHOLD_SUMMARY_SCHEMA_VERSION = "piccard-real-threshold-summary-v1"
+THRESHOLD_SUMMARY_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant", "section", "truth_basis",
+    "category", "jaccard_bucket", "count", "denominator", "rate",
+    "ci95_low", "ci95_high",
 )
 ENRON_SUMMARY_SCHEMA_VERSION = "piccard-real-enron-summary-v1"
 ENRON_SUMMARY_HEADER_FIELDS = (
@@ -482,6 +489,8 @@ def _parse_artifacts(values: dict, results_root: Path) -> list:
 _ACCURACY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy$")
 _SUMMARY_ID_RE = re.compile(r"^([A-Za-z0-9_]+):accuracy-summary$")
 _THRESHOLD_ID_RE = re.compile(r"^([A-Za-z0-9_]+):threshold$")
+_THRESHOLD_SUMMARY_ID_RE = re.compile(
+    r"^([A-Za-z0-9_]+):threshold-summary$")
 _TIMING_ID_RE = re.compile(r"^([A-Za-z0-9_]+):timing:([A-Za-z0-9-]+)$")
 _ENCODING_ID_RE = re.compile(
     r"^([A-Za-z0-9_]+):encoding:([A-Za-z0-9-]+):(piccard_encode|piccard_sqrt_encode)$")
@@ -600,6 +609,7 @@ def _parse_cells(values: dict, results_root: Path, roots: dict) -> list:
 
 def _cell_variant(cell_id: str) -> str:
     for pattern in (_ACCURACY_ID_RE, _SUMMARY_ID_RE, _THRESHOLD_ID_RE,
+                    _THRESHOLD_SUMMARY_ID_RE,
                     _TIMING_ID_RE, _ENCODING_ID_RE):
         match = pattern.match(cell_id)
         if match:
@@ -647,7 +657,10 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
                 *(f"{variant}:timing:{profile}" for profile in timing_profiles),
             }
             if variant == QUICK_VARIANT:
-                expected_by_variant[variant].add(f"{variant}:threshold")
+                expected_by_variant[variant].update({
+                    f"{variant}:threshold",
+                    f"{variant}:threshold-summary",
+                })
 
     if set(by_variant) != expected_variants:
         fail(f"unexpected variant set for evidence_mode={evidence_mode!r}: "
@@ -892,9 +905,9 @@ def _threshold_digest_u64(payload: bytes) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
-def _threshold_split_rank(pair_id: str) -> int:
-    return _threshold_digest_u64(THRESHOLD_SPLIT_DOMAIN + b"\x00" +
-                                pair_id.encode("utf-8"))
+def _threshold_split_rank(pair_id: str) -> bytes:
+    return hashlib.sha256(THRESHOLD_SPLIT_DOMAIN + b"\x00" +
+                          pair_id.encode("utf-8")).digest()
 
 
 def _threshold_trial_seed(root_seed: int, pair_id: str, trial_index: int) -> int:
@@ -1094,6 +1107,151 @@ def _read_threshold_csv(path: Path) -> list:
         return rows
 
 
+def _threshold_summary_validate_rows(rows: list) -> dict:
+    """Recompute all summary inputs from the threshold CSV.
+
+    Confusion rows remain trial-level, while exact-J distributions are keyed
+    by one stable identity per evaluation pair.  This deliberately repeats
+    the local truth/outcome checks instead of trusting either producer or
+    summarizer fields.
+    """
+    if not rows:
+        fail("threshold summary input contains no evaluation rows")
+    pair_rows = {}
+    trial_indices = {}
+    trial_count = None
+    for row_number, row in enumerate(rows, start=2):
+        if (row.get("dataset") != "dblp_acm" or
+                row.get("variant") != "dblp_acm_u65536"):
+            fail("threshold summary accepts only dblp_acm_u65536")
+        if row.get("split") != "evaluation":
+            fail(f"threshold summary row {row_number} is not an evaluation row")
+        if row.get("label") not in (0, 1) or row.get("label_truth") != row.get("label"):
+            fail(f"threshold summary row {row_number} label truth is inconsistent")
+        if row.get("k") != 128 or row.get("m") != 64:
+            fail(f"threshold summary row {row_number} violates frozen k/m")
+        if row.get("match_count") < 0 or row.get("match_count") > row.get("k"):
+            fail(f"threshold summary row {row_number} match count is out of range")
+        if (row.get("tau_count") < 1 or row.get("tau_count") > row.get("k") or
+                row.get("exact_jaccard_bucketed") < 0.0 or
+                row.get("exact_jaccard_bucketed") > 1.0):
+            fail(f"threshold summary row {row_number} has an out-of-range value")
+        decision = int(row.get("match_count") >= row.get("tau_count"))
+        if row.get("decision") != decision:
+            fail(f"threshold summary row {row_number} decision is inconsistent")
+        expected_tau = _threshold_tau(
+            row["requested_j_threshold"], row["k"], row["m"])
+        expected_realized = _threshold_realized_boundary(
+            expected_tau, row["k"], row["m"])
+        if (row.get("tau_count") != expected_tau or
+                not math.isclose(row.get("realized_j_tau"), expected_realized,
+                                 rel_tol=0.0, abs_tol=1e-12)):
+            fail(f"threshold summary row {row_number} boundary is inconsistent")
+        exact_truth = int(row["exact_jaccard_bucketed"] >= row["realized_j_tau"])
+        if row.get("exact_j_truth") != exact_truth:
+            fail(f"threshold summary row {row_number} exact-J truth is inconsistent")
+        if row.get("label_outcome") != _threshold_outcome(
+                bool(decision), bool(row["label_truth"])):
+            fail(f"threshold summary row {row_number} label outcome is inconsistent")
+        if row.get("exact_j_outcome") != _threshold_outcome(
+                bool(decision), bool(row["exact_j_truth"])):
+            fail(f"threshold summary row {row_number} exact-J outcome is inconsistent")
+        if row.get("threshold_trial_index") < 0:
+            fail(f"threshold summary row {row_number} trial index is negative")
+        pair_id = row["pair_id"]
+        identity = (row["label"], row["pair_kind"], row["record_a"],
+                    row["record_b"], row["rank_position"],
+                    row["exact_jaccard_bucketed"])
+        previous = pair_rows.setdefault(pair_id, identity)
+        if previous != identity:
+            fail(f"threshold summary pair {pair_id!r} changes identity")
+        indices = trial_indices.setdefault(pair_id, set())
+        trial_index = row["threshold_trial_index"]
+        if trial_index in indices:
+            fail(f"threshold summary pair {pair_id!r} repeats a trial index")
+        indices.add(trial_index)
+    for pair_id, indices in trial_indices.items():
+        count = max(indices) + 1
+        if trial_count is None:
+            trial_count = count
+        if count != trial_count or indices != set(range(trial_count)):
+            fail(f"threshold summary pair {pair_id!r} has an incomplete trial sequence")
+    return pair_rows
+
+
+def _threshold_summary_interval(count: int, denominator: int) -> tuple[float, float]:
+    if denominator <= 0:
+        fail("threshold summary confusion denominator is zero")
+    rate = count / denominator
+    margin = 1.96 * math.sqrt(rate * (1.0 - rate) / denominator)
+    return max(0.0, rate - margin), min(1.0, rate + margin)
+
+
+def _threshold_summary_rows(csv_path: Path) -> list:
+    rows = _read_threshold_csv(csv_path)
+    pair_rows = _threshold_summary_validate_rows(rows)
+    dataset = rows[0]["dataset"]
+    variant = rows[0]["variant"]
+    output = []
+
+    def add_confusion(truth_basis: str, outcomes: list) -> None:
+        for category in ("TP", "TN", "FP", "FN"):
+            count = sum(outcome == category for outcome in outcomes)
+            denominator = sum(
+                outcome in (("TP", "FN") if category in ("TP", "FN")
+                            else ("TN", "FP"))
+                for outcome in outcomes)
+            low, high = _threshold_summary_interval(count, denominator)
+            output.append([
+                THRESHOLD_SUMMARY_SCHEMA_VERSION, dataset, variant, "confusion",
+                truth_basis, category, "", str(count), str(denominator),
+                format_float(count / denominator), format_float(low),
+                format_float(high),
+            ])
+
+    add_confusion("label", [row["label_outcome"] for row in rows])
+    add_confusion("exact_j", [row["exact_j_outcome"] for row in rows])
+    for label in (0, 1):
+        subset = [identity for identity in pair_rows.values()
+                  if identity[0] == label]
+        if not subset:
+            fail("threshold summary label-conditioned denominator is zero")
+        for bucket in _BUCKET_ORDER:
+            count = sum(
+                ("b00_10" if identity[5] < 0.1 else
+                 "b10_30" if identity[5] < 0.3 else
+                 "b30_60" if identity[5] < 0.6 else "b60_100") == bucket
+                for identity in subset)
+            denominator = len(subset)
+            output.append([
+                THRESHOLD_SUMMARY_SCHEMA_VERSION, dataset, variant,
+                "distribution", "label-conditioned-exact-j", str(label),
+                bucket, str(count), str(denominator),
+                format_float(count / denominator), "", "",
+            ])
+    return output
+
+
+def _threshold_summary_bytes(csv_path: Path) -> bytes:
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream, lineterminator="\n")
+    writer.writerow(THRESHOLD_SUMMARY_HEADER_FIELDS)
+    writer.writerows(_threshold_summary_rows(csv_path))
+    return stream.getvalue().encode("utf-8")
+
+
+def _validate_threshold_summary(cell: dict, threshold_csv: Path,
+                                summary_path: Path) -> None:
+    expected = _threshold_summary_bytes(threshold_csv)
+    try:
+        observed = summary_path.read_bytes()
+    except OSError as exc:
+        fail(f"cell {cell['id']!r} threshold summary is unreadable: {exc}")
+    if observed != expected:
+        fail(f"cell {cell['id']!r} threshold summary does not byte-match the "
+             "independent recomputation")
+
+
 def verify_threshold_artifacts(dataset_manifest: Path, csv_path: Path,
                                workload_manifest_path: Path,
                                workload_rows_path: Path, *, root_seed: int,
@@ -1116,7 +1274,10 @@ def verify_threshold_artifacts(dataset_manifest: Path, csv_path: Path,
     candidates = _threshold_candidates(split_pairs)
     choice = _threshold_choice(split_pairs, candidates, k, m)
 
-    manifest_pairs = parse_two_column_tsv(workload_manifest_path)
+    try:
+        manifest_pairs = parse_two_column_tsv(workload_manifest_path)
+    except ManifestError as exc:
+        fail(f"threshold workload manifest is malformed: {exc}")
     seen_manifest_keys = set()
     for key, _value in manifest_pairs:
         if key in seen_manifest_keys:
@@ -1138,6 +1299,26 @@ def verify_threshold_artifacts(dataset_manifest: Path, csv_path: Path,
                           ("trial_seed_domain", "piccard-dblp-threshold-eval-v1")):
         if manifest.get(key) != expected:
             fail(f"threshold workload {key} mismatch")
+
+    manifest_prefix = (
+        "schema_version", "dataset_manifest_sha256", "rows_sha256",
+        "calibration_rows_sha256", "evaluation_rows_sha256", "k", "m",
+        "root_seed", "max_pairs", "threshold_trials", "hash_randomness",
+        "pair_selection", "split_domain", "trial_seed_domain",
+        "calibration_pair_count", "evaluation_pair_count", "candidate_count",
+    )
+    manifest_suffix = (
+        "selected_requested_j_threshold", "tau_count", "realized_j_tau",
+        "calibration_fpr", "calibration_fnr", "calibration_balanced_error",
+    )
+    expected_manifest_keys = (manifest_prefix +
+                              tuple(f"candidate.{index}"
+                                    for index in range(len(candidates))) +
+                              manifest_suffix)
+    actual_manifest_keys = tuple(key for key, _value in manifest_pairs)
+    if actual_manifest_keys != expected_manifest_keys:
+        fail("threshold workload manifest key order/set does not match the "
+             "exact piccard-real-threshold-workload-v1 grammar")
 
     rows_bytes = workload_rows_path.read_bytes()
     if manifest.get("rows_sha256") != hashlib.sha256(rows_bytes).hexdigest():
@@ -2001,6 +2182,27 @@ def verify(results_root: Path) -> str:
     if not cells:
         fail("run_metadata.tsv declares zero cells")
     _validate_cell_id_enumeration(cells, evidence_mode)
+    threshold_binary_sha = _require(values, "bench_real_threshold_sha256")
+    threshold_cells = [cell for cell in cells
+                       if cell["id"].endswith(":threshold")]
+    if threshold_cells:
+        if not _SHA256_RE.match(threshold_binary_sha):
+            fail("paper threshold cell requires a 64-hex bench_real_threshold "
+                 "SHA-256")
+        build_dir = roots.get("build-dir")
+        if build_dir is None:
+            fail("threshold cell requires a build-dir root")
+        threshold_binary = build_dir / "bench_real_threshold"
+        if not threshold_binary.is_file():
+            fail("bench_real_threshold executable is missing from the declared "
+                 "build-dir root")
+        actual_threshold_sha = sha256_file(threshold_binary)
+        if actual_threshold_sha != threshold_binary_sha:
+            fail("bench_real_threshold binary SHA-256 does not match "
+                 "run_metadata.tsv")
+    elif threshold_binary_sha != "not-used":
+        fail("run_metadata.tsv must declare bench_real_threshold_sha256=not-used "
+             "when no threshold cell is present")
     # Codex stop-gate round 2: root presence is bound to the cell
     # enumeration in BOTH modes -- deleting a variant's source/processed
     # root entries (and adjusting root_count) must fail, not silently skip
@@ -2074,6 +2276,24 @@ def verify(results_root: Path) -> str:
                 max_pairs=int(_argv_value(cell, "max-pairs")),
                 k=int(_argv_value(cell, "k")),
                 m=int(_argv_value(cell, "m")))
+        elif cell["id"].endswith(":threshold-summary"):
+            if variant != QUICK_VARIANT:
+                fail(f"cell {cell['id']!r} threshold summary is DBLP-only")
+            threshold_input = [
+                entry for entry in cell["inputs"]
+                if entry["role"] == "threshold-csv"
+            ]
+            if len(threshold_input) != 1:
+                fail(f"cell {cell['id']!r} must have exactly one threshold-csv input")
+            threshold_csv = threshold_input[0]["resolved"]
+            expected_threshold_csv = _output_path_for(
+                by_id[f"{variant}:threshold"], f"real_threshold_{variant}.csv")
+            if threshold_csv != expected_threshold_csv:
+                fail(f"cell {cell['id']!r} threshold-csv input is not bound to "
+                     "the threshold producer output")
+            summary_path = _output_path_for(
+                cell, f"real_threshold_summary_{variant}.csv")
+            _validate_threshold_summary(cell, threshold_csv, summary_path)
         elif ":timing:" in cell["id"]:
             profile = cell["id"].split(":timing:", 1)[1]
             csv_path = _output_path_for(cell, f"real_timing_{variant}_{profile}.csv")

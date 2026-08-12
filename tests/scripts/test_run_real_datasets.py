@@ -4,8 +4,8 @@ scripts/verify_real_dataset_outputs.py (Work 5, master Task 9B).
 
 Hermetic: every test writes results-roots and fake build directories under
 tempfile.TemporaryDirectory(); no test touches the real `datasets/` tree or
-the network. `bench_real_datasets` is replaced by a small deterministic fake
-executable (this suite never builds or links OpenFHE); `summarize_real_datasets.py`
+the network. The benchmark executables are replaced by small deterministic
+fakes (this suite never builds or links OpenFHE); `summarize_real_datasets.py`
 is always the REAL, already-tested script, since the runner resolves it from
 the committed source root rather than from a caller-controlled build dir.
 
@@ -372,9 +372,9 @@ def main():
             return len(left & right) / union
 
         def split_rank(pair_id):
-            return int.from_bytes(hashlib.sha256(
+            return hashlib.sha256(
                 b"piccard-dblp-threshold-split-v1\x00" +
-                pair_id.encode("utf-8")).digest()[:8], "big")
+                pair_id.encode("utf-8")).digest()
 
         requested_count = min(len(real_pairs), max_pairs)
         by_label = {
@@ -703,6 +703,7 @@ def write_fake_bench_real_datasets(build_dir: pathlib.Path) -> pathlib.Path:
         "threshold_header": THRESHOLD_HEADER_FIELDS,
     }
     make_executable(path, body)
+    make_executable(build_dir / "bench_real_threshold", body)
     (build_dir / "CMakeCache.txt").write_text(
         "CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
     return path
@@ -988,11 +989,11 @@ class Phase3RealDataContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                      if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 10)
+        self.assertEqual(len(run_lines), 11)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
             self.assertEqual(len(variant_lines),
-                             4 if variant == "dblp_acm_u65536" else 3)
+                             5 if variant == "dblp_acm_u65536" else 3)
             self.assertTrue(any("--mode=accuracy" in line for line in variant_lines))
             self.assertTrue(any("summarize_real_datasets.py" in line
                                 for line in variant_lines))
@@ -1003,6 +1004,9 @@ class Phase3RealDataContractTest(unittest.TestCase):
             if variant == "dblp_acm_u65536":
                 self.assertTrue(any("--mode=threshold" in line and
                                     "--threshold-trials=50" in line
+                                    for line in variant_lines))
+                self.assertTrue(any("summarize_real_datasets.py" in line and
+                                    "--mode=threshold" in line
                                     for line in variant_lines))
             else:
                 self.assertFalse(any("--mode=threshold" in line
@@ -1430,11 +1434,11 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                     if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 10)
+        self.assertEqual(len(run_lines), 11)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
             self.assertEqual(len(variant_lines),
-                             4 if variant == "dblp_acm_u65536" else 3)
+                             5 if variant == "dblp_acm_u65536" else 3)
             self.assertTrue(any("--max-pairs=10000" in line for line in variant_lines))
             self.assertTrue(any("--profile=std128-t40-primary" in line
                                 for line in variant_lines))
@@ -1443,6 +1447,9 @@ class DryRunTest(unittest.TestCase):
             if variant == "dblp_acm_u65536":
                 self.assertTrue(any("--mode=threshold" in line and
                                     "--threshold-trials=50" in line
+                                    for line in variant_lines))
+                self.assertTrue(any("summarize_real_datasets.py" in line and
+                                    "--mode=threshold" in line
                                     for line in variant_lines))
             else:
                 self.assertFalse(any("--mode=threshold" in line
@@ -2416,13 +2423,14 @@ class PaperModeScratchRepoTest(unittest.TestCase):
         metadata = read_kv_file(results_root / "run_metadata.tsv")
         self.assertEqual(metadata["evidence_mode"], "paper")
         self.assertEqual(metadata["git_dirty"], "false")
-        self.assertEqual(metadata["cell_count"], "10")
-        ids = {metadata[f"cell.{i:03d}.id"] for i in range(10)}
+        self.assertEqual(metadata["cell_count"], "11")
+        ids = {metadata[f"cell.{i:03d}.id"] for i in range(11)}
         self.assertEqual(ids, {
             "dblp_acm_u65536:accuracy",
             "dblp_acm_u65536:accuracy-summary",
             "dblp_acm_u65536:timing:std128-t40-primary",
             "dblp_acm_u65536:threshold",
+            "dblp_acm_u65536:threshold-summary",
             "enron_u65536:accuracy",
             "enron_u65536:accuracy-summary",
             "enron_u65536:timing:std128-t40-primary",
@@ -2430,6 +2438,9 @@ class PaperModeScratchRepoTest(unittest.TestCase):
             "enron_u1048576:accuracy-summary",
             "enron_u1048576:timing:std128-t40-primary",
         })
+        verify_result = run_verifier(results_root)
+        self.assertEqual(verify_result.returncode, 0, verify_result.stderr)
+        self.assertTrue((results_root / "verification_status.tsv").is_file())
 
     def test_verifier_requires_exact_source_manifest_root_for_each_paper_variant(self):
         results_root = self.tmp / "missing-source-root"

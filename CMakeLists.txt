@@ -1189,6 +1189,26 @@ if(BUILD_BENCHMARKS)
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         )
     endif()
+
+    # Plaintext DBLP threshold producer.  Keep this as a separate executable:
+    # bench_real_datasets also owns the OpenFHE-backed timing mode, so its
+    # link closure is not an admissible dependency for threshold evidence.
+    add_executable(
+        bench_real_threshold
+        benchmarks/bench_real_threshold.cpp
+        benchmarks/real_threshold_driver.cpp
+    )
+    target_link_libraries(
+        bench_real_threshold
+        piccard_core
+        piccard_data
+        OpenSSL::Crypto
+    )
+    target_include_directories(
+        bench_real_threshold
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    add_dependencies(bench_real_datasets bench_real_threshold)
 endif()
 
 if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
