@@ -1461,12 +1461,17 @@ def verify_ctest_gate_receipt(root: Path, run: dict[str, Any]) -> tuple[Path, st
             receipt.get("frozen_work6_hashes") == frozen_work6_hashes(),
             "full CTest gate receipt contract mismatch")
     gate_logs: set[str] = set()
-    for digest_field, relative in CTEST_GATE_LOGS:
+    raw_logs: dict[str, bytes] = {}
+    for _, relative in CTEST_GATE_LOGS:
         raw_log = relative_file(root, relative, "full CTest raw log")
-        require(raw_log.is_file() and not raw_log.is_symlink() and
-                receipt.get(digest_field) == sha256_file(raw_log),
-                f"full CTest raw log is missing, unsafe, or hash-mismatched: {relative}")
+        require(raw_log.is_file() and not raw_log.is_symlink(),
+                f"full CTest raw log is missing or unsafe: {relative}")
+        raw_logs[relative] = raw_log.read_bytes()
         gate_logs.add(relative)
+    classified = classify_work6_scope_ctest(
+        8, raw_logs["gates/full-ctest.stdout"], raw_logs["gates/full-ctest.stderr"])
+    require(all(receipt.get(field) == value for field, value in classified.items()),
+            "full CTest raw log or receipt classifier contract mismatch")
     return path, sha256_file(path), gate_logs
 
 

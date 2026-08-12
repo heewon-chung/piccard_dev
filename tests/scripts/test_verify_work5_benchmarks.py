@@ -752,6 +752,26 @@ class Work5VerifierContractTest(unittest.TestCase):
 
         work5_verifier.verify_inventory(root, records, toy, run)
 
+        valid_stdout = stdout.read_bytes()
+        valid_receipt = receipt_path.read_bytes()
+        forged_stdout = b"100% tests passed, 0 tests failed out of 1\n"
+        forged_receipt = json.loads(valid_receipt)
+        forged_receipt.update({
+            "classification": "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH",
+            "ctest_exit_code": 0, "test_count": 1, "passed": 1, "failed": 0,
+            "failed_test": None, "failed_subtests": [],
+            "check_work6_scope": {"ran": 0, "failures": 0,
+                                  "failed_subtests": [], "first_reason": ""},
+            "stdout_sha256": hashlib.sha256(forged_stdout).hexdigest(),
+        })
+        stdout.write_bytes(forged_stdout)
+        receipt_path.write_bytes(work5_runner.canonical_json(forged_receipt))
+        with self.assertRaisesRegex(work5_verifier.VerificationError,
+                                    "full CTest"):
+            work5_verifier.verify_inventory(root, records, toy, run)
+        stdout.write_bytes(valid_stdout)
+        receipt_path.write_bytes(valid_receipt)
+
         for path in (stdout, stderr):
             with self.subTest(missing=path.name):
                 payload = path.read_bytes()
