@@ -120,6 +120,16 @@ class Work5CtestExceptionTest(unittest.TestCase):
 
 
 class JournalContractTest(unittest.TestCase):
+    def test_fresh_macos_configure_binds_openfhe_runtime_path(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        configure = capture.configure_command(Path("/source"), Path("/build"))
+        runtime_option = "-DCMAKE_BUILD_RPATH=/usr/local/lib"
+        if capture.platform.system() == "Darwin" and Path("/usr/local/lib").is_dir():
+            self.assertIn(runtime_option, configure)
+        else:
+            self.assertNotIn(runtime_option, configure)
+
     def test_complete_pairs_are_monotone_and_incomplete_pairs_fail(self) -> None:
         import capture_work5_phase6_prelive as capture
 

@@ -250,10 +250,24 @@ def journal_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def configure_command(source_root: Path, build_dir: Path) -> list[str]:
+    configure = ["cmake", "-S", str(source_root), "-B", str(build_dir),
+                 "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON",
+                 "-DBUILD_BENCHMARKS=ON"]
+    # Homebrew's OpenFHE packages on this macOS host expose absolute dylib
+    # paths without adding that directory to the build RPATH.  The pre-live
+    # build is intentionally fresh, so bind the runtime search path in the
+    # recorded configure argv rather than relying on the caller's shell
+    # environment.  This keeps commands.jsonl truthful and makes every later
+    # CTest/direct-benchmark child use the same source-bound binary contract.
+    if platform.system() == "Darwin" and Path("/usr/local/lib").is_dir():
+        configure.append("-DCMAKE_BUILD_RPATH=/usr/local/lib")
+
+    return configure
+
+
 def build(source_root: Path, build_dir: Path, journal: Journal) -> None:
-    journal.run("configure-release", ["cmake", "-S", str(source_root), "-B", str(build_dir),
-                                       "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON",
-                                       "-DBUILD_BENCHMARKS=ON"], cwd=source_root)
+    journal.run("configure-release", configure_command(source_root, build_dir), cwd=source_root)
     journal.run("build-release", ["cmake", "--build", str(build_dir), "-j2"], cwd=source_root)
 
 
