@@ -130,6 +130,12 @@ class JournalContractTest(unittest.TestCase):
         else:
             self.assertNotIn(runtime_option, configure)
 
+    def test_workspace_build_command_is_source_bound(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        self.assertEqual(capture.workspace_build_command(Path("/source")),
+                         ["cmake", "--build", "/source/build", "-j2"])
+
     def test_complete_pairs_are_monotone_and_incomplete_pairs_fail(self) -> None:
         import capture_work5_phase6_prelive as capture
 

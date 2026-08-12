@@ -266,9 +266,20 @@ def configure_command(source_root: Path, build_dir: Path) -> list[str]:
     return configure
 
 
+def workspace_build_command(source_root: Path) -> list[str]:
+    return ["cmake", "--build", str(source_root / "build"), "-j2"]
+
+
 def build(source_root: Path, build_dir: Path, journal: Journal) -> None:
     journal.run("configure-release", configure_command(source_root, build_dir), cwd=source_root)
     journal.run("build-release", ["cmake", "--build", str(build_dir), "-j2"], cwd=source_root)
+    # PreThresholdProfileRunner is an existing CTest test whose provenance
+    # helper intentionally reads the repository's conventional build/ path.
+    # Refresh that ignored helper build inside the journal before CTest so a
+    # prior-commit local build cannot make a source-bound gate look green.
+    workspace_build = source_root / "build"
+    require(workspace_build.is_dir(), "source workspace build directory is missing")
+    journal.run("workspace-build", workspace_build_command(source_root), cwd=source_root)
 
 
 def write_manifest(root: Path) -> str:
