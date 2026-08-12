@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unicodedata
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -56,7 +57,7 @@ _ENRON_PROCESSED_KEY_ORDER = (
     "bucketed_set_size_min", "bucketed_set_size_median",
     "bucketed_set_size_p95", "bucketed_set_size_max",
     "original_positive_count", "retained_positive_count", "requested_pair_count",
-    "max_documents", "min_related_pairs",
+    "max_documents", "min_related_pairs", "pair_proxy",
     "dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
     "dropped.duplicate_copy", "dropped.duplicate_message_id",
 )
@@ -206,6 +207,8 @@ class CoreTests(unittest.TestCase):
             "requested_pair_count": str(len(pairs)),
             "max_documents": "" if is_dblp else "10",
             "min_related_pairs": "" if is_dblp else "2",
+            "pair_proxy": "" if is_dblp else
+                "canonical-subject-proxy-not-thread-ground-truth-v1",
             "dropped.empty_features_dblp": "0",
             "dropped.empty_features_acm": "0",
             "dropped.charset_or_mime": "0",
@@ -1785,6 +1788,280 @@ class EnronRecordTests(unittest.TestCase):
         self.assertEqual(
             candidate.raw_features,
             (6747757901913873495, 11866603913081688669))
+
+
+def _independent_enron_tree_digest(root: Path) -> str:
+    """Independent source-tree digest for Phase 2 command fixtures."""
+    entries = []
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix().encode("utf-8")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        payload = path.read_bytes()
+        entries.append((relative, len(payload), hashlib.sha256(payload).digest()))
+    digest = hashlib.sha256(b"piccard-enron-tree-v1\x00")
+    for relative, size, file_digest in entries:
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(size.to_bytes(8, "big"))
+        digest.update(file_digest)
+    return digest.hexdigest()
+
+
+def _write_pair_source(root: Path) -> Path:
+    """Create six distinct eligible records: four related and two cross-thread."""
+    maildir = root / "maildir"
+    maildir.mkdir()
+    subjects = ["Team Update"] * 4 + ["Other Topic", "Third Topic"]
+    for index, subject in enumerate(subjects):
+        message = (
+            f"Date: Mon, {index + 1} Jan 2024 00:00:00 +0000\n"
+            f"From: Sender {index} <sender{index}@example.com>\n"
+            "To: Receiver <receiver@example.com>\n"
+            f"Subject: {subject}\n"
+            f"Message-ID: <fixture-{index}@example.com>\n"
+            "Content-Type: text/plain; charset=utf-8\n\n"
+            "alpha bravo charlie delta echo foxtrot\n"
+        )
+        (maildir / f"message-{index}.eml").write_text(message, encoding="utf-8")
+    duplicate = (maildir / "message-0.eml").read_text(encoding="utf-8")
+    duplicate = duplicate.replace(
+        "Message-ID: <fixture-0@example.com>",
+        "Message-ID: <fixture-copy@example.com>",
+    )
+    (maildir / "message-copy.eml").write_text(duplicate, encoding="utf-8")
+    digest = _independent_enron_tree_digest(maildir)
+    manifest = root / "source.manifest.tsv"
+    write_lf(
+        manifest,
+        "\n".join((
+            "key\tvalue",
+            "schema_version\tpiccard-real-source-v1",
+            "dataset\tenron",
+            "dataset_version\tcmu-2015-05-07",
+            "source_url\thttps://example.invalid/enron",
+            "citation\tHermetic Enron fixture",
+            "license_or_terms_url\thttps://example.invalid/terms",
+            "acquisition_note\thermetic test fixture",
+            "parsing_schema\tenron-maildir-rfc5322-v1",
+            "preprocessing_profile\tenron-shingle5-v2",
+            "input.0.role\tmaildir_root",
+            "input.0.path\tmaildir",
+            f"input.0.sha256\t{digest}",
+        )) + "\n",
+    )
+    return manifest
+
+
+class EnronSelectionTests(unittest.TestCase):
+    """Independent RED/KATs for Phase 2 selection, pairing, and outputs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+        cls.enron = load_enron_module()
+
+    def require_api(self, name):
+        self.assertTrue(
+            hasattr(self.module, name),
+            f"Phase 2 API {name} is required; the Phase 1 Enron stub is still active")
+        return getattr(self.module, name)
+
+    def fixture_candidates(self):
+        self.assertIsNotNone(self.enron)
+        candidates, dropped = self.enron.build_record_candidates(
+            ENRON_FIXTURE_DIR / "inbox")
+        self.assertEqual(dropped["dropped.duplicate_copy"], 0)
+        return candidates
+
+    @staticmethod
+    def stub(record_id, subject, path=None):
+        return SimpleNamespace(
+            record_id=record_id,
+            relative_path=path or record_id.replace("enron:", "") + ".eml",
+            canonical_subject=subject,
+        )
+
+    def test_document_rank_tie_break_and_record_ids_are_literal(self):
+        rank_and_select = self.require_api("rank_and_select_documents")
+        candidates = self.fixture_candidates()
+        seed = 20260729
+        domain = b"piccard-enron-document-v1"
+        expected = []
+        for candidate in candidates:
+            path_bytes = candidate.relative_path.encode("utf-8")
+            rank = hashlib.sha256(
+                domain + seed.to_bytes(8, "big") + path_bytes).digest()
+            expected.append((rank, path_bytes, candidate.relative_path))
+        expected_paths = [item[2] for item in sorted(expected)[:3]]
+        selected = rank_and_select(candidates, seed=seed, max_documents=3)
+        self.assertEqual([record.relative_path for record in selected], expected_paths)
+        expected_ids = {
+            "ascii.eml": "enron:640f321aeab5e982d8145a0fb99ce843bb0eaddbc12a4b5bf57956a7d0d9896b",
+            "quote_tail.eml": "enron:6456e690aa73f0fa5cd50712ad519e71515c301136f6fc8c1fa1424fcffad32a",
+            "ansi.eml": "enron:1735c2eee0f1645f415da56aabc70282b96b04b334bdb2e180f77201b9bd506a",
+        }
+        self.assertEqual(
+            {record.relative_path: record.record_id for record in selected},
+            {path: expected_ids[path] for path in expected_paths},
+        )
+
+    def test_repeated_subject_prefixes_and_empty_subject_are_pair_inputs(self):
+        self.assertIsNotNone(self.enron)
+        canonical_subject = self.enron.canonical_subject
+        build_pairs = self.require_api("build_enron_pairs")
+        self.assertEqual(
+            canonical_subject(" Fwd: Re[12]: FW: re: Café, status! "),
+            "caf status",
+        )
+        records = [
+            self.stub("enron:a", "topic"),
+            self.stub("enron:b", "topic"),
+            self.stub("enron:c", "other"),
+            self.stub("enron:empty", ""),
+        ]
+        pairs = build_pairs(records, seed=20260729, pairs=2, min_related_pairs=1)
+        self.assertEqual(
+            [(pair.record_a, pair.record_b, pair.pair_kind, pair.label)
+             for pair in pairs],
+            [("enron:a", "enron:b", "thread_related", -1),
+             ("enron:a", "enron:c", "cross_thread", -1)],
+        )
+        self.assertNotIn("enron:empty", {
+            endpoint for pair in pairs for endpoint in (pair.record_a, pair.record_b)
+        })
+
+    def test_candidate_rank_domains_and_pair_ids_are_literal(self):
+        build_pairs = self.require_api("build_enron_pairs")
+        records = [
+            self.stub("enron:a", "topic"),
+            self.stub("enron:b", "topic"),
+            self.stub("enron:c", "other"),
+            self.stub("enron:d", "third"),
+        ]
+        pairs = build_pairs(records, seed=20260729, pairs=3, min_related_pairs=1)
+        self.assertEqual(
+            [pair.pair_id for pair in pairs],
+            [
+                "enron-pair:1b0173fb3cf8369927ffee9e07411f07f33b9dd53a8d1d086915c03c50c46d68",
+                "enron-pair:7bacbfdcfadef52ae90b3ab186cc395de705375ada14701c3bb1c6c7a72f9655",
+                "enron-pair:06e2645133947049aaadf03598174353e9b37b4d99a8960e5aab10491742249a",
+            ],
+        )
+
+    def test_related_minimum_is_a_hard_failure(self):
+        build_pairs = self.require_api("build_enron_pairs")
+        records = [self.stub("enron:a", "one"), self.stub("enron:b", "two")]
+        with self.assertRaises(self.module.ManifestError):
+            build_pairs(records, seed=20260729, pairs=1, min_related_pairs=1)
+
+    def test_enron_output_manifest_labels_counts_proxy_and_drop_keys(self):
+        prepare_enron = self.require_api("prepare_enron")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_manifest = _write_pair_source(root)
+            output = root / "processed"
+            prepare_enron(source_manifest, output, 65536, 6, 4, 2, 20260729, True)
+            manifest = dict(
+                line.split("\t")
+                for line in (output / "dataset.manifest.tsv").read_text().splitlines()[1:]
+            )
+            self.assertEqual(manifest["preprocessing_version"], "enron-shingle5-v2")
+            self.assertEqual(
+                manifest["pair_proxy"],
+                "canonical-subject-proxy-not-thread-ground-truth-v1",
+            )
+            self.assertEqual(manifest["original_positive_count"], "0")
+            self.assertEqual(manifest["retained_positive_count"], "0")
+            self.assertEqual(manifest["requested_pair_count"], "4")
+            self.assertEqual(manifest["pair_count"], "4")
+            self.assertEqual(manifest["dropped.duplicate_copy"], "1")
+            rows = (output / "pairs.tsv").read_text().splitlines()[1:]
+            self.assertEqual(len(rows), 4)
+            self.assertTrue(all(row.rsplit("\t", 1)[1] == "-1" for row in rows))
+
+    def test_rerun_is_byte_identical_and_universe_topology_is_identical(self):
+        prepare_enron = self.require_api("prepare_enron")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_manifest = _write_pair_source(root)
+            out_a = root / "u65536-a"
+            out_b = root / "u65536-b"
+            out_large = root / "u1048576"
+            args = (source_manifest, 6, 4, 2, 20260729, True)
+            prepare_enron(source_manifest, out_a, 65536, *args[1:])
+            prepare_enron(source_manifest, out_b, 65536, *args[1:])
+            prepare_enron(source_manifest, out_large, 1048576, *args[1:])
+            for name in ("records.tsv", "pairs.tsv", "source.manifest.tsv",
+                         "dataset.manifest.tsv"):
+                self.assertEqual((out_a / name).read_bytes(), (out_b / name).read_bytes())
+            records_a = (out_a / "records.tsv").read_text().splitlines()[1:]
+            records_large = (out_large / "records.tsv").read_text().splitlines()[1:]
+            self.assertEqual(
+                [row.split("\t", 1)[0] for row in records_a],
+                [row.split("\t", 1)[0] for row in records_large],
+            )
+            self.assertEqual(
+                (out_a / "pairs.tsv").read_bytes(),
+                (out_large / "pairs.tsv").read_bytes(),
+            )
+
+
+class EnronCliTests(unittest.TestCase):
+    """Strict argparse and end-to-end CLI contract tests."""
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "enron", *extra],
+            capture_output=True, text=True,
+        )
+
+    def test_enron_cli_requires_exact_arguments_and_strict_mode(self):
+        result = self._run("--source-manifest=x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--output-dir", result.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(
+                "--source-manifest=x", "--output-dir=y", "--universe=65536",
+                "--max-documents=1", "--pairs=1", "--min-related-pairs=1",
+                "--seed=1",
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--strict", result.stderr)
+
+    def test_enron_cli_rejects_unsupported_universe_profile_and_counts(self):
+        base = (
+            "--source-manifest=x", "--output-dir=y", "--max-documents=1",
+            "--pairs=1", "--min-related-pairs=1", "--seed=1", "--strict",
+        )
+        cases = (
+            ("--universe=123",),
+            ("--universe=65536", "--profile=paper"),
+            ("--universe=65536", "--max-documents=0"),
+            ("--universe=65536", "--pairs=0"),
+            ("--universe=65536", "--min-related-pairs=0"),
+            ("--universe=65536", "--pairs=1", "--min-related-pairs=2"),
+            ("--universe=65536", "--seed=0"),
+        )
+        for override in cases:
+            result = self._run(*(base + override))
+            self.assertNotEqual(result.returncode, 0, override)
+
+    def test_enron_cli_writes_requested_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_manifest = _write_pair_source(root)
+            output = root / "cli-output"
+            result = self._run(
+                f"--source-manifest={source_manifest}",
+                f"--output-dir={output}", "--universe=65536",
+                "--max-documents=6", "--pairs=4", "--min-related-pairs=2",
+                "--seed=20260729", "--strict",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+            self.assertTrue((output / "dataset.manifest.tsv").is_file())
 
 
 class SourceManifestTests(unittest.TestCase):

@@ -15,9 +15,9 @@ caller passes in. It implements:
   * per-record/per-pair set-size summary statistics (min/median/p95/max);
   * an atomic, checksum-verified writer for `processed/<variant>/` outputs.
 
-Dataset-specific subcommands (`dblp-acm`, `enron`) are added in later phases;
-this module's CLI only recognizes them and reports "not implemented" so that
-those phases' own tests stay RED until implemented.
+Dataset-specific subcommands (`dblp-acm`, `enron`) share this module's strict
+manifest and atomic-output core.  The Enron path is deliberately limited to
+the two frozen universe sizes and profile from the revision contract.
 """
 
 import argparse
@@ -96,6 +96,19 @@ class PairRow:
 
 
 @dataclass(frozen=True)
+class EnronSelectedRecord:
+    """A Phase 2 ranked record with its deterministic Enron record ID."""
+
+    record_id: str
+    candidate: object
+
+    def __getattr__(self, name):
+        # Keep the Phase 1 candidate immutable and free of a record_id while
+        # exposing its fields naturally to pair/output code in Phase 2.
+        return getattr(self.candidate, name)
+
+
+@dataclass(frozen=True)
 class SetSizeStats:
     min: int
     median: float
@@ -119,6 +132,11 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 _FEATURE_HASH_DOMAIN = b"piccard-real-feature-v1"
 _ENRON_TREE_DOMAIN = b"piccard-enron-tree-v1"
+_ENRON_DOCUMENT_DOMAIN = b"piccard-enron-document-v1"
+_ENRON_RELATED_DOMAIN = b"piccard-enron-related-v1"
+_ENRON_CROSS_DOMAIN = b"piccard-enron-cross-v1"
+_ENRON_PAIR_PROXY = "canonical-subject-proxy-not-thread-ground-truth-v1"
+_ENRON_UNIVERSES = frozenset({65536, 1048576})
 
 # dataset -> ((role_name, role_kind), ...); role_kind is "file" or "directory".
 _DATASET_ROLE_TABLES = {
@@ -176,7 +194,10 @@ def _processed_manifest_key_order(dataset) -> tuple:
     if dataset not in _PROCESSED_MANIFEST_DROP_KEYS:
         raise ManifestError(
             f"unknown dataset for processed manifest key order: {dataset!r}")
-    return _PROCESSED_MANIFEST_KEY_PREFIX + _PROCESSED_MANIFEST_DROP_KEYS[dataset]
+    order = _PROCESSED_MANIFEST_KEY_PREFIX
+    if dataset == "enron":
+        order += ("pair_proxy",)
+    return order + _PROCESSED_MANIFEST_DROP_KEYS[dataset]
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +409,283 @@ def build_record_candidates(maildir: Path):
     except ImportError as exc:
         raise ManifestError("Enron preprocessing module is unavailable") from exc
     return _build(maildir)
+
+
+# ---------------------------------------------------------------------------
+# Enron Phase 2 selection, pairing, and preparation
+# ---------------------------------------------------------------------------
+
+def _require_positive_uint64(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ManifestError(f"{label} must be a positive uint64")
+    if value <= 0 or value > (1 << 64) - 1:
+        raise ManifestError(f"{label} must be a positive uint64")
+    return value
+
+
+def _require_positive_int(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ManifestError(f"{label} must be a positive integer")
+    return value
+
+
+def _enron_record_id(relative_path: str) -> str:
+    path_bytes = relative_path.encode("utf-8")
+    return "enron:" + hashlib.sha256(path_bytes).hexdigest()
+
+
+def _candidate_field(record, name: str):
+    try:
+        return getattr(record, name)
+    except AttributeError as exc:
+        candidate = getattr(record, "candidate", None)
+        if candidate is None:
+            raise ManifestError(f"Enron record is missing {name!r}") from exc
+        try:
+            return getattr(candidate, name)
+        except AttributeError as nested_exc:
+            raise ManifestError(f"Enron record is missing {name!r}") from nested_exc
+
+
+def rank_and_select_documents(candidates, seed: int, max_documents: int):
+    """Rank deduplicated Enron candidates and retain the requested prefix.
+
+    The rank digest is exactly
+    ``SHA256(domain || BE64(seed) || relative_path_utf8)``.  Relative-path
+    bytes are the deterministic tie-break after the digest.
+    """
+    seed = _require_positive_uint64(seed, "seed")
+    max_documents = _require_positive_int(max_documents, "max_documents")
+    candidates = list(candidates)
+    if max_documents > len(candidates):
+        raise ManifestError(
+            f"max_documents={max_documents} exceeds eligible documents={len(candidates)}")
+    ranked = []
+    seen_paths = set()
+    seed_bytes = seed.to_bytes(8, "big")
+    for candidate in candidates:
+        relative_path = _candidate_field(candidate, "relative_path")
+        if not isinstance(relative_path, str) or relative_path == "":
+            raise ManifestError("Enron candidate has an invalid relative_path")
+        path_bytes = relative_path.encode("utf-8")
+        if path_bytes in seen_paths:
+            raise ManifestError(f"duplicate Enron relative path: {relative_path!r}")
+        seen_paths.add(path_bytes)
+        rank = hashlib.sha256(
+            _ENRON_DOCUMENT_DOMAIN + seed_bytes + path_bytes).digest()
+        ranked.append((rank, path_bytes, candidate))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [EnronSelectedRecord(
+        record_id=_enron_record_id(_candidate_field(candidate, "relative_path")),
+        candidate=candidate,
+    ) for _, _, candidate in ranked[:max_documents]]
+
+
+def _enron_pair_rank(kind: str, seed: int, record_a: str, record_b: str):
+    domain = {
+        "thread_related": _ENRON_RELATED_DOMAIN,
+        "cross_thread": _ENRON_CROSS_DOMAIN,
+    }.get(kind)
+    if domain is None:
+        raise ManifestError(f"unknown Enron pair kind: {kind!r}")
+    endpoint_a = record_a.encode("utf-8")
+    endpoint_b = record_b.encode("utf-8")
+    payload = (
+        domain + b"\x00" + seed.to_bytes(8, "big")
+        + len(endpoint_a).to_bytes(4, "big") + endpoint_a
+        + len(endpoint_b).to_bytes(4, "big") + endpoint_b
+    )
+    return hashlib.sha256(payload).digest(), endpoint_a, endpoint_b
+
+
+def _enron_pair_id(kind: str, record_a: str, record_b: str) -> str:
+    payload = (kind.encode("utf-8") + b"\x00" + record_a.encode("utf-8")
+               + b"\x00" + record_b.encode("utf-8"))
+    return "enron-pair:" + hashlib.sha256(payload).hexdigest()
+
+
+def build_enron_pairs(records, seed: int, pairs: int, min_related_pairs: int):
+    """Build deterministic proxy-related and cross-thread Enron pairs."""
+    seed = _require_positive_uint64(seed, "seed")
+    pairs = _require_positive_int(pairs, "pairs")
+    min_related_pairs = _require_positive_int(min_related_pairs,
+                                              "min_related_pairs")
+    if min_related_pairs > pairs:
+        raise ManifestError("min_related_pairs must be <= pairs")
+
+    normalized = []
+    seen_ids = set()
+    for record in records:
+        record_id = getattr(record, "record_id", None)
+        if record_id is None:
+            relative_path = _candidate_field(record, "relative_path")
+            record_id = _enron_record_id(relative_path)
+        if not isinstance(record_id, str) or record_id == "":
+            raise ManifestError("Enron record has an invalid record_id")
+        if record_id in seen_ids:
+            raise ManifestError(f"duplicate Enron record id: {record_id!r}")
+        seen_ids.add(record_id)
+        subject = _candidate_field(record, "canonical_subject")
+        if not isinstance(subject, str):
+            raise ManifestError("Enron canonical_subject must be a string")
+        normalized.append((record_id, subject, record))
+
+    related = []
+    cross_thread = []
+    for index, (record_a, subject_a, _) in enumerate(normalized):
+        # Empty canonical subjects are ineligible for either class.
+        if subject_a == "":
+            continue
+        for record_b, subject_b, _ in normalized[index + 1:]:
+            if subject_b == "":
+                continue
+            endpoint_a, endpoint_b = sorted((record_a, record_b))
+            kind = ("thread_related" if subject_a == subject_b
+                    else "cross_thread")
+            rank = _enron_pair_rank(kind, seed, endpoint_a, endpoint_b)
+            item = (rank, endpoint_a, endpoint_b, kind)
+            if kind == "thread_related":
+                related.append(item)
+            else:
+                cross_thread.append(item)
+    related.sort(key=lambda item: item[:3])
+    cross_thread.sort(key=lambda item: item[:3])
+    if len(related) < min_related_pairs:
+        raise ManifestError(
+            f"insufficient related pairs: needed {min_related_pairs}, "
+            f"found {len(related)}")
+    needed_cross = pairs - min_related_pairs
+    if len(cross_thread) < needed_cross:
+        raise ManifestError(
+            f"insufficient cross-thread pairs: needed {needed_cross}, "
+            f"found {len(cross_thread)}")
+
+    selected = related[:min_related_pairs] + cross_thread[:needed_cross]
+    return [PairRow(
+        pair_id=_enron_pair_id(kind, endpoint_a, endpoint_b),
+        record_a=endpoint_a,
+        record_b=endpoint_b,
+        pair_kind=kind,
+        label=-1,
+    ) for _, endpoint_a, endpoint_b, kind in selected]
+
+
+def prepare_enron(source_manifest: Path, output_dir: Path, universe: int,
+                  max_documents: int, pairs: int,
+                  min_related_pairs: int, seed: int, strict: bool):
+    """Prepare one deterministic Enron processed variant atomically."""
+    if universe not in _ENRON_UNIVERSES:
+        raise ManifestError(
+            f"Enron only accepts universe in {sorted(_ENRON_UNIVERSES)}, "
+            f"got {universe!r}")
+    if not strict:
+        raise ManifestError("Enron preparation requires strict validation")
+    seed = _require_positive_uint64(seed, "seed")
+    max_documents = _require_positive_int(max_documents, "max_documents")
+    pairs = _require_positive_int(pairs, "pairs")
+    min_related_pairs = _require_positive_int(min_related_pairs,
+                                              "min_related_pairs")
+    if min_related_pairs > pairs:
+        raise ManifestError("min_related_pairs must be <= pairs")
+
+    inventories = {}
+    manifest = validate_source_manifest(
+        source_manifest, "enron", _inventory_out=inventories)
+    if len(manifest.inputs) != 1:
+        raise ManifestError("enron source manifest must contain one directory input")
+    maildir = manifest.inputs[0].resolved_path
+    candidates, dropped = build_record_candidates(maildir)
+    selected = rank_and_select_documents(candidates, seed, max_documents)
+    pair_rows = build_enron_pairs(selected, seed, pairs, min_related_pairs)
+
+    records = []
+    for record in selected:
+        raw_features = tuple(_candidate_field(record, "raw_features"))
+        bucketed_features = tuple(bucket_features(raw_features, universe))
+        records.append(RecordRow(
+            record_id=record.record_id,
+            raw_features=raw_features,
+            bucketed_features=bucketed_features,
+        ))
+    raw_stats = summarize_set_sizes([len(record.raw_features) for record in records])
+    bucketed_stats = summarize_set_sizes(
+        [len(record.bucketed_features) for record in records])
+    source_bytes = manifest.manifest_path.read_bytes()
+    records_bytes = _canonicalize_records(records)
+    pairs_bytes = _canonicalize_pairs(pair_rows)
+    values = {
+        "schema_version": "piccard-real-processed-v1",
+        "dataset": "enron",
+        "variant": f"enron_u{universe}",
+        "preprocessing_version": "enron-shingle5-v2",
+        "universe_size": str(universe),
+        "seed": str(seed),
+        "source_manifest_file": "source.manifest.tsv",
+        "source_manifest_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "records_file": "records.tsv",
+        "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
+        "record_count": str(len(records)),
+        "pairs_file": "pairs.tsv",
+        "pairs_sha256": hashlib.sha256(pairs_bytes).hexdigest(),
+        "pair_count": str(len(pair_rows)),
+        "raw_set_size_min": str(raw_stats.min),
+        "raw_set_size_median": format_float(raw_stats.median),
+        "raw_set_size_p95": str(raw_stats.p95),
+        "raw_set_size_max": str(raw_stats.max),
+        "bucketed_set_size_min": str(bucketed_stats.min),
+        "bucketed_set_size_median": format_float(bucketed_stats.median),
+        "bucketed_set_size_p95": str(bucketed_stats.p95),
+        "bucketed_set_size_max": str(bucketed_stats.max),
+        "original_positive_count": "0",
+        "retained_positive_count": "0",
+        "requested_pair_count": str(pairs),
+        "max_documents": str(max_documents),
+        "min_related_pairs": str(min_related_pairs),
+        "pair_proxy": _ENRON_PAIR_PROXY,
+    }
+    for key in _PROCESSED_MANIFEST_DROP_KEYS["enron"]:
+        values[key] = str(dropped.get(key, 0))
+    manifest_pairs = [
+        (key, values[key]) for key in _processed_manifest_key_order("enron")]
+    write_processed_output(
+        output_dir, records, pair_rows, manifest_pairs, manifest.manifest_path,
+        overwrite=False)
+
+
+def _positive_int_arg(value: str) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _positive_uint64_arg(value: str) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive uint64") from exc
+    if parsed <= 0 or parsed > (1 << 64) - 1:
+        raise argparse.ArgumentTypeError("must be a positive uint64")
+    return parsed
+
+
+def cmd_enron(args) -> int:
+    """Run the strict Enron preparation subcommand from an argparse namespace."""
+    try:
+        if args.min_related_pairs > args.pairs:
+            raise ManifestError("min_related_pairs must be <= pairs")
+        prepare_enron(
+            Path(args.source_manifest), Path(args.output_dir), args.universe,
+            args.max_documents, args.pairs, args.min_related_pairs, args.seed,
+            args.strict,
+        )
+    except (ManifestError, OSError) as exc:
+        sys.stderr.write(f"enron: {exc}\n")
+        return 1
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1160,8 +1458,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     dblp_acm.add_argument("--seed", required=True, type=int)
     dblp_acm.add_argument("--strict", action="store_true")
 
-    enron = subparsers.add_parser("enron", add_help=False)
-    enron.add_argument("extra", nargs=argparse.REMAINDER)
+    enron = subparsers.add_parser("enron")
+    enron.add_argument("--source-manifest", required=True)
+    enron.add_argument("--output-dir", required=True)
+    enron.add_argument("--universe", required=True, type=int,
+                       choices=sorted(_ENRON_UNIVERSES))
+    enron.add_argument("--max-documents", required=True, type=_positive_int_arg)
+    enron.add_argument("--pairs", required=True, type=_positive_int_arg)
+    enron.add_argument("--min-related-pairs", required=True,
+                       type=_positive_int_arg)
+    enron.add_argument("--seed", required=True, type=_positive_uint64_arg)
+    enron.add_argument("--strict", action="store_true", required=True)
 
     validate_source = subparsers.add_parser("validate-source")
     validate_source.add_argument("--dataset", required=True)
@@ -1213,6 +1520,10 @@ def main(argv=None) -> int:
             sys.stderr.write(f"validate-source: {exc}\n")
             return 1
         return 0
+    if args.command == "enron":
+        if args.min_related_pairs > args.pairs:
+            parser.error("--min-related-pairs must be <= --pairs")
+        return cmd_enron(args)
     sys.stderr.write(f"{args.command}: not implemented\n")
     return 2
 
