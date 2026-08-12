@@ -303,7 +303,7 @@ const std::map<std::string, std::vector<std::string>>& DropKeysByDataset() {
     static const std::map<std::string, std::vector<std::string>> kTable = {
         {"dblp_acm", {"dropped.empty_features_dblp", "dropped.empty_features_acm"}},
         {"enron", {"dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
-                   "dropped.duplicate_message_id"}},
+                   "dropped.duplicate_copy", "dropped.duplicate_message_id"}},
     };
     return kTable;
 }
@@ -354,7 +354,8 @@ RealDataset LoadRealDataset(const std::filesystem::path& manifest_path) {
     }
 
     std::set<std::string> expected_keys(ProcessedManifestKeyPrefix().begin(),
-                                         ProcessedManifestKeyPrefix().end());
+                                        ProcessedManifestKeyPrefix().end());
+    if (dataset == "enron") expected_keys.insert("pair_proxy");
     for (const auto& key : drop_keys_it->second) expected_keys.insert(key);
     std::set<std::string> actual_keys;
     for (const auto& entry : values) actual_keys.insert(entry.first);
@@ -380,6 +381,32 @@ RealDataset LoadRealDataset(const std::filesystem::path& manifest_path) {
         Fail("universe_size must be positive");
     }
     ds.seed = ParseUint64Strict(require("seed"), "seed");
+
+    if (dataset == "dblp_acm") {
+        if (ds.variant != "dblp_acm_u65536") {
+            Fail("unsupported variant for dataset 'dblp_acm': '" + ds.variant + "'");
+        }
+        if (ds.preprocessing_version != "dblp-acm-trigram-v1") {
+            Fail("unsupported preprocessing_version for dataset 'dblp_acm': '" +
+                 ds.preprocessing_version + "'");
+        }
+    } else if (dataset == "enron") {
+        const bool valid_variant = ds.variant == "enron_u65536" ||
+                                   ds.variant == "enron_u1048576";
+        if (!valid_variant) {
+            Fail("unsupported variant for dataset 'enron': '" + ds.variant + "'");
+        }
+        const uint64_t expected_universe = ds.variant == "enron_u65536"
+                                               ? 65536u
+                                               : 1048576u;
+        if (ds.universe_size != expected_universe) {
+            Fail("universe_size does not match Enron variant '" + ds.variant + "'");
+        }
+        if (ds.preprocessing_version != "enron-shingle5-v2") {
+            Fail("unsupported preprocessing_version for dataset 'enron': '" +
+                 ds.preprocessing_version + "'");
+        }
+    }
 
     ds.source_manifest_file = require("source_manifest_file");
     ds.source_manifest_sha256 = require("source_manifest_sha256");
@@ -423,6 +450,16 @@ RealDataset LoadRealDataset(const std::filesystem::path& manifest_path) {
     ds.requested_pair_count =
         ParseUint64Strict(require("requested_pair_count"), "requested_pair_count");
 
+    if (dataset == "enron") {
+        ds.pair_proxy = require("pair_proxy");
+        if (ds.pair_proxy != "canonical-subject-proxy-not-thread-ground-truth-v1") {
+            Fail("unsupported pair_proxy for dataset 'enron': '" + ds.pair_proxy + "'");
+        }
+        if (ds.original_positive_count != 0 || ds.retained_positive_count != 0) {
+            Fail("Enron positive_count fields must both be zero");
+        }
+    }
+
     const std::string& max_documents_str = require("max_documents");
     const std::string& min_related_pairs_str = require("min_related_pairs");
     if (dataset == "dblp_acm") {
@@ -441,6 +478,9 @@ RealDataset LoadRealDataset(const std::filesystem::path& manifest_path) {
         }
         ds.max_documents = ParseUint64Strict(max_documents_str, "max_documents");
         ds.min_related_pairs = ParseUint64Strict(min_related_pairs_str, "min_related_pairs");
+        if (*ds.max_documents == 0 || *ds.min_related_pairs == 0) {
+            Fail("Enron max_documents and min_related_pairs must be positive");
+        }
     }
 
     for (const auto& drop_key : drop_keys_it->second) {

@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -145,6 +146,74 @@ fs::path CopyFixture(const std::string& stem) {
     return dest;
 }
 
+fs::path MakeEnronFixture(const std::string& stem, uint64_t universe,
+                          const std::string& variant) {
+    fs::path dir = MakeTempDir(stem);
+
+    const std::string source_bytes = "key\tvalue\nfixture\tenron\n";
+    const std::string records_bytes =
+        "record_id\traw_feature_count\traw_features_csv\t"
+        "bucketed_feature_count\tbucketed_features_csv\n"
+        "enron:a\t2\t1,3\t2\t1,3\n"
+        "enron:b\t1\t2\t1\t2\n";
+    const std::string pairs_bytes =
+        "pair_id\trecord_a\trecord_b\tpair_kind\tlabel\n"
+        "enron-pair:a\tenron:a\tenron:b\tthread_related\t-1\n"
+        "enron-pair:b\tenron:b\tenron:a\tcross_thread\t-1\n";
+    WriteFile(dir / "source.manifest.tsv", source_bytes);
+    WriteFile(dir / "records.tsv", records_bytes);
+    WriteFile(dir / "pairs.tsv", pairs_bytes);
+
+    std::ostringstream manifest;
+    manifest << "key\tvalue\n"
+             << "schema_version\tpiccard-real-processed-v1\n"
+             << "dataset\tenron\n"
+             << "variant\t" << variant << "\n"
+             << "preprocessing_version\tenron-shingle5-v2\n"
+             << "universe_size\t" << universe << "\n"
+             << "seed\t20260729\n"
+             << "source_manifest_file\tsource.manifest.tsv\n"
+             << "source_manifest_sha256\t" << Sha256Hex(source_bytes) << "\n"
+             << "records_file\trecords.tsv\n"
+             << "records_sha256\t" << Sha256Hex(records_bytes) << "\n"
+             << "record_count\t2\n"
+             << "pairs_file\tpairs.tsv\n"
+             << "pairs_sha256\t" << Sha256Hex(pairs_bytes) << "\n"
+             << "pair_count\t2\n"
+             << "raw_set_size_min\t1\n"
+             << "raw_set_size_median\t1.5\n"
+             << "raw_set_size_p95\t2\n"
+             << "raw_set_size_max\t2\n"
+             << "bucketed_set_size_min\t1\n"
+             << "bucketed_set_size_median\t1.5\n"
+             << "bucketed_set_size_p95\t2\n"
+             << "bucketed_set_size_max\t2\n"
+             << "original_positive_count\t0\n"
+             << "retained_positive_count\t0\n"
+             << "requested_pair_count\t2\n"
+             << "max_documents\t2\n"
+             << "min_related_pairs\t1\n"
+             << "pair_proxy\tcanonical-subject-proxy-not-thread-ground-truth-v1\n"
+             << "dropped.charset_or_mime\t1\n"
+             << "dropped.empty_body\t2\n"
+             << "dropped.short_body\t3\n"
+             << "dropped.duplicate_copy\t4\n"
+             << "dropped.duplicate_message_id\t5\n";
+    WriteFile(dir / "dataset.manifest.tsv", manifest.str());
+    return dir;
+}
+
+void ExpectLoadErrorContaining(const fs::path& manifest_path,
+                               const std::string& expected_text) {
+    try {
+        (void)LoadRealDataset(manifest_path);
+        FAIL() << "expected LoadRealDataset to reject " << manifest_path;
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find(expected_text), std::string::npos)
+            << "unexpected error: " << error.what();
+    }
+}
+
 // Mutates a single tab-separated data row (1-based, header is row 0) of a
 // records.tsv/pairs.tsv-style file at `path` using `mutator`, then rewrites
 // the file. Returns the original line count (including header) for callers
@@ -249,6 +318,113 @@ TEST(RealDataset, NeverWritesOrPollutesFixtureTree) {
     LoadRealDataset(FixtureDir() / "dataset.manifest.tsv");
     std::string after = ReadFile(FixtureDir() / "dataset.manifest.tsv");
     EXPECT_EQ(before, after);
+}
+
+TEST(RealDataset, LoadsBothEnronVariantsWithProxyAndDropCounters) {
+    for (const auto& [universe, variant] :
+         std::vector<std::pair<uint64_t, std::string>>{
+             {65536u, "enron_u65536"}, {1048576u, "enron_u1048576"}}) {
+        fs::path dir = MakeEnronFixture("enron-valid", universe, variant);
+        RealDataset ds = LoadRealDataset(dir / "dataset.manifest.tsv");
+
+        EXPECT_EQ(ds.dataset, "enron");
+        EXPECT_EQ(ds.variant, variant);
+        EXPECT_EQ(ds.preprocessing_version, "enron-shingle5-v2");
+        EXPECT_EQ(ds.universe_size, universe);
+        EXPECT_EQ(ds.original_positive_count, 0u);
+        EXPECT_EQ(ds.retained_positive_count, 0u);
+        EXPECT_EQ(ds.pair_proxy,
+                  "canonical-subject-proxy-not-thread-ground-truth-v1");
+        ASSERT_EQ(ds.dropped_counts.size(), 5u);
+        EXPECT_EQ(ds.dropped_counts.at("dropped.charset_or_mime"), 1u);
+        EXPECT_EQ(ds.dropped_counts.at("dropped.empty_body"), 2u);
+        EXPECT_EQ(ds.dropped_counts.at("dropped.short_body"), 3u);
+        EXPECT_EQ(ds.dropped_counts.at("dropped.duplicate_copy"), 4u);
+        EXPECT_EQ(ds.dropped_counts.at("dropped.duplicate_message_id"), 5u);
+        ASSERT_EQ(ds.pairs.size(), 2u);
+        EXPECT_EQ(ds.pairs[0].kind, "thread_related");
+        EXPECT_EQ(ds.pairs[0].label, -1);
+        EXPECT_EQ(ds.pairs[1].kind, "cross_thread");
+        EXPECT_EQ(ds.pairs[1].label, -1);
+
+        fs::remove_all(dir);
+    }
+}
+
+TEST(RealDataset, RejectsEnronWrongVariant) {
+    fs::path dir = MakeEnronFixture("enron-wrong-variant", 65536,
+                                    "enron_u32768");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "variant");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronWrongPreprocessingProfile) {
+    fs::path dir = MakeEnronFixture("enron-wrong-profile", 65536,
+                                    "enron_u65536");
+    SetManifestValue(dir / "dataset.manifest.tsv", "preprocessing_version",
+                     "enron-shingle5-v1");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv",
+                              "preprocessing_version");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronBinaryLabels) {
+    fs::path dir = MakeEnronFixture("enron-binary-label", 65536,
+                                    "enron_u65536");
+    MutateDataLine(dir / "pairs.tsv", 0, [](const std::string& line) {
+        return line.substr(0, line.rfind('\t') + 1) + "0";
+    });
+    RecomputeChecksum(dir, "pairs.tsv", "pairs_sha256");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "label");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronWrongPairKind) {
+    fs::path dir = MakeEnronFixture("enron-wrong-kind", 65536,
+                                    "enron_u65536");
+    MutateDataLine(dir / "pairs.tsv", 0, [](const std::string& line) {
+        const auto last_tab = line.rfind('\t');
+        const auto second_last_tab = line.rfind('\t', last_tab - 1);
+        return line.substr(0, second_last_tab + 1) + "known_match" +
+               line.substr(last_tab);
+    });
+    RecomputeChecksum(dir, "pairs.tsv", "pairs_sha256");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "pair_kind");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronMissingPairProxy) {
+    fs::path dir = MakeEnronFixture("enron-missing-proxy", 65536,
+                                    "enron_u65536");
+    auto lines = SplitLinesKeepTrailingNewline(ReadFile(dir / "dataset.manifest.tsv"));
+    lines.erase(std::remove_if(lines.begin(), lines.end(), [](const std::string& line) {
+                   return line.rfind("pair_proxy\t", 0) == 0;
+               }), lines.end());
+    WriteFile(dir / "dataset.manifest.tsv", JoinLinesWithTrailingNewline(lines));
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "pair_proxy");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronNonzeroPositiveCount) {
+    fs::path dir = MakeEnronFixture("enron-positive-count", 65536,
+                                    "enron_u65536");
+    SetManifestValue(dir / "dataset.manifest.tsv", "original_positive_count", "1");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "positive_count");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronUnknownPairEndpoint) {
+    fs::path dir = MakeEnronFixture("enron-unknown-endpoint", 65536,
+                                    "enron_u65536");
+    MutateDataLine(dir / "pairs.tsv", 0, [](const std::string& line) {
+        const auto first_tab = line.find('\t');
+        const auto second_tab = line.find('\t', first_tab + 1);
+        return line.substr(0, first_tab + 1) + "enron:missing" +
+               line.substr(second_tab);
+    });
+    RecomputeChecksum(dir, "pairs.tsv", "pairs_sha256");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "endpoint");
+    fs::remove_all(dir);
 }
 
 // ---------------------------------------------------------------------------

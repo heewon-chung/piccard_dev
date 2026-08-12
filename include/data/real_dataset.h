@@ -57,6 +57,9 @@ struct RealDataset {
     uint64_t requested_pair_count = 0;
     std::optional<uint64_t> max_documents;      // empty/N-A for dblp_acm
     std::optional<uint64_t> min_related_pairs;  // empty/N-A for dblp_acm
+    // Enron's pair labels are a deterministic canonical-subject proxy, not
+    // thread ground truth. DBLP-ACM leaves this field empty.
+    std::string pair_proxy;
 
     // Keyed by the exact "dropped.<reason>" manifest key for the dataset.
     std::map<std::string, uint64_t> dropped_counts;

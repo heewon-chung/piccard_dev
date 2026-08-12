@@ -185,6 +185,8 @@ _PROCESSED_MANIFEST_KEY_PREFIX = (
 )
 _PROCESSED_MANIFEST_DROP_KEYS = {
     "dblp_acm": ("dropped.empty_features_dblp", "dropped.empty_features_acm"),
+    "enron": ("dropped.charset_or_mime", "dropped.empty_body", "dropped.short_body",
+              "dropped.duplicate_copy", "dropped.duplicate_message_id"),
 }
 
 
@@ -192,11 +194,15 @@ def _processed_manifest_key_order(dataset: str) -> tuple:
     if dataset not in _PROCESSED_MANIFEST_DROP_KEYS:
         raise VerificationError(
             f"unknown dataset for processed manifest key order: {dataset!r}")
-    return _PROCESSED_MANIFEST_KEY_PREFIX + _PROCESSED_MANIFEST_DROP_KEYS[dataset]
+    pair_proxy = ("pair_proxy",) if dataset == "enron" else ()
+    return (_PROCESSED_MANIFEST_KEY_PREFIX + pair_proxy +
+            _PROCESSED_MANIFEST_DROP_KEYS[dataset])
 
 
-# rev. 4 descope: DBLP-ACM only. Any other variant token is unknown.
+# Quick evidence remains the single tracked DBLP-ACM fixture. Paper evidence
+# admits the frozen DBLP-ACM and two Enron variants below.
 QUICK_VARIANT = "dblp_acm_u65536"
+PAPER_VARIANTS = {"dblp_acm_u65536", "enron_u65536", "enron_u1048576"}
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
 QUICK_TIMING_PROFILE = "toy-smoke"
 SINGLE_TRIAL_PROFILES = (
@@ -600,13 +606,14 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
         expected_variants = set(by_variant)
         expected_by_variant = {}
         for variant in by_variant:
-            if variant != QUICK_VARIANT:
-                fail(f"unknown variant for paper-mode evidence (rev. 4 "
-                     f"descope: DBLP-ACM only): {variant!r}")
+            if variant not in PAPER_VARIANTS:
+                fail(f"unknown variant for paper-mode evidence: {variant!r}")
+            timing_profiles = (PAPER_PROFILES if variant == QUICK_VARIANT else
+                               ("std128-t40-primary",))
             expected_by_variant[variant] = {
                 f"{variant}:accuracy",
                 f"{variant}:accuracy-summary",
-                *(f"{variant}:timing:{profile}" for profile in PAPER_PROFILES),
+                *(f"{variant}:timing:{profile}" for profile in timing_profiles),
             }
 
     if set(by_variant) != expected_variants:
@@ -753,6 +760,9 @@ def _load_bound_processed_dataset(processed_dir: Path, processed_values: dict) -
     therefore validates both committed processed files before any row truth is
     recomputed from their raw/bucketed feature vectors.
     """
+    dataset = processed_values.get("dataset")
+    if dataset not in {"dblp_acm", "enron"}:
+        fail(f"unsupported processed dataset: {dataset!r}")
     records_path = _resolve_under(processed_dir, processed_values["records_file"],
                                   "processed records_file")
     pairs_path = _resolve_under(processed_dir, processed_values["pairs_file"],
@@ -790,6 +800,10 @@ def _load_bound_processed_dataset(processed_dir: Path, processed_values: dict) -
             "bucketed": _strict_feature_vector(bucketed_csv, bucketed_size,
                                                 "processed bucketed_features_csv"),
         }
+        universe = int(processed_values["universe_size"])
+        if any(value >= universe for value in records[record_id]["bucketed"]):
+            fail(f"processed records.tsv record {record_id!r} has a bucketed "
+                 "feature outside universe_size")
     if len(records) != _strict_nonnegative_int(processed_values["record_count"],
                                                 "processed record_count"):
         fail("processed records.tsv count does not match dataset.manifest.tsv")
@@ -809,21 +823,30 @@ def _load_bound_processed_dataset(processed_dir: Path, processed_values: dict) -
             fail(f"processed pairs.tsv pair {pair_id!r} references an unknown record")
         if record_a == record_b:
             fail(f"processed pairs.tsv pair {pair_id!r} has identical endpoints")
-        if label_raw not in ("0", "1"):
-            fail(f"processed pairs.tsv pair {pair_id!r} label is not binary")
+        if dataset == "enron":
+            if label_raw != "-1":
+                fail(f"processed pairs.tsv pair {pair_id!r} Enron label must be -1")
+            expected_label = {"thread_related": -1, "cross_thread": -1}.get(pair_kind)
+        else:
+            if label_raw not in ("0", "1"):
+                fail(f"processed pairs.tsv pair {pair_id!r} label is not binary")
+            expected_label = {"known_match": 1, "sampled_nonmatch": 0}.get(pair_kind)
         label = int(label_raw)
-        expected_label = {"known_match": 1, "sampled_nonmatch": 0}.get(pair_kind)
         if expected_label is None or label != expected_label:
             fail(f"processed pairs.tsv pair {pair_id!r} pair_kind/label mismatch")
-        positive_count += label
+        if label > 0:
+            positive_count += label
         pairs.append({"pair_id": pair_id, "record_a": record_a,
                       "record_b": record_b, "pair_kind": pair_kind,
                       "label": label})
     if len(pairs) != _strict_nonnegative_int(processed_values["pair_count"],
                                               "processed pair_count"):
         fail("processed pairs.tsv count does not match dataset.manifest.tsv")
-    if positive_count != _strict_nonnegative_int(processed_values["retained_positive_count"],
-                                                  "processed retained_positive_count"):
+    expected_positive_count = (0 if dataset == "enron" else
+                                _strict_nonnegative_int(
+                                    processed_values["retained_positive_count"],
+                                    "processed retained_positive_count"))
+    if positive_count != expected_positive_count:
         fail("processed pairs.tsv positive count does not match dataset.manifest.tsv")
     return {"records": records, "pairs": pairs}
 
@@ -1167,9 +1190,11 @@ def _validate_timing_workload(cell: dict, variant: str, profile: str,
     # Codex stop-gate round 6: the timing pair is not a free choice -- it
     # must be the median-combined-bucketed-size pair recomputed from the
     # anchored records/pairs files, and every CSV row must carry it.
+    processed_manifest_path = next(
+        i for i in cell["inputs"] if i["role"] == "processed-manifest")["resolved"]
+    processed_manifest_values = dict(parse_two_column_tsv(processed_manifest_path))
     processed_values = _validate_processed_manifest(
-        next(i for i in cell["inputs"]
-             if i["role"] == "processed-manifest")["resolved"], "dblp_acm")
+        processed_manifest_path, processed_manifest_values["dataset"])
     processed_dir = _cell_processed_dir(cell)
     expected_pair = _median_pair_id(processed_dir, processed_values)
     if wl["pair_id"] != expected_pair:
@@ -1252,9 +1277,11 @@ def _validate_encoding_workload(cell: dict, variant: str, profile: str,
     if wl["hash_seed"] != str(derived):
         fail(f"cell {cell_id!r} encoding hash seed does not recompute")
 
+    processed_manifest_path = next(
+        i for i in cell["inputs"] if i["role"] == "processed-manifest")["resolved"]
+    processed_manifest_values = dict(parse_two_column_tsv(processed_manifest_path))
     processed_values = _validate_processed_manifest(
-        next(i for i in cell["inputs"]
-             if i["role"] == "processed-manifest")["resolved"], "dblp_acm")
+        processed_manifest_path, processed_manifest_values["dataset"])
     expected_pair = _median_pair_id(_cell_processed_dir(cell), processed_values)
     records = {pair_id: (record_a, record_b) for pair_id, record_a, record_b in
                _read_processed_pairs(_cell_processed_dir(cell), processed_values)}
@@ -1339,6 +1366,29 @@ def _validate_processed_manifest(manifest_path: Path, dataset: str) -> dict:
              f"the exact piccard-real-processed-v1 order for dataset "
              f"{dataset!r}: expected {expected_order!r}, got {actual_order!r}")
     values = dict(pairs)
+    if values.get("dataset") != dataset:
+        fail(f"processed manifest {manifest_path}: dataset does not match "
+             f"the bound dataset {dataset!r}")
+    if dataset == "dblp_acm":
+        if values.get("variant") != "dblp_acm_u65536":
+            fail(f"processed manifest {manifest_path}: unsupported DBLP variant")
+        if values.get("preprocessing_version") != "dblp-acm-trigram-v1":
+            fail(f"processed manifest {manifest_path}: unsupported DBLP preprocessing profile")
+    elif dataset == "enron":
+        variant = values.get("variant")
+        expected_universe = {"enron_u65536": "65536",
+                             "enron_u1048576": "1048576"}.get(variant)
+        if expected_universe is None:
+            fail(f"processed manifest {manifest_path}: unsupported Enron variant")
+        if values.get("universe_size") != expected_universe:
+            fail(f"processed manifest {manifest_path}: universe_size does not "
+                 "match the Enron variant")
+        if values.get("preprocessing_version") != "enron-shingle5-v2":
+            fail(f"processed manifest {manifest_path}: unsupported Enron preprocessing profile")
+        if values.get("pair_proxy") != "canonical-subject-proxy-not-thread-ground-truth-v1":
+            fail(f"processed manifest {manifest_path}: unsupported Enron pair_proxy")
+        if values.get("original_positive_count") != "0" or values.get("retained_positive_count") != "0":
+            fail(f"processed manifest {manifest_path}: Enron positive_count fields must be zero")
     original = values.get("original_positive_count")
     retained = values.get("retained_positive_count")
     if original != retained:
@@ -1499,8 +1549,10 @@ def verify(results_root: Path) -> str:
         processed_input = next(
             (i for i in cell["inputs"] if i["role"] == "processed-manifest"), None)
         if processed_input is not None and variant not in processed_manifest_cache:
+            manifest_values = dict(parse_two_column_tsv(processed_input["resolved"]))
+            dataset = manifest_values.get("dataset")
             processed_manifest_cache[variant] = _validate_processed_manifest(
-                processed_input["resolved"], "dblp_acm")
+                processed_input["resolved"], dataset)
             processed_dataset_cache[variant] = _load_bound_processed_dataset(
                 processed_input["resolved"].parent,
                 processed_manifest_cache[variant])
@@ -1548,9 +1600,13 @@ def verify(results_root: Path) -> str:
             source_root_id = f"source-root-{variant}"
             if source_root_id not in roots:
                 fail(f"no {source_root_id!r} root recorded for variant {variant!r}")
-            original_source_path = roots[source_root_id] / (
-                "dblp_acm.source.tsv" if evidence_mode == "single-trial-validation"
-                else "source.manifest.tsv")
+            source_manifest_root_id = f"source-manifest-{variant}"
+            if source_manifest_root_id in roots:
+                original_source_path = roots[source_manifest_root_id]
+            else:
+                original_source_path = roots[source_root_id] / (
+                    "dblp_acm.source.tsv" if evidence_mode == "single-trial-validation"
+                    else "source.manifest.tsv")
             if not original_source_path.is_file():
                 fail(f"original source manifest is missing for re-validation: "
                      f"{original_source_path}")
@@ -1561,7 +1617,8 @@ def verify(results_root: Path) -> str:
                 fail(f"copied source manifest for variant {variant!r} does not "
                      "byte-match the original at its source-root")
             try:
-                validate_source_manifest(original_source_path, "dblp_acm")
+                validate_source_manifest(original_source_path,
+                                         processed_values["dataset"])
             except ManifestError as exc:
                 fail(f"source manifest re-validation failed for variant "
                      f"{variant!r}: {exc}")

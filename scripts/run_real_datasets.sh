@@ -222,7 +222,7 @@ def _reject_legacy_processed_path(path: pathlib.Path, label: str) -> None:
 
 
 def load_manifest_pair(source_manifest: pathlib.Path,
-                        dataset_manifest: pathlib.Path) -> ManifestPair:
+                       dataset_manifest: pathlib.Path) -> ManifestPair:
     if not source_manifest.is_absolute() or not dataset_manifest.is_absolute():
         fail("--source-manifest and --dataset-manifest must be absolute paths")
     source_manifest = source_manifest.resolve(strict=True)
@@ -236,6 +236,17 @@ def load_manifest_pair(source_manifest: pathlib.Path,
     variant = values.get("variant")
     if not dataset or not variant:
         fail(f"dataset manifest {dataset_manifest} is missing 'dataset'/'variant'")
+    declared_source_sha = values.get("source_manifest_sha256")
+    if not declared_source_sha:
+        fail(f"dataset manifest {dataset_manifest} is missing 'source_manifest_sha256'")
+    actual_source_sha = sha256_file(source_manifest)
+    if actual_source_sha != declared_source_sha:
+        fail("caller-supplied source manifest does not match the processed "
+             "dataset manifest source_manifest_sha256")
+    try:
+        validate_source_manifest(source_manifest, dataset)
+    except ManifestError as error:
+        fail(f"caller-supplied source manifest validation failed: {error}")
     return ManifestPair(source_manifest=source_manifest,
                         dataset_manifest=dataset_manifest,
                         dataset=dataset, variant=variant)
@@ -437,7 +448,13 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
                     pair, results_root, processed_root_id, processed_root,
                     "work5-std192-t40-single-trial", method, seed, threads))
         else:
-            for profile in profiles:
+            # Work 5's DBLP paper profiles remain byte-compatible. Enron's
+            # new-paper STD192 encoding pair is Phase-6 work, so Phase 3
+            # exposes only the executable STD128 timing cell; no Enron
+            # STD192 producer is launched or represented as measured here.
+            paper_profiles = (profiles if pair.dataset == "dblp_acm" else
+                              ("std128-t40-primary",))
+            for profile in paper_profiles:
                 cells.append(timing_cell(
                     pair, results_root, processed_root_id, processed_root,
                     profile, seed, threads, PAPER_TIMING_TRIALS))
@@ -448,7 +465,8 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
 # Metadata assembly
 # ---------------------------------------------------------------------------
 
-def build_roots_section(results_root, build_dir, pairs, roots_by_variant) -> list:
+def build_roots_section(results_root, build_dir, pairs, roots_by_variant,
+                        evidence_mode) -> list:
     pairs_out = [
         ("results-root", str(results_root)),
         ("build-dir", str(build_dir)),
@@ -459,6 +477,12 @@ def build_roots_section(results_root, build_dir, pairs, roots_by_variant) -> lis
                           str(roots_by_variant[pair.variant]["source"])))
         pairs_out.append((f"processed-dataset-{pair.variant}",
                           str(roots_by_variant[pair.variant]["processed"])))
+        if evidence_mode == "paper":
+            # Preserve the exact caller-supplied source-manifest path.  The
+            # source-root directory remains useful for topology checks, but
+            # its basename is not a provenance contract.
+            pairs_out.append((f"source-manifest-{pair.variant}",
+                              str(pair.source_manifest)))
     root_ids = [item[0] for item in pairs_out]
     out = [("root_count", str(len(pairs_out)))]
     for index, (root_id, path) in enumerate(pairs_out):
@@ -661,8 +685,8 @@ def execute(args, project: pathlib.Path) -> int:
     cells = build_cells(args.pairs, results_root, roots_by_variant,
                         args.evidence_mode, args.seed, args.threads, args.profiles)
 
-    root_pairs, root_ids = build_roots_section(results_root, build_dir, args.pairs,
-                                               roots_by_variant)
+    root_pairs, root_ids = build_roots_section(
+        results_root, build_dir, args.pairs, roots_by_variant, args.evidence_mode)
 
     existing_completed = {}
     if args.resume:
@@ -941,6 +965,9 @@ def parse_args(argv):
             pair = load_manifest_pair(pathlib.Path(source_raw), pathlib.Path(dataset_raw))
             if pair.variant in seen:
                 parser.error(f"duplicate variant across manifest pairs: {pair.variant!r}")
+            if pair.variant not in {"dblp_acm_u65536", "enron_u65536",
+                                    "enron_u1048576"}:
+                parser.error(f"unsupported paper real-data variant: {pair.variant!r}")
             seen.add(pair.variant)
             pairs.append(pair)
         args.pairs = pairs

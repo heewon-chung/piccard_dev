@@ -41,6 +41,7 @@ QUICK_VARIANT = "dblp_acm_u65536"
 QUICK_FIXTURE_DIR = ROOT / "tests" / "fixtures" / "real_datasets" / "quick" / QUICK_VARIANT
 QUICK_SOURCE_MANIFEST = QUICK_FIXTURE_DIR / "source.manifest.tsv"
 QUICK_DATASET_MANIFEST = QUICK_FIXTURE_DIR / "dataset.manifest.tsv"
+ENRON_FIXTURE_DIR = ROOT / "tests" / "fixtures" / "real_datasets" / "enron_maildir"
 
 _PREFIX_HEADER = (
     "profile_id,run_class,target_security_bits,cryptographic_profile,"
@@ -535,6 +536,86 @@ def read_kv_file(path: pathlib.Path) -> dict:
     return values
 
 
+def prepare_enron_fixture(output_dir: pathlib.Path, *, universe: int = 65536) -> pathlib.Path:
+    """Create the smallest approved Enron processed fixture in a temp root."""
+    result = subprocess.run([
+        sys.executable, str(ROOT / "scripts" / "prepare_real_datasets.py"),
+        "enron", "--source-manifest", str(ENRON_FIXTURE_DIR / "source.manifest.tsv"),
+        "--output-dir", str(output_dir), "--universe", str(universe),
+        "--max-documents", "6", "--pairs", "4", "--min-related-pairs", "2",
+        "--seed", "20260729", "--strict",
+    ], text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return output_dir / "dataset.manifest.tsv"
+
+
+class Phase3RealDataContractTest(unittest.TestCase):
+    """RED coverage for Phase 3 Enron identity and provenance boundaries."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tmp = pathlib.Path(self.temp.name)
+        self.processed_manifest = prepare_enron_fixture(self.tmp / "enron_u65536")
+        saved_argv = sys.argv[:]
+        try:
+            self.runner = load_runner_module()
+        finally:
+            sys.argv[:] = saved_argv
+        self.verifier = load_verifier_module()
+
+    def test_runner_rejects_caller_source_manifest_not_bound_to_processed_manifest(self):
+        caller_source = self.tmp / "caller.enron.source.tsv"
+        source_bytes = (ENRON_FIXTURE_DIR / "source.manifest.tsv").read_text(
+            encoding="utf-8")
+        caller_source.write_text(
+            source_bytes.replace("acquisition_note\t", "acquisition_note\tchanged-"),
+            encoding="utf-8")
+        with self.assertRaises(self.runner.RunnerError):
+            self.runner.load_manifest_pair(caller_source, self.processed_manifest)
+
+    def test_verifier_accepts_enron_manifest_and_negative_labels(self):
+        values = self.verifier._validate_processed_manifest(
+            self.processed_manifest, "enron")
+        loaded = self.verifier._load_bound_processed_dataset(
+            self.processed_manifest.parent.resolve(), values)
+        self.assertEqual(values["variant"], "enron_u65536")
+        self.assertEqual(values["preprocessing_version"], "enron-shingle5-v2")
+        self.assertEqual(values["pair_proxy"],
+                         "canonical-subject-proxy-not-thread-ground-truth-v1")
+        self.assertEqual(len(values), 33)
+        self.assertEqual({pair["label"] for pair in loaded["pairs"]}, {-1})
+        self.assertEqual({pair["pair_kind"] for pair in loaded["pairs"]},
+                         {"thread_related", "cross_thread"})
+
+    def test_paper_dry_run_accepts_all_frozen_real_variants_without_enron_std192(self):
+        enron_large = prepare_enron_fixture(
+            self.tmp / "enron_u1048576", universe=1048576)
+        source = ENRON_FIXTURE_DIR / "source.manifest.tsv"
+        result = run_runner(
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            f"--source-manifest={source}",
+            f"--dataset-manifest={self.processed_manifest}",
+            f"--source-manifest={source}",
+            f"--dataset-manifest={enron_large}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'missing-build'}",
+            f"--results-root={self.tmp / 'paper-results'}", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_lines = [line for line in result.stdout.splitlines()
+                     if line.startswith("RUN ")]
+        self.assertEqual(len(run_lines), 10)
+        for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
+            self.assertTrue(any(variant in line for line in run_lines))
+        self.assertFalse(any("enron_" in line and
+                             "--profile=std192-t40-primary" in line
+                             for line in run_lines))
+
+
+
 def make_clean_scratch_repo(base_dir: pathlib.Path) -> pathlib.Path:
     """Builds a self-contained git repo (git init + one commit) holding only
     the files run_real_datasets.sh needs to execute: itself,
@@ -781,10 +862,14 @@ class SingleTrialValidationCliTest(unittest.TestCase):
         self.assertIn("requires exactly", wrong_source.stderr)
         legacy_manifest = (ROOT / "datasets" / "data" / "processed" /
                            "dblp_acm_u65536" / "dataset.manifest.tsv")
-        self.assertTrue(legacy_manifest.is_file(), "quarantined prior run must remain available for rejection")
-        legacy = self.invoke(self.source, legacy_manifest, "--dry-run")
-        self.assertNotEqual(legacy.returncode, 0)
-        self.assertIn("quarantined prior processed", legacy.stderr)
+        # The historical processed directory is an ignored main-worktree
+        # artifact and is intentionally absent from isolated source trees.
+        # When present, retain the explicit quarantine regression; the source
+        # path/count gate above remains hermetic in either topology.
+        if legacy_manifest.is_file():
+            legacy = self.invoke(self.source, legacy_manifest, "--dry-run")
+            self.assertNotEqual(legacy.returncode, 0)
+            self.assertIn("quarantined prior processed", legacy.stderr)
         self.assertFalse((self.tmp / "results").exists())
 
 
