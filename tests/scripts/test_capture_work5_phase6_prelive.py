@@ -136,6 +136,15 @@ class JournalContractTest(unittest.TestCase):
         self.assertEqual(capture.workspace_build_command(Path("/source")),
                          ["cmake", "--build", "/source/build", "-j2"])
 
+    def test_macos_loader_path_is_explicitly_journaled(self) -> None:
+        import capture_work5_phase6_prelive as capture
+
+        environment = capture.capture_environment(2)
+        if capture.platform.system() == "Darwin" and Path("/usr/local/lib").is_dir():
+            self.assertEqual(environment["DYLD_LIBRARY_PATH"], "/usr/local/lib")
+        else:
+            self.assertNotIn("DYLD_LIBRARY_PATH", environment)
+
     def test_complete_pairs_are_monotone_and_incomplete_pairs_fail(self) -> None:
         import capture_work5_phase6_prelive as capture
 

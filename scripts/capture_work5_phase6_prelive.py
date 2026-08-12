@@ -270,6 +270,17 @@ def workspace_build_command(source_root: Path) -> list[str]:
     return ["cmake", "--build", str(source_root / "build"), "-j2"]
 
 
+def capture_environment(threads: int) -> dict[str, str]:
+    environment = {"OMP_NUM_THREADS": str(threads), "OMP_DYNAMIC": "FALSE"}
+    # Some existing Python CTest contracts compile temporary OpenFHE-linked
+    # executables themselves, so the fresh-build RPATH cannot cover them.
+    # Record the loader path as an explicit command environment so those
+    # descendants and the journal agree about the runtime contract.
+    if platform.system() == "Darwin" and Path("/usr/local/lib").is_dir():
+        environment["DYLD_LIBRARY_PATH"] = "/usr/local/lib"
+    return environment
+
+
 def build(source_root: Path, build_dir: Path, journal: Journal) -> None:
     journal.run("configure-release", configure_command(source_root, build_dir), cwd=source_root)
     journal.run("build-release", ["cmake", "--build", str(build_dir), "-j2"], cwd=source_root)
@@ -316,7 +327,7 @@ def capture(args: argparse.Namespace) -> None:
             "pre-live output/build path already exists")
     require(output_dir.parent != source_root and "piccard-work5-evidence" not in output_dir.as_posix(),
             "pre-live capture refuses a production evidence-root path")
-    environment = {"OMP_NUM_THREADS": str(args.threads), "OMP_DYNAMIC": "FALSE"}
+    environment = capture_environment(args.threads)
     output_dir.mkdir(parents=True, mode=0o700)
     journal = Journal(output_dir, source_root=source_root, git_sha=git_sha, environment=environment)
     build(source_root, build_dir, journal)
