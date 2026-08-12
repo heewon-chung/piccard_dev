@@ -612,6 +612,24 @@ class RealDatasetPipelineTimingTest(unittest.TestCase):
             self.assertEqual(row["measurement_kind"], "fhe-timing")
             self.assertEqual(row["profile_id"], "toy-smoke")
 
+    def test_single_trial_validation_profile_is_not_comparison_eligible(self):
+        _, csv_path, _ = self.run_timing(
+            dataset_manifest=QUICK_FIXTURE_MANIFEST,
+            profile="work5-std128-t40-single-trial",
+            k=128,
+            m=64,
+            trials=1,
+            suffix="-single-trial-validation",
+        )
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["profile_id"],
+                             "work5-std128-t40-single-trial")
+            self.assertEqual(row["run_class"], "smoke")
+            self.assertEqual(row["comparison_eligible"], "false")
+
 
 class RealDatasetPipelineEncodingTest(unittest.TestCase):
     """The Work #5 STD192 path times only the core encoder.

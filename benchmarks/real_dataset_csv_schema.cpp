@@ -269,7 +269,8 @@ RealDatasetPrefixValues MakeFheTimingPrefix(
     v.cryptographic_profile = capability.cryptographic_profile;
     v.nominal_security_bits = capability.nominal_security_bits;
     v.security_match = capability.security_match;
-    v.comparison_eligible = capability.comparison_eligible;
+    v.comparison_eligible = profile.comparison_eligible &&
+                            capability.comparison_eligible;
     v.comparison_scope = ComparisonScopeName(capability.comparison_scope);
     v.primitive = PrimitiveName(capability.primitive);
     v.protocol_model = ProtocolModelName(capability.protocol_model);
