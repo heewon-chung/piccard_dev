@@ -193,6 +193,54 @@ run_bench() {
     return $rc
 }
 
+# The threshold FP/FN grid runner writes its own CSV atomically.  Capture its
+# receipt stream in a sibling log instead of redirecting stdout to the same
+# path passed through --output; pre-creating that path makes the orchestrator
+# (correctly) refuse to overwrite it.
+run_threshold_grid() {
+    local name="$1"
+    local bin="$2"
+    local outfile="$3"
+    shift 3
+    local args=("$@")
+
+    echo "------------------------------------------------------------"
+    echo "  Running: $name"
+    echo "  Command: $(basename "$bin") ${args[*]}"
+    echo "------------------------------------------------------------"
+
+    local start_time
+    start_time=$(date +%s)
+
+    local logfile="${outfile%.csv}.log"
+    local rc
+    if "$bin" "${args[@]}" > "$logfile" 2>&1; then
+        rc=0
+    else
+        rc=$?
+    fi
+
+    local end_time
+    end_time=$(date +%s)
+    local elapsed=$(( end_time - start_time ))
+
+    # Show the orchestrator receipt/progress in the suite log while retaining
+    # it separately from the CSV artifact it created.
+    cat "$logfile"
+
+    if [[ $rc -eq 0 && ! -s "$outfile" ]]; then
+        echo "  FAILED: orchestrator did not create $outfile"
+        rc=2
+    fi
+    if [[ $rc -eq 0 ]]; then
+        echo "  Done in ${elapsed}s -> $(basename "$outfile")"
+    else
+        echo "  FAILED (exit $rc) after ${elapsed}s"
+    fi
+    echo ""
+    return $rc
+}
+
 # ── Command plan: comparison timing + postcondition ─────────────────
 # Builds the bench_comparison timing invocation for one security level and,
 # in the paper-grade branch only, the assert_methods.sh postcondition check
@@ -399,7 +447,7 @@ for SECURITY in "${SECURITY_LEVELS[@]}"; do
         # ── 8b. bench_threshold: boundary FP/FN (true-Jaccard, R3-4) ─
         # The point producer is plaintext-only; this runner invokes the
         # fixed 84-point orchestrator with an explicit profile and root seed.
-        run_bench "Threshold boundary FP/FN ($SECURITY)" \
+        run_threshold_grid "Threshold boundary FP/FN ($SECURITY)" \
             "$(command -v python3)" \
             "$CSV_DIR/threshold_fpfn_${SECURITY}.csv" \
             "$SCRIPT_DIR/run_threshold_fpfn_grid.py" \

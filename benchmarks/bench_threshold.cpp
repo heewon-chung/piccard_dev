@@ -1489,12 +1489,20 @@ static void BenchSpecDump(const BenchmarkConfig& config) {
 // Main
 // ============================================================================
 
-static bool IsSyntheticThresholdMode(int argc, char** argv) {
+static std::string ParseRequestedMode(int argc, char** argv) {
+    bool saw_mode = false;
+    std::string mode;
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
-        if (arg.rfind("--mode=", 0) == 0) return arg.substr(7) == "fpfn";
+        if (arg.rfind("--mode=", 0) == 0) {
+            if (saw_mode) {
+                throw std::invalid_argument("duplicate --mode");
+            }
+            saw_mode = true;
+            mode = arg.substr(7);
+        }
     }
-    return false;
+    return mode;
 }
 
 int main(int argc, char** argv) {
@@ -1510,7 +1518,18 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (IsSyntheticThresholdMode(argc, argv)) {
+    std::string requested_mode;
+    try {
+        // Parse mode occurrence before selecting either parser.  The legacy
+        // parser historically retained only the last --mode, so a mode placed
+        // after --mode=timing could bypass the dedicated point path.
+        requested_mode = ParseRequestedMode(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "bench_threshold: " << error.what() << "\n";
+        return 2;
+    }
+
+    if (requested_mode == "fpfn") {
         try {
             return RunSyntheticThresholdPoint(ParseFpfnArgs(argc, argv));
         } catch (const std::invalid_argument& error) {

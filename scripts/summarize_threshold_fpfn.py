@@ -10,6 +10,11 @@ from pathlib import Path
 import sys
 from typing import Iterable, Mapping, Sequence
 
+try:
+    from scripts.verify_threshold_outputs import VerificationError, verify_csv
+except ModuleNotFoundError:  # direct invocation from a different cwd
+    from verify_threshold_outputs import VerificationError, verify_csv  # type: ignore
+
 
 def summarize_rows(rows: Iterable[Mapping[str, str]]) -> dict[str, object]:
     grouped: dict[int, list[Mapping[str, str]]] = {}
@@ -51,23 +56,31 @@ def summarize_rows(rows: Iterable[Mapping[str, str]]) -> dict[str, object]:
     }
 
 
-def summarize_csv(path: Path) -> dict[str, object]:
+def summarize_csv(
+    path: Path, *, mode: str, root_seed: int, trials: int
+) -> dict[str, object]:
+    # Summary is a consumer of the exact artifact, not a second permissive CSV
+    # reader.  Verify all rows, coverage, order, metadata, seeds, MinHash
+    # matches, outcomes, and probability fields before aggregating anything.
+    verify_csv(path, mode, root_seed, trials)
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        required = {"k", "grid_index", "trial_index", "exact_j_truth", "outcome", "predicted_error_probability"}
-        if not required.issubset(set(reader.fieldnames or ())):
-            raise ValueError("CSV is not a threshold FP/FN result")
-        return summarize_rows(reader)
+        return summarize_rows(list(reader))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, required=True)
+    parser.add_argument("--mode", choices=("toy", "paper"), required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--trials", type=int, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
     try:
-        summary = summarize_csv(args.csv)
+        summary = summarize_csv(
+            args.csv, mode=args.mode, root_seed=args.seed, trials=args.trials
+        )
         if args.format == "json":
             rendered = json.dumps(summary, indent=2, sort_keys=True) + "\n"
         else:
@@ -87,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.write_text(rendered, encoding="utf-8")
         else:
             sys.stdout.write(rendered)
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, VerificationError) as exc:
         print(f"summarize_threshold_fpfn: FAIL: {exc}", file=sys.stderr)
         return 2
     return 0

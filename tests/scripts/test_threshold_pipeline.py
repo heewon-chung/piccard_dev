@@ -157,22 +157,176 @@ class ThresholdPipelineContractTest(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
 
-    def test_verifier_rejects_mutated_outcome_and_probability(self):
+    def test_duplicate_mode_is_rejected_independent_of_order(self):
+        # Do not provide --profile here: the first ordering used to fall
+        # through to BenchmarkConfig's legacy parser, which silently retained
+        # the last mode and emitted the adjacent 42-row timing sweep.
+        for first, second in (
+            ("timing", "fpfn"),
+            ("fpfn", "timing"),
+            ("fpfn", "fpfn"),
+        ):
+            result = subprocess.run(
+                [
+                    str(BINARY),
+                    f"--mode={first}",
+                    f"--mode={second}",
+                    "--security=TOY",
+                    "--trials=1",
+                    "--point-k=128",
+                    "--grid-index=0",
+                    f"--seed={SEED}",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(
+                result.returncode,
+                0,
+                f"duplicate mode unexpectedly succeeded: {first}, {second}",
+            )
+            self.assertEqual(result.stdout, "")
+
+    def test_verifier_rejects_full_mutation_matrix(self):
         import scripts.verify_threshold_outputs as verifier
 
         result = _run_point(128, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         row = next(csv.DictReader(result.stdout.splitlines()))
+        mutations = {
+            "k": {**row, "k": "64"},
+            "grid": {**row, "grid_index": "1"},
+            "row seed": {**row, "row_seed": str(int(row["row_seed"]) + 1)},
+            "outcome": {**row, "outcome": "TP"},
+            "probability": {
+                **row,
+                "predicted_decision_probability": "0.0",
+            },
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(field=name):
+                with self.assertRaises(verifier.VerificationError):
+                    verifier._validate_row(mutated, "toy", SEED)
+
+        # Coverage mutations are checked at the independent artifact level,
+        # not only at the individual-row level.
         with self.assertRaises(verifier.VerificationError):
-            verifier._validate_row({**row, "outcome": "TP"}, "toy", SEED)
+            verifier.verify_rows([], "toy", SEED, 1)
         with self.assertRaises(verifier.VerificationError):
-            verifier._validate_row(
-                {
-                    **row,
-                    "predicted_decision_probability": "0.0",
-                },
-                "toy",
-                SEED,
+            verifier.verify_rows([row], "toy", SEED, 1)
+        with self.assertRaises(verifier.VerificationError):
+            verifier.verify_rows([row, row], "toy", SEED, 1)
+
+    def _summarizer_command(self, csv_path: Path, *extra: str):
+        return subprocess.run(
+            [
+                "python3",
+                str(ROOT / "scripts" / "summarize_threshold_fpfn.py"),
+                "--csv",
+                str(csv_path),
+                *extra,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+
+    def _verified_toy_csv(self) -> Path:
+        # A checked-in synthetic artifact keeps this positive summary test
+        # hermetic; it is not a paper/data benchmark output.
+        path = ROOT / "tests" / "fixtures" / "threshold_fpfn_toy_v1.csv"
+        self.assertTrue(path.is_file())
+        return path
+
+    def test_summarizer_accepts_fully_verified_toy_artifact(self):
+        result = self._summarizer_command(
+            self._verified_toy_csv(),
+            "--mode=toy",
+            f"--seed={SEED}",
+            "--trials=1",
+            "--format",
+            "json",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"rows": 84', result.stdout)
+        self.assertIn('"profile": "readiness-toy-v1"', result.stdout)
+
+    def test_summarizer_rejects_header_only_missing_duplicate_and_mixed_profile(self):
+        valid = self._verified_toy_csv()
+        header = ",".join(
+            (
+                "schema_version",
+                "profile",
+                "security",
+                "estimator_model",
+                "hash_randomness",
+                "root_seed",
+                "k",
+                "m",
+                "set_size",
+                "tau_count",
+                "j_tau",
+                "grid_index",
+                "target_j",
+                "signed_delta",
+                "absolute_delta",
+                "alpha",
+                "realized_intersection",
+                "realized_union",
+                "realized_j",
+                "trial_index",
+                "row_seed",
+                "match_count",
+                "decision",
+                "exact_j_truth",
+                "outcome",
+                "predicted_decision_probability",
+                "predicted_error_probability",
+                "gaussian_error_approx",
             )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            header_only = tmp_path / "header-only.csv"
+            header_only.write_text(header + "\n", encoding="utf-8")
+            missing = tmp_path / "missing.csv"
+            duplicate = tmp_path / "duplicate.csv"
+            mixed = tmp_path / "mixed.csv"
+
+            # Read the header separately so the fixture remains literal and
+            # the mutated files retain the exact artifact schema.
+            with valid.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames
+                rows = list(reader)
+            self.assertIsNotNone(fieldnames)
+
+            with duplicate.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+                writer.writerow(rows[-1])
+            with mixed.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                rows[0]["profile"] = "paper-v1"
+                writer.writerows(rows)
+
+            for name, path in (
+                ("header-only", header_only),
+                ("missing", missing),
+                ("duplicate", duplicate),
+                ("mixed profile", mixed),
+            ):
+                with self.subTest(artifact=name):
+                    result = self._summarizer_command(
+                        path,
+                        "--mode=toy",
+                        f"--seed={SEED}",
+                        "--trials=1",
+                    )
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_verifier_module_exposes_independent_literal_checks(self):
         # The verifier is a separate executable module, not a subprocess shim

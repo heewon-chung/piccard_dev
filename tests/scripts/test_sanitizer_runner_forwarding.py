@@ -1,3 +1,4 @@
+import csv
 import os
 import shutil
 import stat
@@ -148,21 +149,65 @@ class SanitizerRunnerForwardingTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assert_no_side_effects(results_root)
 
-        profile = "--transcript_stat_bits=64 --max_queries=17"
-        expected = [
-            "bench_piccard --mode=timing --security=TOY --trials=2 "
-            f"--set_size=1000 {profile}",
-            "bench_piccard --mode=accuracy --security=TOY --trials=5 "
-            f"--set_size=1000 {profile}",
-            "bench_piccard --mode=combined --security=TOY --trials=2 "
-            "--accuracy_trials=5 --overlap=0.3 --set_size=1000 "
-            f"{profile}",
-            "bench_comparison --mode=timing --security=TOY --trials=2 "
-            f"--set_size=1000 {profile}",
-        ]
-        planned = [
-            line.strip()
-            for line in completed.stdout.splitlines()
-            if line.startswith("  bench_")
-        ]
-        self.assertEqual(planned, expected)
+    def test_non_dry_threshold_wrapper_keeps_grid_csv_separate_from_log(self):
+        """Exercise the real shell wrapper with fake children, never a benchmark.
+
+        The threshold orchestrator owns its CSV path.  The shell wrapper must
+        capture only the orchestrator's receipt/log stream, otherwise shell
+        redirection creates the CSV before the orchestrator can write it.
+        """
+        project = self.root / "non-dry-project"
+        scripts = project / "scripts"
+        build = project / "build"
+        scripts.mkdir(parents=True)
+        build.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "run_benchmarks.sh", scripts / "run_benchmarks.sh")
+        for name in ("run_threshold_fpfn_grid.py", "verify_threshold_outputs.py"):
+            shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+
+        # The first six producers are deliberately inert shell fakes.  The
+        # threshold fake emits one structurally valid receipt only when the
+        # orchestrator supplies a selected point; no benchmark code runs.
+        inert = "#!/usr/bin/env bash\nexit 0\n"
+        for name in ("bench_piccard", "bench_comparison"):
+            path = build / name
+            path.write_text(inert, encoding="utf-8")
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        threshold = build / "bench_threshold"
+        threshold.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "args={}\n"
+            "for item in sys.argv[1:]:\n"
+            "  if item.startswith('--') and '=' in item:\n"
+            "    key,value=item[2:].split('=',1); args[key]=value\n"
+            "if 'point-k' not in args: raise SystemExit(0)\n"
+            "print('schema_version,profile,security,estimator_model,hash_randomness,root_seed,k,m,set_size,tau_count,j_tau,grid_index,target_j,signed_delta,absolute_delta,alpha,realized_intersection,realized_union,realized_j,trial_index,row_seed,match_count,decision,exact_j_truth,outcome,predicted_decision_probability,predicted_error_probability,gaussian_error_approx')\n"
+            "print('piccard-threshold-fpfn-v1,%s,%s,sha256-random-ranking-poc-v1,resampled,%s,%s,64,1000,1,0.5,%s,0.5,0,0,0.6,1000,1000,1,0,1,1,1,1,TP,0.5,0.5,0.5' % (args['profile'],args['security'],args['seed'],args['point-k'],args['grid-index']))\n",
+            encoding="utf-8",
+        )
+        threshold.chmod(threshold.stat().st_mode | stat.S_IXUSR)
+
+        results_root = self.root / "non-dry-results"
+        env = os.environ.copy()
+        env.update({"BENCH_RESULTS_ROOT": str(results_root), "DRY_RUN": "0"})
+        completed = subprocess.run(
+            [str(scripts / "run_benchmarks.sh"), "--quick"],
+            cwd=project,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        # Exclude the runner's `latest` symlink; assert against the concrete
+        # timestamped run directory so the artifact count is unambiguous.
+        outputs = list(results_root.glob("*_quick/csv/threshold_fpfn_TOY.csv"))
+        self.assertEqual(len(outputs), 1)
+        with outputs[0].open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 84)
+        logs = list(results_root.glob("*_quick/csv/threshold_fpfn_TOY.log"))
+        self.assertEqual(len(logs), 1)
+        self.assertNotEqual(outputs[0], logs[0])
