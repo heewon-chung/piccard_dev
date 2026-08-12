@@ -988,7 +988,8 @@ def create_initial_root(root_capability: ResultsRootCapability, build_dir: Path,
     """Create the immutable skeleton shared by the toy and parameter phases."""
     root = root_capability.root
     claim_fresh_root(root_capability)
-    for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real", "dynamic", "toy", ".tmp"):
+    for directory in ("commands", "logs", "csv", "workloads", "traces", "context", "real",
+                      "dynamic", "toy", "gates", ".tmp"):
         (root / directory).mkdir(exist_ok=False)
     matrix_path = root / "matrix.json"
     atomic_write(matrix_path, canonical_json(matrix), new=True)

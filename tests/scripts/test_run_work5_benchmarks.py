@@ -31,6 +31,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import run_work5_benchmarks as work5_runner
+import verify_work5_benchmarks as work5_verifier
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "work5" / "single_trial_contract.json"
 
@@ -976,6 +977,40 @@ class Work5RunnerContractTest(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), "preserve\n")
         self.assertIn("resume", run.stderr.lower())
         self.assertTrue(load_contract()["lifecycle"]["refuse_existing_results_root"])
+
+    def test_production_toy_root_precreates_inventory_safe_gates_directory(self) -> None:
+        results = self.tmp / "production-toy-root"
+        capability = work5_runner.validate_results_root(results, resume=False)
+        production_run = {
+            "schema": "piccard-work5-run-v1", "test_fixture_mode": False,
+            "completed_phases": [], "phase_inventory": {}, "cells_sha256": None,
+        }
+        with mock.patch.object(work5_runner, "initial_run", return_value=production_run):
+            run = work5_runner.create_initial_root(
+                capability, self.build, {}, {"schema": "piccard-work5-matrix-v1"},
+                test_fixture=False, deadline=time.monotonic() + 30,
+            )
+
+        self.assertFalse(run["test_fixture_mode"])
+        gates = results / "gates"
+        self.assertTrue(gates.is_dir() and not gates.is_symlink())
+        self.assertEqual(list(gates.iterdir()), [])
+
+        toy_paths = work5_runner.toy_artifact_paths(results)
+        toy = {}
+        for label, path in toy_paths.items():
+            work5_runner.atomic_write(path, f"{label}\n".encode("ascii"), new=True)
+            toy[f"{label}_path"] = path.relative_to(results).as_posix()
+        work5_runner.atomic_write(results / "toy.json", b"{}\n", new=True)
+        work5_runner.install_phase_inventory(
+            run, "toy", work5_runner.phase_inventory_document(
+                results, "toy", [results / "toy.json", *toy_paths.values()],
+                row_counts={"terminal_cells": 0, "measured": 1,
+                            "skipped": 0, "errors": 0},
+            ),
+        )
+        work5_runner.atomic_write(results / "run.json", work5_runner.canonical_json(run))
+        work5_verifier.verify_inventory(results, [], toy, run)
 
     def test_resume_rejects_hash_drift_and_never_reruns_terminal_cells(self) -> None:
         results = self.tmp / "work5-resume"
