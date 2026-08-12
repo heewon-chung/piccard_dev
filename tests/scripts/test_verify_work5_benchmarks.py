@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import verify_review_comparison as review_verifier
 import run_work5_benchmarks as work5_runner
 import verify_work5_benchmarks as work5_verifier
+from tests.scripts.test_capture_work5_phase6_prelive import known_ctest_stdout
 RUNNER = ROOT / "scripts" / "run_work5_benchmarks.py"
 VERIFIER = ROOT / "scripts" / "verify_work5_benchmarks.py"
 FAKE_BENCHMARK = ROOT / "tests" / "fixtures" / "work5" / "fake_work5_benchmark.py"
@@ -221,6 +222,67 @@ class Work5VerifierContractTest(unittest.TestCase):
                 row["trial_payload_sha256"] = self.fixture_actual_payload(row)
         self.rebind_cells(root, rows)
         return rows
+
+    def production_parameter_inventory_root(
+            self, name: str) -> tuple[Path, dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        """Build the exact post-CTest, pre-parameter-receipt file topology.
+
+        The parameter artifacts come from the hermetic 61-cell producer, but
+        the lifecycle and gate files are deliberately production-shaped: toy
+        precedes parameters, the CTest receipt binds its two canonical raw
+        logs, and no parameter receipt exists until inventory verification
+        succeeds.
+        """
+        root = self.produce_parameter_root(name)
+        records = read_jsonl(root / "cells.jsonl")
+        run_path = root / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+
+        toy_paths = work5_runner.toy_artifact_paths(root)
+        toy: dict[str, Any] = {}
+        for label, path in toy_paths.items():
+            path.write_bytes(f"production-shaped toy {label}\n".encode("ascii"))
+            toy[f"{label}_path"] = path.relative_to(root).as_posix()
+        (root / "toy.json").write_bytes(work5_runner.canonical_json({
+            "schema": "piccard-work5-toy-v1", **toy,
+        }))
+        toy_inventory = work5_runner.phase_inventory_document(
+            root, "toy", [root / "toy.json", *toy_paths.values()],
+            row_counts={"terminal_cells": 0, "measured": 1,
+                        "skipped": 0, "errors": 0},
+        )
+        run["test_fixture_mode"] = False
+        run["completed_phases"] = ["toy", "parameters"]
+        run["phase_inventory"] = {
+            "toy": toy_inventory,
+            "parameters": run["phase_inventory"]["parameters"],
+        }
+        run_path.write_bytes(work5_runner.canonical_json(run))
+
+        verification = root / "verification"
+        verification.mkdir()
+        (verification / "toy.json").write_bytes(work5_runner.canonical_json({
+            "schema": "piccard-work5-verification-receipt-v1", "verdict": "PASS",
+            "phase": "toy", "results_root": str(root.resolve()),
+            "run_sha256": "0" * 64, "git_sha": run["git_sha"],
+            "completed_phases": ["toy"],
+            "phase_inventory_sha256": work5_runner.phase_inventory_sha256(toy_inventory),
+            "terminal_cells": 0,
+        }))
+        stdout, stderr = known_ctest_stdout(), b"Errors while running CTest\n"
+        stdout_path, stderr_path = (root / "gates" / "full-ctest.stdout",
+                                    root / "gates" / "full-ctest.stderr")
+        stdout_path.write_bytes(stdout)
+        stderr_path.write_bytes(stderr)
+        ctest_receipt = work5_verifier.classify_work6_scope_ctest(8, stdout, stderr)
+        ctest_receipt.update({
+            "results_root": str(root.resolve()), "run_sha256": "0" * 64,
+            "git_sha": run["git_sha"], "completed_phases": ["toy"],
+            "created_at_utc": "2026-08-12T00:00:00Z",
+        })
+        (verification / "full-ctest.json").write_bytes(
+            work5_runner.canonical_json(ctest_receipt))
+        return root, run, records, toy
 
     def rebind_copied_parameter_root(self, source: Path, candidate: Path) -> list[dict[str, Any]]:
         """Copy a valid fixture root while preserving its root-bound contract.
@@ -680,6 +742,52 @@ class Work5VerifierContractTest(unittest.TestCase):
         (orphan / "csv" / "orphan.csv").write_text("forged\n", encoding="utf-8")
         self.assertNotEqual(self.verify(orphan).returncode, 0,
                             "orphan producer artifact must not verify")
+
+    def test_parameter_inventory_accepts_only_receipt_bound_full_ctest_logs(self) -> None:
+        root, run, records, toy = self.production_parameter_inventory_root(
+            "production-parameter-inventory")
+        stdout = root / "gates" / "full-ctest.stdout"
+        stderr = root / "gates" / "full-ctest.stderr"
+        receipt_path = root / "verification" / "full-ctest.json"
+
+        work5_verifier.verify_inventory(root, records, toy, run)
+
+        for path in (stdout, stderr):
+            with self.subTest(missing=path.name):
+                payload = path.read_bytes()
+                path.unlink()
+                with self.assertRaisesRegex(
+                        work5_verifier.VerificationError, "full CTest raw log"):
+                    work5_verifier.verify_inventory(root, records, toy, run)
+                path.write_bytes(payload)
+
+        stdout_payload = stdout.read_bytes()
+        stdout.write_bytes(stdout_payload + b"mutation\n")
+        with self.assertRaisesRegex(work5_verifier.VerificationError,
+                                    "full CTest raw log"):
+            work5_verifier.verify_inventory(root, records, toy, run)
+        stdout.write_bytes(stdout_payload)
+
+        receipt_payload = receipt_path.read_bytes()
+        receipt_path.unlink()
+        with self.assertRaisesRegex(work5_verifier.VerificationError,
+                                    "artifact inventory"):
+            work5_verifier.verify_inventory(root, records, toy, run)
+        receipt_path.write_bytes(receipt_payload)
+
+        receipt = json.loads(receipt_payload)
+        receipt["frozen_work6_hashes"]["CMakeLists.txt"] = "0" * 64
+        receipt_path.write_bytes(work5_runner.canonical_json(receipt))
+        with self.assertRaisesRegex(work5_verifier.VerificationError,
+                                    "full CTest gate receipt contract"):
+            work5_verifier.verify_inventory(root, records, toy, run)
+        receipt_path.write_bytes(receipt_payload)
+
+        orphan = root / "gates" / "unexpected.log"
+        orphan.write_text("orphan\n", encoding="utf-8")
+        with self.assertRaisesRegex(work5_verifier.VerificationError,
+                                    "artifact inventory"):
+            work5_verifier.verify_inventory(root, records, toy, run)
 
     def test_semantic_matrix_mutations_fail_closed(self) -> None:
         source = self.produce_parameter_root("source")

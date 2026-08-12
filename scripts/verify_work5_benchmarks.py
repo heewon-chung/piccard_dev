@@ -139,6 +139,10 @@ PHASE_ORDERS = {
     "real": ["toy", "parameters", "real"],
     "dynamic": ["toy", "parameters", "real", "dynamic"],
 }
+CTEST_GATE_LOGS = (
+    ("stdout_sha256", "gates/full-ctest.stdout"),
+    ("stderr_sha256", "gates/full-ctest.stderr"),
+)
 PARAMETERS = {"k": (16, 32, 64, 128, 256, 512),
               "m": (16, 32, 64, 128, 256),
               "n": (100, 1000, 10000, 100000),
@@ -1277,6 +1281,7 @@ def verify_inventory(root: Path, records: list[dict[str, Any]],
         for artifact in inventory["artifacts"]:
             expected.add(artifact["path"])
     receipt_dir = root / "verification"
+    has_ctest_gate_receipt = False
     if receipt_dir.exists():
         require(receipt_dir.is_dir() and not receipt_dir.is_symlink(),
                 "verification receipt path is malformed")
@@ -1286,6 +1291,10 @@ def verify_inventory(root: Path, records: list[dict[str, Any]],
                     receipt.suffix == ".json" and receipt.stem in allowed,
                     "verification receipt inventory is malformed")
             expected.add(receipt.relative_to(root).as_posix())
+            has_ctest_gate_receipt = has_ctest_gate_receipt or receipt.stem == "full-ctest"
+    if has_ctest_gate_receipt:
+        _, _, gate_logs = verify_ctest_gate_receipt(root, run)
+        expected.update(gate_logs)
     for optional in ("SHA256SUMS", "SHA256SUMS.sha256"):
         if (root / optional).is_file():
             expected.add(optional)
@@ -1440,7 +1449,7 @@ def write_ctest_gate_receipt(root: Path, run: dict[str, Any], output: Path,
     runner.atomic_write(output, canonical_json(receipt), new=True)
 
 
-def verify_ctest_gate_receipt(root: Path, run: dict[str, Any]) -> tuple[Path, str]:
+def verify_ctest_gate_receipt(root: Path, run: dict[str, Any]) -> tuple[Path, str, set[str]]:
     path = root / "verification" / "full-ctest.json"
     receipt = load_object(path, "full CTest gate receipt")
     require(receipt.get("schema") == "piccard-work5-ctest-gate-receipt-v1" and
@@ -1451,7 +1460,14 @@ def verify_ctest_gate_receipt(root: Path, run: dict[str, Any]) -> tuple[Path, st
             receipt.get("completed_phases") == ["toy"] and
             receipt.get("frozen_work6_hashes") == frozen_work6_hashes(),
             "full CTest gate receipt contract mismatch")
-    return path, sha256_file(path)
+    gate_logs: set[str] = set()
+    for digest_field, relative in CTEST_GATE_LOGS:
+        raw_log = relative_file(root, relative, "full CTest raw log")
+        require(raw_log.is_file() and not raw_log.is_symlink() and
+                receipt.get(digest_field) == sha256_file(raw_log),
+                f"full CTest raw log is missing, unsafe, or hash-mismatched: {relative}")
+        gate_logs.add(relative)
+    return path, sha256_file(path), gate_logs
 
 
 def _phase_receipt_hashes(root: Path, run: dict[str, Any]) -> dict[str, str]:
@@ -1481,7 +1497,7 @@ def write_pre_seal_receipt(root: Path, run: dict[str, Any], output: Path) -> Non
                 "pre-seal requires all receipt and seal artifacts to be absent")
     if list(expected.parent.glob(f".{expected.name}.tmp.*")):
         raise VerificationError("pre-seal receipt has a stale temporary")
-    ctest_path, ctest_hash = verify_ctest_gate_receipt(root, run)
+    ctest_path, ctest_hash, _ = verify_ctest_gate_receipt(root, run)
     phase_hashes = _phase_receipt_hashes(root, run)
     inventory = sealer.inventory(root, exclude={"verification/pre-seal-receipt.json",
                                                 "SHA256SUMS", "SHA256SUMS.sha256"})
