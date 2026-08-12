@@ -23,6 +23,11 @@ SUBTESTS = (
     "helper_moved_body", "helper_moved_namespace", "attribute_prefix", "define_prefix",
     "duplicate", "brace_comment", "brace_string", "escaped_brace",
 )
+EXPECTED_REASONS = (
+    *("check_work6_scope: FAIL: src/fhe/bfv_context.cpp changes preexisting content",) * 9,
+    *("check_work6_scope: FAIL: codec definition has wrong scope",) * 2,
+    *("check_work6_scope: FAIL: src/fhe/bfv_context.cpp changes preexisting content",) * 6,
+)
 
 # The accepted CTest exception is bound to the complete numbered test/name
 # sequence, not merely to its exit code and one failed test.  Keep this local
@@ -68,7 +73,18 @@ def known_ctest_stdout() -> bytes:
             lines.append("test_bfv_production_shaped_mutations_fail_after_subtraction (...) ...")
             for subtest in SUBTESTS:
                 lines.append(f"  test_bfv_production_shaped_mutations_fail_after_subtraction (...) (name='{subtest}') ... FAIL")
-                lines.append(FROZEN_REASON)
+            # Match unittest's actual --output-on-failure shape: the checker
+            # result occurs inside each AssertionError diff, never as a
+            # standalone line-start diagnostic.
+            for subtest, expected_reason in zip(SUBTESTS, EXPECTED_REASONS):
+                lines.extend([
+                    "======================================================================",
+                    f"FAIL: test_bfv_production_shaped_mutations_fail_after_subtraction (...) (name='{subtest}')",
+                    "----------------------------------------------------------------------",
+                    "AssertionError: checker result differs from the expected mutation reason",
+                    "- " + FROZEN_REASON,
+                    "+ " + expected_reason,
+                ])
             lines.extend(["Ran 18 tests in 0.001s", "FAILED (failures=17)"])
         else:
             lines.append(f"{number}/83 Test #{number}: {name} ...........................   Passed    0.00 sec")
@@ -92,6 +108,9 @@ class Work5CtestExceptionTest(unittest.TestCase):
             "subtest_order": (8, stdout.replace(b"condition", b"zz_condition", 1)),
             "appended_pass_diagnostic": (8, stdout + b"check_work6_scope: PASS: accepted mutation\n"),
             "appended_extra_reason": (8, stdout + b"check_work6_scope: FAIL: accepted mutation\n"),
+            "changed_expected_reason": (8, stdout.replace(
+                b"+ check_work6_scope: FAIL: codec definition has wrong scope",
+                b"+ check_work6_scope: FAIL: accepted mutation", 1)),
         }
         for name, (exit_code, candidate) in cases.items():
             with self.subTest(name=name):

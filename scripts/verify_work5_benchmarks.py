@@ -92,6 +92,11 @@ WORK6_FAILURE_SUBTESTS = (
     "duplicate", "brace_comment", "brace_string", "escaped_brace",
 )
 WORK6_FIRST_REASON = "check_work6_scope: FAIL: include/fhe/bfv_context.h changes preexisting content"
+WORK6_EXPECTED_REASONS = (
+    *("check_work6_scope: FAIL: src/fhe/bfv_context.cpp changes preexisting content",) * 9,
+    *("check_work6_scope: FAIL: codec definition has wrong scope",) * 2,
+    *("check_work6_scope: FAIL: src/fhe/bfv_context.cpp changes preexisting content",) * 6,
+)
 # The accepted diagnostic is bound to the complete CTest topology, including
 # every numbered test name.  A changed test name or a truncated/duplicated
 # result line is a different run and must not be accepted as the exception.
@@ -448,9 +453,22 @@ def classify_work6_scope_ctest(exit_code: int, stdout: bytes, stderr: bytes) -> 
     subtests = re.findall(r"\(name='([^']+)'\)\s+\.\.\.\s+FAIL", stdout_text)
     require(tuple(subtests) == WORK6_FAILURE_SUBTESTS,
             "CheckWork6Scope failing mutation set/order differs from the frozen signature")
-    diagnostic_lines = re.findall(r"(?m)^\s*check_work6_scope:\s+[^\n]*$", stdout_text)
-    require(diagnostic_lines == [WORK6_FIRST_REASON] * len(WORK6_FAILURE_SUBTESTS),
-            "CheckWork6Scope diagnostic lines differ from the frozen raw-log shape")
+    # unittest renders the unexpected checker result as the removed (``-``)
+    # side of each AssertionError diff, followed by the mutation-specific
+    # expected (``+``) reason.  It does not emit standalone checker lines in
+    # CTest's raw log.  Bind that real shape exactly: counting only line-start
+    # diagnostics would reject the genuine run, while a loose substring count
+    # could accept an appended PASS or an extra diagnostic.
+    diagnostic_lines = re.findall(
+        r"(?m)^[ \t]*([-+]?)[ \t]*(check_work6_scope:[ \t]+(?:FAIL|PASS)(?::[ \t]*)?[^\n]*)$",
+        stdout_text)
+    expected_diagnostics: list[tuple[str, str]] = []
+    for expected_reason in WORK6_EXPECTED_REASONS:
+        expected_diagnostics.extend((("-", WORK6_FIRST_REASON), ("+", expected_reason)))
+    require(diagnostic_lines == expected_diagnostics and
+            stdout_text.count(WORK6_FIRST_REASON) == len(WORK6_FAILURE_SUBTESTS) and
+            "check_work6_scope: PASS" not in stdout_text,
+            "CheckWork6Scope AssertionError diagnostics differ from the frozen raw-log shape")
     return {
         "schema": "piccard-work5-ctest-gate-receipt-v1",
         "verdict": "PASS", "classification": "KNOWN_WORK6_SCOPE_DIAGNOSTIC_MISMATCH",
