@@ -94,10 +94,12 @@ def load_runner_module():
     module = types.ModuleType("run_real_datasets")
     module.__file__ = str(RUNNER)
     sys.modules[module.__name__] = module
+    saved_argv = sys.argv[:]
     sys.path.insert(0, str(RUNNER.parent))
     try:
         exec(compile(python_source, str(RUNNER), "exec"), module.__dict__)
     finally:
+        sys.argv[:] = saved_argv
         sys.path.pop(0)
     return module
 
@@ -445,7 +447,8 @@ def main():
                                record_b=selected_pair["record_b"],
                                trial_index=str(trial),
                                hash_seed=str(seed),
-                               workload_manifest_sha256=workload_sha)
+                               workload_manifest_sha256=workload_sha,
+                               **truth_for(selected_pair))
                 writer.writerow([row[name] for name in header])
     return 0
 
@@ -508,6 +511,56 @@ def rebind_file_hash(results_root: pathlib.Path, rel_path: str) -> None:
     (results_root / "verification_status.tsv").unlink(missing_ok=True)
 
 
+def remove_root_ids(results_root: pathlib.Path, removed_ids) -> None:
+    """Remove selected root records and rewrite the indexed root grammar."""
+    removed_ids = set(removed_ids)
+    metadata_path = results_root / "run_metadata.tsv"
+    lines = metadata_path.read_text(encoding="utf-8").splitlines()
+    roots = []
+    other = []
+    root_count_seen = False
+    for line in lines:
+        if line.startswith("root_count\t"):
+            root_count_seen = True
+            other.append(None)
+        elif line.startswith("root."):
+            key, value = line.split("\t", 1)
+            index = int(key.split(".")[1])
+            field = key.split(".", 2)[2]
+            while len(roots) <= index:
+                roots.append({})
+            roots[index][field] = value
+        else:
+            other.append(line)
+    assert root_count_seen
+    kept = [root for root in roots if root.get("id") not in removed_ids]
+    rebuilt = []
+    for line in other:
+        if line is None:
+            rebuilt.append(f"root_count\t{len(kept)}")
+            for index, root in enumerate(kept):
+                rebuilt.append(f"root.{index:03d}.id\t{root['id']}")
+                rebuilt.append(f"root.{index:03d}.path\t{root['path']}")
+        else:
+            rebuilt.append(line)
+    metadata_path.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+    (results_root / "verification_status.tsv").unlink(missing_ok=True)
+
+
+def recompute_and_rebind_summary_for_variant(results_root: pathlib.Path,
+                                             variant: str) -> None:
+    accuracy_rel = f"csv/real_accuracy_{variant}.csv"
+    summary_rel = f"csv/real_accuracy_summary_{variant}.csv"
+    completed = run_command([
+        sys.executable, str(SUMMARIZER),
+        f"--input={results_root / accuracy_rel}",
+        f"--output={results_root / summary_rel}",
+    ])
+    assert completed.returncode == 0, completed.stderr
+    rebind_file_hash(results_root, accuracy_rel)
+    rebind_file_hash(results_root, summary_rel)
+
+
 def recompute_and_rebind_summary(results_root: pathlib.Path) -> None:
     """Rebuild the accuracy summary after a CSV mutation and rebind both
     artifacts in run_metadata.tsv.  The ensuing verifier rejection must be
@@ -548,6 +601,97 @@ def prepare_enron_fixture(output_dir: pathlib.Path, *, universe: int = 65536) ->
     if result.returncode != 0:
         raise AssertionError(result.stderr)
     return output_dir / "dataset.manifest.tsv"
+
+
+def prepare_nonfixture_dblp(output_dir: pathlib.Path):
+    """Make a tiny byte-distinct DBLP-shaped paper input for verifier tests."""
+    source_dir = output_dir / "source"
+    processed_dir = output_dir / "processed"
+    source_dir.mkdir(parents=True)
+    processed_dir.mkdir()
+    source_files = {
+        "dblp_records.csv": "id,title\n1,custom dblp\n",
+        "acm_records.csv": "id,title\n1,custom acm\n",
+        "mapping.csv": "dblp_id,acm_id\n1,1\n",
+    }
+    for name, content in source_files.items():
+        (source_dir / name).write_text(content, encoding="utf-8")
+    source_pairs = [
+        ("schema_version", "piccard-real-source-v1"),
+        ("dataset", "dblp_acm"),
+        ("dataset_version", "2026-release"),
+        ("source_url", "https://example.invalid/custom-dblp"),
+        ("citation", "Custom Citation 2026"),
+        ("license_or_terms_url", "https://example.invalid/custom-terms"),
+        ("acquisition_note", "hermetic verifier fixture"),
+        ("parsing_schema", "dblp-acm-csv-v1"),
+        ("preprocessing_profile", "dblp-acm-trigram-v1"),
+    ]
+    for index, (name, _content) in enumerate(source_files.items()):
+        source_pairs.extend((
+            (f"input.{index}.role", ("dblp_records", "acm_records",
+                                      "dblp_acm_mapping")[index]),
+            (f"input.{index}.path", name),
+            (f"input.{index}.sha256", hashlib.sha256(
+                (source_dir / name).read_bytes()).hexdigest()),
+        ))
+    source_manifest = source_dir / "source.manifest.tsv"
+    source_manifest.write_text(
+        "key\tvalue\n" + "".join(f"{key}\t{value}\n" for key, value in source_pairs),
+        encoding="utf-8")
+
+    records_bytes = (QUICK_DATASET_MANIFEST.parent / "records.tsv").read_bytes()
+    records_bytes = records_bytes.replace(
+        b"293941716891108309", b"293941716891108310", 1)
+    pairs_bytes = (QUICK_DATASET_MANIFEST.parent / "pairs.tsv").read_bytes()
+    pairs_bytes = pairs_bytes.replace(
+        b"dblp_acm-pair:3df24e6e8fd4fc939161bf9bd8a0dc5dfecbb2d8c921359b1f46dc6b163caf9f",
+        b"custom-pair:3df24e6e8fd4fc939161bf9bd8a0dc5dfecbb2d8c921359b1f46dc6b163caf9f",
+        1)
+    (processed_dir / "records.tsv").write_bytes(records_bytes)
+    (processed_dir / "pairs.tsv").write_bytes(pairs_bytes)
+    shutil.copy2(source_manifest, processed_dir / "source.manifest.tsv")
+
+    manifest_pairs = []
+    for key, value in (line.split("\t", 1)
+                       for line in QUICK_DATASET_MANIFEST.read_text(
+                           encoding="utf-8").splitlines()[1:]):
+        if key == "source_manifest_sha256":
+            value = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+        elif key == "records_sha256":
+            value = hashlib.sha256(records_bytes).hexdigest()
+        elif key == "pairs_sha256":
+            value = hashlib.sha256(pairs_bytes).hexdigest()
+        manifest_pairs.append((key, value))
+    dataset_manifest = processed_dir / "dataset.manifest.tsv"
+    dataset_manifest.write_text(
+        "key\tvalue\n" + "".join(f"{key}\t{value}\n"
+                                   for key, value in manifest_pairs),
+        encoding="utf-8")
+    return source_manifest, dataset_manifest
+
+
+def prepare_paper_manifests(output_dir: pathlib.Path):
+    """Return the exact frozen paper pair set using hermetic Enron outputs."""
+    dblp_source, dblp_dataset = prepare_nonfixture_dblp(output_dir / "dblp")
+    enron_u65536 = prepare_enron_fixture(output_dir / "enron_u65536")
+    enron_u1048576 = prepare_enron_fixture(
+        output_dir / "enron_u1048576", universe=1048576)
+    source = ENRON_FIXTURE_DIR / "source.manifest.tsv"
+    return (
+        (dblp_source, dblp_dataset),
+        (source, enron_u65536),
+        (source, enron_u1048576),
+    )
+
+
+ENRON_SUMMARY_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median", "bucketed_set_size_max",
+    "jaccard_bucket", "n", "mae", "sample_sd", "median", "p95", "max",
+    "ci95_low", "ci95_high",
+)
 
 
 class Phase3RealDataContractTest(unittest.TestCase):
@@ -607,12 +751,114 @@ class Phase3RealDataContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                      if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 10)
+        self.assertEqual(len(run_lines), 9)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
-            self.assertTrue(any(variant in line for line in run_lines))
-        self.assertFalse(any("enron_" in line and
-                             "--profile=std192-t40-primary" in line
-                             for line in run_lines))
+            variant_lines = [line for line in run_lines if variant in line]
+            self.assertEqual(len(variant_lines), 3)
+            self.assertTrue(any("--mode=accuracy" in line for line in variant_lines))
+            self.assertTrue(any("summarize_real_datasets.py" in line
+                                for line in variant_lines))
+            self.assertTrue(any("--profile=std128-t40-primary" in line
+                                for line in variant_lines))
+            self.assertFalse(any("--profile=std192-t40-primary" in line
+                                 for line in variant_lines))
+
+    def test_paper_dry_run_rejects_incomplete_frozen_variant_set(self):
+        result = run_runner(
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'missing-build'}",
+            f"--results-root={self.tmp / 'incomplete-paper'}", "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exact", result.stderr.lower())
+
+    def test_paper_dry_run_rejects_duplicate_variant(self):
+        enron = prepare_enron_fixture(self.tmp / "duplicate-enron")
+        source = ENRON_FIXTURE_DIR / "source.manifest.tsv"
+        result = run_runner(
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            f"--source-manifest={source}", f"--dataset-manifest={enron}",
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'missing-build'}",
+            f"--results-root={self.tmp / 'duplicate-paper'}", "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate variant", result.stderr)
+
+    def test_paper_dry_run_rejects_unknown_variant(self):
+        forged_manifest = self.tmp / "unknown-variant.manifest.tsv"
+        text = QUICK_DATASET_MANIFEST.read_text(encoding="utf-8")
+        forged_manifest.write_text(text.replace("variant\tdblp_acm_u65536\n",
+                                                "variant\tforged_u65536\n"),
+                                   encoding="utf-8")
+        result = run_runner(
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={forged_manifest}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'missing-build'}",
+            f"--results-root={self.tmp / 'unknown-paper'}", "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported paper real-data variant", result.stderr)
+
+    def test_verifier_rejects_incomplete_frozen_variant_set(self):
+        cells = [
+            {"id": "dblp_acm_u65536:accuracy"},
+            {"id": "dblp_acm_u65536:accuracy-summary"},
+            {"id": "dblp_acm_u65536:timing:std128-t40-primary"},
+        ]
+        with self.assertRaises(self.verifier.VerificationError):
+            self.verifier._validate_cell_id_enumeration(cells, "paper")
+
+    def test_enron_summary_reports_sizes_and_accuracy_buckets_without_labels(self):
+        input_path = self.tmp / "enron-accuracy.csv"
+        output_path = self.tmp / "enron-summary.csv"
+        rows = []
+        for index, bucketed_jaccard in enumerate((0.05, 0.2, 0.4, 0.8)):
+            row = {field: "" for field in ACCURACY_HEADER_FIELDS}
+            row.update({
+                "dataset": "enron", "variant": "enron_u65536",
+                "record_a": f"enron:a{index}", "record_b": f"enron:b{index}",
+                "set_size_a_raw": str(2 + index),
+                "set_size_b_raw": str(3 + index),
+                "set_size_a_bucketed": str(4 + index),
+                "set_size_b_bucketed": str(5 + index),
+                "exact_jaccard_bucketed": str(bucketed_jaccard),
+                "abs_error": str(0.1 + index / 10),
+            })
+            rows.append(row)
+        with input_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=ACCURACY_HEADER_FIELDS,
+                                    lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+        result = run_command([
+            sys.executable, str(SUMMARIZER), f"--input={input_path}",
+            f"--output={output_path}",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with output_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            self.assertEqual(reader.fieldnames, list(ENRON_SUMMARY_HEADER_FIELDS))
+            summary_rows = list(reader)
+        self.assertEqual([row["jaccard_bucket"] for row in summary_rows],
+                         ["b00_10", "b10_30", "b30_60", "b60_100"])
+        self.assertTrue(all(row["schema_version"] == "piccard-real-enron-summary-v1"
+                            for row in summary_rows))
+        self.assertTrue(all(row["raw_set_size_min"] == "2" and
+                            row["raw_set_size_median"] == "4" and
+                            row["raw_set_size_max"] == "6" and
+                            row["bucketed_set_size_min"] == "4" and
+                            row["bucketed_set_size_median"] == "6" and
+                            row["bucketed_set_size_max"] == "8"
+                            for row in summary_rows))
+        self.assertFalse(any("label" in field or "threshold" in field
+                             for field in ENRON_SUMMARY_HEADER_FIELDS))
 
 
 
@@ -860,16 +1106,26 @@ class SingleTrialValidationCliTest(unittest.TestCase):
         wrong_source = self.invoke(QUICK_SOURCE_MANIFEST, QUICK_DATASET_MANIFEST, "--dry-run")
         self.assertNotEqual(wrong_source.returncode, 0)
         self.assertIn("requires exactly", wrong_source.stderr)
-        legacy_manifest = (ROOT / "datasets" / "data" / "processed" /
-                           "dblp_acm_u65536" / "dataset.manifest.tsv")
-        # The historical processed directory is an ignored main-worktree
-        # artifact and is intentionally absent from isolated source trees.
-        # When present, retain the explicit quarantine regression; the source
-        # path/count gate above remains hermetic in either topology.
-        if legacy_manifest.is_file():
-            legacy = self.invoke(self.source, legacy_manifest, "--dry-run")
-            self.assertNotEqual(legacy.returncode, 0)
-            self.assertIn("quarantined prior processed", legacy.stderr)
+        self.assertFalse((self.tmp / "results").exists())
+
+    def test_prior_processed_directory_quarantine_is_hermetic(self):
+        runner = load_runner_module()
+        legacy_root = self.tmp / "historical-processed-dblp"
+        legacy_root.mkdir()
+        source = legacy_root / "dblp_acm.source.tsv"
+        dataset = legacy_root / "dataset.manifest.tsv"
+        source.write_text("not-used\n", encoding="utf-8")
+        dataset.write_text("not-used\n", encoding="utf-8")
+        argv = [
+            "--single-trial-validation", f"--source-manifest={source}",
+            f"--dataset-manifest={dataset}", "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'build'}",
+            f"--results-root={self.tmp / 'results'}",
+        ]
+        with mock.patch.object(runner, "_LEGACY_PROCESSED_DIR", legacy_root.resolve()):
+            with self.assertRaisesRegex(runner.RunnerError,
+                                        "quarantined prior processed"):
+                runner.parse_args(argv)
         self.assertFalse((self.tmp / "results").exists())
 
 
@@ -911,9 +1167,15 @@ class DryRunTest(unittest.TestCase):
                             "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_paper_dry_run_pins_exactly_four_cells(self):
-        result = run_runner(f"--source-manifest={QUICK_SOURCE_MANIFEST}",
-                            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+    def test_paper_dry_run_pins_exactly_three_cells_per_variant(self):
+        manifests = prepare_paper_manifests(self.tmp / "paper-manifests")
+        arguments = [
+            argument
+            for source, dataset in manifests
+            for argument in (f"--source-manifest={source}",
+                             f"--dataset-manifest={dataset}")
+        ]
+        result = run_runner(*arguments,
                             "--profile=std128-t40-primary",
                             "--profile=std192-t40-primary",
                             "--seed=20260729", "--threads=8",
@@ -923,12 +1185,15 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                     if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 4)
-        self.assertIn("--max-pairs=10000", run_lines[0])
-        self.assertIn("--trials=30", run_lines[2])
-        self.assertIn("--profile=std128-t40-primary", run_lines[2])
-        self.assertIn("--trials=30", run_lines[3])
-        self.assertIn("--profile=std192-t40-primary", run_lines[3])
+        self.assertEqual(len(run_lines), 9)
+        for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
+            variant_lines = [line for line in run_lines if variant in line]
+            self.assertEqual(len(variant_lines), 3)
+            self.assertTrue(any("--max-pairs=10000" in line for line in variant_lines))
+            self.assertTrue(any("--profile=std128-t40-primary" in line
+                                for line in variant_lines))
+            self.assertFalse(any("--profile=std192-t40-primary" in line
+                                 for line in variant_lines))
 
 
 class PathSafetyTest(unittest.TestCase):
@@ -1761,6 +2026,10 @@ class VerifierUnitTest(unittest.TestCase):
             with self.assertRaises(self.module.VerificationError):
                 self.module._validate_processed_manifest(tmp_path, "dblp_acm")
 
+    def test_processed_manifest_rejects_dataset_variant_mismatch(self):
+        with self.assertRaises(self.module.VerificationError):
+            self.module._validate_processed_manifest(QUICK_DATASET_MANIFEST, "enron")
+
     def test_fixture_fingerprints_contain_the_tracked_quick_fixture_hashes(self):
         fingerprints = self.module._fixture_fingerprints()
         dataset_values = dict(self._parse_pairs(QUICK_DATASET_MANIFEST))
@@ -1864,16 +2133,18 @@ class PaperModeScratchRepoTest(unittest.TestCase):
         self.tmp = pathlib.Path(self.temp.name)
         self.build_dir = self.tmp / "build"
         write_fake_bench_real_datasets(self.build_dir)
+        self.paper_manifests = prepare_paper_manifests(self.tmp / "paper-manifests")
 
     def run_paper(self, results_root):
-        return run_command([
-            str(self.runner),
-            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
-            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
-            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
-            "--seed=20260729", "--threads=2",
-            f"--build-dir={self.build_dir}", f"--results-root={results_root}",
-        ], cwd=self.repo)
+        command = [str(self.runner)]
+        for source, dataset in self.paper_manifests:
+            command.extend((f"--source-manifest={source}",
+                            f"--dataset-manifest={dataset}"))
+        command.extend(("--profile=std128-t40-primary",
+                        "--profile=std192-t40-primary", "--seed=20260729",
+                        "--threads=2", f"--build-dir={self.build_dir}",
+                        f"--results-root={results_root}"))
+        return run_command(command, cwd=self.repo)
 
     def test_paper_mode_against_a_dirty_scratch_repo_is_rejected(self):
         marker = self.repo / "scripts" / "__scratch_dirty_marker__.txt"
@@ -1885,21 +2156,94 @@ class PaperModeScratchRepoTest(unittest.TestCase):
         self.assertIn("clean", result.stderr)
         self.assertFalse(results_root.exists())
 
-    def test_paper_mode_structurally_succeeds_with_four_cells(self):
+    def test_paper_mode_structurally_succeeds_with_three_cells_per_variant(self):
         results_root = self.tmp / "results"
         result = self.run_paper(results_root)
         self.assertEqual(result.returncode, 0, result.stderr)
         metadata = read_kv_file(results_root / "run_metadata.tsv")
         self.assertEqual(metadata["evidence_mode"], "paper")
         self.assertEqual(metadata["git_dirty"], "false")
-        self.assertEqual(metadata["cell_count"], "4")
-        ids = {metadata[f"cell.{i:03d}.id"] for i in range(4)}
+        self.assertEqual(metadata["cell_count"], "9")
+        ids = {metadata[f"cell.{i:03d}.id"] for i in range(9)}
         self.assertEqual(ids, {
             "dblp_acm_u65536:accuracy",
             "dblp_acm_u65536:accuracy-summary",
             "dblp_acm_u65536:timing:std128-t40-primary",
-            "dblp_acm_u65536:timing:std192-t40-primary",
+            "enron_u65536:accuracy",
+            "enron_u65536:accuracy-summary",
+            "enron_u65536:timing:std128-t40-primary",
+            "enron_u1048576:accuracy",
+            "enron_u1048576:accuracy-summary",
+            "enron_u1048576:timing:std128-t40-primary",
         })
+
+    def test_verifier_requires_exact_source_manifest_root_for_each_paper_variant(self):
+        results_root = self.tmp / "missing-source-root"
+        result = self.run_paper(results_root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        remove_root_ids(results_root, {"source-manifest-enron_u65536"})
+
+        verify_result = run_command(
+            [sys.executable, str(VERIFIER), str(results_root)], cwd=self.repo)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn("source-manifest-enron_u65536", verify_result.stderr)
+        self.assertFalse((results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_rebound_accuracy_manifest_identity_for_dblp_and_enron(self):
+        mutations = {
+            "dataset": "forged_dataset",
+            "variant": "forged_variant",
+            "dataset_manifest_sha256": "0" * 64,
+            "records_sha256": "1" * 64,
+            "pairs_sha256": "2" * 64,
+        }
+        for variant in ("dblp_acm_u65536", "enron_u65536"):
+            for field, replacement in mutations.items():
+                with self.subTest(variant=variant, field=field):
+                    results_root = self.tmp / f"accuracy-identity-{variant}-{field}"
+                    result = self.run_paper(results_root)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    csv_rel = f"csv/real_accuracy_{variant}.csv"
+                    csv_path = results_root / csv_rel
+                    lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                    header = lines[0].rstrip("\n").split(",")
+                    row_index = header.index(field)
+                    for line_index in range(1, len(lines)):
+                        row = lines[line_index].rstrip("\n").split(",")
+                        row[row_index] = replacement
+                        lines[line_index] = ",".join(row) + "\n"
+                    csv_path.write_text("".join(lines), encoding="utf-8")
+                    recompute_and_rebind_summary_for_variant(results_root, variant)
+
+                    verify_result = run_command(
+                        [sys.executable, str(VERIFIER), str(results_root)], cwd=self.repo)
+                    self.assertNotEqual(verify_result.returncode, 0)
+                    self.assertIn(field, verify_result.stderr)
+                    self.assertFalse((results_root / "verification_status.tsv").exists())
+
+    def test_verifier_rejects_rebound_timing_kind_and_label_for_dblp_and_enron(self):
+        for variant in ("dblp_acm_u65536", "enron_u65536"):
+            with self.subTest(variant=variant):
+                results_root = self.tmp / f"timing-identity-{variant}"
+                result = self.run_paper(results_root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                csv_rel = f"csv/real_timing_{variant}_std128-t40-primary.csv"
+                csv_path = results_root / csv_rel
+                lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                header = lines[0].rstrip("\n").split(",")
+                row = lines[1].rstrip("\n").split(",")
+                row[header.index("pair_kind")] = "forged_kind"
+                row[header.index("label")] = "0"
+                lines[1] = ",".join(row) + "\n"
+                csv_path.write_text("".join(lines), encoding="utf-8")
+                rebind_file_hash(results_root, csv_rel)
+
+                verify_result = run_command(
+                    [sys.executable, str(VERIFIER), str(results_root)], cwd=self.repo)
+                self.assertNotEqual(verify_result.returncode, 0)
+                self.assertTrue("pair_kind" in verify_result.stderr or
+                                "label" in verify_result.stderr)
+                self.assertFalse((results_root / "verification_status.tsv").exists())
 
     def test_verifier_rejects_source_manifest_copy_mismatch(self):
         # Fable gate finding #4c: the verifier's dedicated byte-match check

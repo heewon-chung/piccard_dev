@@ -369,14 +369,16 @@ TEST(RealDataset, RejectsEnronWrongPreprocessingProfile) {
 }
 
 TEST(RealDataset, RejectsEnronBinaryLabels) {
-    fs::path dir = MakeEnronFixture("enron-binary-label", 65536,
-                                    "enron_u65536");
-    MutateDataLine(dir / "pairs.tsv", 0, [](const std::string& line) {
-        return line.substr(0, line.rfind('\t') + 1) + "0";
-    });
-    RecomputeChecksum(dir, "pairs.tsv", "pairs_sha256");
-    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "label");
-    fs::remove_all(dir);
+    for (const std::string& forbidden_label : {"0", "1"}) {
+        fs::path dir = MakeEnronFixture("enron-binary-label", 65536,
+                                        "enron_u65536");
+        MutateDataLine(dir / "pairs.tsv", 0, [&](const std::string& line) {
+            return line.substr(0, line.rfind('\t') + 1) + forbidden_label;
+        });
+        RecomputeChecksum(dir, "pairs.tsv", "pairs_sha256");
+        ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "label");
+        fs::remove_all(dir);
+    }
 }
 
 TEST(RealDataset, RejectsEnronWrongPairKind) {
@@ -405,11 +407,50 @@ TEST(RealDataset, RejectsEnronMissingPairProxy) {
     fs::remove_all(dir);
 }
 
-TEST(RealDataset, RejectsEnronNonzeroPositiveCount) {
-    fs::path dir = MakeEnronFixture("enron-positive-count", 65536,
+TEST(RealDataset, RejectsEnronNonzeroPositiveCounts) {
+    for (const std::string& key : {"original_positive_count", "retained_positive_count"}) {
+        fs::path dir = MakeEnronFixture("enron-positive-count", 65536,
+                                        "enron_u65536");
+        SetManifestValue(dir / "dataset.manifest.tsv", key, "1");
+        ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "positive_count");
+        fs::remove_all(dir);
+    }
+}
+
+TEST(RealDataset, RejectsEnronWrongUniverseForVariant) {
+    fs::path dir = MakeEnronFixture("enron-wrong-universe", 1048576,
                                     "enron_u65536");
-    SetManifestValue(dir / "dataset.manifest.tsv", "original_positive_count", "1");
-    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "positive_count");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "universe_size");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronWrongPairProxy) {
+    fs::path dir = MakeEnronFixture("enron-wrong-proxy", 65536,
+                                    "enron_u65536");
+    SetManifestValue(dir / "dataset.manifest.tsv", "pair_proxy",
+                     "canonical-subject-proxy-v0");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "pair_proxy");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronMissingDropCounter) {
+    fs::path dir = MakeEnronFixture("enron-missing-drop-counter", 65536,
+                                    "enron_u65536");
+    auto lines = SplitLinesKeepTrailingNewline(ReadFile(dir / "dataset.manifest.tsv"));
+    lines.erase(std::remove_if(lines.begin(), lines.end(), [](const std::string& line) {
+                   return line.rfind("dropped.duplicate_copy\t", 0) == 0;
+               }), lines.end());
+    WriteFile(dir / "dataset.manifest.tsv", JoinLinesWithTrailingNewline(lines));
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "duplicate_copy");
+    fs::remove_all(dir);
+}
+
+TEST(RealDataset, RejectsEnronExtraDropCounter) {
+    fs::path dir = MakeEnronFixture("enron-extra-drop-counter", 65536,
+                                    "enron_u65536");
+    WriteFile(dir / "dataset.manifest.tsv",
+              ReadFile(dir / "dataset.manifest.tsv") + "dropped.unexpected\t1\n");
+    ExpectLoadErrorContaining(dir / "dataset.manifest.tsv", "unknown manifest key");
     fs::remove_all(dir);
 }
 

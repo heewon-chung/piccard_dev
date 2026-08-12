@@ -56,6 +56,8 @@ QUICK_DATASET_MANIFEST = (
     / "dataset.manifest.tsv"
 )
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
+PAPER_VARIANTS = frozenset(("dblp_acm_u65536", "enron_u65536",
+                            "enron_u1048576"))
 SINGLE_TRIAL_PROFILES = (
     "work5-std128-t40-single-trial",
     "work5-std192-t40-single-trial",
@@ -448,16 +450,12 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
                     pair, results_root, processed_root_id, processed_root,
                     "work5-std192-t40-single-trial", method, seed, threads))
         else:
-            # Work 5's DBLP paper profiles remain byte-compatible. Enron's
-            # new-paper STD192 encoding pair is Phase-6 work, so Phase 3
-            # exposes only the executable STD128 timing cell; no Enron
-            # STD192 producer is launched or represented as measured here.
-            paper_profiles = (profiles if pair.dataset == "dblp_acm" else
-                              ("std128-t40-primary",))
-            for profile in paper_profiles:
-                cells.append(timing_cell(
-                    pair, results_root, processed_root_id, processed_root,
-                    profile, seed, threads, PAPER_TIMING_TRIALS))
+            # Phase 3 exposes only executable STD128 timing. New-paper
+            # STD192 is intentionally absent until Phase 6; the legacy
+            # Work 5 single-trial encoding branch above remains unchanged.
+            cells.append(timing_cell(
+                pair, results_root, processed_root_id, processed_root,
+                "std128-t40-primary", seed, threads, PAPER_TIMING_TRIALS))
     return cells
 
 
@@ -965,12 +963,20 @@ def parse_args(argv):
             pair = load_manifest_pair(pathlib.Path(source_raw), pathlib.Path(dataset_raw))
             if pair.variant in seen:
                 parser.error(f"duplicate variant across manifest pairs: {pair.variant!r}")
-            if pair.variant not in {"dblp_acm_u65536", "enron_u65536",
-                                    "enron_u1048576"}:
+            if pair.variant not in PAPER_VARIANTS:
                 parser.error(f"unsupported paper real-data variant: {pair.variant!r}")
+            expected_dataset = ("dblp_acm" if pair.variant == "dblp_acm_u65536"
+                                else "enron")
+            if pair.dataset != expected_dataset:
+                parser.error(f"dataset/variant mismatch for paper variant "
+                             f"{pair.variant!r}: expected dataset={expected_dataset!r}, "
+                             f"got {pair.dataset!r}")
             seen.add(pair.variant)
             pairs.append(pair)
         args.pairs = pairs
+        if set(seen) != PAPER_VARIANTS:
+            parser.error("paper mode requires exactly the frozen real-data "
+                         f"variant set {sorted(PAPER_VARIANTS)!r}, got {sorted(seen)!r}")
         if not args.profile:
             parser.error("evidence_mode=paper requires at least one --profile")
         if set(args.profile) != set(PAPER_PROFILES) or len(args.profile) != len(PAPER_PROFILES):

@@ -125,6 +125,14 @@ SUMMARY_HEADER_FIELDS = (
     "dataset", "variant", "jaccard_bucket", "n", "mae", "sample_sd",
     "median", "p95", "max", "ci95_low", "ci95_high",
 )
+ENRON_SUMMARY_SCHEMA_VERSION = "piccard-real-enron-summary-v1"
+ENRON_SUMMARY_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median", "bucketed_set_size_max",
+    "jaccard_bucket", "n", "mae", "sample_sd", "median", "p95", "max",
+    "ci95_low", "ci95_high",
+)
 _BUCKET_ORDER = ("b00_10", "b10_30", "b30_60", "b60_100")
 
 # Fields that must never be an empty cell in either row schema (mirrors
@@ -202,7 +210,7 @@ def _processed_manifest_key_order(dataset: str) -> tuple:
 # Quick evidence remains the single tracked DBLP-ACM fixture. Paper evidence
 # admits the frozen DBLP-ACM and two Enron variants below.
 QUICK_VARIANT = "dblp_acm_u65536"
-PAPER_VARIANTS = {"dblp_acm_u65536", "enron_u65536", "enron_u1048576"}
+PAPER_VARIANTS = frozenset({"dblp_acm_u65536", "enron_u65536", "enron_u1048576"})
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
 QUICK_TIMING_PROFILE = "toy-smoke"
 SINGLE_TRIAL_PROFILES = (
@@ -603,13 +611,10 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
             }
         }
     else:
-        expected_variants = set(by_variant)
+        expected_variants = set(PAPER_VARIANTS)
         expected_by_variant = {}
-        for variant in by_variant:
-            if variant not in PAPER_VARIANTS:
-                fail(f"unknown variant for paper-mode evidence: {variant!r}")
-            timing_profiles = (PAPER_PROFILES if variant == QUICK_VARIANT else
-                               ("std128-t40-primary",))
+        for variant in expected_variants:
+            timing_profiles = ("std128-t40-primary",)
             expected_by_variant[variant] = {
                 f"{variant}:accuracy",
                 f"{variant}:accuracy-summary",
@@ -618,7 +623,7 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
 
     if set(by_variant) != expected_variants:
         fail(f"unexpected variant set for evidence_mode={evidence_mode!r}: "
-             f"found {sorted(by_variant)!r}")
+             f"expected {sorted(expected_variants)!r}, found {sorted(by_variant)!r}")
     for variant, expected_ids in expected_by_variant.items():
         actual_ids = by_variant[variant]
         if actual_ids != expected_ids:
@@ -884,7 +889,30 @@ def _numeric_truth_equal(observed, expected: float, field: str, cell_id: str,
              f"(expected canonical value {rendered!r})")
 
 
+def _validate_row_identity(row: dict, cell: dict, row_number: int,
+                           processed_values: dict, pair: dict) -> None:
+    """Bind producer identity/provenance columns to the processed manifest."""
+    cell_id = cell["id"]
+    expected = {
+        "dataset": processed_values["dataset"],
+        "variant": processed_values["variant"],
+        "dataset_manifest_sha256": _cell_processed_sha(cell),
+        "records_sha256": processed_values["records_sha256"],
+        "pairs_sha256": processed_values["pairs_sha256"],
+        "pair_id": pair["pair_id"],
+        "pair_kind": pair["pair_kind"],
+        "label": pair["label"],
+        "record_a": pair["record_a"],
+        "record_b": pair["record_b"],
+    }
+    for field, expected_value in expected.items():
+        if str(row.get(field)) != str(expected_value):
+            fail(f"cell {cell_id!r} row {row_number}: {field} identity/provenance "
+                 "does not match the bound processed manifest")
+
+
 def _validate_accuracy_truth(cell: dict, csv_rows: list,
+                             processed_values: dict,
                              processed_dataset: dict) -> None:
     """Recompute every accuracy truth/value coupling from bound records/pairs."""
     cell_id = cell["id"]
@@ -895,11 +923,7 @@ def _validate_accuracy_truth(cell: dict, csv_rows: list,
         pair = pairs.get(pair_id)
         if pair is None:
             fail(f"cell {cell_id!r} row {offset}: pair_id {pair_id!r} is absent from pairs.tsv")
-        for field in ("pair_kind", "record_a", "record_b"):
-            if str(row.get(field)) != pair[field]:
-                fail(f"cell {cell_id!r} row {offset}: {field} truth mismatch")
-        if row.get("label") != pair["label"]:
-            fail(f"cell {cell_id!r} row {offset}: label truth mismatch")
+        _validate_row_identity(row, cell, offset, processed_values, pair)
         record_a, record_b = records[pair["record_a"]], records[pair["record_b"]]
         raw_intersection, raw_union, raw_jaccard = _truth_jaccard(
             record_a["raw"], record_b["raw"])
@@ -1125,11 +1149,12 @@ def _validate_accuracy_workload(cell: dict, variant: str, csv_rows: list,
                                 str(row.get("record_b"))):
             fail(f"cell {cell_id!r} accuracy CSV endpoints for {pair_id!r} do "
                  "not match pairs.tsv")
-    _validate_accuracy_truth(cell, csv_rows, processed_dataset)
+    _validate_accuracy_truth(cell, csv_rows, processed_values, processed_dataset)
 
 
 def _validate_timing_workload(cell: dict, variant: str, profile: str,
-                              csv_rows: list) -> None:
+                              csv_rows: list, processed_values: dict,
+                              processed_dataset: dict) -> None:
     cell_id = cell["id"]
     manifest_path = _output_path_for(
         cell, f"timing_{variant}_{profile}.manifest.tsv")
@@ -1190,11 +1215,6 @@ def _validate_timing_workload(cell: dict, variant: str, profile: str,
     # Codex stop-gate round 6: the timing pair is not a free choice -- it
     # must be the median-combined-bucketed-size pair recomputed from the
     # anchored records/pairs files, and every CSV row must carry it.
-    processed_manifest_path = next(
-        i for i in cell["inputs"] if i["role"] == "processed-manifest")["resolved"]
-    processed_manifest_values = dict(parse_two_column_tsv(processed_manifest_path))
-    processed_values = _validate_processed_manifest(
-        processed_manifest_path, processed_manifest_values["dataset"])
     processed_dir = _cell_processed_dir(cell)
     expected_pair = _median_pair_id(processed_dir, processed_values)
     if wl["pair_id"] != expected_pair:
@@ -1203,6 +1223,9 @@ def _validate_timing_workload(cell: dict, variant: str, profile: str,
     records_by_pair = {p: (a, b) for p, a, b in
                        _read_processed_pairs(processed_dir, processed_values)}
     expected_records = records_by_pair[expected_pair]
+    expected_pair_row = next(
+        pair for pair in processed_dataset["pairs"]
+        if pair["pair_id"] == expected_pair)
 
     manifest_sha = sha256_file(manifest_path)
     if len(csv_rows) != trials_n:
@@ -1223,6 +1246,8 @@ def _validate_timing_workload(cell: dict, variant: str, profile: str,
         if (str(row.get("record_a")), str(row.get("record_b"))) != expected_records:
             fail(f"cell {cell_id!r} timing CSV endpoints do not match "
                  "pairs.tsv for the median pair")
+        _validate_row_identity(row, cell, offset + 2, processed_values,
+                               expected_pair_row)
 
 
 def _validate_encoding_workload(cell: dict, variant: str, profile: str,
@@ -1345,6 +1370,80 @@ def _validate_summary_recomputation(cell: dict, summary_path: Path) -> None:
         if regenerated.read_bytes() != summary_path.read_bytes():
             fail(f"cell {cell['id']!r} summary CSV does not byte-match the "
                  "recomputation from its accuracy CSV")
+
+
+def _summary_size_stats(values: list) -> tuple:
+    if not values:
+        fail("Enron summary has no bound record set sizes")
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[middle]
+    else:
+        median = (ordered[middle - 1] + ordered[middle]) / 2.0
+    return ordered[0], median, ordered[-1]
+
+
+def _validate_enron_summary(cell: dict, summary_path: Path,
+                            processed_values: dict,
+                            processed_dataset: dict) -> None:
+    """Independently recompute Enron size statistics from bound rows/records."""
+    accuracy_input = next(
+        i for i in cell["inputs"] if i["role"] == "accuracy-csv")
+    accuracy_rows = _read_rows(
+        accuracy_input["resolved"], ACCURACY_HEADER_FIELDS, cell["id"])
+    records = processed_dataset["records"]
+    observed = {}
+    for row in accuracy_rows:
+        for record_field, raw_field, bucketed_field in (
+                ("record_a", "set_size_a_raw", "set_size_a_bucketed"),
+                ("record_b", "set_size_b_raw", "set_size_b_bucketed")):
+            record_id = str(row[record_field])
+            if record_id not in records:
+                fail(f"cell {cell['id']!r} Enron summary row references unknown "
+                     f"record {record_id!r}")
+            expected_size = (len(records[record_id]["raw"]),
+                             len(records[record_id]["bucketed"]))
+            observed_size = (row[raw_field], row[bucketed_field])
+            if observed_size != expected_size:
+                fail(f"cell {cell['id']!r} Enron summary source row set-size "
+                     f"mismatch for record {record_id!r}")
+            previous = observed.get(record_id)
+            if previous is not None and previous != observed_size:
+                fail(f"cell {cell['id']!r} Enron summary source row has "
+                     f"inconsistent set size for record {record_id!r}")
+            observed[record_id] = observed_size
+
+    raw_min, raw_median, raw_max = _summary_size_stats(
+        [size[0] for size in observed.values()])
+    bucketed_min, bucketed_median, bucketed_max = _summary_size_stats(
+        [size[1] for size in observed.values()])
+    expected_sizes = {
+        "raw_set_size_min": format_float(float(raw_min)),
+        "raw_set_size_median": format_float(float(raw_median)),
+        "raw_set_size_max": format_float(float(raw_max)),
+        "bucketed_set_size_min": format_float(float(bucketed_min)),
+        "bucketed_set_size_median": format_float(float(bucketed_median)),
+        "bucketed_set_size_max": format_float(float(bucketed_max)),
+    }
+    with summary_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != list(ENRON_SUMMARY_HEADER_FIELDS):
+            fail(f"cell {cell['id']!r} Enron summary header mismatch")
+        rows = list(reader)
+    if len(rows) != len(_BUCKET_ORDER):
+        fail(f"cell {cell['id']!r} Enron summary must contain four accuracy buckets")
+    for row, bucket in zip(rows, _BUCKET_ORDER):
+        if row["schema_version"] != ENRON_SUMMARY_SCHEMA_VERSION:
+            fail(f"cell {cell['id']!r} Enron summary schema_version mismatch")
+        if row["dataset"] != processed_values["dataset"] or \
+                row["variant"] != processed_values["variant"]:
+            fail(f"cell {cell['id']!r} Enron summary dataset identity mismatch")
+        if row["jaccard_bucket"] != bucket:
+            fail(f"cell {cell['id']!r} Enron summary bucket order mismatch")
+        for field, expected in expected_sizes.items():
+            if row[field] != expected:
+                fail(f"cell {cell['id']!r} Enron summary {field} mismatch")
 
 
 def _validate_eligibility_integrity(rows: list, cell_id: str, evidence_mode: str) -> None:
@@ -1572,7 +1671,10 @@ def verify(results_root: Path) -> str:
             csv_path = _output_path_for(cell, f"real_timing_{variant}_{profile}.csv")
             rows = _read_rows(csv_path, TIMING_HEADER_FIELDS, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
-            _validate_timing_workload(cell, variant, profile, rows)
+            _validate_timing_workload(
+                cell, variant, profile, rows,
+                processed_manifest_cache[variant],
+                processed_dataset_cache[variant])
         elif ":encoding:" in cell["id"]:
             _variant, _marker, profile, method = cell["id"].split(":", 3)
             csv_path = _output_path_for(
@@ -1582,12 +1684,20 @@ def verify(results_root: Path) -> str:
             _validate_encoding_workload(cell, variant, profile, method, rows)
         elif cell["id"].endswith(":accuracy-summary"):
             csv_path = _output_path_for(cell, f"real_accuracy_summary_{variant}.csv")
+            processed_values = processed_manifest_cache[variant]
+            expected_header = (ENRON_SUMMARY_HEADER_FIELDS
+                               if processed_values["dataset"] == "enron"
+                               else SUMMARY_HEADER_FIELDS)
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 reader = csv.reader(handle)
                 header = next(reader)
-                if header != list(SUMMARY_HEADER_FIELDS):
+                if header != list(expected_header):
                     fail(f"cell {cell['id']!r} summary CSV header mismatch")
             _validate_summary_recomputation(cell, csv_path)
+            if processed_values["dataset"] == "enron":
+                _validate_enron_summary(
+                    cell, csv_path, processed_values,
+                    processed_dataset_cache[variant])
         else:
             fail(f"unrecognized cell id shape: {cell['id']!r}")
 
@@ -1601,7 +1711,10 @@ def verify(results_root: Path) -> str:
             if source_root_id not in roots:
                 fail(f"no {source_root_id!r} root recorded for variant {variant!r}")
             source_manifest_root_id = f"source-manifest-{variant}"
-            if source_manifest_root_id in roots:
+            if evidence_mode == "paper":
+                if source_manifest_root_id not in roots:
+                    fail(f"no {source_manifest_root_id!r} root recorded for "
+                         f"paper variant {variant!r}")
                 original_source_path = roots[source_manifest_root_id]
             else:
                 original_source_path = roots[source_root_id] / (

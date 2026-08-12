@@ -94,6 +94,14 @@ SUMMARY_HEADER_FIELDS = (
     "dataset", "variant", "jaccard_bucket", "n", "mae", "sample_sd",
     "median", "p95", "max", "ci95_low", "ci95_high",
 )
+ENRON_SUMMARY_SCHEMA_VERSION = "piccard-real-enron-summary-v1"
+ENRON_SUMMARY_HEADER_FIELDS = (
+    "schema_version", "dataset", "variant",
+    "raw_set_size_min", "raw_set_size_median", "raw_set_size_max",
+    "bucketed_set_size_min", "bucketed_set_size_median", "bucketed_set_size_max",
+    "jaccard_bucket", "n", "mae", "sample_sd", "median", "p95", "max",
+    "ci95_low", "ci95_high",
+)
 
 # Fixed bucket order, normative plan §Phase 5 "Summaries group bucketed
 # exact Jaccard into...": every (dataset, variant) group always emits all
@@ -167,11 +175,8 @@ def _parse_finite_float(raw: str, *, field: str, row_number: int) -> float:
     return value
 
 
-def read_accuracy_rows(input_path: Path):
-    """Validates the exact RealAccuracyHeader() header (column set and
-    order) and yields (dataset, variant, exact_jaccard_bucketed, abs_error)
-    per data row, rejecting non-finite values in either numeric field and
-    any row whose column count does not match the header."""
+def _read_accuracy_csv_rows(input_path: Path):
+    """Read accuracy rows with the extra Enron set-size identity fields."""
     with input_path.open(newline="", encoding="utf-8") as handle:
         reader = csv.reader(handle)
         try:
@@ -202,16 +207,63 @@ def read_accuracy_rows(input_path: Path):
                 row_number=row_number)
             abs_error = _parse_finite_float(
                 row[abs_error_index], field="abs_error", row_number=row_number)
-            yield dataset, variant, exact_jaccard_bucketed, abs_error
+            parsed = {
+                "dataset": dataset,
+                "variant": variant,
+                "exact_jaccard_bucketed": exact_jaccard_bucketed,
+                "abs_error": abs_error,
+            }
+            if dataset == "enron":
+                for field in ("record_a", "record_b"):
+                    value = row[header.index(field)]
+                    if value == "":
+                        raise SummarizerError(
+                            f"row {row_number}: Enron field {field!r} is empty")
+                    parsed[field] = value
+                for field in (
+                    "set_size_a_raw", "set_size_b_raw",
+                    "set_size_a_bucketed", "set_size_b_bucketed",
+                ):
+                    raw = row[header.index(field)]
+                    try:
+                        value = int(raw)
+                    except ValueError as exc:
+                        raise SummarizerError(
+                            f"row {row_number}: Enron field {field!r} is not an integer"
+                        ) from exc
+                    if value < 0:
+                        raise SummarizerError(
+                            f"row {row_number}: Enron field {field!r} is negative")
+                    parsed[field] = value
+            yield parsed
+
+
+def read_accuracy_rows(input_path: Path):
+    """Validate the exact RealAccuracyHeader() and yield the legacy four
+    summary inputs. Enron callers use the richer internal row representation
+    to add a versioned set-size summary without changing DBLP bytes."""
+    for row in _read_accuracy_csv_rows(input_path):
+        yield (row["dataset"], row["variant"],
+               row["exact_jaccard_bucketed"], row["abs_error"])
 
 
 def build_summary_rows(input_path: Path):
     """Groups accuracy rows by (dataset, variant) in first-seen order, then
     by jaccard_bucket, and returns one formatted output row per (dataset,
     variant, bucket) with all four buckets always present per group."""
+    detailed_rows = list(_read_accuracy_csv_rows(input_path))
+    if any(row["dataset"] == "enron" for row in detailed_rows):
+        if any(row["dataset"] != "enron" for row in detailed_rows):
+            raise SummarizerError("an accuracy CSV cannot mix Enron and non-Enron rows")
+        return _build_enron_summary_rows(detailed_rows)
+
     groups: dict = {}
     group_order = []
-    for dataset, variant, exact_jaccard_bucketed, abs_error in read_accuracy_rows(input_path):
+    for row in detailed_rows:
+        dataset = row["dataset"]
+        variant = row["variant"]
+        exact_jaccard_bucketed = row["exact_jaccard_bucketed"]
+        abs_error = row["abs_error"]
         key = (dataset, variant)
         if key not in groups:
             groups[key] = {bucket: [] for bucket in _BUCKET_ORDER}
@@ -227,6 +279,72 @@ def build_summary_rows(input_path: Path):
     return output_rows
 
 
+def _format_size_stat(value):
+    return format_float(float(value))
+
+
+def _size_stats(values):
+    if not values:
+        raise SummarizerError("Enron accuracy rows contain no set-size values")
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[mid]
+    else:
+        median = (ordered[mid - 1] + ordered[mid]) / 2.0
+    return ordered[0], median, ordered[-1]
+
+
+def _build_enron_summary_rows(detailed_rows):
+    groups = {}
+    group_order = []
+    for row in detailed_rows:
+        key = (row["dataset"], row["variant"])
+        if key not in groups:
+            groups[key] = {
+                "buckets": {bucket: [] for bucket in _BUCKET_ORDER},
+                "records": {},
+            }
+            group_order.append(key)
+        group = groups[key]
+        group["buckets"][jaccard_bucket_label(
+            row["exact_jaccard_bucketed"])].append(row["abs_error"])
+        for record_id, raw_field, bucketed_field in (
+                (row["record_a"], "set_size_a_raw", "set_size_a_bucketed"),
+                (row["record_b"], "set_size_b_raw", "set_size_b_bucketed")):
+            size = (row[raw_field], row[bucketed_field])
+            previous = group["records"].get(record_id)
+            if previous is not None and previous != size:
+                raise SummarizerError(
+                    f"Enron record {record_id!r} has inconsistent set sizes")
+            group["records"][record_id] = size
+
+    output_rows = []
+    for dataset, variant in group_order:
+        group = groups[(dataset, variant)]
+        raw_min, raw_median, raw_max = _size_stats(
+            [size[0] for size in group["records"].values()])
+        bucketed_min, bucketed_median, bucketed_max = _size_stats(
+            [size[1] for size in group["records"].values()])
+        for bucket in _BUCKET_ORDER:
+            stats = summarize(group["buckets"][bucket])
+            output_rows.append([
+                ENRON_SUMMARY_SCHEMA_VERSION, dataset, variant,
+                _format_size_stat(raw_min), _format_size_stat(raw_median),
+                _format_size_stat(raw_max), _format_size_stat(bucketed_min),
+                _format_size_stat(bucketed_median), _format_size_stat(bucketed_max),
+                bucket, str(stats["n"]),
+                "" if stats["mae"] is None else format_float(stats["mae"]),
+                "" if stats["sample_sd"] is None else format_float(stats["sample_sd"]),
+                "" if stats["median"] is None else format_float(stats["median"]),
+                "" if stats["p95"] is None else format_float(stats["p95"]),
+                "" if stats["max"] is None else format_float(stats["max"]),
+                "" if stats["ci95_low"] is None else format_float(stats["ci95_low"]),
+                "" if stats["ci95_high"] is None else format_float(stats["ci95_high"]),
+            ])
+    return output_rows
+
+
 def _format_summary_row(dataset: str, variant: str, bucket: str, stats: dict):
     def cell(value):
         return "" if value is None else format_float(value)
@@ -239,7 +357,7 @@ def _format_summary_row(dataset: str, variant: str, bucket: str, stats: dict):
     ]
 
 
-def _write_atomic(output_path: Path, rows) -> None:
+def _write_atomic(output_path: Path, rows, header) -> None:
     """Writes the summary CSV to a sibling temp file, fsyncs it, and
     atomically renames it into place -- no partial output is ever visible
     at `output_path`."""
@@ -249,7 +367,7 @@ def _write_atomic(output_path: Path, rows) -> None:
     try:
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle, lineterminator="\n")
-            writer.writerow(SUMMARY_HEADER_FIELDS)
+            writer.writerow(header)
             for row in rows:
                 writer.writerow(row)
             handle.flush()
@@ -265,7 +383,10 @@ def _write_atomic(output_path: Path, rows) -> None:
 
 def run(input_path: Path, output_path: Path) -> None:
     rows = build_summary_rows(input_path)
-    _write_atomic(output_path, rows)
+    header = SUMMARY_HEADER_FIELDS
+    if rows and rows[0] and rows[0][0] == ENRON_SUMMARY_SCHEMA_VERSION:
+        header = ENRON_SUMMARY_HEADER_FIELDS
+    _write_atomic(output_path, rows, header)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
