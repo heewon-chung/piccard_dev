@@ -3,7 +3,7 @@
     {
       "argv": [
         "--revision-cell=paper-v1::real_dataset::dblp_acm_u65536_artifact=summary",
-        "--accuracy-csv={output}/accuracy.csv",
+        "--accuracy-csv={accuracy_output}/accuracy.csv",
         "--output={output}/summary.csv",
         "--variant=dblp_acm_u65536"
       ],
@@ -12,7 +12,7 @@
     {
       "argv": [
         "--revision-cell=paper-v1::real_dataset::enron_u1048576_artifact=summary",
-        "--accuracy-csv={output}/accuracy.csv",
+        "--accuracy-csv={accuracy_output}/accuracy.csv",
         "--output={output}/summary.csv",
         "--variant=enron_u1048576"
       ],
@@ -21,7 +21,7 @@
     {
       "argv": [
         "--revision-cell=paper-v1::real_dataset::enron_u65536_artifact=summary",
-        "--accuracy-csv={output}/accuracy.csv",
+        "--accuracy-csv={accuracy_output}/accuracy.csv",
         "--output={output}/summary.csv",
         "--variant=enron_u65536"
       ],

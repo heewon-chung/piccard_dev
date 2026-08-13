@@ -272,7 +272,7 @@ def _validate_summary_contract_entries(
         argv = entry.get("argv")
         expected = [
             f"--revision-cell={cell_id}",
-            "--accuracy-csv={output}/accuracy.csv",
+            "--accuracy-csv={accuracy_output}/accuracy.csv",
             "--output={output}/summary.csv",
             f"--variant={variant}",
         ]
@@ -312,11 +312,18 @@ def _canonicalize_summary_argv(request: Mapping[str, Any],
         _revision_reject("--accuracy-csv must resolve to accuracy.csv")
     if output_path.name != "summary.csv":
         _revision_reject("--output must resolve to summary.csv")
-    if input_path.parent != output_path.parent:
-        _revision_reject("input and output must share the one revision output root")
+    variant = str(request["variant"])
+    accuracy_id = f"paper-v1::real_dataset::{variant}_artifact=accuracy"
+    def slug(value: str) -> str:
+        return "".join(character if character.isalnum() else "_"
+                       for character in value)
+    if (input_path.parent.name != slug(accuracy_id) or
+            output_path.parent.name != slug(str(request["revision_cell"])) or
+            input_path.parent.parent != output_path.parent.parent):
+        _revision_reject("input and output must bind sibling canonical cell roots")
     canonical = [
         f"--revision-cell={request['revision_cell']}",
-        "--accuracy-csv={output}/accuracy.csv",
+        "--accuracy-csv={accuracy_output}/accuracy.csv",
         "--output={output}/summary.csv",
         f"--variant={request['variant']}",
     ]

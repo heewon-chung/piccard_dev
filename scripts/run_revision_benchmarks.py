@@ -65,7 +65,7 @@ def _absolute_directory(value: str, label: str, *, must_exist: bool) -> Path:
         _fail(f"{label} must not be a symlink")
     if must_exist and not path.is_dir():
         _fail(f"{label} must be an existing directory")
-    return path
+    return path.resolve()
 
 
 def _fresh_results_root(value: str) -> Path:
@@ -100,36 +100,37 @@ def _fsync_directory(path: Path) -> None:
 def _copy_toy_manifests(results_root: Path) -> tuple[dict[str, Path], Path]:
     """Create bounded, non-maildir fixture manifests for readiness-only runs.
 
-    The copied records/pairs are the existing tiny DBLP fixture.  Rebinding its
-    metadata to an Enron variant is intentional: it gives the toy lifecycle a
-    finite processed fixture without reading the raw Enron maildir.  The
-    generated files live below the untracked result root and are sealed there.
+    DBLP is copied byte-for-byte.  Enron is prepared from the tracked tiny RFC
+    fixture using the production preprocessor, so its manifest/drop keys,
+    labels, pair kinds, and digests are real Enron contracts.  The actual
+    untracked maildir is never read.
     """
     source = ROOT / "tests" / "fixtures" / "real_datasets" / "quick" / "dblp_acm_u65536"
     if not source.is_dir():
         _fail("bounded real-data fixture is missing")
     manifests: dict[str, Path] = {}
     destination_root = results_root / "toy-input"
-    for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
+    destination = destination_root / "dblp_acm_u65536"
+    shutil.copytree(source, destination)
+    manifests["dblp_acm_u65536"] = destination / "dataset.manifest.tsv"
+    enron_source = (ROOT / "tests" / "fixtures" / "real_datasets" /
+                    "enron_maildir" / "source.manifest.tsv")
+    for universe in (65536, 1048576):
+        variant = f"enron_u{universe}"
         destination = destination_root / variant
-        shutil.copytree(source, destination)
-        manifest = destination / "dataset.manifest.tsv"
-        lines = manifest.read_text(encoding="utf-8").splitlines()
-        rewritten: list[str] = []
-        for line in lines:
-            key, separator, value = line.partition("\t")
-            if separator == "" and "=" in line:
-                key, value = line.split("=", 1)
-                separator = "="
-            if key == "dataset":
-                value = "dblp_acm" if variant.startswith("dblp") else "enron"
-            elif key == "variant":
-                value = variant
-            elif key == "universe_size":
-                value = "1048576" if variant == "enron_u1048576" else "65536"
-            rewritten.append(key + "\t" + value)
-        manifest.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-        manifests[variant] = manifest
+        command = [
+            sys.executable, str(SCRIPT_DIR / "prepare_real_datasets.py"),
+            "enron", "--source-manifest", str(enron_source),
+            "--output-dir", str(destination), "--universe", str(universe),
+            "--max-documents", "7", "--pairs", "4",
+            "--min-related-pairs", "1", "--seed", "7", "--strict",
+        ]
+        completed = subprocess.run(command, cwd=ROOT, capture_output=True,
+                                   text=True, check=False)
+        if completed.returncode != 0:
+            _fail("tracked Enron toy fixture preparation failed: " +
+                  completed.stderr.strip())
+        manifests[variant] = destination / "dataset.manifest.tsv"
     return manifests, manifests["dblp_acm_u65536"]
 
 
@@ -179,6 +180,7 @@ def _write_initial_manifest(
     root: Path, *, mode: str, seed: int, threads: int, matrix_path: Path,
     matrix_sha: str, cells: list[dict[str, Any]], source: dict[str, Any],
     binaries: dict[str, Any], scripts: dict[str, str], tools: dict[str, str],
+    build_dir: Path, variant_manifests: dict[str, Path], dblp_manifest: Path,
 ) -> dict[str, Any]:
     phases = {phase: "PENDING" for phase in PHASES}
     manifest: dict[str, Any] = {
@@ -207,6 +209,12 @@ def _write_initial_manifest(
         "binaries": binaries,
         "scripts": scripts,
         "tools": tools,
+        "build_dir": str(build_dir.resolve()),
+        "input_bindings": {
+            "variant_manifests": {key: str(value.resolve()) for key, value in
+                                  sorted(variant_manifests.items())},
+            "dblp_manifest": str(dblp_manifest.resolve()),
+        },
     }
     write_json(root / "run.json", manifest)
     return manifest
@@ -257,7 +265,7 @@ def _record_plans(root: Path, plans: list[dict[str, Any]]) -> None:
 
 def _run_one(
     *, root: Path, manifest: dict[str, Any], plan: dict[str, Any],
-    command: list[str], mode: str, no_exec: bool,
+    command: list[str], mode: str,
 ) -> None:
     cell_id = plan["cell_id"]
     output = Path(plan["output_dir"])
@@ -285,7 +293,7 @@ def _run_one(
                         "artifact_inventory": []})
         write_json(output / "receipt.json", receipt)
         return
-    if mode == "dry-run" or no_exec:
+    if mode == "dry-run":
         stdout.write_text("PLANNED\n", encoding="utf-8")
         stderr.write_text("", encoding="utf-8")
         receipt.update({"execution_status": "PLANNED", "exit_code": None,
@@ -344,7 +352,13 @@ def _run_one(
 def _load_verify_and_seal(root: Path, mode: str) -> None:
     from verify_revision_benchmarks import verify_root
     from seal_revision_benchmarks import create_seal
-    verify_root(root, mode=mode, write_receipt=True)
+    verify_root(root, mode=mode, write_receipt=True,
+                lifecycle_stage="verification")
+    manifest = json.loads((root / "run.json").read_text(encoding="utf-8"))
+    _phase(root, manifest, "verification", "COMPLETED")
+    _phase(root, manifest, "seal", "STARTED")
+    manifest["state"] = "COMPLETED"
+    write_json(root / "run.json", manifest)
     create_seal(root)
 
 
@@ -364,6 +378,9 @@ def run(args: argparse.Namespace) -> int:
 
     document, matrix_sha = load_matrix(matrix_path)
     cells = select_cells(document, mode)
+    source = source_metadata(ROOT)
+    if mode in {"toy", "paper"} and source.get("dirty"):
+        _fail("executable revision runs require a tracked-clean source tree")
     results_root.mkdir()
     _fsync_directory(results_root.parent)
     try:
@@ -375,8 +392,16 @@ def run(args: argparse.Namespace) -> int:
         manifest = _write_initial_manifest(
             results_root, mode=mode, seed=seed, threads=threads,
             matrix_path=matrix_path, matrix_sha=matrix_sha, cells=cells,
-            source=source_metadata(ROOT), binaries=binaries,
-            scripts=_script_hashes(), tools=tool_metadata())
+            source=source, binaries=binaries,
+            scripts=_script_hashes(), tools=tool_metadata(build_dir),
+            build_dir=build_dir, variant_manifests=variant_manifests,
+            dblp_manifest=dblp_manifest)
+        if mode in {"toy", "paper"}:
+            missing = sorted(name for name, item in binaries.items()
+                             if item.get("sha256") == "MISSING")
+            if missing:
+                _fail("executable revision run has missing producers: " +
+                      ",".join(missing))
         plans: list[dict[str, Any]] = []
         for cell in cells:
             canonical, command = _materialized_command(
@@ -400,15 +425,17 @@ def run(args: argparse.Namespace) -> int:
         write_json(results_root / "run.json", manifest)
         event_sequence = 0
         for phase in PHASES:
+            if mode != "dry-run" and phase in {"verification", "seal"}:
+                continue
             _phase(results_root, manifest, phase, "STARTED")
             if phase in {"preflight", "verification", "seal"}:
                 _phase(results_root, manifest, phase, "COMPLETED")
                 continue
             for plan in [item for item in plans if item["phase"] == phase]:
                 _run_one(root=results_root, manifest=manifest, plan=plan,
-                         command=plan["command"], mode=mode, no_exec=args.no_exec)
+                         command=plan["command"], mode=mode)
             _phase(results_root, manifest, phase, "COMPLETED")
-        manifest["state"] = "COMPLETED"
+        manifest["state"] = "COMPLETED" if mode == "dry-run" else "VERIFYING"
         manifest["event_sequence"] = int(manifest.get("event_sequence", event_sequence))
         if mode == "toy":
             manifest["performance_status"] = "PAPER_PERFORMANCE_PENDING"
@@ -416,7 +443,8 @@ def run(args: argparse.Namespace) -> int:
         elif mode == "paper":
             manifest["performance_status"] = "PAPER_PERFORMANCE_RECORDED"
         write_json(results_root / "run.json", manifest)
-        if mode != "dry-run" and not args.no_exec:
+        if mode != "dry-run":
+            _phase(results_root, manifest, "verification", "STARTED")
             _load_verify_and_seal(results_root, mode)
         print(f"revision {mode}: {len(cells)} cells; spawned={manifest['spawned_processes']}")
         return 0
@@ -443,7 +471,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--matrix", default=str(MATRIX_DEFAULT))
     parser.add_argument("--authorize-paper-run", action="store_true",
                         help="required explicit token for paper mode")
-    parser.add_argument("--no-exec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 

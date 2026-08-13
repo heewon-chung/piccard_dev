@@ -47,6 +47,21 @@ class RevisionSealContractTest(unittest.TestCase):
             self.assertNotEqual(second.returncode, 0)
             self.assertEqual(original, (root / "seal.json").read_bytes())
 
+            before = {path.relative_to(root).as_posix(): path.read_bytes()
+                      for path in root.rglob("*") if path.is_file()}
+            post = subprocess.run(
+                [sys.executable, str(VERIFIER), str(root), "--mode=post-seal"],
+                cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(post.returncode, 0, post.stderr)
+            after = {path.relative_to(root).as_posix(): path.read_bytes()
+                     for path in root.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
+            (root / "post-seal-forgery.txt").write_text("forged\n")
+            rejected = subprocess.run(
+                [sys.executable, str(VERIFIER), str(root), "--mode=post-seal"],
+                cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

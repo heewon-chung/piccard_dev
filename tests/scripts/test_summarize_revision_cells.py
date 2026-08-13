@@ -40,10 +40,13 @@ def _summary_id(variant: str) -> str:
 
 
 def _concrete_argv(cell_id: str, variant: str, root: Path) -> list[str]:
+    accuracy_id = f"paper-v1::real_dataset::{variant}_artifact=accuracy"
+    slug = lambda value: "".join(character if character.isalnum() else "_"
+                                  for character in value)
     return [
         f"--revision-cell={cell_id}",
-        f"--accuracy-csv={root / 'accuracy.csv'}",
-        f"--output={root / 'summary.csv'}",
+        f"--accuracy-csv={root / slug(accuracy_id) / 'accuracy.csv'}",
+        f"--output={root / slug(cell_id) / 'summary.csv'}",
         f"--variant={variant}",
     ]
 
@@ -96,7 +99,7 @@ class SummarizeRevisionCellsTest(unittest.TestCase):
                 entry["argv"],
                 [
                     f"--revision-cell={cell_id}",
-                    "--accuracy-csv={output}/accuracy.csv",
+                    "--accuracy-csv={accuracy_output}/accuracy.csv",
                     "--output={output}/summary.csv",
                     f"--variant={variant}",
                 ],
@@ -119,7 +122,7 @@ class SummarizeRevisionCellsTest(unittest.TestCase):
                 self.assertEqual(selected["terminal_count"], 1)
                 self.assertEqual(selected["canonical_argv"], [
                     f"--revision-cell={cell_id}",
-                    "--accuracy-csv={output}/accuracy.csv",
+                    "--accuracy-csv={accuracy_output}/accuracy.csv",
                     "--output={output}/summary.csv",
                     f"--variant={variant}",
                 ])
@@ -128,21 +131,21 @@ class SummarizeRevisionCellsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             variant = "dblp_acm_u65536"
-            accuracy = root / "accuracy.csv"
-            output = root / "summary.csv"
+            argv = _concrete_argv(_summary_id(variant), variant, root)
+            accuracy = Path(argv[1].split("=", 1)[1])
+            output = Path(argv[2].split("=", 1)[1])
+            accuracy.parent.mkdir(parents=True)
+            output.parent.mkdir(parents=True)
             _write_accuracy(accuracy, variant)
             result = subprocess.run(
                 [
                     sys.executable, str(SCRIPT),
-                    *_concrete_argv(_summary_id(variant), variant, root),
+                    *argv,
                 ], cwd=ROOT, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "")
             self.assertTrue(output.is_file())
-            self.assertEqual(
-                sorted(path.name for path in root.iterdir()),
-                ["accuracy.csv", "summary.csv"],
-            )
+            self.assertEqual(len(list(root.rglob("*.csv"))), 2)
             with output.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
             self.assertEqual(rows[0], list(summarizer.SUMMARY_HEADER_FIELDS))
@@ -255,7 +258,8 @@ class SummarizeRevisionCellsTest(unittest.TestCase):
             self.assertNotEqual(missing.returncode, 0)
             self.assertFalse(output.exists())
 
-            accuracy = root / "accuracy.csv"
+            accuracy = Path(_concrete_argv(cell_id, variant, root)[1].split("=", 1)[1])
+            accuracy.parent.mkdir(parents=True)
             _write_accuracy(accuracy, "enron_u65536")
             mismatch = subprocess.run(
                 [sys.executable, str(SCRIPT),

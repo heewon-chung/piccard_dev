@@ -57,6 +57,19 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("authorize-paper-run", result.stderr)
 
+    def test_authorized_paper_rejects_missing_producer_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            build.mkdir()
+            result = self.run_runner(
+                "--mode=paper", "--authorize-paper-run",
+                "--build-dir", str(build),
+                "--results-root", str(Path(temporary) / "paper"),
+                "--seed", "1", "--threads", "1", "--matrix", str(MATRIX))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue("missing producers" in result.stderr.lower() or
+                            "tracked-clean" in result.stderr.lower())
+
     def test_results_root_must_be_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary) / "build"
@@ -74,26 +87,40 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("fresh", result.stderr.lower())
 
-    def test_toy_selection_is_104_cells_and_excludes_raw_enron(self) -> None:
+    def test_toy_selection_is_104_cells_and_has_no_public_no_exec_bypass(self) -> None:
+        help_result = self.run_runner("--help")
+        self.assertEqual(help_result.returncode, 0)
+        self.assertNotIn("no-exec", help_result.stdout)
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import load_matrix, select_cells
+        document, _ = load_matrix(MATRIX)
+        cells = select_cells(document, "toy")
+        self.assertEqual(len(cells), 104)
+        self.assertTrue(all(cell["invocation_status"] == "RUN" for cell in cells))
+
+    def test_toy_enron_inputs_use_real_enron_processed_grammar(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from run_revision_benchmarks import _copy_toy_manifests
         with tempfile.TemporaryDirectory() as temporary:
-            build = Path(temporary) / "build"
-            build.mkdir()
-            result = self.run_runner(
-                "--mode=toy",
-                "--build-dir", str(build),
-                "--results-root", str(Path(temporary) / "toy"),
-                "--seed", "20260729",
-                "--threads", "2",
-                "--matrix", str(MATRIX),
-                "--no-exec",
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            root = Path(temporary) / "toy"
-            manifest = json.loads((root / "run.json").read_text())
-            self.assertEqual(manifest["cell_count"], 104)
-            argv_text = (root / "planned_argv.jsonl").read_text()
-            self.assertNotIn("maildir", argv_text)
-            self.assertGreater(manifest["toy_measured_count"], 0)
+            root = Path(temporary)
+            manifests, _ = _copy_toy_manifests(root)
+            for variant in ("enron_u65536", "enron_u1048576"):
+                values = {}
+                for line in manifests[variant].read_text().splitlines()[1:]:
+                    key, value = line.split("\t", 1)
+                    values[key] = value
+                self.assertEqual(values["dataset"], "enron")
+                self.assertEqual(values["variant"], variant)
+                self.assertEqual(values["preprocessing_version"],
+                                 "enron-shingle5-v2")
+                self.assertIn("dropped.duplicate_copy", values)
+                self.assertEqual(values["original_positive_count"], "0")
+                pairs = manifests[variant].parent / values["pairs_file"]
+                pair_text = pairs.read_text()
+                self.assertTrue(any(line.endswith("\t-1")
+                                    for line in pair_text.splitlines()[1:]))
+                self.assertTrue("thread_related" in pair_text or
+                                "cross_thread" in pair_text)
 
 
 if __name__ == "__main__":

@@ -73,11 +73,18 @@ def write_json(path: Path, value: Any, *, fsync: bool = True) -> None:
 
 
 def append_jsonl(path: Path, value: Any) -> None:
+    existed = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("ab") as stream:
         stream.write(canonical_json(value))
         stream.flush()
         os.fsync(stream.fileno())
+    if not existed:
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def load_matrix(path: Path) -> tuple[dict[str, Any], str]:
@@ -411,14 +418,14 @@ def command_label(command: list[str]) -> str:
     return " ".join(command)
 
 
-def tool_metadata() -> dict[str, str]:
+def tool_metadata(build_dir: Path | None = None) -> dict[str, str]:
     def output(command: list[str]) -> str:
         try:
             return subprocess.run(command, check=False, capture_output=True,
                                   text=True, timeout=10).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             return "unavailable"
-    return {
+    metadata = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "compiler": output(["c++", "--version"]).splitlines()[0]
@@ -427,6 +434,18 @@ def tool_metadata() -> dict[str, str]:
         if output(["cmake", "--version"]) != "unavailable" else "unavailable",
         "openfhe": os.environ.get("PICCARD_OPENFHE_VERSION", "not-probed"),
     }
+    if build_dir is not None:
+        cache = build_dir / "CMakeCache.txt"
+        if cache.is_file():
+            metadata["cmake_cache_sha256"] = sha256_file(cache)
+            for line in cache.read_text(encoding="utf-8", errors="strict").splitlines():
+                if line.startswith("OpenFHE_DIR:PATH="):
+                    metadata["openfhe_dir"] = line.split("=", 1)[1]
+                    version_file = Path(metadata["openfhe_dir"]) / "OpenFHEConfigVersion.cmake"
+                    if version_file.is_file():
+                        metadata["openfhe_config_version_sha256"] = sha256_file(version_file)
+                    break
+    return metadata
 
 
 def source_metadata(root: Path) -> dict[str, Any]:
