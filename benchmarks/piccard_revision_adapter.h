@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,34 @@ struct PiccardRevisionExecutionPlan {
     bool native_sweep = false;
 };
 
+/** @brief Runtime fields projected from BenchmarkConfig without FHE types. */
+struct PiccardRevisionRuntimeConfig {
+    std::string profile;
+    std::string mode;
+    std::string security;
+    bool evidence_point = false;
+    uint32_t k = 0;
+    uint32_t m = 0;
+    uint64_t set_size = 0;
+    uint64_t universe = 0;
+    uint64_t trials = 0;
+    uint64_t accuracy_trials = 0;
+};
+
+/** @brief Parsed successor flags and canonical planner argv. */
+struct PiccardRevisionCliOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    std::string identity_output;
+};
+
+/** @brief Purely prepared successor CLI plan consumed by the producer. */
+struct PiccardRevisionCliPlan {
+    PiccardRevisionCliOptions options;
+    PiccardRevisionRequest request;
+    PiccardRevisionExecutionPlan execution;
+};
+
 /**
  * @brief Parse and strictly validate one planner-produced Piccard argv.
  *
@@ -81,6 +110,20 @@ struct PiccardRevisionExecutionPlan {
  */
 PiccardRevisionRequest ParsePiccardRevisionArgs(
     const std::vector<std::string>& argv);
+
+/** @brief Parse successor-only flags while preserving planner argv order. */
+PiccardRevisionCliOptions ParsePiccardRevisionCliOptions(
+    const std::vector<std::string>& argv);
+
+/** @brief Normalize concrete runtime seed/output values to planner tokens. */
+std::vector<std::string> CanonicalizePiccardRevisionPlannerArgv(
+    const std::vector<std::string>& argv);
+
+/** @brief Prepare the exact one-cell successor plan before engine creation. */
+std::optional<PiccardRevisionCliPlan> PreparePiccardRevisionCliPlan(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    const PiccardRevisionRuntimeConfig& config);
 
 /**
  * @brief Select exactly one validated matrix cell and replan its argv.
@@ -156,6 +199,11 @@ std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
 
 /** @brief Bind a selected cell's canonical identity for successor output. */
 PiccardRevisionIdentity MakePiccardRevisionIdentity(
+    const PiccardRevisionSelection& selection);
+
+/** @brief Atomically publish one successor identity file. */
+void WritePiccardRevisionIdentityAtomic(
+    const std::string& output_path,
     const PiccardRevisionSelection& selection);
 
 }  // namespace benchmark

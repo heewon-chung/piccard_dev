@@ -11,8 +11,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <optional>
@@ -36,147 +34,6 @@ struct RawTimingOptions {
     std::string profile_id;
     size_t measured_trials = 0;
 };
-
-struct PiccardSuccessorOptions {
-    bool enabled = false;
-    std::vector<std::string> planner_argv;
-    std::string identity_output;
-};
-
-static PiccardSuccessorOptions ParsePiccardSuccessorOptions(
-    int argc, char** argv) {
-    PiccardSuccessorOptions options;
-    bool identity_seen = false;
-    for (int index = 1; index < argc; ++index) {
-        const std::string arg(argv[index]);
-        if (arg.rfind("--revision-cell=", 0) == 0) {
-            options.enabled = true;
-            options.planner_argv.push_back(arg);
-        } else if (arg.rfind("--revision-identity-out=", 0) == 0) {
-            if (identity_seen) {
-                throw std::invalid_argument(
-                    "duplicate --revision-identity-out");
-            }
-            identity_seen = true;
-            options.identity_output = arg.substr(24);
-            if (options.identity_output.empty()) {
-                throw std::invalid_argument(
-                    "--revision-identity-out must not be empty");
-            }
-        } else {
-            options.planner_argv.push_back(arg);
-        }
-    }
-    if (!options.enabled) {
-        if (identity_seen) {
-            throw std::invalid_argument(
-                "--revision-identity-out requires --revision-cell");
-        }
-        options.planner_argv.clear();
-        return options;
-    }
-    if (!identity_seen) {
-        throw std::invalid_argument(
-            "successor --revision-cell requires --revision-identity-out");
-    }
-    return options;
-}
-
-static std::vector<std::string> CanonicalizePiccardPlannerArgv(
-    const std::vector<std::string>& argv) {
-    std::vector<std::string> canonical;
-    canonical.reserve(argv.size());
-    for (const std::string& arg : argv) {
-        if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
-            canonical.push_back("--seed={seed}");
-        } else if (arg.rfind("--raw_timing_dir=", 0) == 0 &&
-                   arg != "--raw_timing_dir={output}") {
-            canonical.push_back("--raw_timing_dir={output}");
-        } else {
-            canonical.push_back(arg);
-        }
-    }
-    return canonical;
-}
-
-static RevisionRunMode RevisionModeForPiccardRequest(
-    const PiccardRevisionRequest& request) {
-    if (request.profile == "readiness-toy-v1") {
-        return RevisionRunMode::Toy;
-    }
-    if (request.profile == "paper-std128-t40-v1") {
-        return RevisionRunMode::Paper;
-    }
-    throw std::invalid_argument("unsupported Piccard successor profile");
-}
-
-static void ValidatePiccardSuccessorConfig(
-    const BenchmarkConfig& config,
-    const PiccardRevisionRequest& request,
-    const PiccardRevisionExecutionPlan& execution) {
-    if (config.profile.run_class == BenchmarkRunClass::Legacy ||
-        config.profile.id != request.profile || config.mode != request.mode ||
-        !config.evidence_point) {
-        throw std::invalid_argument(
-            "Piccard successor requires the exact evidence profile and mode");
-    }
-    const bool toy = request.profile == "readiness-toy-v1";
-    const SecurityLevel expected_security =
-        toy ? SecurityLevel::TOY : SecurityLevel::STD128;
-    if (config.security_level != expected_security ||
-        config.k != execution.point.k || config.m != execution.point.m ||
-        config.set_size != execution.point.set_size ||
-        config.universe_size != execution.point.universe_size ||
-        config.trials != request.trials ||
-        config.accuracy_trials != request.accuracy_trials) {
-        throw std::invalid_argument(
-            "Piccard successor flags do not match the selected matrix cell");
-    }
-    if (execution.selection.plan.expected_rows.size() != 2u ||
-        execution.selection.plan.expected_rows[0].measured_count !=
-            config.trials ||
-        execution.selection.plan.expected_rows[1].measured_count !=
-            config.accuracy_trials) {
-        throw std::invalid_argument(
-            "Piccard successor counts do not match the selected matrix rows");
-    }
-}
-
-static void WritePiccardRevisionIdentityAtomic(
-    const std::string& output_path,
-    const PiccardRevisionSelection& selection) {
-    namespace fs = std::filesystem;
-    const fs::path final_path(output_path);
-    const fs::path temporary_path = final_path.string() + ".tmp";
-    {
-        std::ofstream output(temporary_path,
-                             std::ios::out | std::ios::trunc);
-        if (!output.is_open()) {
-            throw std::runtime_error(
-                "failed to open Piccard revision identity temporary file: " +
-                temporary_path.string());
-        }
-        output << SerializePiccardRevisionIdentityHeader()
-               << SerializePiccardRevisionIdentityRow(selection);
-        if (!output.good()) {
-            output.close();
-            std::error_code remove_error;
-            fs::remove(temporary_path, remove_error);
-            throw std::runtime_error(
-                "failed to write Piccard revision identity: " + output_path);
-        }
-    }
-
-    std::error_code rename_error;
-    fs::rename(temporary_path, final_path, rename_error);
-    if (rename_error) {
-        std::error_code remove_error;
-        fs::remove(temporary_path, remove_error);
-        throw std::runtime_error(
-            "failed to publish Piccard revision identity: " +
-            rename_error.message());
-    }
-}
 
 static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
     RawTimingOptions options;
@@ -1344,7 +1201,9 @@ static BenchmarkResult RunProfileAccuracyPoint(
     row.accuracy_p75 = stats.p75;
     row.accuracy_p95 = stats.p95;
     row.accuracy_max = stats.max_error;
-    row.jaccard_expected = point.target_jaccard;
+    row.jaccard_expected = bounded_workload == nullptr
+        ? point.target_jaccard
+        : bounded_workload->realized_jaccard;
     row.hash_randomness = HashRandomnessName(config.hash_randomness);
     row.hash_seed = config.hash_randomness == HashRandomness::Fixed
         ? fixed_hash_seed : 0;
@@ -1477,8 +1336,13 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const PiccardSuccessorOptions successor_options =
-        ParsePiccardSuccessorOptions(argc, argv);
+    std::vector<std::string> runtime_argv;
+    runtime_argv.reserve(static_cast<size_t>(argc > 1 ? argc - 1 : 0));
+    for (int index = 1; index < argc; ++index) {
+        runtime_argv.emplace_back(argv[index]);
+    }
+    const PiccardRevisionCliOptions successor_options =
+        ParsePiccardRevisionCliOptions(runtime_argv);
     RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
     RejectUnknownBenchmarkOptions(
@@ -1491,16 +1355,35 @@ int main(int argc, char** argv) {
 #ifdef PICCARD_REVISION_MATRIX_PATH
         const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
             PICCARD_REVISION_MATRIX_PATH);
-        const std::vector<std::string> planner_argv =
-            CanonicalizePiccardPlannerArgv(successor_options.planner_argv);
-        const PiccardRevisionRequest request =
-            ParsePiccardRevisionArgs(planner_argv);
-        const RevisionRunMode mode = RevisionModeForPiccardRequest(request);
-        revision_execution = PlanPiccardRevisionExecution(
-            matrix, planner_argv, mode);
-        ValidatePiccardSuccessorConfig(config, request, *revision_execution);
+        const auto security_name = [](SecurityLevel level) {
+            switch (level) {
+                case SecurityLevel::TOY: return std::string("TOY");
+                case SecurityLevel::STD128: return std::string("STD128");
+                case SecurityLevel::STD192: return std::string("STD192");
+                case SecurityLevel::STD256: return std::string("STD256");
+            }
+            throw std::logic_error("unknown security level");
+        };
+        const PiccardRevisionRuntimeConfig runtime_config{
+            config.profile.id,
+            config.mode,
+            security_name(config.security_level),
+            config.evidence_point,
+            config.k,
+            config.m,
+            config.set_size,
+            config.universe_size,
+            config.trials,
+            config.accuracy_trials};
+        const auto prepared = PreparePiccardRevisionCliPlan(
+            matrix, runtime_argv, runtime_config);
+        if (!prepared.has_value()) {
+            throw std::logic_error(
+                "successor options did not produce an execution plan");
+        }
+        revision_execution = prepared->execution;
         WritePiccardRevisionIdentityAtomic(
-            successor_options.identity_output,
+            prepared->options.identity_output,
             revision_execution->selection);
 #else
         throw std::runtime_error(

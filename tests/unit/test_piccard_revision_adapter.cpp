@@ -5,6 +5,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <set>
 #include <string>
@@ -29,6 +31,12 @@ using piccard::benchmark::MakeBoundedOverlapSets;
 using piccard::benchmark::SerializePiccardRevisionIdentityHeader;
 using piccard::benchmark::SerializePiccardRevisionIdentityRow;
 using piccard::benchmark::SelectPiccardRevisionCell;
+using piccard::benchmark::CanonicalizePiccardRevisionPlannerArgv;
+using piccard::benchmark::ParsePiccardRevisionCliOptions;
+using piccard::benchmark::PiccardRevisionCliPlan;
+using piccard::benchmark::PiccardRevisionRuntimeConfig;
+using piccard::benchmark::PreparePiccardRevisionCliPlan;
+using piccard::benchmark::WritePiccardRevisionIdentityAtomic;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -219,6 +227,21 @@ TEST(PiccardRevisionAdapter,
                  std::invalid_argument);
 }
 
+TEST(PiccardRevisionAdapter,
+     BoundedWorkloadReportsTheFlooredRealizedTruthForSmallCells) {
+    const auto n100 = MakeBoundedOverlapSets(100, 0.5, 65536);
+    EXPECT_EQ(n100.intersection_size, 66u);
+    EXPECT_EQ(n100.union_size, 134u);
+    EXPECT_DOUBLE_EQ(n100.realized_jaccard, 66.0 / 134.0);
+    EXPECT_NE(n100.realized_jaccard, n100.target_jaccard);
+
+    const auto n1000 = MakeBoundedOverlapSets(1000, 0.5, 65536);
+    EXPECT_EQ(n1000.intersection_size, 666u);
+    EXPECT_EQ(n1000.union_size, 1334u);
+    EXPECT_DOUBLE_EQ(n1000.realized_jaccard, 666.0 / 1334.0);
+    EXPECT_NE(n1000.realized_jaccard, n1000.target_jaccard);
+}
+
 TEST(PiccardRevisionAdapter, BoundedWorkloadHonorsExactEndpointTargets) {
     const auto disjoint = MakeBoundedOverlapSets(10, 0.0, 20);
     EXPECT_EQ(disjoint.intersection_size, 0u);
@@ -288,6 +311,127 @@ TEST(PiccardRevisionAdapter, VersionedIdentityPrefixesOnlySuccessorRows) {
     EXPECT_EQ(SerializePiccardRevisionIdentityRow(plan.selection),
               "piccard-revision-cell-v1," + cells.front()->cell_id +
                   ",65536\n");
+}
+
+PiccardRevisionRuntimeConfig RuntimeConfigFor(
+    const PiccardRevisionRequest& request) {
+    return {request.profile, request.mode, request.security,
+            request.evidence_point, static_cast<uint32_t>(request.k),
+            static_cast<uint32_t>(request.m), request.set_size,
+            request.universe, request.trials, request.accuracy_trials};
+}
+
+TEST(PiccardRevisionAdapter,
+     SuccessorCliSeamCanonicalizesRuntimeValuesAndPlansOneTerminalPair) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = PiccardCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+
+    for (const RevisionRunMode mode : {RevisionRunMode::Paper,
+                                       RevisionRunMode::Toy}) {
+        for (const RevisionCell* cell : cells) {
+            const auto canonical = PlanPiccardRevisionCell(*cell, mode).argv;
+            const auto canonical_request = ParsePiccardRevisionArgs(canonical);
+            auto runtime_argv = canonical;
+            for (auto& arg : runtime_argv) {
+                if (arg == "--seed={seed}") arg = "--seed=123456";
+                if (arg == "--raw_timing_dir={output}") {
+                    arg = "--raw_timing_dir=/tmp/piccard-raw";
+                }
+            }
+            runtime_argv.push_back(
+                "--revision-identity-out=/tmp/piccard-identity.csv");
+
+            const auto prepared = PreparePiccardRevisionCliPlan(
+                matrix, runtime_argv, RuntimeConfigFor(canonical_request));
+            ASSERT_TRUE(prepared.has_value());
+            EXPECT_EQ(prepared->request.argv, canonical);
+            EXPECT_EQ(prepared->options.identity_output,
+                      "/tmp/piccard-identity.csv");
+            EXPECT_EQ(prepared->execution.selection.cell.cell_id,
+                      cell->cell_id);
+            EXPECT_EQ(prepared->execution.selected_point_count, 1u);
+            EXPECT_EQ(prepared->execution.keygen_calls, 0u);
+            EXPECT_FALSE(prepared->execution.native_sweep);
+            ASSERT_EQ(prepared->execution.selection.plan.expected_rows.size(),
+                      2u);
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[0].row_id,
+                      "onehot_timing");
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[1].row_id,
+                      "onehot_accuracy");
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[0].terminal_status,
+                      "MEASURED");
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[1].terminal_status,
+                      "MEASURED");
+            const uint64_t timing_count = mode == RevisionRunMode::Toy ? 1 : 30;
+            const uint64_t accuracy_count = mode == RevisionRunMode::Toy ? 1 : 50;
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[0].measured_count,
+                      timing_count);
+            EXPECT_EQ(prepared->execution.selection.plan.expected_rows[1].measured_count,
+                      accuracy_count);
+        }
+    }
+}
+
+TEST(PiccardRevisionAdapter,
+     SuccessorCliSeamFailsClosedBeforeAnyExecutionMetadataIsReturned) {
+    const RevisionMatrix matrix = Load();
+    const auto cell = PiccardCells(matrix).front();
+    const auto canonical = PlanPiccardRevisionCell(
+        *cell, RevisionRunMode::Paper).argv;
+    const auto request = ParsePiccardRevisionArgs(canonical);
+    const auto config = RuntimeConfigFor(request);
+
+    EXPECT_FALSE(ParsePiccardRevisionCliOptions({"--k=128"}).enabled);
+
+    auto missing_identity = canonical;
+    EXPECT_THROW(PreparePiccardRevisionCliPlan(
+                     matrix, missing_identity, config),
+                 std::invalid_argument);
+
+    auto duplicate_identity = canonical;
+    duplicate_identity.push_back(
+        "--revision-identity-out=/tmp/piccard-identity.csv");
+    duplicate_identity.push_back(
+        "--revision-identity-out=/tmp/piccard-identity-2.csv");
+    EXPECT_THROW(PreparePiccardRevisionCliPlan(
+                     matrix, duplicate_identity, config),
+                 std::invalid_argument);
+
+    auto mismatched = canonical;
+    mismatched.push_back("--revision-identity-out=/tmp/piccard-identity.csv");
+    auto wrong_config = config;
+    ++wrong_config.k;
+    EXPECT_THROW(PreparePiccardRevisionCliPlan(
+                     matrix, mismatched, wrong_config),
+                 std::invalid_argument);
+
+    EXPECT_TRUE(CanonicalizePiccardRevisionPlannerArgv(
+                    {"--seed=abc", "--raw_timing_dir=/tmp/raw"}) ==
+                std::vector<std::string>({"--seed={seed}",
+                                          "--raw_timing_dir={output}"}));
+}
+
+TEST(PiccardRevisionAdapter, IdentityPublicationUsesVersionedExactBytes) {
+    const RevisionMatrix matrix = Load();
+    const auto cell = PiccardCells(matrix).front();
+    const auto execution = PlanPiccardRevisionExecution(
+        matrix, PlanPiccardRevisionCell(*cell, RevisionRunMode::Paper).argv,
+        RevisionRunMode::Paper);
+    const auto path = std::filesystem::temp_directory_path() /
+                      "piccard_revision_identity_test.csv";
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    WritePiccardRevisionIdentityAtomic(path.string(), execution.selection);
+    std::ifstream input(path);
+    ASSERT_TRUE(input.is_open());
+    const std::string contents((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    EXPECT_EQ(contents, SerializePiccardRevisionIdentityHeader() +
+                          SerializePiccardRevisionIdentityRow(
+                              execution.selection));
+    input.close();
+    std::filesystem::remove(path, error);
 }
 
 }  // namespace

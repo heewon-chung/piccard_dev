@@ -2,6 +2,8 @@
 
 #include <charconv>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -164,6 +166,124 @@ PiccardRevisionRequest ParsePiccardRevisionArgs(
     return request;
 }
 
+PiccardRevisionCliOptions ParsePiccardRevisionCliOptions(
+    const std::vector<std::string>& argv) {
+    PiccardRevisionCliOptions options;
+    bool identity_seen = false;
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--revision-cell=", 0) == 0) {
+            options.enabled = true;
+            options.planner_argv.push_back(arg);
+            continue;
+        }
+        if (arg.rfind("--revision-identity-out=", 0) == 0) {
+            if (identity_seen) {
+                throw std::invalid_argument(
+                    "duplicate --revision-identity-out");
+            }
+            identity_seen = true;
+            options.identity_output = arg.substr(24);
+            if (options.identity_output.empty()) {
+                throw std::invalid_argument(
+                    "--revision-identity-out must not be empty");
+            }
+            continue;
+        }
+        options.planner_argv.push_back(arg);
+    }
+    if (!options.enabled) {
+        if (identity_seen) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    if (!identity_seen) {
+        throw std::invalid_argument(
+            "successor --revision-cell requires --revision-identity-out");
+    }
+    return options;
+}
+
+std::vector<std::string> CanonicalizePiccardRevisionPlannerArgv(
+    const std::vector<std::string>& argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(argv.size());
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
+            canonical.push_back("--seed={seed}");
+        } else if (arg.rfind("--raw_timing_dir=", 0) == 0 &&
+                   arg != "--raw_timing_dir={output}") {
+            canonical.push_back("--raw_timing_dir={output}");
+        } else {
+            canonical.push_back(arg);
+        }
+    }
+    return canonical;
+}
+
+RevisionRunMode RevisionModeForPiccardRequest(
+    const PiccardRevisionRequest& request) {
+    if (request.profile == "readiness-toy-v1") {
+        return RevisionRunMode::Toy;
+    }
+    if (request.profile == "paper-std128-t40-v1") {
+        return RevisionRunMode::Paper;
+    }
+    throw std::invalid_argument("unsupported Piccard successor profile");
+}
+
+void ValidatePiccardRevisionRuntimeConfig(
+    const PiccardRevisionRuntimeConfig& config,
+    const PiccardRevisionRequest& request,
+    const PiccardRevisionExecutionPlan& execution) {
+    if (config.profile != request.profile || config.mode != request.mode ||
+        !config.evidence_point) {
+        Reject("successor requires the exact evidence profile and mode");
+    }
+    const bool toy = request.profile == "readiness-toy-v1";
+    if (config.security != (toy ? "TOY" : "STD128") ||
+        config.k != execution.point.k || config.m != execution.point.m ||
+        config.set_size != execution.point.set_size ||
+        config.universe != execution.point.universe_size ||
+        config.trials != request.trials ||
+        config.accuracy_trials != request.accuracy_trials) {
+        Reject("successor flags do not match the selected matrix cell");
+    }
+
+    const auto& rows = execution.selection.plan.expected_rows;
+    if (rows.size() != 2u || rows[0].row_id != "onehot_timing" ||
+        rows[1].row_id != "onehot_accuracy" ||
+        rows[0].status != "MEASURED" || rows[1].status != "MEASURED" ||
+        rows[0].terminal_status != "MEASURED" ||
+        rows[1].terminal_status != "MEASURED" ||
+        rows[0].measured_count != config.trials ||
+        rows[1].measured_count != config.accuracy_trials) {
+        Reject("successor plan must contain timing and accuracy terminal rows");
+    }
+}
+
+std::optional<PiccardRevisionCliPlan> PreparePiccardRevisionCliPlan(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    const PiccardRevisionRuntimeConfig& config) {
+    PiccardRevisionCliOptions options = ParsePiccardRevisionCliOptions(argv);
+    if (!options.enabled) return std::nullopt;
+
+    options.planner_argv = CanonicalizePiccardRevisionPlannerArgv(
+        options.planner_argv);
+    const PiccardRevisionRequest request =
+        ParsePiccardRevisionArgs(options.planner_argv);
+    const PiccardRevisionExecutionPlan execution =
+        PlanPiccardRevisionExecution(
+            matrix, options.planner_argv,
+            RevisionModeForPiccardRequest(request));
+    ValidatePiccardRevisionRuntimeConfig(config, request, execution);
+
+    return PiccardRevisionCliPlan{std::move(options), request, execution};
+}
+
 PiccardRevisionSelection SelectPiccardRevisionCell(
     const RevisionMatrix& matrix,
     const PiccardRevisionRequest& request,
@@ -284,6 +404,42 @@ std::string SerializePiccardRevisionIdentityRow(
     return SerializePiccardRevisionIdentity(MakePiccardRevisionIdentity(
                selection)) +
            "\n";
+}
+
+void WritePiccardRevisionIdentityAtomic(
+    const std::string& output_path,
+    const PiccardRevisionSelection& selection) {
+    namespace fs = std::filesystem;
+    const fs::path final_path(output_path);
+    const fs::path temporary_path = final_path.string() + ".tmp";
+    {
+        std::ofstream output(temporary_path,
+                             std::ios::out | std::ios::trunc);
+        if (!output.is_open()) {
+            throw std::runtime_error(
+                "failed to open Piccard revision identity temporary file: " +
+                temporary_path.string());
+        }
+        output << SerializePiccardRevisionIdentityHeader()
+               << SerializePiccardRevisionIdentityRow(selection);
+        if (!output.good()) {
+            output.close();
+            std::error_code remove_error;
+            fs::remove(temporary_path, remove_error);
+            throw std::runtime_error(
+                "failed to write Piccard revision identity: " + output_path);
+        }
+    }
+
+    std::error_code rename_error;
+    fs::rename(temporary_path, final_path, rename_error);
+    if (rename_error) {
+        std::error_code remove_error;
+        fs::remove(temporary_path, remove_error);
+        throw std::runtime_error(
+            "failed to publish Piccard revision identity: " +
+            rename_error.message());
+    }
 }
 
 PiccardRevisionExecutionPlan PlanPiccardRevisionExecution(
