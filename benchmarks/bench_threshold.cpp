@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "raw_timing_schema.h"
 #include "threshold_csv_schema.h"
 #include "threshold_fpfn_schema.h"
 #include "protocol/threshold_piccard.h"
@@ -27,6 +28,75 @@
 
 using namespace piccard;
 using namespace piccard::benchmark;
+
+namespace {
+
+constexpr const char* kRawTimingProducerId = "bench_threshold";
+
+struct RawTimingOptions {
+    bool enabled = false;
+    bool trials_explicit = false;
+    std::string output_directory;
+    std::string profile_id;
+    size_t measured_trials = 0;
+};
+
+static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
+    RawTimingOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+            if (options.enabled) {
+                throw std::invalid_argument("duplicate --raw_timing_dir");
+            }
+            options.enabled = true;
+            options.output_directory = arg.substr(17);
+            if (options.output_directory.empty()) {
+                throw std::invalid_argument(
+                    "--raw_timing_dir must not be empty");
+            }
+        } else if (arg.rfind("--trials=", 0) == 0) {
+            options.trials_explicit = true;
+        }
+    }
+    return options;
+}
+
+static std::string RawTimingProfileId(const BenchmarkConfig& config) {
+    if (config.profile.id == "readiness-toy-v1") {
+        return kReadinessTimingProfileVersion;
+    }
+    if (config.profile.id == "paper-std128-t40-v1" ||
+        config.profile.id == "paper-std192-encoding-v1" ||
+        config.profile.id.rfind("paper-", 0) == 0) {
+        return kPaperTimingProfileVersion;
+    }
+    throw std::invalid_argument(
+        "--raw_timing_dir requires --profile=paper-* or readiness-toy-v1");
+}
+
+static void ResolveRawTimingOptions(RawTimingOptions& options,
+                                    const BenchmarkConfig& config) {
+    if (!options.enabled) return;
+    if (config.mode != "timing") {
+        throw std::invalid_argument(
+            "--raw_timing_dir requires --mode=timing");
+    }
+    if (TimingContractFor(kRawTimingProducerId) == kTimingNotApplicable) {
+        throw std::invalid_argument("bench_threshold has no raw timing contract");
+    }
+    options.profile_id = RawTimingProfileId(config);
+    options.measured_trials = static_cast<size_t>(
+        ExpectedTimingTrials(options.profile_id));
+    if (options.trials_explicit &&
+        config.trials != options.measured_trials) {
+        throw std::invalid_argument(
+            "versioned raw timing requires exactly " +
+            std::to_string(options.measured_trials) + " measured trials");
+    }
+}
+
+}  // namespace
 
 // ============================================================================
 // Helpers (shared with bench_piccard.cpp)
@@ -547,6 +617,35 @@ static ThresholdResult MakeSkippedRow(const std::string& label, uint32_t k,
     return r;
 }
 
+static void AddRawTimingSamples(
+    std::vector<RawTimingSample>& samples,
+    const std::string& producer_id,
+    const std::string& profile_id,
+    const std::string& cell_id,
+    const ThresholdResult& result,
+    SampleKind sample_kind,
+    uint64_t trial_index,
+    uint64_t seed) {
+    const auto add = [&](const char* phase, double raw_ms) {
+        if (!std::isfinite(raw_ms) || raw_ms < 0.0) {
+            throw std::invalid_argument(
+                std::string("threshold raw phase is invalid: ") + phase);
+        }
+        samples.push_back({producer_id, profile_id, cell_id, phase,
+                           sample_kind, trial_index, seed, raw_ms});
+    };
+    add("minhash", result.phase_minhash_ms);
+    add("encode", result.phase_encode_ms);
+    add("encrypt", result.phase_encrypt_ms);
+    add("multiply", result.phase_multiply_ms);
+    add("rotate_sum", result.phase_rotate_sum_ms);
+    add("mask", result.phase_mask_ms);
+    add("poly_eval", result.phase_poly_eval_ms);
+    add("flood", result.phase_flood_ms);
+    add("decrypt", result.phase_decrypt_ms);
+    add("total", result.total_ms);
+}
+
 // ============================================================================
 // Per-phase timed threshold protocol
 // ============================================================================
@@ -671,10 +770,19 @@ static ThresholdResult RunMultiTrialThreshold(
     const std::vector<uint64_t>& set_y,
     const TruthContext& tc,
     const std::string& label,
-    size_t trials)
+    size_t trials,
+    RawTimingArtifact* raw_artifact = nullptr,
+    uint64_t raw_seed = 0,
+    double raw_seed_domain = 0.5)
 {
     // Warmup (discarded)
-    RunTimedThreshold(engine, set_x, set_y, tc, "warmup");
+    const auto warmup = RunTimedThreshold(engine, set_x, set_y, tc, "warmup");
+    if (raw_artifact != nullptr) {
+        AddRawTimingSamples(raw_artifact->samples, raw_artifact->producer_id,
+                            raw_artifact->profile_id, raw_artifact->cell_id,
+                            warmup, SampleKind::DiscardedWarmup, 0,
+                            raw_seed);
+    }
 
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
     std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_flood, v_decrypt;
@@ -683,6 +791,13 @@ static ThresholdResult RunMultiTrialThreshold(
 
     for (size_t t = 0; t < trials; t++) {
         auto tr = RunTimedThreshold(engine, set_x, set_y, tc, label);
+        if (raw_artifact != nullptr) {
+            AddRawTimingSamples(
+                raw_artifact->samples, raw_artifact->producer_id,
+                raw_artifact->profile_id, raw_artifact->cell_id, tr,
+                SampleKind::Measured, static_cast<uint64_t>(t),
+                TrialSeed(raw_seed, t, raw_seed_domain));
+        }
         v_total.push_back(tr.total_ms);
         v_minhash.push_back(tr.phase_minhash_ms);
         v_encode.push_back(tr.phase_encode_ms);
@@ -820,6 +935,68 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
         out_error = "unknown exception during engine construction";
         return nullptr;
     }
+}
+
+static void RunRawTimingThreshold(const BenchmarkConfig& config,
+                                  const RawTimingOptions& options,
+                                  ThresholdCSVWriter& csv) {
+    const uint64_t measured_trials = options.measured_trials;
+    if (measured_trials == 0) {
+        throw std::invalid_argument("raw timing measured trial count is zero");
+    }
+    if (options.profile_id == kReadinessTimingProfileVersion &&
+        config.security_level != SecurityLevel::TOY) {
+        throw std::invalid_argument("readiness raw timing requires TOY security");
+    }
+    if (options.profile_id == kPaperTimingProfileVersion &&
+        config.security_level == SecurityLevel::TOY) {
+        throw std::invalid_argument(
+            "paper raw timing does not permit TOY security");
+    }
+
+    const uint32_t tau = static_cast<uint32_t>(0.6 * config.k);
+    PiccardParams params;
+    std::string error;
+    auto engine = TryCreateThresholdEngine(config.k, config.m, tau,
+                                           config.security_level, params, error);
+    if (!engine) {
+        throw std::runtime_error("raw threshold timing cannot create engine: " +
+                                 error);
+    }
+    // Timing uses one fixed CRS.  Bind it to the supplied root seed so the
+    // sidecar's seed column is honest and reruns are reproducible.
+    engine->SetHashSeed(config.seed);
+
+    const double intersection_fraction =
+        config.target_jaccard == 0.0
+            ? 0.0
+            : (2.0 * config.target_jaccard) /
+                  (1.0 + config.target_jaccard);
+    auto [set_a, set_b] = MakeSetsWithOverlap(
+        config.set_size, intersection_fraction);
+    const TruthContext truth = MakeTruthContext(*engine, set_a, set_b);
+    const std::string cell_id =
+        "threshold-k" + std::to_string(config.k) + "-m" +
+        std::to_string(config.m) + "-n" + std::to_string(config.set_size) +
+        "-tau" + std::to_string(tau);
+
+    RawTimingArtifact artifact;
+    artifact.producer_id = kRawTimingProducerId;
+    artifact.profile_id = options.profile_id;
+    artifact.cell_id = cell_id;
+    artifact.warmup_policy = WarmupPolicy::DiscardOne;
+    if (artifact.warmup_policy != ExpectedWarmupPolicy(artifact.producer_id)) {
+        throw std::logic_error("bench_threshold raw warmup policy drift");
+    }
+    artifact.expected_measured = measured_trials;
+    auto row = RunMultiTrialThreshold(
+        *engine, set_a, set_b, truth, cell_id + "_timing",
+        static_cast<size_t>(measured_trials), &artifact, config.seed,
+        config.target_jaccard);
+    csv.WriteRow(row);
+
+    ValidateRawTimingArtifact(artifact);
+    WriteRawTimingArtifactsV1(options.output_directory, {artifact});
 }
 
 // ============================================================================
@@ -1550,6 +1727,7 @@ int main(int argc, char** argv) {
     }
 
     BenchmarkConfig config;
+    RawTimingOptions raw_options;
     try {
         config = BenchmarkConfig::ParseArgs(argc, argv);
         if (config.mode == "combined") {
@@ -1557,6 +1735,8 @@ int main(int argc, char** argv) {
                 "bench_threshold does not emit combined mode; select timing, "
                 "accuracy, spec, or the dedicated fpfn point path");
         }
+        raw_options = ParseRawTimingOptions(argc, argv);
+        ResolveRawTimingOptions(raw_options, config);
     } catch (const std::exception& error) {
         std::cerr << "bench_threshold: " << error.what() << "\n";
         return 2;
@@ -1566,6 +1746,11 @@ int main(int argc, char** argv) {
     ThresholdCSVWriter csv;
     if (config.mode != "spec") {
         csv.WriteHeader();
+    }
+
+    if (raw_options.enabled) {
+        RunRawTimingThreshold(config, raw_options, csv);
+        return 0;
     }
 
     if (config.mode == "timing") {

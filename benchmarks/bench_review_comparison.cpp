@@ -3,6 +3,7 @@
 #include "benchmark_profile.h"
 #include "benchmark_provenance.h"
 #include "comparison_workload.h"
+#include "raw_timing_schema.h"
 #include "baselines/bcg12.h"
 #include "baselines/pjs_baseline.h"
 #include "baselines/sj16.h"
@@ -68,6 +69,16 @@ using piccard::benchmark::ResolveBaselineCapability;
 using piccard::benchmark::ReviewMeasurementKind;
 using piccard::benchmark::ReviewNumericCell;
 using piccard::benchmark::ResolveReviewMethodRowPolicy;
+using piccard::benchmark::ExpectedTimingTrials;
+using piccard::benchmark::ExpectedWarmupPolicy;
+using piccard::benchmark::RawTimingArtifact;
+using piccard::benchmark::RawTimingSample;
+using piccard::benchmark::SampleKind;
+using piccard::benchmark::WarmupPolicy;
+using piccard::benchmark::WriteRawTimingArtifactsV1;
+using piccard::benchmark::kPaperTimingProfileVersion;
+using piccard::benchmark::kReadinessTimingProfileVersion;
+using piccard::benchmark::ComputeTimingAggregateV1;
 using piccard::benchmark::SecurityBasisName;
 using piccard::benchmark::TrialKind;
 using piccard::benchmark::ValidateAggregateMembership;
@@ -102,6 +113,9 @@ struct Options {
         SecurityPolicy::Unset;
     std::filesystem::path manifest_out;
     std::filesystem::path execution_trace_out;
+    // Optional v1 raw timing sidecars.  Empty preserves the frozen Work 5
+    // stdout, manifest, and execution-trace behavior byte-for-byte.
+    std::filesystem::path raw_timing_out;
 };
 
 uint64_t ParseU64(const std::string& text, const std::string& flag) {
@@ -168,6 +182,10 @@ Options ParseOptions(int argc, char** argv) {
         else if (key == "--sj16-key-bits") { set_once("sj16-key-bits"); options.sj16_key_bits = ParseU32(value, "--sj16-key-bits"); }
         else if (key == "--manifest-out") { set_once("manifest-out"); options.manifest_out = value; }
         else if (key == "--execution-trace-out") { set_once("execution-trace-out"); options.execution_trace_out = value; }
+        else if (key == "--raw-timing-out" || key == "--raw_timing_dir") {
+            set_once("raw-timing-out");
+            options.raw_timing_out = value;
+        }
         else if (arg == "--strict-security") {
             set_once("security-policy"); options.policy = Options::SecurityPolicy::Strict;
         } else if (arg == "--diagnostic-security") {
@@ -182,6 +200,7 @@ Options ParseOptions(int argc, char** argv) {
                    "--target-jaccard=DECIMAL --trials=N --accuracy-trials=N "
                    "--seed=N --methods=CSV --sj16-key-bits=N "
                    "--manifest-out=PATH.bin --execution-trace-out=PATH.bin "
+                   "[--raw_timing_dir=DIR|--raw-timing-out=DIR] "
                    "(--strict-security|--diagnostic-security|"
                    "--allow-unmatched-security)\n"
                    "Profile supplies security when --security is omitted.\n";
@@ -224,6 +243,11 @@ Options ParseOptions(int argc, char** argv) {
     if (options.manifest_out == options.execution_trace_out) {
         throw std::invalid_argument(
             "--manifest-out and --execution-trace-out must differ");
+    }
+    if (!options.raw_timing_out.empty() &&
+        (!std::filesystem::exists(options.raw_timing_out) ||
+         !std::filesystem::is_directory(options.raw_timing_out))) {
+        throw std::invalid_argument("--raw-timing-out requires an existing directory");
     }
     return options;
 }
@@ -381,8 +405,16 @@ public:
             hasher.ComputeSignature(trial.set_b);
         Observation out;
         if (trial.kind == TrialKind::Warmup) {
+            const auto warmup_start = Clock::now();
             static_cast<void>(Encode(signature_a));
             static_cast<void>(Encode(signature_b));
+            const auto warmup_stop = Clock::now();
+            // The aggregate still discards this record.  Keeping a real
+            // boundary here lets the optional raw sidecar label the discarded
+            // first-touch call instead of publishing a synthetic zero.
+            out.encode_pair_ms = std::chrono::duration<double, std::milli>(
+                warmup_stop - warmup_start).count();
+            out.cost.total_ms = out.encode_pair_ms;
             ++audit_.warmup_calls;
             ++audit_.warmup_pair_calls;
             return out;
@@ -688,6 +720,46 @@ struct Aggregate {
     TrialKind kind = TrialKind::Timing;
     std::vector<Observation> observations;
 };
+
+std::string RawTimingProfileForReview(const Options& options) {
+    if (std::string(kReadinessTimingProfileVersion) != "readiness-toy-v1" ||
+        std::string(kPaperTimingProfileVersion) != "paper-v1") {
+        throw std::logic_error("raw timing profile constants drifted");
+    }
+    if (options.trials == 1) return kReadinessTimingProfileVersion;
+    if (options.trials == 30) return kPaperTimingProfileVersion;
+    throw std::invalid_argument(
+        "review raw timing requires exactly 1 toy or 30 paper measured trials");
+}
+
+double RawMillisecondsForReview(const std::string& method,
+                                const Observation& observation) {
+    // Encoding rows have a pair-specific timing boundary; all protocol
+    // adapters expose the complete query boundary through total_ms.
+    return IsEncodingMethod(method) ? observation.encode_pair_ms
+                                    : observation.cost.total_ms;
+}
+
+RawTimingArtifact MakeReviewRawTimingArtifact(
+    const Options& options,
+    const std::string& profile_id,
+    const std::string& method,
+    std::vector<RawTimingSample> samples) {
+    RawTimingArtifact artifact;
+    artifact.producer_id = "bench_review_comparison";
+    artifact.profile_id = profile_id;
+    artifact.cell_id = "review-" + std::to_string(options.universe) + "-" + method;
+    artifact.warmup_policy = WarmupPolicy::DiscardOne;
+    if (artifact.warmup_policy != ExpectedWarmupPolicy(artifact.producer_id)) {
+        throw std::logic_error("review raw timing warmup policy drift");
+    }
+    artifact.expected_measured = ExpectedTimingTrials(profile_id);
+    artifact.samples = std::move(samples);
+    artifact.aggregates.push_back(ComputeTimingAggregateV1(
+        artifact.producer_id, artifact.profile_id, artifact.cell_id, "total",
+        artifact.samples));
+    return artifact;
+}
 
 std::string OptionalU32(const std::optional<uint32_t>& value) {
     return value ? std::to_string(*value) : "";
@@ -1228,6 +1300,14 @@ int Run(int argc, char** argv) {
             "encoding-only methods cannot share a reviewer producer with FHE methods");
     }
 
+    const bool write_raw_timing = !options.raw_timing_out.empty();
+    const std::string raw_timing_profile = write_raw_timing
+        ? RawTimingProfileForReview(options) : "";
+    // Keep raw calls in a separate sidecar collection.  In particular, the
+    // binary ExecutionTrace below remains the Work 5 dispatch trace and is
+    // never folded into a timing artifact.
+    std::map<std::string, std::vector<RawTimingSample>> raw_samples;
+
     std::vector<std::unique_ptr<Adapter>> adapters =
         SetupAdapters(options, profile, workload);
     std::map<std::string, Adapter*> by_name;
@@ -1250,6 +1330,23 @@ int Run(int argc, char** argv) {
             for (const auto& method : workload.ExecutionOrder(trial)) {
                 trace.AppendDispatch(method);  // must precede adapter invocation
                 Observation observation = by_name.at(method)->Run(trial);
+                if (write_raw_timing &&
+                    (trial.kind == TrialKind::Warmup ||
+                     trial.kind == TrialKind::Timing)) {
+                    RawTimingSample sample;
+                    sample.producer_id = "bench_review_comparison";
+                    sample.profile_id = raw_timing_profile;
+                    sample.cell_id = "review-" + std::to_string(options.universe) +
+                                     "-" + method;
+                    sample.phase = "total";
+                    sample.sample_kind = trial.kind == TrialKind::Warmup
+                        ? SampleKind::DiscardedWarmup : SampleKind::Measured;
+                    sample.trial_index = trial.kind == TrialKind::Warmup
+                        ? 0 : static_cast<uint64_t>(trial.index);
+                    sample.seed = trial.trial_seed;
+                    sample.raw_ms = RawMillisecondsForReview(method, observation);
+                    raw_samples[method].push_back(std::move(sample));
+                }
                 if (trial.kind == TrialKind::Timing ||
                     trial.kind == TrialKind::Accuracy) {
                     aggregates.at({method, trial.kind}).observations.push_back(
@@ -1267,6 +1364,16 @@ int Run(int argc, char** argv) {
     }
 
     const std::string trace_sha = trace.WriteNew(options.execution_trace_out);
+    if (write_raw_timing) {
+        std::vector<RawTimingArtifact> artifacts;
+        artifacts.reserve(workload.Spec().methods.size());
+        for (const auto& method : workload.Spec().methods) {
+            artifacts.push_back(MakeReviewRawTimingArtifact(
+                options, raw_timing_profile, method,
+                std::move(raw_samples.at(method))));
+        }
+        WriteRawTimingArtifactsV1(options.raw_timing_out.string(), artifacts);
+    }
     std::vector<AggregateIdentity> identities;
     std::vector<std::string> rows;
     for (const auto& method : workload.Spec().methods) {

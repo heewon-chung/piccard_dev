@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "raw_timing_schema.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -12,10 +13,87 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace piccard;
 using namespace piccard::benchmark;
+
+namespace {
+
+constexpr const char* kRawTimingProducerId = "bench_crossover";
+
+struct RawTimingOptions {
+    bool enabled = false;
+    bool trials_explicit = false;
+    std::string output_directory;
+    std::string profile_id;
+    size_t measured_trials = 0;
+};
+
+static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
+    RawTimingOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+            if (options.enabled) {
+                throw std::invalid_argument("duplicate --raw_timing_dir");
+            }
+            options.enabled = true;
+            options.output_directory = arg.substr(17);
+            if (options.output_directory.empty()) {
+                throw std::invalid_argument("--raw_timing_dir must not be empty");
+            }
+        } else if (arg.rfind("--trials=", 0) == 0) {
+            options.trials_explicit = true;
+        }
+    }
+    return options;
+}
+
+static std::string RawTimingProfileId(const BenchmarkConfig& config) {
+    if (config.profile.id == "readiness-toy-v1") {
+        return kReadinessTimingProfileVersion;
+    }
+    if (config.profile.id == "paper-std128-t40-v1" ||
+        config.profile.id == "paper-std192-encoding-v1" ||
+        config.profile.id.rfind("paper-", 0) == 0) {
+        return kPaperTimingProfileVersion;
+    }
+    throw std::invalid_argument(
+        "--raw_timing_dir requires --profile=paper-* or readiness-toy-v1");
+}
+
+static void ResolveRawTimingOptions(RawTimingOptions& options,
+                                    const BenchmarkConfig& config) {
+    if (!options.enabled) return;
+    if (TimingContractFor(kRawTimingProducerId) == kTimingNotApplicable) {
+        throw std::invalid_argument(
+            "bench_crossover has no raw timing contract");
+    }
+    options.profile_id = RawTimingProfileId(config);
+    options.measured_trials =
+        static_cast<size_t>(ExpectedTimingTrials(options.profile_id));
+    if (options.trials_explicit && config.trials != options.measured_trials) {
+        throw std::invalid_argument(
+            "versioned raw timing requires exactly " +
+            std::to_string(options.measured_trials) + " measured trials");
+    }
+}
+
+static void AddRawTimingSample(
+    RawTimingArtifact& artifact,
+    const char* phase,
+    SampleKind sample_kind,
+    uint64_t trial_index,
+    uint64_t seed,
+    double raw_ms) {
+    artifact.samples.push_back(
+        {artifact.producer_id, artifact.profile_id, artifact.cell_id, phase,
+         sample_kind, trial_index, seed, raw_ms});
+}
+
+}  // namespace
 
 // ============================================================================
 // CSV output
@@ -106,13 +184,17 @@ static double RunSqrtTotal(
 // ============================================================================
 
 static void RunCrossoverSweep(const BenchmarkConfig& config,
-                              CrossoverCSVWriter& csv) {
+                              CrossoverCSVWriter& csv,
+                              const RawTimingOptions* raw_options = nullptr) {
     std::vector<uint32_t> k_values = {32, 64, 128, 256, 512};
     // All sqrt-valid m values
     std::vector<uint32_t> m_values = {4, 16, 64, 256, 1024};
 
     std::mt19937_64 rng(config.seed);
     auto [set_a, set_b] = MakeRandomSetsWithOverlap(config.set_size, 0.5, rng);
+    const size_t timing_trials = raw_options == nullptr
+        ? config.trials : raw_options->measured_trials;
+    std::vector<RawTimingArtifact> raw_artifacts;
 
     for (uint32_t k : k_values) {
         for (uint32_t m : m_values) {
@@ -175,14 +257,45 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
                 sqrt_eng.GetParams().FloodNoiseBits();
 
             // Warmup
-            RunOneHotTotal(onehot, set_a, set_b);
-            RunSqrtTotal(sqrt_eng, set_a, set_b);
+            RawTimingArtifact artifact;
+            RawTimingArtifact* artifact_ptr = nullptr;
+            if (raw_options != nullptr) {
+                artifact.producer_id = kRawTimingProducerId;
+                artifact.profile_id = raw_options->profile_id;
+                artifact.cell_id = "k" + std::to_string(k) + "_m" +
+                                   std::to_string(m);
+                artifact.warmup_policy = WarmupPolicy::DiscardOne;
+                artifact.expected_measured = raw_options->measured_trials;
+                artifact_ptr = &artifact;
+            }
+            const double onehot_warmup = RunOneHotTotal(onehot, set_a, set_b);
+            const double sqrt_warmup = RunSqrtTotal(sqrt_eng, set_a, set_b);
+            if (artifact_ptr != nullptr) {
+                AddRawTimingSample(
+                    *artifact_ptr, "onehot_total",
+                    SampleKind::DiscardedWarmup, 0, config.seed,
+                    onehot_warmup);
+                AddRawTimingSample(
+                    *artifact_ptr, "sqrt_total", SampleKind::DiscardedWarmup,
+                    0, config.seed, sqrt_warmup);
+            }
 
             // Multi-trial timing
             std::vector<double> oh_times, sq_times;
-            for (size_t t = 0; t < config.trials; t++) {
-                oh_times.push_back(RunOneHotTotal(onehot, set_a, set_b));
-                sq_times.push_back(RunSqrtTotal(sqrt_eng, set_a, set_b));
+            for (size_t t = 0; t < timing_trials; t++) {
+                const double onehot_ms = RunOneHotTotal(onehot, set_a, set_b);
+                const double sqrt_ms = RunSqrtTotal(sqrt_eng, set_a, set_b);
+                oh_times.push_back(onehot_ms);
+                sq_times.push_back(sqrt_ms);
+                if (artifact_ptr != nullptr) {
+                    const uint64_t trial_seed = TrialSeed(config.seed, t, 0.5);
+                    AddRawTimingSample(
+                        *artifact_ptr, "onehot_total", SampleKind::Measured,
+                        static_cast<uint64_t>(t), trial_seed, onehot_ms);
+                    AddRawTimingSample(
+                        *artifact_ptr, "sqrt_total", SampleKind::Measured,
+                        static_cast<uint64_t>(t), trial_seed, sqrt_ms);
+                }
             }
 
             cr.onehot_total_ms = Median(oh_times);
@@ -192,6 +305,9 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
                 ? (cr.onehot_total_ms / cr.sqrt_total_ms) : 0.0;
 
             csv.WriteRow(cr);
+            if (artifact_ptr != nullptr) {
+                raw_artifacts.push_back(std::move(artifact));
+            }
 
             std::cerr << "  k=" << k << " m=" << m
                       << " OH_N=" << cr.onehot_ring_dim
@@ -200,6 +316,10 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
                       << " Sq=" << cr.sqrt_total_ms << "ms"
                       << (cr.sqrt_faster ? " [SQRT FASTER]" : "") << "\n";
         }
+    }
+
+    if (raw_options != nullptr && !raw_artifacts.empty()) {
+        WriteRawTimingArtifactsV1(raw_options->output_directory, raw_artifacts);
     }
 }
 
@@ -233,8 +353,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    ResolveRawTimingOptions(raw_options, config);
     (void)ResolveBenchmarkGrid(
         config.profile, BenchmarkProducer::Crossover, BenchmarkMode::Timing,
         false, {});
@@ -245,7 +367,8 @@ int main(int argc, char** argv) {
 
     std::cerr << "\n=== Crossover sweep (median of "
               << config.trials << " trials) ===\n";
-    RunCrossoverSweep(config, csv);
+    RunCrossoverSweep(config, csv,
+                      raw_options.enabled ? &raw_options : nullptr);
 
     return 0;
 }

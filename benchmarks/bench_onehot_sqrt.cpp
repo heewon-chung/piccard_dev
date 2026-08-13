@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "raw_timing_schema.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -11,10 +12,103 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace piccard;
 using namespace piccard::benchmark;
+
+namespace {
+
+constexpr const char* kRawTimingProducerId = "bench_onehot_sqrt";
+
+struct RawTimingOptions {
+    bool enabled = false;
+    bool trials_explicit = false;
+    std::string output_directory;
+    std::string profile_id;
+    size_t measured_trials = 0;
+};
+
+static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
+    RawTimingOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+            if (options.enabled) {
+                throw std::invalid_argument("duplicate --raw_timing_dir");
+            }
+            options.enabled = true;
+            options.output_directory = arg.substr(17);
+            if (options.output_directory.empty()) {
+                throw std::invalid_argument("--raw_timing_dir must not be empty");
+            }
+        } else if (arg.rfind("--trials=", 0) == 0) {
+            options.trials_explicit = true;
+        }
+    }
+    return options;
+}
+
+static std::string RawTimingProfileId(const BenchmarkConfig& config) {
+    if (config.profile.id == "readiness-toy-v1") {
+        return kReadinessTimingProfileVersion;
+    }
+    if (config.profile.id == "paper-std128-t40-v1" ||
+        config.profile.id == "paper-std192-encoding-v1" ||
+        config.profile.id.rfind("paper-", 0) == 0) {
+        return kPaperTimingProfileVersion;
+    }
+    throw std::invalid_argument(
+        "--raw_timing_dir requires --profile=paper-* or readiness-toy-v1");
+}
+
+static void ResolveRawTimingOptions(RawTimingOptions& options,
+                                    const BenchmarkConfig& config) {
+    if (!options.enabled) return;
+    if (config.mode != "timing") {
+        throw std::invalid_argument(
+            "--raw_timing_dir requires --mode=timing");
+    }
+    if (TimingContractFor(kRawTimingProducerId) == kTimingNotApplicable) {
+        throw std::invalid_argument(
+            "bench_onehot_sqrt has no raw timing contract");
+    }
+    options.profile_id = RawTimingProfileId(config);
+    options.measured_trials =
+        static_cast<size_t>(ExpectedTimingTrials(options.profile_id));
+    if (options.trials_explicit && config.trials != options.measured_trials) {
+        throw std::invalid_argument(
+            "versioned raw timing requires exactly " +
+            std::to_string(options.measured_trials) + " measured trials");
+    }
+}
+
+static void AddRawTimingSamples(
+    std::vector<RawTimingSample>& samples,
+    const std::string& producer_id,
+    const std::string& profile_id,
+    const std::string& cell_id,
+    const BenchmarkResult& result,
+    SampleKind sample_kind,
+    uint64_t trial_index,
+    uint64_t seed) {
+    const auto add = [&](const char* phase, double raw_ms) {
+        samples.push_back({producer_id, profile_id, cell_id, phase,
+                           sample_kind, trial_index, seed, raw_ms});
+    };
+    add("total", result.time_ms);
+    add("minhash", result.phase_minhash_ms);
+    add("encode", result.phase_encode_ms);
+    add("encrypt", result.phase_encrypt_ms);
+    add("multiply", result.phase_multiply_ms);
+    add("rotate_sum", result.phase_rotate_sum_ms);
+    add("flood", result.phase_flood_ms);
+    add("decrypt", result.phase_decrypt_ms);
+}
+
+}  // namespace
 
 // ============================================================================
 // Per-engine Evaluate timing: OneHot (2 sub-phases)
@@ -208,10 +302,20 @@ static BenchmarkResult RunMultiTrial(
     const std::string& label,
     const std::string& encoding_name,
     uint32_t mult_depth,
-    size_t trials)
+    size_t trials,
+    RawTimingArtifact* raw_artifact = nullptr,
+    uint64_t raw_seed = 0,
+    double raw_seed_domain = 0.5)
 {
     // Warmup
-    RunTimedProtocol(engine, set_x, set_y, j_true, "warmup", encoding_name, mult_depth);
+    const auto warmup = RunTimedProtocol(
+        engine, set_x, set_y, j_true, "warmup", encoding_name, mult_depth);
+    if (raw_artifact != nullptr) {
+        AddRawTimingSamples(raw_artifact->samples, raw_artifact->producer_id,
+                            raw_artifact->profile_id, raw_artifact->cell_id,
+                            warmup, SampleKind::DiscardedWarmup, 0,
+                            raw_seed);
+    }
 
     std::vector<double> v_minhash, v_encode, v_encrypt, v_multiply;
     std::vector<double> v_rotate_sum, v_flood, v_decrypt, v_total;
@@ -222,6 +326,13 @@ static BenchmarkResult RunMultiTrial(
     for (size_t t = 0; t < trials; t++) {
         auto br = RunTimedProtocol(engine, set_x, set_y, j_true, label,
                                    encoding_name, mult_depth);
+        if (raw_artifact != nullptr) {
+            AddRawTimingSamples(
+                raw_artifact->samples, raw_artifact->producer_id,
+                raw_artifact->profile_id, raw_artifact->cell_id, br,
+                SampleKind::Measured, static_cast<uint64_t>(t),
+                TrialSeed(raw_seed, t, raw_seed_domain));
+        }
         v_minhash.push_back(br.phase_minhash_ms);
         v_encode.push_back(br.phase_encode_ms);
         v_encrypt.push_back(br.phase_encrypt_ms);
@@ -597,7 +708,8 @@ static BenchmarkResult RunProfileAccuracyEncoding(
     return row;
 }
 
-static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv) {
+static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
+                           const RawTimingOptions* raw_options = nullptr) {
     const BenchmarkMode mode = ParseBenchmarkMode(config.mode);
     if (mode == BenchmarkMode::Combined) {
         throw std::invalid_argument(
@@ -609,6 +721,10 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv) {
     const auto points = ResolveBenchmarkGrid(
         config.profile, BenchmarkProducer::OneHotSqrt, mode,
         config.evidence_point, supplied);
+
+    const size_t timing_trials = raw_options == nullptr
+        ? config.trials : raw_options->measured_trials;
+    std::vector<RawTimingArtifact> raw_artifacts;
 
     for (const auto& point : points) {
         PiccardParams onehot_params;
@@ -633,24 +749,56 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv) {
             auto [set_a, set_b] = MakeRandomSetsWithOverlap(
                 point.set_size, intersection_fraction, rng);
             const double j_true = ExactJaccard(set_a, set_b);
+            const std::string timing_label = point.axis + "_timing";
+            RawTimingArtifact onehot_artifact;
+            RawTimingArtifact sqrt_artifact;
+            RawTimingArtifact* onehot_artifact_ptr = nullptr;
+            RawTimingArtifact* sqrt_artifact_ptr = nullptr;
+            if (raw_options != nullptr) {
+                onehot_artifact.producer_id = kRawTimingProducerId;
+                onehot_artifact.profile_id = raw_options->profile_id;
+                onehot_artifact.cell_id = timing_label + "_onehot";
+                onehot_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+                onehot_artifact.expected_measured = raw_options->measured_trials;
+                onehot_artifact_ptr = &onehot_artifact;
+
+                sqrt_artifact.producer_id = kRawTimingProducerId;
+                sqrt_artifact.profile_id = raw_options->profile_id;
+                sqrt_artifact.cell_id = timing_label + "_sqrt";
+                sqrt_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+                sqrt_artifact.expected_measured = raw_options->measured_trials;
+                sqrt_artifact_ptr = &sqrt_artifact;
+            }
             auto onehot_row = RunMultiTrial(
-                onehot, set_a, set_b, j_true, point.axis + "_timing",
-                "onehot", 1, config.trials);
+                onehot, set_a, set_b, j_true, timing_label,
+                "onehot", 1, timing_trials, onehot_artifact_ptr,
+                raw_options == nullptr ? 0 : config.seed,
+                point.target_jaccard);
             auto sqrt_row = RunMultiTrial(
-                sqrt_engine, set_a, set_b, j_true,
-                point.axis + "_timing", "sqrt", 3, config.trials);
+                sqrt_engine, set_a, set_b, j_true, timing_label, "sqrt", 3,
+                timing_trials, sqrt_artifact_ptr,
+                raw_options == nullptr ? 0 : config.seed,
+                point.target_jaccard);
             ApplyBenchmarkProfile(
                 config, onehot_row, BenchmarkMeasurementKind::FheTiming);
             ApplyBenchmarkProfile(
                 config, sqrt_row, BenchmarkMeasurementKind::FheTiming);
             csv.WriteRow(onehot_row);
             csv.WriteRow(sqrt_row);
+            if (onehot_artifact_ptr != nullptr) {
+                raw_artifacts.push_back(std::move(onehot_artifact));
+                raw_artifacts.push_back(std::move(sqrt_artifact));
+            }
         } else {
             csv.WriteRow(RunProfileAccuracyEncoding(
                 onehot, config, point, "onehot", 1));
             csv.WriteRow(RunProfileAccuracyEncoding(
                 sqrt_engine, config, point, "sqrt", 3));
         }
+    }
+
+    if (raw_options != nullptr && !raw_artifacts.empty()) {
+        WriteRawTimingArtifactsV1(raw_options->output_directory, raw_artifacts);
     }
 }
 
@@ -696,15 +844,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    ResolveRawTimingOptions(raw_options, config);
     config.Print();
 
     CSVWriter csv;
     csv.WriteHeader();
 
     if (config.profile.run_class != BenchmarkRunClass::Legacy) {
-        RunProfileGrid(config, csv);
+        RunProfileGrid(config, csv,
+                       raw_options.enabled ? &raw_options : nullptr);
         return 0;
     }
 

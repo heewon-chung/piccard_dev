@@ -12,6 +12,7 @@
 #include "data/real_dataset.h"
 #include "data/real_dataset_metrics.h"
 #include "protocol/piccard.h"
+#include "raw_timing_schema.h"
 #include "real_dataset_csv_schema.h"
 #include "util/params.h"
 
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -37,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef _OPENMP
@@ -59,7 +62,10 @@ using piccard::data::RealDataset;
 using piccard::data::RealDatasetRecord;
 using piccard::benchmark::BenchmarkProfile;
 using piccard::benchmark::CiphertextSizer;
+using piccard::benchmark::RawTimingArtifact;
+using piccard::benchmark::RawTimingSample;
 using piccard::benchmark::ResolveBenchmarkProfile;
+using piccard::benchmark::SampleKind;
 using piccard::benchmark::Timer;
 
 // --- Byte encoding + SHA-256 helpers ---------------------------------------
@@ -407,6 +413,104 @@ double TotalQueryMs(const TimingTrialResult& row) {
           row.phase_bias_correction_ms;
 }
 
+// The raw sidecar is deliberately built from the same per-trial values that
+// feed the legacy CSV.  Keeping this mapping in one place makes it impossible
+// for a phase to be emitted at a different trial index from its siblings.
+using RawPhaseValue = std::pair<const char*, double>;
+
+std::array<RawPhaseValue, 9> RawPhaseValues(const TimingTrialResult& row) {
+    return {{{"total", TotalQueryMs(row)},
+             {"phase_minhash_ms", row.phase_minhash_ms},
+             {"phase_encode_ms", row.phase_encode_ms},
+             {"phase_encrypt_ms", row.phase_encrypt_ms},
+             {"phase_cloud_multiply_ms", row.phase_cloud_multiply_ms},
+             {"phase_cloud_rotate_ms", row.phase_cloud_rotate_ms},
+             {"phase_sanitize_ms", row.phase_sanitize_ms},
+             {"phase_decrypt_ms", row.phase_decrypt_ms},
+             {"phase_bias_correction_ms", row.phase_bias_correction_ms}}};
+}
+
+bool IsVersionedRawTimingProfile(const std::string& profile_id) {
+    return profile_id == "readiness-toy-v1" ||
+           profile_id.rfind("paper-", 0) == 0;
+}
+
+std::string RawTimingProfileId(const std::string& profile_id) {
+    if (profile_id == "readiness-toy-v1") {
+        return piccard::benchmark::kReadinessTimingProfileVersion;
+    }
+    if (profile_id.rfind("paper-", 0) == 0) {
+        return piccard::benchmark::kPaperTimingProfileVersion;
+    }
+    throw std::invalid_argument(
+        "real timing raw sidecar requires a versioned paper/readiness profile");
+}
+
+std::string RawTimingCellId(const RealDataset& dataset,
+                            const piccard::data::RealDatasetPair& pair,
+                            const RealTimingCliArgs& args) {
+    // The selected pair and parameter dimensions are part of the cell identity
+    // because one dataset/profile invocation can be repeated at another k/m.
+    return "real_timing:" + dataset.variant + ":" + pair.id + ":k=" +
+           std::to_string(args.k) + ":m=" + std::to_string(args.m);
+}
+
+void AppendRawTimingSamples(const std::string& producer_id,
+                            const std::string& profile_id,
+                            const std::string& cell_id,
+                            const TimingTrialResult& row,
+                            SampleKind sample_kind,
+                            uint64_t trial_index,
+                            uint64_t seed,
+                            std::vector<RawTimingSample>& samples) {
+    for (const auto& [phase, raw_ms] : RawPhaseValues(row)) {
+        samples.push_back({producer_id, profile_id, cell_id, phase, sample_kind,
+                           trial_index, seed, raw_ms});
+    }
+}
+
+RawTimingArtifact MakeRawTimingArtifact(
+    const RealDataset& dataset,
+    const piccard::data::RealDatasetPair& pair,
+    const RealTimingCliArgs& args,
+    uint64_t hash_seed,
+    const TimingTrialResult& warmup,
+    const std::vector<TimingTrialResult>& measured_trials) {
+    RawTimingArtifact artifact;
+    artifact.producer_id = "real_timing";
+    // Raw artifacts use the frozen schema profile IDs, while the legacy CSV
+    // retains the exact CLI profile ID (for example paper-std128-t40-v1).
+    artifact.profile_id = RawTimingProfileId(args.profile_id);
+    artifact.cell_id = RawTimingCellId(dataset, pair, args);
+    artifact.warmup_policy = piccard::benchmark::WarmupPolicy::DiscardOne;
+    artifact.expected_measured = args.trials;
+    artifact.samples.reserve((measured_trials.size() + 1) *
+                             RawPhaseValues(warmup).size());
+
+    // hash_seed is the actual MinHash CRS used by every endpoint in this
+    // timing invocation.  Encryption randomness is captured separately by the
+    // workload manifest's ciphertext digests; the raw timing seed therefore
+    // remains the fixed, auditable CRS for warmup and measured rows.
+    AppendRawTimingSamples(artifact.producer_id, artifact.profile_id,
+                           artifact.cell_id, warmup,
+                           SampleKind::DiscardedWarmup, 0, hash_seed,
+                           artifact.samples);
+    for (uint64_t trial = 0; trial < measured_trials.size(); ++trial) {
+        AppendRawTimingSamples(
+            artifact.producer_id, artifact.profile_id, artifact.cell_id,
+            measured_trials[trial], SampleKind::Measured, trial, hash_seed,
+            artifact.samples);
+    }
+    return artifact;
+}
+
+fs::path RawTimingOutputPath(const RealTimingCliArgs& args) {
+    if (!args.raw_timing_out_path.empty()) {
+        return fs::path(args.raw_timing_out_path);
+    }
+    return fs::path(args.csv_path + ".raw.tsv");
+}
+
 // --- Workload manifest -------------------------------------------------------
 
 std::string Pad3(unsigned value) {
@@ -513,6 +617,18 @@ int RunRealTimingMode(const RealTimingCliArgs& args) {
     // Unknown profile fails closed here, before any parameter derivation.
     const BenchmarkProfile& profile = ResolveBenchmarkProfile(args.profile_id);
 
+    // The versioned profiles are the only real-timing profiles that publish a
+    // raw artifact.  Freeze their counts at the schema boundary: paper is 30,
+    // readiness toy is exactly one.  Legacy Work-5 profiles retain their
+    // historical caller-provided count and never enter this branch.
+    const bool versioned_raw_timing =
+        IsVersionedRawTimingProfile(args.profile_id);
+    if (versioned_raw_timing &&
+        args.trials != piccard::benchmark::ExpectedTimingTrials(args.profile_id)) {
+        throw std::invalid_argument(
+            "versioned real timing profile requires its frozen trial count");
+    }
+
     PiccardParams params;
     params.k = args.k;
     params.m = args.m;
@@ -539,11 +655,13 @@ int RunRealTimingMode(const RealTimingCliArgs& args) {
     // One discarded warmup: still freshly encrypts real inputs (for the
     // workload manifest's fresh-input hash contract) but its timing and
     // result are never reported.
+    TimingTrialResult warmup_trial;
     {
-        const TimingTrialResult warmup =
+        warmup_trial =
             RunOneTrial(engine, record_a.bucketed_features, record_b.bucketed_features);
         workload_inputs.push_back(
-            {"warmup", std::nullopt, warmup.a_sha256, warmup.b_sha256});
+            {"warmup", std::nullopt, warmup_trial.a_sha256,
+             warmup_trial.b_sha256});
     }
 
     std::vector<TimingTrialResult> measured_trials;
@@ -617,6 +735,27 @@ int RunRealTimingMode(const RealTimingCliArgs& args) {
 
     AtomicWriteFile(fs::path(args.workload_manifest_out_path), workload_manifest_bytes);
     AtomicWriteFile(fs::path(args.csv_path), csv_out.str());
+
+    if (versioned_raw_timing) {
+        const RawTimingArtifact raw_artifact = MakeRawTimingArtifact(
+            dataset, pair, args, hash_seed, warmup_trial, measured_trials);
+        const fs::path raw_path = RawTimingOutputPath(args);
+        if (raw_path.has_parent_path()) {
+            std::error_code mkdir_ec;
+            fs::create_directories(raw_path.parent_path(), mkdir_ec);
+            if (mkdir_ec) {
+                throw std::runtime_error(
+                    "real_timing_driver: cannot create raw timing output parent '" +
+                    raw_path.parent_path().string() + "': " + mkdir_ec.message());
+            }
+        }
+        // WriteRawTimingArtifactV1 validates every phase/index/aggregate and
+        // publishes with the schema's no-overwrite atomic protocol.  It is
+        // intentionally called only for versioned profiles so legacy output
+        // bytes and file topology remain untouched.
+        piccard::benchmark::WriteRawTimingArtifactV1(raw_path.string(),
+                                                     raw_artifact);
+    }
 
     return 0;
 }

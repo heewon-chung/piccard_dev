@@ -11,6 +11,7 @@
 #include "baseline_engine.h"
 #include "build_info.h"
 #include "comparison_workload.h"
+#include "raw_timing_schema.h"
 #include "std_security_evidence_schema.h"
 #include "version.h"
 
@@ -73,6 +74,11 @@ struct Options {
     std::string output;
     std::string workload;
     std::string preflight;
+    // Optional v1 sidecar for the measured E2E phase rows.  It is deliberately
+    // separate from the frozen E2E CSV output.
+    std::string raw_timing_out;
+    std::string raw_profile;
+    bool raw_timing_directory = false;
     std::string format;
     uint64_t universe = 0;
     uint64_t set_size = 0;
@@ -276,6 +282,23 @@ Options ParseOptions(int argc, char** argv) {
                    !value.empty()) {
             MarkOption(&seen_options, "preflight");
             options.preflight = value;
+        } else if (const auto value = OptionValue(argument, "raw-timing-out");
+                   !value.empty()) {
+            MarkOption(&seen_options, "raw-timing-out");
+            options.raw_timing_out = value;
+        } else if (const auto value = OptionValue(argument, "raw_timing_dir");
+                   !value.empty()) {
+            MarkOption(&seen_options, "raw-timing-out");
+            options.raw_timing_out = value;
+            options.raw_timing_directory = true;
+        } else if (const auto value = OptionValue(argument, "raw-profile");
+                   !value.empty()) {
+            MarkOption(&seen_options, "raw-profile");
+            options.raw_profile = value;
+        } else if (const auto value = OptionValue(argument, "raw_timing_profile");
+                   !value.empty()) {
+            MarkOption(&seen_options, "raw-profile");
+            options.raw_profile = value;
         } else if (const auto value = OptionValue(argument, "format");
                    !value.empty()) {
             MarkOption(&seen_options, "format");
@@ -312,6 +335,7 @@ Options ParseOptions(int argc, char** argv) {
                    "--cell-id=fhe-ind-std128|fhe-ind-std192 --universe=64 "
                    "--set-size=10 --target-jaccard=1/2 --seed=7 --trials=1 "
                    "--workload=PATH --output=PATH [--preflight=PATH] "
+                   "[--raw_timing_dir=PATH --raw_timing_profile=readiness-toy-v1|paper-v1] "
                    "--format=json|csv\n";
             std::exit(0);
         } else {
@@ -342,6 +366,8 @@ Options ParseOptions(int argc, char** argv) {
             (options.universe != 16384 && options.universe != 65536) ||
             options.output.empty() || options.format != "json" ||
             !options.workload.empty() || !options.preflight.empty() ||
+            !options.raw_timing_out.empty() ||
+            !options.raw_profile.empty() ||
             options.set_size != 0 || !options.target_jaccard.empty() ||
             options.seed != 0 || options.trials != 0) {
             throw std::invalid_argument(
@@ -367,6 +393,25 @@ Options ParseOptions(int argc, char** argv) {
     }
     if (options.mode == "e2e" && options.preflight.empty()) {
         throw std::invalid_argument("FHE-IND e2e requires preflight artifact");
+    }
+    if (options.mode != "e2e" &&
+        (!options.raw_timing_out.empty() || !options.raw_profile.empty())) {
+        throw std::invalid_argument("raw timing is only available for FHE-IND e2e");
+    }
+    if (!options.raw_profile.empty() &&
+        options.raw_profile != benchmark::kReadinessTimingProfileVersion &&
+        options.raw_profile != benchmark::kPaperTimingProfileVersion) {
+        throw std::invalid_argument("FHE-IND raw profile must be readiness-toy-v1 or paper-v1");
+    }
+    if (!options.raw_timing_out.empty() && options.raw_profile.empty()) {
+        // The frozen FHE-IND workload is a one-trial readiness cell.  Paper
+        // repeats are opt-in and explicit so a sidecar can never silently
+        // claim a 30-row contract from the one-row Work 5 output.
+        options.raw_profile = benchmark::kReadinessTimingProfileVersion;
+    }
+    if (options.raw_timing_out.empty() && !options.raw_profile.empty()) {
+        throw std::invalid_argument(
+            "--raw-profile requires --raw-timing-out");
     }
     if (options.mode == "preflight" && !options.preflight.empty()) {
         throw std::invalid_argument("preflight artifact is only valid for e2e");
@@ -1148,6 +1193,77 @@ std::string E2eCsv(const Options& options, const WorkloadData& workload,
     return out.str();
 }
 
+benchmark::RawTimingArtifact FheIndRawTimingArtifact(
+    const Options& options,
+    const WorkloadData& workload,
+    const std::vector<baseline::FheIndQueryResult>& results) {
+    benchmark::RawTimingArtifact artifact;
+    artifact.producer_id = "bench_fhe_ind";
+    artifact.profile_id = options.raw_profile.empty()
+        ? benchmark::kReadinessTimingProfileVersion : options.raw_profile;
+    artifact.cell_id = options.cell_id;
+    artifact.warmup_policy = benchmark::WarmupPolicy::None;
+    artifact.expected_measured = benchmark::ExpectedTimingTrials(
+        artifact.profile_id);
+    if (artifact.warmup_policy != benchmark::ExpectedWarmupPolicy(
+            artifact.producer_id)) {
+        throw std::logic_error("FHE-IND raw timing warmup policy drift");
+    }
+
+    if (results.size() != artifact.expected_measured) {
+        throw std::logic_error("FHE-IND raw timing result count disagrees with profile");
+    }
+    const uint64_t base_seed = workload.parsed.Records()[1].trial_seed;
+    const auto add_measured = [&](const char* phase, uint64_t trial_index,
+                                  uint64_t seed, double raw_ms) {
+        benchmark::RawTimingSample sample;
+        sample.producer_id = artifact.producer_id;
+        sample.profile_id = artifact.profile_id;
+        sample.cell_id = artifact.cell_id;
+        sample.phase = phase;
+        sample.sample_kind = benchmark::SampleKind::Measured;
+        sample.trial_index = trial_index;
+        sample.seed = seed;
+        sample.raw_ms = RequirePositiveTiming(raw_ms, phase);
+        artifact.samples.push_back(std::move(sample));
+    };
+
+    // Keep each E2E phase as its own raw row.  The setup and online rows are
+    // aligned on the same workload trial seed; no synthetic warmup is added.
+    for (size_t index = 0; index < results.size(); ++index) {
+        const auto& result = results[index];
+        const uint64_t trial_seed = base_seed + static_cast<uint64_t>(index);
+        const double online = RequirePositiveTiming(
+            result.phase_encode_ms + result.phase_encrypt_ms +
+                result.phase_evaluate_ms + result.phase_decrypt_ms,
+            "online_e2e_ms");
+        const double full = RequirePositiveTiming(
+            result.setup_context_ms + result.setup_keygen_ms + online,
+            "full_e2e_ms");
+        add_measured("setup_context", index, trial_seed, result.setup_context_ms);
+        add_measured("setup_keygen", index, trial_seed, result.setup_keygen_ms);
+        add_measured("encode", index, trial_seed, result.phase_encode_ms);
+        add_measured("encrypt", index, trial_seed, result.phase_encrypt_ms);
+        add_measured("evaluate", index, trial_seed, result.phase_evaluate_ms);
+        add_measured("decrypt", index, trial_seed, result.phase_decrypt_ms);
+        add_measured("online_e2e", index, trial_seed, online);
+        add_measured("full_e2e", index, trial_seed, full);
+    }
+
+    for (const char* phase : {"setup_context", "setup_keygen", "encode",
+                              "encrypt", "evaluate", "decrypt", "online_e2e",
+                              "full_e2e"}) {
+        std::vector<benchmark::RawTimingSample> phase_samples;
+        for (const auto& sample : artifact.samples) {
+            if (sample.phase == phase) phase_samples.push_back(sample);
+        }
+        artifact.aggregates.push_back(benchmark::ComputeTimingAggregateV1(
+            artifact.producer_id, artifact.profile_id, artifact.cell_id, phase,
+            phase_samples));
+    }
+    return artifact;
+}
+
 std::string CapabilitiesJson(const ProducerIdentity& identity) {
     auto object = CapabilitiesDescriptor(identity.fhe_ind_binary_sha256);
     object.AddString("capabilities_sha256", identity.capabilities_sha256);
@@ -1161,6 +1277,13 @@ int Run(const Options& options) {
         return 0;
     }
     RequireAbsolutePath(options.output, "--output");
+    if (!options.raw_timing_out.empty()) {
+        RequireAbsolutePath(options.raw_timing_out, "--raw-timing-out");
+        if (options.raw_timing_out == options.output) {
+            throw std::invalid_argument(
+                "--raw-timing-out and --output must designate different files");
+        }
+    }
     if (options.mode == "work5-preflight") {
         baseline::BaselineParams params;
         params.universe_size = options.universe;
@@ -1200,6 +1323,10 @@ int Run(const Options& options) {
         throw std::runtime_error(
             "FHE-IND preflight is SKIPPED_PRECHECK; e2e is not permitted");
     }
+    const auto& timing = workload.parsed.Records()[1];
+    std::vector<baseline::FheIndQueryResult> results;
+    results.reserve(options.raw_timing_out.empty()
+        ? 1 : benchmark::ExpectedTimingTrials(options.raw_profile));
     engine.InitializeKeys();
     const TupleData after_keys = TupleFromContext(engine, options.security);
     if (after_keys.context_tuple_sha256 != tuple.context_tuple_sha256 ||
@@ -1207,14 +1334,64 @@ int Run(const Options& options) {
         after_keys.ordered_rns_moduli != tuple.ordered_rns_moduli) {
         throw std::invalid_argument("FHE-IND context tuple changed after keygen");
     }
-    const auto& timing = workload.parsed.Records()[1];
-    const auto result = engine.RunQueryPhased(timing.set_a, timing.set_b);
-    if (result.intersection != kExpectedIntersection ||
-        result.union_size != kExpectedUnion ||
-        result.jaccard != 7.0 / 13.0) {
+    const auto first_result = engine.RunQueryPhased(timing.set_a, timing.set_b);
+    results.push_back(first_result);
+    if (first_result.intersection != kExpectedIntersection ||
+        first_result.union_size != kExpectedUnion ||
+        first_result.jaccard != 7.0 / 13.0) {
         throw std::runtime_error("FHE-IND result does not match frozen workload");
     }
-    WriteNew(options.output, E2eCsv(options, workload, tuple, identity, result));
+
+    // The frozen Work 5 path above executes one query.  An explicit paper-v1
+    // sidecar requests 30 genuinely repeated setup+E2E calls; each repetition
+    // owns a fresh context/key schedule, while the preflight tuple remains the
+    // binding tuple checked before this loop.
+    if (options.raw_profile == benchmark::kPaperTimingProfileVersion) {
+        const uint64_t expected = benchmark::ExpectedTimingTrials(
+            options.raw_profile);
+        for (uint64_t index = 1; index < expected; ++index) {
+            baseline::BaselineEngine repeat_engine(params);
+            repeat_engine.Initialize();
+            const TupleData repeat_tuple = TupleFromContext(
+                repeat_engine, options.security);
+            if (repeat_tuple.context_tuple_sha256 != tuple.context_tuple_sha256 ||
+                repeat_tuple.realized_ring_dim != tuple.realized_ring_dim ||
+                repeat_tuple.ordered_rns_moduli != tuple.ordered_rns_moduli) {
+                throw std::invalid_argument(
+                    "FHE-IND repeated context tuple changed during paper timing");
+            }
+            const auto repeat_result = repeat_engine.RunQueryPhased(
+                timing.set_a, timing.set_b);
+            if (repeat_result.intersection != kExpectedIntersection ||
+                repeat_result.union_size != kExpectedUnion ||
+                repeat_result.jaccard != 7.0 / 13.0) {
+                throw std::runtime_error(
+                    "FHE-IND repeated result does not match frozen workload");
+            }
+            results.push_back(repeat_result);
+        }
+    }
+
+    WriteNew(options.output,
+             E2eCsv(options, workload, tuple, identity, results.front()));
+    if (!options.raw_timing_out.empty()) {
+        const benchmark::RawTimingArtifact artifact =
+            FheIndRawTimingArtifact(options, workload, results);
+        if (options.raw_timing_directory) {
+            std::error_code raw_ec;
+            std::filesystem::create_directories(options.raw_timing_out, raw_ec);
+            if (raw_ec) {
+                throw std::runtime_error(
+                    "cannot create FHE-IND raw timing directory: " +
+                    raw_ec.message());
+            }
+            benchmark::WriteRawTimingArtifactsV1(
+                options.raw_timing_out, {artifact});
+        } else {
+            benchmark::WriteRawTimingArtifactV1(
+                options.raw_timing_out, artifact);
+        }
+    }
     return 0;
 }
 

@@ -243,4 +243,109 @@ DynamicResult RunSingleOwnerRefresh(
     return row;
 }
 
+std::vector<DynamicResult> RunSingleOwnerRefreshTrials(
+    const DynamicPiccard& engine,
+    const std::vector<uint64_t>& set_a,
+    const std::vector<uint64_t>& set_b,
+    uint32_t depth,
+    uint64_t refresh_updates,
+    uint64_t measured_trials) {
+    if (measured_trials == 0) {
+        throw std::invalid_argument("measured_trials must be positive");
+    }
+    if (measured_trials >
+        static_cast<uint64_t>(std::vector<DynamicResult>().max_size())) {
+        throw std::invalid_argument("measured_trials exceeds vector capacity");
+    }
+
+    std::vector<DynamicResult> rows;
+    rows.reserve(static_cast<size_t>(measured_trials));
+    for (uint64_t trial = 0; trial < measured_trials; ++trial) {
+        rows.push_back(RunSingleOwnerRefresh(
+            engine, set_a, set_b, depth, refresh_updates));
+    }
+    return rows;
+}
+
+namespace {
+
+double RequireRefreshPhase(const std::optional<double>& value,
+                           const char* phase) {
+    if (!value.has_value()) {
+        throw std::invalid_argument(std::string("refresh row is missing phase: ") +
+                                    phase);
+    }
+    if (!std::isfinite(*value) || *value < 0.0) {
+        throw std::invalid_argument(std::string("refresh phase is invalid: ") +
+                                    phase);
+    }
+    return *value;
+}
+
+void AppendRefreshPhaseSamples(std::vector<RawTimingSample>& samples,
+                               const std::string& profile_id,
+                               const std::string& cell_id,
+                               uint64_t seed,
+                               uint64_t trial_index,
+                               const DynamicResult& row,
+                               const char* phase,
+                               const std::optional<double>& value) {
+    samples.push_back({"dynamic_refresh", profile_id, cell_id, phase,
+                       SampleKind::Measured, trial_index, seed,
+                       RequireRefreshPhase(value, phase)});
+}
+
+}  // namespace
+
+RawTimingArtifact MakeDynamicRefreshTimingArtifact(
+    const std::string& profile_id,
+    const std::string& cell_id,
+    uint64_t seed,
+    const std::vector<DynamicResult>& measured_trials) {
+    const uint64_t expected_measured = ExpectedTimingTrials(profile_id);
+    if (measured_trials.size() != expected_measured) {
+        throw std::invalid_argument(
+            "refresh raw timing trial count disagrees with profile");
+    }
+
+    RawTimingArtifact artifact;
+    artifact.producer_id = "dynamic_refresh";
+    artifact.profile_id = profile_id;
+    artifact.cell_id = cell_id;
+    artifact.warmup_policy = WarmupPolicy::None;
+    if (artifact.warmup_policy != ExpectedWarmupPolicy(artifact.producer_id)) {
+        throw std::logic_error("dynamic_refresh raw warmup policy drift");
+    }
+    artifact.expected_measured = expected_measured;
+    artifact.samples.reserve(measured_trials.size() * 7);
+    for (uint64_t trial = 0; trial < measured_trials.size(); ++trial) {
+        const auto& row = measured_trials[static_cast<size_t>(trial)];
+        const uint64_t trial_seed =
+            TrialSeed(seed, static_cast<size_t>(trial), 0.5);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "refresh_update",
+                                  row.phase_refresh_update_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "refresh_signature",
+                                  row.phase_refresh_signature_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "refresh_encode",
+                                  row.phase_refresh_encode_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "refresh_encrypt",
+                                  row.phase_refresh_encrypt_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "refresh_serialize",
+                                  row.phase_refresh_serialize_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "cloud_replace",
+                                  row.phase_cloud_replace_ms);
+        AppendRefreshPhaseSamples(artifact.samples, profile_id, cell_id, trial_seed,
+                                  trial, row, "total",
+                                  row.refresh_total_ms);
+    }
+    ValidateRawTimingArtifact(artifact);
+    return artifact;
+}
+
 }  // namespace piccard::benchmark

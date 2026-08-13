@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "raw_timing_schema.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -9,11 +10,82 @@
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace piccard;
 using namespace piccard::benchmark;
 using Clock = std::chrono::high_resolution_clock;
+
+namespace {
+
+constexpr const char* kRawTimingProducerId = "bench_sqrt_comparison";
+
+struct RawTimingOptions {
+    bool enabled = false;
+    bool trials_explicit = false;
+    std::string output_directory;
+    std::string profile_id;
+    size_t measured_trials = 0;
+};
+
+static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
+    RawTimingOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+            if (options.enabled) {
+                throw std::invalid_argument("duplicate --raw_timing_dir");
+            }
+            options.enabled = true;
+            options.output_directory = arg.substr(17);
+            if (options.output_directory.empty()) {
+                throw std::invalid_argument("--raw_timing_dir must not be empty");
+            }
+        } else if (arg.rfind("--trials=", 0) == 0) {
+            options.trials_explicit = true;
+        }
+    }
+    return options;
+}
+
+static std::string RawTimingProfileId(const BenchmarkConfig& config) {
+    if (config.profile.id == "readiness-toy-v1") {
+        return kReadinessTimingProfileVersion;
+    }
+    if (config.profile.id == "paper-std128-t40-v1" ||
+        config.profile.id == "paper-std192-encoding-v1" ||
+        config.profile.id.rfind("paper-", 0) == 0) {
+        return kPaperTimingProfileVersion;
+    }
+    throw std::invalid_argument(
+        "--raw_timing_dir requires --profile=paper-* or readiness-toy-v1");
+}
+
+static void ResolveRawTimingOptions(RawTimingOptions& options,
+                                    const SqrtComparisonConfig& config) {
+    if (!options.enabled) return;
+    if (config.sanitizer.mode != "timing") {
+        throw std::invalid_argument(
+            "--raw_timing_dir requires --mode=timing");
+    }
+    if (TimingContractFor(kRawTimingProducerId) == kTimingNotApplicable) {
+        throw std::invalid_argument(
+            "bench_sqrt_comparison has no raw timing contract");
+    }
+    options.profile_id = RawTimingProfileId(config.sanitizer);
+    options.measured_trials =
+        static_cast<size_t>(ExpectedTimingTrials(options.profile_id));
+    if (options.trials_explicit &&
+        static_cast<size_t>(config.trials) != options.measured_trials) {
+        throw std::invalid_argument(
+            "versioned raw timing requires exactly " +
+            std::to_string(options.measured_trials) + " measured trials");
+    }
+}
+
+}  // namespace
 
 double TrueJaccard(const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
     std::vector<uint64_t> sa(a.begin(), a.end()), sb(b.begin(), b.end());
@@ -38,6 +110,44 @@ struct BenchResult {
     SanitizerMetadata sanitizer;
     BenchmarkProvenance provenance;
 };
+
+namespace {
+
+static RawTimingArtifact MakeRawTimingArtifact(
+    const RawTimingOptions& options,
+    const std::string& cell_id,
+    const std::string& encoding,
+    const std::vector<BenchResult>& results,
+    uint64_t root_seed) {
+    RawTimingArtifact artifact;
+    artifact.producer_id = kRawTimingProducerId;
+    artifact.profile_id = options.profile_id;
+    artifact.cell_id = cell_id + "_" + encoding;
+    artifact.warmup_policy = WarmupPolicy::None;
+    artifact.expected_measured = options.measured_trials;
+    std::vector<RawTimingSample> samples;
+    samples.reserve(results.size() * 5);
+
+    for (size_t trial = 0; trial < results.size(); ++trial) {
+        const auto& result = results[trial];
+        const uint64_t trial_seed = TrialSeed(root_seed, trial, 0.5);
+        const auto add = [&](const char* phase, double raw_ms) {
+            samples.push_back(
+                {artifact.producer_id, artifact.profile_id, artifact.cell_id,
+                 phase, SampleKind::Measured,
+                 static_cast<uint64_t>(trial), trial_seed, raw_ms});
+        };
+        add("encode", result.encode_ms);
+        add("encrypt", result.encrypt_ms);
+        add("evaluate", result.evaluate_ms);
+        add("decrypt", result.decrypt_ms);
+        add("total", result.total_ms);
+    }
+    artifact.samples = std::move(samples);
+    return artifact;
+}
+
+}  // namespace
 
 template <typename Engine>
 BenchResult RunBench(Engine& engine, const std::vector<uint64_t>& set_x,
@@ -158,14 +268,17 @@ void PrintRow(const BenchmarkConfig& config,
 int main(int argc, char** argv) {
     const uint32_t n = 500;
 
+    RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     const SqrtComparisonConfig config =
         ResolveSqrtComparisonConfig(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv);
+    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    ResolveRawTimingOptions(raw_options, config);
     (void)ResolveBenchmarkGrid(
         config.sanitizer.profile, BenchmarkProducer::SqrtComparison,
         BenchmarkMode::Timing, false, {});
     const uint64_t seed = config.seed;
-    const int num_trials = config.trials;
+    const int num_trials = raw_options.enabled
+        ? static_cast<int>(raw_options.measured_trials) : config.trials;
 
     std::mt19937_64 rng(seed);
 
@@ -186,6 +299,8 @@ int main(int argc, char** argv) {
     };
 
     PrintHeader(num_trials);
+
+    std::vector<RawTimingArtifact> raw_artifacts;
 
     for (auto& cfg : configs) {
         std::vector<BenchResult> onehot_results, sqrt_results;
@@ -228,6 +343,18 @@ int main(int argc, char** argv) {
 
         PrintRow(config.sanitizer, "OneHot", cfg.k, cfg.m, onehot_results);
         PrintRow(config.sanitizer, "Sqrt", cfg.k, cfg.m, sqrt_results);
+        if (raw_options.enabled) {
+            const std::string cell_id =
+                "k" + std::to_string(cfg.k) + "_m" + std::to_string(cfg.m);
+            raw_artifacts.push_back(MakeRawTimingArtifact(
+                raw_options, cell_id, "onehot", onehot_results, config.seed));
+            raw_artifacts.push_back(MakeRawTimingArtifact(
+                raw_options, cell_id, "sqrt", sqrt_results, config.seed));
+        }
+    }
+
+    if (raw_options.enabled) {
+        WriteRawTimingArtifactsV1(raw_options.output_directory, raw_artifacts);
     }
 
     return 0;

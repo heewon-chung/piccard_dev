@@ -856,6 +856,21 @@ if(BUILD_TESTS)
                 PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
             )
             add_test(NAME RawTimingArtifacts COMMAND test_raw_timing_artifacts)
+            add_test(
+                NAME RawTimingProducerGroupA
+                COMMAND python3
+                        ${CMAKE_SOURCE_DIR}/tests/scripts/test_phase7_group_a_raw_timing.py
+            )
+            add_test(
+                NAME RawTimingProducerGroupC
+                COMMAND python3
+                        ${CMAKE_SOURCE_DIR}/tests/scripts/test_phase7_group_c_producers.py
+            )
+            add_test(
+                NAME RawTimingProducerContracts
+                COMMAND python3
+                        ${CMAKE_SOURCE_DIR}/tests/scripts/test_raw_timing_artifacts.py
+            )
 
             add_executable(
                 test_estimator_provenance_serializers
@@ -1633,7 +1648,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     # engine (piccard_baselines pulls SJ16 + Paillier + GMP + OpenFHE) and OpenMP.
     if(HAVE_PICCARD_BASELINES)
         add_executable(bench_sj16_calibrate benchmarks/bench_sj16_calibrate.cpp)
-        target_link_libraries(bench_sj16_calibrate piccard_baselines)
+        target_link_libraries(
+            bench_sj16_calibrate
+            piccard_baselines
+            piccard_benchmark_serializers
+        )
         if(OpenMP_CXX_FOUND)
             target_link_libraries(bench_sj16_calibrate OpenMP::OpenMP_CXX)
         endif()

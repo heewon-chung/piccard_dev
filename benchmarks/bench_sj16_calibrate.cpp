@@ -37,6 +37,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -48,9 +49,20 @@
 
 #include "baselines/sj16.h"
 #include "benchmark_utils.h"  // Timer, MakeRandomSetsWithOverlap, ComputeDispersion
+#include "raw_timing_schema.h"
 
 using piccard::baselines::SJ16;
 using piccard::benchmark::MakeRandomSetsWithOverlap;
+using piccard::benchmark::ComputeTimingAggregateV1;
+using piccard::benchmark::ExpectedTimingTrials;
+using piccard::benchmark::ExpectedWarmupPolicy;
+using piccard::benchmark::RawTimingArtifact;
+using piccard::benchmark::RawTimingSample;
+using piccard::benchmark::SampleKind;
+using piccard::benchmark::WarmupPolicy;
+using piccard::benchmark::WriteRawTimingArtifactsV1;
+using piccard::benchmark::kPaperTimingProfileVersion;
+using piccard::benchmark::kReadinessTimingProfileVersion;
 
 namespace {
 
@@ -64,6 +76,8 @@ struct Config {
     size_t trials = 5;
     int threads = 8;  // resolved from OMP_NUM_THREADS below if unset on CLI
     size_t enc_iters = 1000;
+    std::string raw_timing_out;
+    std::string raw_profile;
 };
 
 std::vector<std::string> Split(const std::string& s, char delim) {
@@ -89,6 +103,8 @@ void PrintUsage() {
            "or 8)\n"
         << "  --enc_iters=N        Single-encrypt samples for t_enc "
            "(default 1000)\n"
+        << "  --raw_timing_dir=DIR Write v1 raw timing sidecars (opt-in)\n"
+        << "  --raw_timing_profile=readiness-toy-v1|paper-v1  Raw profile (optional)\n"
         << "  --help, -h           This message\n";
 }
 
@@ -195,6 +211,30 @@ bool ParseArgs(int argc, char** argv, Config& c, bool& want_help) {
                 return false;
             }
             c.enc_iters = n;
+        } else if (a.rfind("--raw-timing-out=", 0) == 0 ||
+                   a.rfind("--raw_timing_out=", 0) == 0 ||
+                   a.rfind("--raw_timing_dir=", 0) == 0) {
+            const char* prefix = a.rfind("--raw-timing-out=", 0) == 0
+                ? "--raw-timing-out="
+                : (a.rfind("--raw_timing_out=", 0) == 0
+                       ? "--raw_timing_out=" : "--raw_timing_dir=");
+            c.raw_timing_out = val(prefix);
+            if (c.raw_timing_out.empty()) {
+                std::cerr << "ERROR: --raw_timing_dir requires a directory.\n";
+                return false;
+            }
+        } else if (a.rfind("--raw-profile=", 0) == 0 ||
+                   a.rfind("--raw_profile=", 0) == 0 ||
+                   a.rfind("--raw_timing_profile=", 0) == 0) {
+            const char* prefix = a.rfind("--raw-profile=", 0) == 0
+                ? "--raw-profile="
+                : (a.rfind("--raw_profile=", 0) == 0
+                       ? "--raw_profile=" : "--raw_timing_profile=");
+            c.raw_profile = val(prefix);
+            if (c.raw_profile.empty()) {
+                std::cerr << "ERROR: --raw-profile requires a profile id.\n";
+                return false;
+            }
         } else {
             std::cerr << "ERROR: unrecognized flag: " << a << "\n";
             return false;
@@ -309,17 +349,33 @@ MakeSetsForUniverse(uint32_t m, uint64_t seed) {
 // per size, in the same order as `sizes` (raw, unsorted — the caller derives
 // median/IQR). Seeding matches the per-size scheme (per-size base = base_seed ^
 // m), so results are deterministic regardless of the rotation.
+struct RawTimingSeries {
+    double warmup_ms = 0.0;
+    uint64_t warmup_seed = 0;
+    std::vector<double> measured_ms;
+    std::vector<uint64_t> measured_seeds;
+};
+
 std::vector<std::vector<double>> MeasureQueriesSamples(
     SJ16& s, const std::vector<uint32_t>& sizes, size_t trials,
-    uint64_t base_seed) {
+    uint64_t base_seed,
+    std::map<uint32_t, RawTimingSeries>* raw_queries = nullptr) {
     std::vector<std::vector<double>> samples(sizes.size());
     for (auto& v : samples) v.reserve(trials);
     // Warmup pass (discarded): amortizes first-touch allocation / page faults.
     for (uint32_t m : sizes) {
         s.SetUniverse(m);
-        auto [wx, wy] =
-            MakeSetsForUniverse(m, (base_seed ^ m) ^ 0x9E3779B97F4A7C15ULL);
-        (void)s.RunProtocol(wx, wy);
+        const uint64_t warmup_seed =
+            (base_seed ^ m) ^ 0x9E3779B97F4A7C15ULL;
+        auto [wx, wy] = MakeSetsForUniverse(m, warmup_seed);
+        const auto warmup_result = s.RunProtocol(wx, wy);
+        if (raw_queries != nullptr) {
+            RawTimingSeries& series = (*raw_queries)[m];
+            series.warmup_ms = warmup_result.cost.total_ms;
+            series.warmup_seed = warmup_seed;
+            series.measured_ms.reserve(trials);
+            series.measured_seeds.reserve(trials);
+        }
     }
     const size_t nsz = sizes.size();
     // Interleaved measurement: each trial sweeps every size once, rotated.
@@ -328,9 +384,15 @@ std::vector<std::vector<double>> MeasureQueriesSamples(
             size_t si = (k + t) % nsz;  // rotate order per trial
             uint32_t m = sizes[si];
             s.SetUniverse(m);
-            auto [x, y] = MakeSetsForUniverse(m, (base_seed ^ m) + t * 1009ULL);
+            const uint64_t trial_seed = (base_seed ^ m) + t * 1009ULL;
+            auto [x, y] = MakeSetsForUniverse(m, trial_seed);
             auto res = s.RunProtocol(x, y);
             samples[si].push_back(res.cost.total_ms);
+            if (raw_queries != nullptr) {
+                RawTimingSeries& series = (*raw_queries)[m];
+                series.measured_ms.push_back(res.cost.total_ms);
+                series.measured_seeds.push_back(trial_seed);
+            }
         }
     }
     return samples;
@@ -341,11 +403,26 @@ std::vector<std::vector<double>> MeasureQueriesSamples(
 // obtainable without touching sj16.* (the median-only API otherwise hides the
 // spread).
 MedIqr MeasureEncMs(const SJ16& s, size_t enc_iters,
-                    std::vector<double>& samples_out) {
+                    std::vector<double>& samples_out,
+                    RawTimingSeries* raw_encryption = nullptr,
+                    uint64_t base_seed = 0) {
     samples_out.clear();
     samples_out.reserve(enc_iters);
+    if (raw_encryption != nullptr) {
+        // The sidecar contract labels this first-touch call explicitly rather
+        // than smuggling it into the measured encryption aggregate.
+        raw_encryption->warmup_seed = base_seed;
+        raw_encryption->warmup_ms = s.MeasureEncryptMsMedian(1);
+        raw_encryption->measured_ms.reserve(enc_iters);
+        raw_encryption->measured_seeds.reserve(enc_iters);
+    }
     for (size_t i = 0; i < enc_iters; ++i) {
-        samples_out.push_back(s.MeasureEncryptMsMedian(1));
+        const double raw_ms = s.MeasureEncryptMsMedian(1);
+        samples_out.push_back(raw_ms);
+        if (raw_encryption != nullptr) {
+            raw_encryption->measured_ms.push_back(raw_ms);
+            raw_encryption->measured_seeds.push_back(base_seed + i);
+        }
     }
     // MedianIqr sorts a COPY, so samples_out keeps its raw acquisition order.
     return MedianIqr(samples_out);
@@ -445,6 +522,83 @@ struct KResult {
     bool pass = false;
 };
 
+std::string RawTimingProfileForSj16(const Config& cfg) {
+    if (cfg.raw_timing_out.empty() && cfg.raw_profile.empty()) return {};
+    if (cfg.raw_timing_out.empty() && !cfg.raw_profile.empty()) {
+        throw std::invalid_argument(
+            "--raw-profile requires --raw-timing-out");
+    }
+    std::string profile = cfg.raw_profile;
+    if (profile.empty()) {
+        if (cfg.trials == 1 && cfg.enc_iters == 1) {
+            profile = kReadinessTimingProfileVersion;
+        } else if (cfg.trials == 30 && cfg.enc_iters == 30) {
+            profile = kPaperTimingProfileVersion;
+        } else {
+            throw std::invalid_argument(
+                "SJ16 raw timing requires 1 toy or 30 paper measured calls; "
+                "pass --raw-profile with matching --trials/--enc_iters");
+        }
+    }
+    if (profile != kReadinessTimingProfileVersion &&
+        profile != kPaperTimingProfileVersion) {
+        throw std::invalid_argument(
+            "SJ16 raw profile must be readiness-toy-v1 or paper-v1");
+    }
+    const uint64_t expected = ExpectedTimingTrials(profile);
+    if (cfg.trials != expected || cfg.enc_iters != expected) {
+        throw std::invalid_argument(
+            "SJ16 --trials and --enc_iters must equal the raw profile count");
+    }
+    return profile;
+}
+
+RawTimingArtifact MakeSj16RawTimingArtifact(
+    const std::string& profile,
+    const std::string& cell_id,
+    const char* phase,
+    const RawTimingSeries& series) {
+    RawTimingArtifact artifact;
+    artifact.producer_id = "bench_sj16_calibrate";
+    artifact.profile_id = profile;
+    artifact.cell_id = cell_id;
+    artifact.warmup_policy = WarmupPolicy::DiscardOne;
+    artifact.expected_measured = ExpectedTimingTrials(profile);
+    if (artifact.warmup_policy != ExpectedWarmupPolicy(artifact.producer_id)) {
+        throw std::logic_error("SJ16 raw timing warmup policy drift");
+    }
+
+    RawTimingSample warmup;
+    warmup.producer_id = artifact.producer_id;
+    warmup.profile_id = artifact.profile_id;
+    warmup.cell_id = artifact.cell_id;
+    warmup.phase = phase;
+    warmup.sample_kind = SampleKind::DiscardedWarmup;
+    warmup.trial_index = 0;
+    warmup.seed = series.warmup_seed;
+    warmup.raw_ms = series.warmup_ms;
+    artifact.samples.push_back(std::move(warmup));
+    if (series.measured_ms.size() != series.measured_seeds.size()) {
+        throw std::logic_error("SJ16 raw timing samples/seeds are unaligned");
+    }
+    for (size_t index = 0; index < series.measured_ms.size(); ++index) {
+        RawTimingSample sample;
+        sample.producer_id = artifact.producer_id;
+        sample.profile_id = artifact.profile_id;
+        sample.cell_id = artifact.cell_id;
+        sample.phase = phase;
+        sample.sample_kind = SampleKind::Measured;
+        sample.trial_index = static_cast<uint64_t>(index);
+        sample.seed = series.measured_seeds[index];
+        sample.raw_ms = series.measured_ms[index];
+        artifact.samples.push_back(std::move(sample));
+    }
+    artifact.aggregates.push_back(ComputeTimingAggregateV1(
+        artifact.producer_id, artifact.profile_id, artifact.cell_id, phase,
+        artifact.samples));
+    return artifact;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -510,6 +664,14 @@ int main(int argc, char** argv) {
                   << ").\n";
         return 1;
     }
+    std::string raw_profile;
+    try {
+        raw_profile = RawTimingProfileForSj16(cfg);
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: " << e.what() << "\n";
+        return 1;
+    }
+    const bool write_raw_timing = !raw_profile.empty();
 
     // ---- Thread policy (D4): pin, then OBSERVE the real team size -----------
     // omp_get_max_threads() is only an UPPER BOUND; the number of threads that
@@ -559,6 +721,7 @@ int main(int argc, char** argv) {
     constexpr double kResidualTau = 0.10;    // held-out residual gate
 
     std::vector<KResult> results;
+    std::vector<RawTimingArtifact> raw_artifacts;
 
     // ---- D4 scaling check: ONE representative size at threads=1 vs threads=P -
     // The full T(m) fit runs only at the pinned team size, so parallel scaling
@@ -641,7 +804,12 @@ int main(int argc, char** argv) {
 
             // Single-encryption unit cost (median + IQR + raw samples).
             std::vector<double> enc_samples;
-            MedIqr enc = MeasureEncMs(s, cfg.enc_iters, enc_samples);
+            RawTimingSeries raw_encryption;
+            const uint64_t encryption_seed =
+                0xE11C0DE5EEDULL ^ static_cast<uint64_t>(K);
+            MedIqr enc = MeasureEncMs(
+                s, cfg.enc_iters, enc_samples,
+                write_raw_timing ? &raw_encryption : nullptr, encryption_seed);
             std::cout << "  t_enc: median=" << enc.median
                       << " ms  IQR=" << enc.iqr << " ms"
                       << "  (Q1=" << enc.q1 << " Q3=" << enc.q3 << ")\n";
@@ -653,8 +821,11 @@ int main(int argc, char** argv) {
             uint64_t base_seed = 0xC0FFEEULL ^ (static_cast<uint64_t>(K) << 8);
             std::vector<uint32_t> all_sizes = cfg.sizes;
             all_sizes.push_back(cfg.held_out);
+            std::map<uint32_t, RawTimingSeries> raw_queries;
             std::vector<std::vector<double>> all_samples =
-                MeasureQueriesSamples(s, all_sizes, cfg.trials, base_seed);
+                MeasureQueriesSamples(
+                    s, all_sizes, cfg.trials, base_seed,
+                    write_raw_timing ? &raw_queries : nullptr);
 
             const size_t nfit = cfg.sizes.size();
             std::vector<double> xs, ys;
@@ -727,6 +898,20 @@ int main(int argc, char** argv) {
             kr.residual = residual;
             kr.pass = pass;
             results.push_back(std::move(kr));
+
+            if (write_raw_timing) {
+                raw_artifacts.push_back(MakeSj16RawTimingArtifact(
+                    raw_profile,
+                    "sj16-k" + std::to_string(K) + "-encrypt", "encrypt",
+                    raw_encryption));
+                for (uint32_t m : all_sizes) {
+                    raw_artifacts.push_back(MakeSj16RawTimingArtifact(
+                        raw_profile,
+                        "sj16-k" + std::to_string(K) + "-m" +
+                            std::to_string(m),
+                        "query", raw_queries.at(m)));
+                }
+            }
         } catch (const std::exception& e) {
             std::cerr << "  ERROR: measurement failed for K=" << K << ": "
                       << e.what()
@@ -869,6 +1054,24 @@ int main(int argc, char** argv) {
         out << "\n";
     }
     out.close();
+
+    if (write_raw_timing) {
+        if (any_failure || results.size() != cfg.key_bits.size()) {
+            std::cerr << "ERROR: raw timing sidecars suppressed because the "
+                         "calibration did not complete every requested key size.\n";
+            return 1;
+        }
+        std::error_code raw_ec;
+        std::filesystem::create_directories(cfg.raw_timing_out, raw_ec);
+        if (raw_ec) {
+            std::cerr << "ERROR: could not create raw timing directory "
+                      << cfg.raw_timing_out << ": " << raw_ec.message() << "\n";
+            return 1;
+        }
+        WriteRawTimingArtifactsV1(cfg.raw_timing_out, raw_artifacts);
+        std::cout << "Wrote raw timing sidecars to " << cfg.raw_timing_out
+                  << " (profile=" << raw_profile << ")\n";
+    }
 
     std::cout << "\nWrote " << path << "\n";
 

@@ -26,6 +26,11 @@ struct RealTimingCliArgs {
     uint64_t root_seed = 0;
     std::string csv_path;
     std::string workload_manifest_out_path;
+    // Optional versioned raw-timing sidecar destination.  The legacy CLI does
+    // not expose a third output flag; when this is empty, the implementation
+    // derives `<csv>.raw.tsv` for paper/readiness profiles only.  Work-5 CSV
+    // and workload bytes are never routed through the sidecar serializer.
+    std::string raw_timing_out_path;
 };
 
 // Runs the FHE timing mode end to end: loads and strictly validates the
@@ -35,7 +40,10 @@ struct RealTimingCliArgs {
 // discarded warmup plus `trials` zero-based measured trials of the deployed
 // one-hot MinHash BFV query protocol against a live BFV context built for
 // that profile, and atomically writes the timing CSV and the timing
-// workload manifest.
+// workload manifest.  Versioned paper/readiness profiles additionally publish
+// one independently checkable raw-timing sidecar containing every phase for
+// one discarded warmup and all measured trials.  The sidecar path is the
+// optional field above or `<csv>.raw.tsv` when the field is empty.
 //
 // Throws std::invalid_argument for a missing/malformed argument or an
 // unknown profile, and std::runtime_error for any I/O, dataset-validation,
