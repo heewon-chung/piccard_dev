@@ -1621,6 +1621,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_revision_flooding_adapter
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SummarizeRevisionCells
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_summarize_revision_cells
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================

@@ -34,11 +34,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import math
 import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 # Both scripts live in scripts/; when this file is invoked as a top-level
 # script (directly, or via `python3 scripts/summarize_real_datasets.py`),
@@ -55,6 +58,356 @@ from prepare_real_datasets import format_float  # noqa: E402
 
 class SummarizerError(ValueError):
     """Raised for header mismatch, malformed rows, or non-finite cells."""
+
+
+class RevisionSummaryError(SummarizerError):
+    """Raised when the strict one-cell revision summary contract is invalid."""
+
+
+class _RevisionMatrixDocument(dict):
+    """Parsed matrix with immutable source digests for drift detection."""
+
+    source_sha256: str
+    parsed_sha256: str
+
+
+_REPO_ROOT = _SCRIPT_DIR.parent
+REVISION_MATRIX_PATH = _REPO_ROOT / "benchmarks" / "revision_matrix.json"
+REVISION_SUMMARY_CONTRACT_PATH = (
+    _REPO_ROOT / "benchmarks" / "revision_summary_argv_contract.json"
+)
+_REVISION_MATRIX_SCHEMA = "piccard-revision-matrix-v1"
+_REVISION_SUMMARY_CONTRACT_SCHEMA = "piccard-revision-summary-argv-v1"
+_REVISION_SUMMARY_PRODUCER = "summarize_real_datasets.py"
+_REVISION_SUMMARY_OPTIONS = frozenset({
+    "--revision-cell", "--accuracy-csv", "--output", "--variant",
+})
+_REAL_VARIANT_BINDINGS = {
+    "dblp_acm_u65536": ("dblp_acm", 65536),
+    "enron_u65536": ("enron", 65536),
+    "enron_u1048576": ("enron", 1048576),
+}
+
+
+def _revision_reject(message: str) -> None:
+    raise RevisionSummaryError("invalid real-dataset summary revision argv: "
+                               + message)
+
+
+def _canonical_json_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_revision_matrix(path: str | Path = REVISION_MATRIX_PATH) -> Mapping[str, Any]:
+    """Load the canonical matrix and retain digests used by successor binding."""
+
+    matrix_path = Path(path)
+    try:
+        raw = matrix_path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        _revision_reject(f"cannot load revision matrix {matrix_path}: {error}")
+    if not isinstance(value, dict):
+        _revision_reject("revision matrix must be an object")
+    if (value.get("schema") != _REVISION_MATRIX_SCHEMA or
+            value.get("version") != 1):
+        _revision_reject("revision matrix schema/version mismatch")
+    cells = value.get("cells")
+    if not isinstance(cells, list):
+        _revision_reject("revision matrix cells must be a list")
+    document = _RevisionMatrixDocument(value)
+    document.source_sha256 = hashlib.sha256(raw).hexdigest()
+    document.parsed_sha256 = _canonical_json_digest(value)
+    return document
+
+
+def load_revision_summary_contract(
+        path: str | Path = REVISION_SUMMARY_CONTRACT_PATH,
+        matrix_path: str | Path = REVISION_MATRIX_PATH) -> Mapping[str, Any]:
+    """Load the frozen Python successor argv contract.
+
+    The contract is deliberately separate from the producer implementation:
+    C++ ``revision_invocation_plan`` is the authority that produced these
+    ordered argv KATs, while this script only consumes the checked-in contract.
+    """
+
+    contract_path = Path(path)
+    try:
+        raw = contract_path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        _revision_reject(f"cannot load summary argv contract {contract_path}: {error}")
+    if not isinstance(value, dict):
+        _revision_reject("summary argv contract must be an object")
+    if (value.get("schema") != _REVISION_SUMMARY_CONTRACT_SCHEMA or
+            value.get("version") != 1 or
+            value.get("producer") != _REVISION_SUMMARY_PRODUCER):
+        _revision_reject("summary argv contract schema/version/producer mismatch")
+    try:
+        matrix_digest = hashlib.sha256(Path(matrix_path).read_bytes()).hexdigest()
+    except OSError as error:
+        _revision_reject(f"cannot hash canonical revision matrix: {error}")
+    if value.get("matrix_sha256") != matrix_digest:
+        _revision_reject("summary argv contract is not bound to matrix bytes")
+    entries = value.get("cells")
+    if not isinstance(entries, list) or len(entries) != len(_REAL_VARIANT_BINDINGS):
+        _revision_reject("summary argv contract must contain exactly three cells")
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            _revision_reject("summary argv contract cell must be an object")
+        cell_id = entry.get("cell_id")
+        argv = entry.get("argv")
+        if (not isinstance(cell_id, str) or not cell_id or cell_id in seen or
+                not isinstance(argv, list) or
+                not all(isinstance(arg, str) and arg for arg in argv)):
+            _revision_reject("summary argv contract has duplicate or malformed cell")
+        seen.add(cell_id)
+        if len(argv) != 4:
+            _revision_reject("summary argv contract cells require four ordered options")
+    return value
+
+
+def _split_revision_option(arg: str) -> tuple[str, str]:
+    if (not isinstance(arg, str) or not arg.startswith("--") or
+            "=" not in arg):
+        _revision_reject("successor options must use --name=value")
+    name, value = arg.split("=", 1)
+    if name not in _REVISION_SUMMARY_OPTIONS:
+        _revision_reject(f"unknown option {name}")
+    if not value or "{" in value or "}" in value:
+        _revision_reject(f"option {name} has an empty or unresolved value")
+    return name, value
+
+
+def parse_revision_summary_args(argv: Sequence[str]) -> dict[str, Any]:
+    """Parse exactly the four frozen successor options, once each."""
+
+    if not argv:
+        _revision_reject("successor argv is empty")
+    values: dict[str, str] = {}
+    ordered = list(argv)
+    for arg in ordered:
+        name, value = _split_revision_option(arg)
+        if name in values:
+            _revision_reject(f"duplicate option {name}")
+        values[name] = value
+    missing = _REVISION_SUMMARY_OPTIONS.difference(values)
+    if missing:
+        _revision_reject("missing option(s) " + ", ".join(sorted(missing)))
+    variant = values["--variant"]
+    if variant not in _REAL_VARIANT_BINDINGS:
+        _revision_reject("unknown real-data variant")
+    return {
+        "argv": ordered,
+        "revision_cell": values["--revision-cell"],
+        "accuracy_csv": Path(values["--accuracy-csv"]),
+        "output": Path(values["--output"]),
+        "variant": variant,
+    }
+
+
+def _validate_revision_matrix_integrity(matrix: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if (not isinstance(matrix, _RevisionMatrixDocument) or
+            not hasattr(matrix, "source_sha256") or
+            not hasattr(matrix, "parsed_sha256")):
+        _revision_reject("matrix must be loaded by load_revision_matrix")
+    current_digest = _canonical_json_digest(matrix)
+    if current_digest != matrix.parsed_sha256:
+        _revision_reject("revision matrix was mutated after loading")
+    cells = matrix.get("cells")
+    if not isinstance(cells, list):
+        _revision_reject("revision matrix cells must be a list")
+    return cells
+
+
+def _summary_cells(matrix: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    cells = _validate_revision_matrix_integrity(matrix)
+    result = []
+    seen: set[str] = set()
+    for cell in cells:
+        if not isinstance(cell, dict):
+            _revision_reject("revision matrix cell must be an object")
+        if cell.get("family") == "real_dataset" and cell.get("axis_value") == "summary":
+            cell_id = cell.get("cell_id")
+            if not isinstance(cell_id, str) or cell_id in seen:
+                _revision_reject("summary matrix cell IDs are missing or duplicated")
+            seen.add(cell_id)
+            result.append(cell)
+    if len(result) != len(_REAL_VARIANT_BINDINGS):
+        _revision_reject("matrix must contain exactly the three summary cells")
+    return result
+
+
+def _contract_entry(contract: Mapping[str, Any], cell_id: str) -> Mapping[str, Any]:
+    entries = contract.get("cells")
+    if not isinstance(entries, list):
+        _revision_reject("summary argv contract cells must be a list")
+    matches = [entry for entry in entries
+               if isinstance(entry, dict) and entry.get("cell_id") == cell_id]
+    if len(matches) != 1:
+        _revision_reject("summary argv contract cell is missing or duplicated")
+    return matches[0]
+
+
+def _validate_summary_contract_entries(
+        contract: Mapping[str, Any],
+        summary_cells: Sequence[Mapping[str, Any]]) -> None:
+    entries = contract.get("cells")
+    if not isinstance(entries, list) or len(entries) != len(summary_cells):
+        _revision_reject("summary argv contract must contain exactly three cells")
+    ids = [entry.get("cell_id") if isinstance(entry, dict) else None
+           for entry in entries]
+    if any(not isinstance(cell_id, str) for cell_id in ids) or len(set(ids)) != len(ids):
+        _revision_reject("summary argv contract cell IDs are missing or duplicated")
+    matrix_ids = {cell.get("cell_id") for cell in summary_cells}
+    if set(ids) != matrix_ids:
+        _revision_reject("summary argv contract contains an unknown summary cell")
+    for cell in summary_cells:
+        cell_id = cell["cell_id"]
+        variant, _ = _validate_summary_cell(cell)
+        entry = _contract_entry(contract, cell_id)
+        argv = entry.get("argv")
+        expected = [
+            f"--revision-cell={cell_id}",
+            "--accuracy-csv={output}/accuracy.csv",
+            "--output={output}/summary.csv",
+            f"--variant={variant}",
+        ]
+        if argv != expected:
+            _revision_reject("summary argv contract has canonical argv drift")
+
+
+def _validate_summary_cell(cell: Mapping[str, Any]) -> tuple[str, int]:
+    cell_id = cell.get("cell_id")
+    variant = cell.get("variant")
+    if (cell.get("family") != "real_dataset" or
+            cell.get("axis_value") != "summary" or
+            cell.get("producer") != _REVISION_SUMMARY_PRODUCER or
+            cell.get("invocation_status") != "RUN" or
+            cell.get("artifact_kind") != "summary" or
+            cell.get("artifact_schema") != "real-dataset-csv-v1" or
+            not isinstance(cell_id, str) or
+            not isinstance(variant, str) or
+            variant not in _REAL_VARIANT_BINDINGS):
+        _revision_reject("selected cell is not a canonical RUN summary cell")
+    axes = cell.get("axes")
+    if (not isinstance(axes, dict) or axes.get("artifact") != "summary" or
+            axes.get("variant") != variant or axes.get("k") != 128 or
+            axes.get("m") != 64 or axes.get("n") != 1000 or
+            axes.get("u") != _REAL_VARIANT_BINDINGS[variant][1]):
+        _revision_reject("summary cell axes do not bind the selected variant")
+    if cell.get("dataset") != _REAL_VARIANT_BINDINGS[variant][0]:
+        _revision_reject("summary cell dataset does not bind the selected variant")
+    return variant, _REAL_VARIANT_BINDINGS[variant][1]
+
+
+def _canonicalize_summary_argv(request: Mapping[str, Any],
+                               contract_argv: Sequence[str]) -> list[str]:
+    input_path = Path(request["accuracy_csv"])
+    output_path = Path(request["output"])
+    if input_path.name != "accuracy.csv":
+        _revision_reject("--accuracy-csv must resolve to accuracy.csv")
+    if output_path.name != "summary.csv":
+        _revision_reject("--output must resolve to summary.csv")
+    if input_path.parent != output_path.parent:
+        _revision_reject("input and output must share the one revision output root")
+    canonical = [
+        f"--revision-cell={request['revision_cell']}",
+        "--accuracy-csv={output}/accuracy.csv",
+        "--output={output}/summary.csv",
+        f"--variant={request['variant']}",
+    ]
+    if list(contract_argv) != canonical:
+        _revision_reject("frozen summary argv contract has drifted")
+    return canonical
+
+
+def select_revision_summary_cell(matrix: Mapping[str, Any],
+                                 contract: Mapping[str, Any],
+                                 request: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind one strict successor argv to one matrix cell and one artifact."""
+
+    summary_cells = _summary_cells(matrix)
+    contract_entries = contract.get("cells")
+    if not isinstance(contract_entries, list):
+        _revision_reject("summary argv contract cells must be a list")
+    if (contract.get("producer") != _REVISION_SUMMARY_PRODUCER or
+            contract.get("matrix_sha256") != matrix.source_sha256):
+        _revision_reject("summary argv contract is not bound to loaded matrix bytes")
+    _validate_summary_contract_entries(contract, summary_cells)
+    cell_id = request.get("revision_cell")
+    matches = [cell for cell in summary_cells if cell.get("cell_id") == cell_id]
+    if len(matches) != 1:
+        _revision_reject("selected summary cell is missing or duplicated")
+    cell = matches[0]
+    variant, universe = _validate_summary_cell(cell)
+    if request.get("variant") != variant:
+        _revision_reject("--variant does not match selected matrix cell")
+    entry = _contract_entry(contract, cell_id)
+    canonical_argv = _canonicalize_summary_argv(request, entry.get("argv", []))
+    if list(request.get("argv", [])) != [
+            f"--revision-cell={cell_id}",
+            f"--accuracy-csv={request['accuracy_csv']}",
+            f"--output={request['output']}",
+            f"--variant={variant}"]:
+        _revision_reject("successor argv is not in the frozen option order")
+    return {
+        "cell": cell,
+        "variant": variant,
+        "universe": universe,
+        "artifact": "summary",
+        "canonical_argv": canonical_argv,
+        "accuracy_csv": Path(request["accuracy_csv"]),
+        "output": Path(request["output"]),
+        "selected_cell_count": 1,
+        "artifact_count": 1,
+        "terminal_count": 1,
+    }
+
+
+def _validate_revision_summary_input(input_path: Path,
+                                     cell: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if not input_path.is_file():
+        _revision_reject(f"missing accuracy input: {input_path}")
+    try:
+        rows = list(_read_accuracy_csv_rows(input_path))
+    except (OSError, SummarizerError) as error:
+        if isinstance(error, RevisionSummaryError):
+            raise
+        _revision_reject(str(error))
+    if not rows:
+        _revision_reject("accuracy input has no rows to bind to the selected variant")
+    variant, _ = _validate_summary_cell(cell)
+    dataset = _REAL_VARIANT_BINDINGS[variant][0]
+    for row in rows:
+        if row["dataset"] != dataset or row["variant"] != variant:
+            _revision_reject("accuracy input dataset/variant does not match selected cell")
+    return rows
+
+
+def run_revision_summary(request: Mapping[str, Any],
+                         matrix_path: str | Path = REVISION_MATRIX_PATH,
+                         contract_path: str | Path = REVISION_SUMMARY_CONTRACT_PATH) -> dict[str, Any]:
+    """Execute exactly one bound summary artifact for successor argv."""
+
+    matrix = load_revision_matrix(matrix_path)
+    contract = load_revision_summary_contract(contract_path, matrix_path)
+    selected = select_revision_summary_cell(matrix, contract, request)
+    _validate_revision_summary_input(selected["accuracy_csv"], selected["cell"])
+    rows = build_summary_rows(selected["accuracy_csv"])
+    if len(rows) != 4:
+        _revision_reject("summary producer must emit exactly four bucket rows")
+    header = SUMMARY_HEADER_FIELDS
+    if rows and rows[0] and rows[0][0] == ENRON_SUMMARY_SCHEMA_VERSION:
+        header = ENRON_SUMMARY_HEADER_FIELDS
+    try:
+        _write_atomic(selected["output"], rows, header)
+    except OSError as error:
+        _revision_reject(f"cannot write the one summary artifact: {error}")
+    return selected
 
 
 # Pasted byte-for-byte from normative plan §Phase 5 (adjudication A1's
@@ -610,8 +963,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if any(
+        arg == "--revision-cell" or arg.startswith("--revision-cell=") or
+        arg == "--accuracy-csv" or arg.startswith("--accuracy-csv=")
+        for arg in raw_argv
+    ):
+        try:
+            request = parse_revision_summary_args(raw_argv)
+            run_revision_summary(request)
+        except (RevisionSummaryError, OSError) as exc:
+            sys.stderr.write(f"summarize_real_datasets: {exc}\n")
+            return 1
+        return 0
+
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     try:
         run(Path(args.input), Path(args.output), args.mode)
     except (SummarizerError, OSError) as exc:

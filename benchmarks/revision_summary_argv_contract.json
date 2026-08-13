@@ -1,0 +1,35 @@
+{
+  "cells": [
+    {
+      "argv": [
+        "--revision-cell=paper-v1::real_dataset::dblp_acm_u65536_artifact=summary",
+        "--accuracy-csv={output}/accuracy.csv",
+        "--output={output}/summary.csv",
+        "--variant=dblp_acm_u65536"
+      ],
+      "cell_id": "paper-v1::real_dataset::dblp_acm_u65536_artifact=summary"
+    },
+    {
+      "argv": [
+        "--revision-cell=paper-v1::real_dataset::enron_u1048576_artifact=summary",
+        "--accuracy-csv={output}/accuracy.csv",
+        "--output={output}/summary.csv",
+        "--variant=enron_u1048576"
+      ],
+      "cell_id": "paper-v1::real_dataset::enron_u1048576_artifact=summary"
+    },
+    {
+      "argv": [
+        "--revision-cell=paper-v1::real_dataset::enron_u65536_artifact=summary",
+        "--accuracy-csv={output}/accuracy.csv",
+        "--output={output}/summary.csv",
+        "--variant=enron_u65536"
+      ],
+      "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=summary"
+    }
+  ],
+  "matrix_sha256": "ff363be2c869d336c16415221fa97ac33629ff9326180e08dd4dbc20d0ec4da4",
+  "producer": "summarize_real_datasets.py",
+  "schema": "piccard-revision-summary-argv-v1",
+  "version": 1
+}
