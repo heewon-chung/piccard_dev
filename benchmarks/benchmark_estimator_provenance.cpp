@@ -2,6 +2,7 @@
 
 #include "util/params.h"
 
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -9,6 +10,20 @@
 namespace piccard {
 namespace benchmark {
 namespace {
+
+// Keep crossover's optional-arm serialization independent from the
+// benchmark-provenance translation unit.  The latter's formatter is private
+// to that TU, while this serializer needs the same finite, round-trippable
+// spelling for applicable sqrt measurements and speedups.
+std::string FormatDouble(double value) {
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(
+            "crossover floating value must be finite");
+    }
+    std::ostringstream output;
+    output << std::setprecision(17) << value;
+    return output.str();
+}
 
 template <typename T>
 void WriteOptional(std::ostringstream& out, const std::optional<T>& value);
@@ -686,60 +701,61 @@ std::string SerializeCrossoverRow(
     const char* estimator_model = RequireEstimatorModel(r.estimator_model);
     const bool applicable = RequireSanitizerMetadata(r.sanitizer);
     ValidateBenchmarkProvenance(onehot_provenance);
-    ValidateBenchmarkProvenance(sqrt_provenance);
     if (!applicable ||
         !r.onehot_coefficient_stat_bits.has_value() ||
         !r.onehot_eval_noise_bits.has_value() ||
-        !r.onehot_flood_noise_bits.has_value() ||
-        !r.sqrt_coefficient_stat_bits.has_value() ||
-        !r.sqrt_eval_noise_bits.has_value() ||
-        !r.sqrt_flood_noise_bits.has_value()) {
+        !r.onehot_flood_noise_bits.has_value()) {
         throw std::logic_error(
-            "crossover row is missing applicable arm sanitizer metadata");
+            "crossover row is missing one-hot sanitizer metadata");
     }
-    const bool common_matches =
+    const bool onehot_matches =
         onehot_provenance.sanitizer_applicable &&
-        sqrt_provenance.sanitizer_applicable &&
-        r.sanitizer.transcript_stat_bits ==
-            onehot_provenance.transcript_stat_bits &&
-        r.sanitizer.transcript_stat_bits ==
-            sqrt_provenance.transcript_stat_bits &&
+        r.sanitizer.transcript_stat_bits == onehot_provenance.transcript_stat_bits &&
         r.sanitizer.max_queries == onehot_provenance.max_queries &&
-        r.sanitizer.max_queries == sqrt_provenance.max_queries &&
         r.sanitizer.query_stat_bits == onehot_provenance.query_stat_bits &&
-        r.sanitizer.query_stat_bits == sqrt_provenance.query_stat_bits &&
-        r.sanitizer.flood_margin_bits ==
-            onehot_provenance.flood_margin_bits &&
-        r.sanitizer.flood_margin_bits ==
-            sqrt_provenance.flood_margin_bits;
-    const bool arms_match =
+        r.sanitizer.flood_margin_bits == onehot_provenance.flood_margin_bits;
+    const bool onehot_arm_matches =
         r.onehot_coefficient_stat_bits ==
             onehot_provenance.coefficient_stat_bits &&
         r.onehot_eval_noise_bits == onehot_provenance.eval_noise_bits &&
-        r.onehot_flood_noise_bits == onehot_provenance.flood_noise_bits &&
-        r.sqrt_coefficient_stat_bits ==
-            sqrt_provenance.coefficient_stat_bits &&
-        r.sqrt_eval_noise_bits == sqrt_provenance.eval_noise_bits &&
-        r.sqrt_flood_noise_bits == sqrt_provenance.flood_noise_bits;
-    if (!common_matches || !arms_match ||
-        onehot_provenance.openfhe_version !=
-            sqrt_provenance.openfhe_version) {
+        r.onehot_flood_noise_bits == onehot_provenance.flood_noise_bits;
+    const bool sqrt_matches = !r.sqrt_applicable ||
+        (sqrt_provenance.sanitizer_applicable &&
+         r.sqrt_coefficient_stat_bits.has_value() &&
+         r.sqrt_eval_noise_bits.has_value() &&
+         r.sqrt_flood_noise_bits.has_value() &&
+         r.sanitizer.transcript_stat_bits == sqrt_provenance.transcript_stat_bits &&
+         r.sanitizer.max_queries == sqrt_provenance.max_queries &&
+         r.sanitizer.query_stat_bits == sqrt_provenance.query_stat_bits &&
+         r.sanitizer.flood_margin_bits == sqrt_provenance.flood_margin_bits &&
+         r.sqrt_coefficient_stat_bits == sqrt_provenance.coefficient_stat_bits &&
+         r.sqrt_eval_noise_bits == sqrt_provenance.eval_noise_bits &&
+         r.sqrt_flood_noise_bits == sqrt_provenance.flood_noise_bits &&
+         onehot_provenance.openfhe_version == sqrt_provenance.openfhe_version);
+    if (!onehot_matches || !onehot_arm_matches || !sqrt_matches) {
         throw std::logic_error(
             "crossover sanitizer or build provenance is inconsistent");
+    }
+    if (!r.sqrt_applicable &&
+        (r.sqrt_coefficient_stat_bits.has_value() ||
+         r.sqrt_eval_noise_bits.has_value() ||
+         r.sqrt_flood_noise_bits.has_value())) {
+        throw std::logic_error(
+            "non-applicable crossover sqrt arm has measured metadata");
     }
     std::ostringstream out;
     out << r.k << ","
         << r.m << ","
         << r.onehot_feature_dim << ","
-        << r.sqrt_feature_dim << ","
+        << (r.sqrt_applicable ? std::to_string(r.sqrt_feature_dim) : "N/A") << ","
         << r.onehot_ring_dim << ","
-        << r.sqrt_ring_dim << ","
+        << (r.sqrt_applicable ? std::to_string(r.sqrt_ring_dim) : "N/A") << ","
         << std::fixed << std::setprecision(3)
         << r.onehot_total_ms << ","
-        << r.sqrt_total_ms << ","
-        << (r.sqrt_faster ? 1 : 0) << ","
+        << (r.sqrt_applicable ? FormatDouble(r.sqrt_total_ms) : "N/A") << ","
+        << (r.sqrt_applicable ? (r.sqrt_faster ? "1" : "0") : "N/A") << ","
         << std::setprecision(4)
-        << r.speedup_ratio << ","
+        << (r.sqrt_applicable ? FormatDouble(r.speedup_ratio) : "N/A") << ","
         << SanitizerModelName(*r.sanitizer.model) << ","
         << SanitizerAssuranceName(*r.sanitizer.model) << ",";
     WriteOptional(out, r.sanitizer.transcript_stat_bits);
@@ -773,13 +789,17 @@ std::string SerializeCrossoverRow(
     out << ",";
     WriteOptional(out, onehot_provenance.num_limbs);
     out << ",";
-    WriteOptional(out, sqrt_provenance.actual_ring_dim);
+    if (r.sqrt_applicable) WriteOptional(out, sqrt_provenance.actual_ring_dim);
+    else out << "N/A";
     out << ",";
-    WriteOptional(out, sqrt_provenance.log_q_bits);
+    if (r.sqrt_applicable) WriteOptional(out, sqrt_provenance.log_q_bits);
+    else out << "N/A";
     out << ",";
-    WriteOptional(out, sqrt_provenance.plaintext_modulus);
+    if (r.sqrt_applicable) WriteOptional(out, sqrt_provenance.plaintext_modulus);
+    else out << "N/A";
     out << ",";
-    WriteOptional(out, sqrt_provenance.num_limbs);
+    if (r.sqrt_applicable) WriteOptional(out, sqrt_provenance.num_limbs);
+    else out << "N/A";
     out << "\n";
     return out.str();
 }

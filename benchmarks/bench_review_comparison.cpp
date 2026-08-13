@@ -4,6 +4,7 @@
 #include "benchmark_provenance.h"
 #include "comparison_workload.h"
 #include "raw_timing_schema.h"
+#include "review_revision_adapter.h"
 #include "baselines/bcg12.h"
 #include "baselines/pjs_baseline.h"
 #include "baselines/sj16.h"
@@ -83,6 +84,14 @@ using piccard::benchmark::SecurityBasisName;
 using piccard::benchmark::TrialKind;
 using piccard::benchmark::ValidateAggregateMembership;
 using piccard::benchmark::WorkloadSpec;
+using piccard::benchmark::LoadAndValidateRevisionMatrix;
+using piccard::benchmark::ParseReviewRevisionArgs;
+using piccard::benchmark::PlanReviewRevisionExecution;
+using piccard::benchmark::ReviewRevisionExecutionPlan;
+using piccard::benchmark::ReviewRevisionRequest;
+using piccard::benchmark::RevisionMatrix;
+using piccard::benchmark::RevisionRunMode;
+using piccard::benchmark::MakeConcreteReviewArgs;
 using piccard::baseline::BaselineEngine;
 using piccard::baseline::BaselineParams;
 using piccard::baselines::BCG12;
@@ -116,7 +125,113 @@ struct Options {
     // Optional v1 raw timing sidecars.  Empty preserves the frozen Work 5
     // stdout, manifest, and execution-trace behavior byte-for-byte.
     std::filesystem::path raw_timing_out;
+    // Non-empty only on the strict Phase-9 successor path. Legacy invocations
+    // keep this field empty and retain their historical artifact identity.
+    std::string revision_cell;
 };
+
+struct ReviewSuccessorOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    RevisionRunMode mode = RevisionRunMode::Paper;
+    ReviewRevisionExecutionPlan execution;
+};
+
+std::vector<std::string> CanonicalizeReviewPlannerArgv(
+    const std::vector<std::string>& argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(argv.size());
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
+            canonical.push_back("--seed={seed}");
+        } else if (arg.rfind("--output=", 0) == 0) {
+            const std::string value = arg.substr(9);
+            const std::string suffix = value.size() >= 4
+                ? value.substr(value.size() - 4) : "";
+            if (suffix == ".csv") {
+                const bool encoding = value.find("encoding.csv") !=
+                                      std::string::npos;
+                canonical.push_back(std::string("--output={output}/") +
+                                     (encoding ? "encoding.csv"
+                                               : "comparison.csv"));
+            } else {
+                canonical.push_back(arg);
+            }
+        } else {
+            canonical.push_back(arg);
+        }
+    }
+    return canonical;
+}
+
+ReviewSuccessorOptions ParseReviewSuccessorOptions(int argc, char** argv) {
+    ReviewSuccessorOptions successor;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--revision-cell=", 0) == 0) successor.enabled = true;
+        successor.planner_argv.push_back(arg);
+    }
+    if (!successor.enabled) {
+        successor.planner_argv.clear();
+        return successor;
+    }
+#ifdef PICCARD_REVISION_MATRIX_PATH
+    successor.planner_argv = CanonicalizeReviewPlannerArgv(
+        successor.planner_argv);
+    const ReviewRevisionRequest request = ParseReviewRevisionArgs(
+        successor.planner_argv);
+    successor.mode = request.profile == "readiness-toy-v1"
+        ? RevisionRunMode::Toy : RevisionRunMode::Paper;
+    const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+        PICCARD_REVISION_MATRIX_PATH);
+    successor.execution = PlanReviewRevisionExecution(
+        matrix, successor.planner_argv, successor.mode);
+#else
+    throw std::runtime_error(
+        "review successor requires PICCARD_REVISION_MATRIX_PATH");
+#endif
+    return successor;
+}
+
+std::vector<char*> MutableArgv(std::vector<std::string>& arguments) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    static char program_name[] = "bench_review_comparison";
+    argv.push_back(program_name);
+    for (std::string& argument : arguments) {
+        argv.push_back(argument.data());
+    }
+    return argv;
+}
+
+void ValidateReviewSuccessorConfig(
+    const Options& options,
+    const ReviewRevisionExecutionPlan& execution) {
+    const auto& cell = execution.selection.cell;
+    if (options.revision_cell != cell.cell_id ||
+        options.suite != execution.concrete_suite ||
+        options.profile != execution.concrete_profile ||
+        options.security != (execution.concrete_security == "TOY"
+                                 ? SecurityLevel::TOY
+                                 : execution.concrete_security == "STD192"
+                                       ? SecurityLevel::STD192
+                                       : SecurityLevel::STD128) ||
+        options.k != std::stoull(cell.axes.at("k")) ||
+        options.m != std::stoull(cell.axes.at("m")) ||
+        options.set_size != execution.set_size ||
+        options.universe != execution.universe ||
+        options.trials != execution.timing_trials ||
+        options.accuracy_trials != execution.accuracy_trials ||
+        options.methods != execution.concrete_methods) {
+        throw std::invalid_argument(
+            "review successor flags do not match the selected matrix cell");
+    }
+    if (cell.invocation_status != "RUN" || execution.selected_point_count != 1 ||
+        !execution.producer_must_spawn) {
+        throw std::invalid_argument(
+            "review successor can execute only one RUN matrix cell");
+    }
+}
 
 uint64_t ParseU64(const std::string& text, const std::string& flag) {
     if (text.empty() || text[0] == '-') {
@@ -748,7 +863,9 @@ RawTimingArtifact MakeReviewRawTimingArtifact(
     RawTimingArtifact artifact;
     artifact.producer_id = "bench_review_comparison";
     artifact.profile_id = profile_id;
-    artifact.cell_id = "review-" + std::to_string(options.universe) + "-" + method;
+    artifact.cell_id = options.revision_cell.empty()
+        ? "review-" + std::to_string(options.universe) + "-" + method
+        : options.revision_cell + "::" + method;
     artifact.warmup_policy = WarmupPolicy::DiscardOne;
     if (artifact.warmup_policy != ExpectedWarmupPolicy(artifact.producer_id)) {
         throw std::logic_error("review raw timing warmup policy drift");
@@ -1229,7 +1346,20 @@ std::vector<std::unique_ptr<Adapter>> SetupAdapters(
 }
 
 int Run(int argc, char** argv) {
-    Options options = ParseOptions(argc, argv);
+    const ReviewSuccessorOptions successor =
+        ParseReviewSuccessorOptions(argc, argv);
+    Options options;
+    if (successor.enabled) {
+        std::vector<std::string> concrete_args =
+            MakeConcreteReviewArgs(successor.execution);
+        std::vector<char*> mutable_argv = MutableArgv(concrete_args);
+        options = ParseOptions(static_cast<int>(mutable_argv.size()),
+                               mutable_argv.data());
+        options.revision_cell = successor.execution.selection.cell.cell_id;
+        ValidateReviewSuccessorConfig(options, successor.execution);
+    } else {
+        options = ParseOptions(argc, argv);
+    }
     const BenchmarkProfile& profile =
         piccard::benchmark::ResolveBenchmarkProfile(options.profile);
     if (!options.saw_security) {
@@ -1280,7 +1410,10 @@ int Run(int argc, char** argv) {
          std::all_of(spec.methods.begin(), spec.methods.end(),
                      [](const std::string& method) {
                          return IsEncodingMethod(method);
-                     }))) {
+                     })) ||
+        (successor.enabled &&
+         successor.execution.selection.cell.family ==
+             "piccard_std192_encoding")) {
         spec.correctness_trials = 1;
     }
 

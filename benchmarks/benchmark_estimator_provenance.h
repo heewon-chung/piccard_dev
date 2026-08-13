@@ -323,6 +323,10 @@ struct CrossoverResult {
     double onehot_total_ms = 0.0;
     double sqrt_total_ms = 0.0;
     bool sqrt_faster = false;
+    // False denotes the canonical terminal NOT_APPLICABLE sqrt arm for a
+    // non-perfect-square m.  The one-hot arm remains measured and its
+    // applicable metadata is still serialized.
+    bool sqrt_applicable = true;
     double speedup_ratio = 0.0;
     SanitizerMetadata sanitizer;
     std::optional<uint32_t> onehot_coefficient_stat_bits;
