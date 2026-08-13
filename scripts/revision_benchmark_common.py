@@ -37,6 +37,11 @@ TOY_PROFILE = "readiness-toy-v1"
 PAPER_PROFILE = "paper-v1"
 PAPER_STD128_PROFILE = "paper-std128-t40-v1"
 PAPER_STD192_PROFILE = "paper-std192-encoding-v1"
+PAPER_VARIANTS = (
+    "dblp_acm_u65536",
+    "enron_u65536",
+    "enron_u1048576",
+)
 CELL_SCHEMA = "piccard-revision-cell-receipt-v1"
 EVENT_SCHEMA = "piccard-revision-event-v1"
 FLOODING_EXECUTABLE = "scripts/run_noise_profiles.sh"
@@ -46,6 +51,226 @@ FLOODING_PAYLOAD_DIR = "payload"
 
 class RevisionContractError(RuntimeError):
     """Raised for a fail-closed lifecycle or matrix contract violation."""
+
+
+_PROCESSED_MANIFEST_PREFIX = (
+    "schema_version", "dataset", "variant", "preprocessing_version",
+    "universe_size", "seed", "source_manifest_file", "source_manifest_sha256",
+    "records_file", "records_sha256", "record_count", "pairs_file",
+    "pairs_sha256", "pair_count", "raw_set_size_min", "raw_set_size_median",
+    "raw_set_size_p95", "raw_set_size_max", "bucketed_set_size_min",
+    "bucketed_set_size_median", "bucketed_set_size_p95", "bucketed_set_size_max",
+    "original_positive_count", "retained_positive_count", "requested_pair_count",
+    "max_documents", "min_related_pairs",
+)
+_PROCESSED_DROP_KEYS = {
+    "dblp_acm": ("dropped.empty_features_dblp", "dropped.empty_features_acm"),
+    "enron": ("dropped.charset_or_mime", "dropped.empty_body",
+              "dropped.short_body", "dropped.duplicate_copy",
+              "dropped.duplicate_message_id"),
+}
+_PAPER_DATASET_BY_VARIANT = {
+    "dblp_acm_u65536": {
+        "dataset": "dblp_acm", "universe_size": "65536",
+        "preprocessing_version": "dblp-acm-trigram-v1",
+        "parsing_schema": "dblp-acm-csv-v1",
+    },
+    "enron_u65536": {
+        "dataset": "enron", "universe_size": "65536",
+        "preprocessing_version": "enron-shingle5-v2",
+        "parsing_schema": "enron-maildir-rfc5322-v1",
+    },
+    "enron_u1048576": {
+        "dataset": "enron", "universe_size": "1048576",
+        "preprocessing_version": "enron-shingle5-v2",
+        "parsing_schema": "enron-maildir-rfc5322-v1",
+    },
+}
+
+
+def _strict_key_value_file(path: Path, label: str) -> tuple[tuple[str, str], ...]:
+    """Read a canonical two-column TSV without using a producer parser."""
+    if not path.is_absolute():
+        raise RevisionContractError(f"{label} must be an absolute path")
+    if path.is_symlink() or not path.is_file():
+        raise RevisionContractError(f"{label} must be a regular non-symlink file")
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RevisionContractError(f"{label} is not valid UTF-8") from exc
+    if raw.startswith(b"\xef\xbb\xbf") or "\r" in text:
+        raise RevisionContractError(f"{label} must be UTF-8 LF TSV without BOM/CR")
+    if not text.endswith("\n") or not text:
+        raise RevisionContractError(f"{label} must be nonempty and LF terminated")
+    lines = text[:-1].split("\n")
+    if not lines or lines[0] != "key\tvalue":
+        raise RevisionContractError(f"{label} header mismatch")
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, line in enumerate(lines[1:], start=2):
+        if not line or line.count("\t") != 1:
+            raise RevisionContractError(f"{label} malformed row {index}")
+        key, value = line.split("\t", 1)
+        if not key or key in seen:
+            raise RevisionContractError(f"{label} duplicate/empty key at row {index}")
+        seen.add(key)
+        result.append((key, value))
+    return tuple(result)
+
+
+def _processed_manifest_values(path: Path) -> dict[str, str]:
+    pairs = _strict_key_value_file(path, "processed manifest")
+    values = dict(pairs)
+    dataset = values.get("dataset", "")
+    expected = _PROCESSED_MANIFEST_PREFIX + (tuple(["pair_proxy"]) if dataset == "enron" else tuple()) + _PROCESSED_DROP_KEYS.get(dataset, tuple())
+    if tuple(key for key, _ in pairs) != expected:
+        raise RevisionContractError("processed manifest key order/schema mismatch")
+    if values.get("schema_version") != "piccard-real-processed-v1":
+        raise RevisionContractError("processed manifest schema_version mismatch")
+    return values
+
+
+def _positive_decimal(values: dict[str, str], key: str, label: str) -> int:
+    value = values.get(key, "")
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise RevisionContractError(f"{label} {key} must be a positive integer") from exc
+    if parsed <= 0 or str(parsed) != value:
+        raise RevisionContractError(f"{label} {key} must be a positive integer")
+    return parsed
+
+
+def _sha256_hex(value: str, label: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise RevisionContractError(f"{label} must be a lowercase SHA-256 hex digest")
+
+
+def _validate_bound_file(base: Path, declared: str, expected_name: str,
+                         declared_sha: str, label: str) -> Path:
+    if declared != expected_name:
+        raise RevisionContractError(f"{label} path must be exactly {expected_name}")
+    path = base / declared
+    if path.is_symlink() or not path.is_file():
+        raise RevisionContractError(f"{label} is missing or is a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(base.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise RevisionContractError(f"{label} escapes the manifest directory") from exc
+    _sha256_hex(declared_sha, f"{label} SHA-256")
+    if sha256_file(resolved) != declared_sha:
+        raise RevisionContractError(f"{label} SHA-256 does not match manifest")
+    return resolved
+
+
+def _validate_paper_manifest(path: Path, variant: str, root_seed: int) -> dict[str, str]:
+    if "toy-input" in path.resolve().parts:
+        raise RevisionContractError(f"paper manifest {variant} may not be under toy-input")
+    expected = _PAPER_DATASET_BY_VARIANT[variant]
+    values = _processed_manifest_values(path)
+    label = f"paper manifest {variant}"
+    for key in ("dataset", "variant", "universe_size", "preprocessing_version"):
+        expected_value = variant if key == "variant" else expected[key]
+        if values.get(key) != expected_value:
+            raise RevisionContractError(f"{label} {key} mismatch")
+    try:
+        seed = int(values.get("seed", ""), 10)
+    except ValueError as exc:
+        raise RevisionContractError(f"{label} seed is invalid") from exc
+    if seed <= 0 or str(seed) != values.get("seed"):
+        raise RevisionContractError(f"{label} seed must be a positive integer")
+    if seed != root_seed:
+        raise RevisionContractError(f"{label} seed does not match root seed")
+    source = _validate_bound_file(
+        path.parent, values.get("source_manifest_file", ""),
+        "source.manifest.tsv", values.get("source_manifest_sha256", ""),
+        f"{label} source manifest")
+    source_values = dict(_strict_key_value_file(source, f"{label} source manifest"))
+    if (source_values.get("schema_version") != "piccard-real-source-v1" or
+            source_values.get("dataset") != expected["dataset"] or
+            source_values.get("parsing_schema") != expected["parsing_schema"] or
+            source_values.get("preprocessing_profile") != expected["preprocessing_version"]):
+        raise RevisionContractError(f"{label} source manifest identity mismatch")
+    records = _validate_bound_file(
+        path.parent, values.get("records_file", ""), "records.tsv",
+        values.get("records_sha256", ""), f"{label} records")
+    pairs = _validate_bound_file(
+        path.parent, values.get("pairs_file", ""), "pairs.tsv",
+        values.get("pairs_sha256", ""), f"{label} pairs")
+    record_count = _positive_decimal(values, "record_count", label)
+    pair_count = _positive_decimal(values, "pair_count", label)
+    requested_pair_count = _positive_decimal(values, "requested_pair_count", label)
+    if pair_count != requested_pair_count:
+        raise RevisionContractError(f"{label} pair count/request mismatch")
+    original = values.get("original_positive_count")
+    retained = values.get("retained_positive_count")
+    if original != retained:
+        raise RevisionContractError(f"{label} positive-count fields mismatch")
+    if expected["dataset"] == "enron":
+        required = {"record_count": 10000, "pair_count": 10000,
+                    "requested_pair_count": 10000, "max_documents": 10000,
+                    "min_related_pairs": 100}
+        for key, expected_value in required.items():
+            if values.get(key) != str(expected_value):
+                raise RevisionContractError(f"{label} {key} does not match paper count")
+        if original != "0" or retained != "0" or values.get("pair_proxy") != (
+                "canonical-subject-proxy-not-thread-ground-truth-v1"):
+            raise RevisionContractError(f"{label} Enron label/proxy taxonomy mismatch")
+    else:
+        if record_count <= 0 or pair_count <= 0 or values.get("max_documents") != "" or \
+                values.get("min_related_pairs") != "":
+            raise RevisionContractError(f"{label} DBLP count fields mismatch")
+    # Check the bound pair labels independently of the manifest summary.
+    try:
+        pair_lines = pairs.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RevisionContractError(f"{label} pairs are not valid UTF-8") from exc
+    expected_header = "pair_id\trecord_a\trecord_b\tpair_kind\tlabel"
+    if not pair_lines or pair_lines[0] != expected_header:
+        raise RevisionContractError(f"{label} pairs header mismatch")
+    if len(pair_lines) - 1 != pair_count:
+        raise RevisionContractError(f"{label} pair_count does not match pairs.tsv")
+    expected_labels = ({"thread_related": "-1", "cross_thread": "-1"}
+                       if expected["dataset"] == "enron" else
+                       {"known_match": "1", "sampled_nonmatch": "0"})
+    for line in pair_lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 5 or fields[3] not in expected_labels or fields[4] != expected_labels[fields[3]]:
+            raise RevisionContractError(f"{label} pair kind/label taxonomy mismatch")
+    # Keep the independent record binding observable even though the C++ loader
+    # performs the full feature and endpoint validation during execution.
+    try:
+        record_lines = records.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RevisionContractError(f"{label} records are not valid UTF-8") from exc
+    expected_record_header = (
+        "record_id\traw_feature_count\traw_features_csv\t"
+        "bucketed_feature_count\tbucketed_features_csv")
+    if not record_lines or record_lines[0] != expected_record_header:
+        raise RevisionContractError(f"{label} records header mismatch")
+    if len(record_lines) - 1 != record_count:
+        raise RevisionContractError(f"{label} record_count does not match records.tsv")
+    if not records.is_file():  # pragma: no cover - defensive after binding check
+        raise RevisionContractError(f"{label} records binding disappeared")
+    return values
+
+
+def validate_paper_manifest_bindings(*, dblp_manifest: Path,
+                                     variant_manifests: dict[str, Path],
+                                     root_seed: int) -> dict[str, Path]:
+    """Validate the exact three processed datasets required by paper mode."""
+    expected_keys = set(PAPER_VARIANTS)
+    if set(variant_manifests) != expected_keys:
+        raise RevisionContractError("paper requires exactly three dataset variants")
+    paths = {variant: Path(variant_manifests[variant])
+             for variant in PAPER_VARIANTS}
+    if paths["dblp_acm_u65536"].resolve() != Path(dblp_manifest).resolve():
+        raise RevisionContractError("DBLP paper manifest bindings disagree")
+    for variant, path in paths.items():
+        _validate_paper_manifest(path, variant, root_seed)
+    return {variant: path.resolve() for variant, path in paths.items()}
 
 
 def canonical_json(value: Any) -> bytes:

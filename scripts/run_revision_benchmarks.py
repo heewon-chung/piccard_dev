@@ -42,6 +42,7 @@ from revision_benchmark_common import (  # noqa: E402
     materialize_cell_argv,
     phase_for_cell,
     producer_extra_args,
+    validate_paper_manifest_bindings,
     select_cells,
     sha256_file,
     source_metadata,
@@ -362,6 +363,33 @@ def run(args: argparse.Namespace) -> int:
 
     document, matrix_sha = load_matrix(matrix_path)
     cells = select_cells(document, mode)
+    if mode == "paper":
+        if not args.paper_dblp_manifest or not args.paper_enron_u65536_manifest or \
+                not args.paper_enron_u1048576_manifest:
+            _fail("paper mode requires --paper-dblp-manifest, "
+                  "--paper-enron-u65536-manifest, and "
+                  "--paper-enron-u1048576-manifest")
+        variant_manifests = {
+            "dblp_acm_u65536": Path(args.paper_dblp_manifest),
+            "enron_u65536": Path(args.paper_enron_u65536_manifest),
+            "enron_u1048576": Path(args.paper_enron_u1048576_manifest),
+        }
+        dblp_manifest = Path(args.paper_dblp_manifest)
+        validated = validate_paper_manifest_bindings(
+            dblp_manifest=dblp_manifest,
+            variant_manifests=variant_manifests,
+            root_seed=seed,
+        )
+        dblp_manifest = validated["dblp_acm_u65536"]
+        variant_manifests = validated
+    else:
+        supplied_paper_manifests = (
+            args.paper_dblp_manifest, args.paper_enron_u65536_manifest,
+            args.paper_enron_u1048576_manifest)
+        if any(supplied_paper_manifests):
+            _fail("paper manifest arguments are only valid in paper mode")
+        variant_manifests = None
+        dblp_manifest = None
     source = source_metadata(ROOT)
     if mode in {"toy", "paper"} and source.get("dirty"):
         _fail("executable revision runs require a tracked-clean source tree")
@@ -371,7 +399,9 @@ def run(args: argparse.Namespace) -> int:
         (results_root / "canonical").mkdir()
         (results_root / "canonical" / "revision_matrix.json").write_bytes(
             matrix_path.read_bytes())
-        variant_manifests, dblp_manifest = _copy_toy_manifests(results_root)
+        if mode in {"toy", "dry-run"}:
+            variant_manifests, dblp_manifest = _copy_toy_manifests(results_root)
+        assert variant_manifests is not None and dblp_manifest is not None
         binaries = _binary_metadata(build_dir, cells)
         manifest = _write_initial_manifest(
             results_root, mode=mode, seed=seed, threads=threads,
@@ -455,6 +485,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--matrix", default=str(MATRIX_DEFAULT))
     parser.add_argument("--authorize-paper-run", action="store_true",
                         help="required explicit token for paper mode")
+    parser.add_argument("--paper-dblp-manifest",
+                        help="processed DBLP-ACM manifest for executable paper mode")
+    parser.add_argument("--paper-enron-u65536-manifest",
+                        help="processed Enron U=65536 manifest for executable paper mode")
+    parser.add_argument("--paper-enron-u1048576-manifest",
+                        help="processed Enron U=1048576 manifest for executable paper mode")
     return parser
 
 

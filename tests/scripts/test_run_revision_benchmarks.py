@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,7 +69,115 @@ class RevisionRunnerContractTest(unittest.TestCase):
                 "--seed", "1", "--threads", "1", "--matrix", str(MATRIX))
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue("missing producers" in result.stderr.lower() or
-                            "tracked-clean" in result.stderr.lower())
+                            "tracked-clean" in result.stderr.lower() or
+                            "paper mode requires" in result.stderr.lower())
+
+    def test_authorized_paper_requires_all_three_processed_manifests(self) -> None:
+        """Executable paper mode cannot fall back to hermetic toy inputs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            build.mkdir()
+            result = self.run_runner(
+                "--mode=paper", "--authorize-paper-run",
+                "--build-dir", str(build),
+                "--results-root", str(Path(temporary) / "paper"),
+                "--seed", "20260729", "--threads", "2",
+                "--matrix", str(MATRIX))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("paper-dblp-manifest", result.stderr)
+
+    def test_paper_rejects_hermetic_toy_processed_manifests(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import (RevisionContractError,
+                                               validate_paper_manifest_bindings)
+        from run_revision_benchmarks import _copy_toy_manifests
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manifests, dblp = _copy_toy_manifests(Path(temporary))
+            with self.assertRaisesRegex(RevisionContractError, "paper|toy|count|variant"):
+                validate_paper_manifest_bindings(
+                    dblp_manifest=dblp,
+                    variant_manifests=manifests,
+                    root_seed=20260729,
+                )
+
+    def test_paper_manifest_identity_and_provenance_mutations_fail_closed(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import (RevisionContractError,
+                                               _validate_paper_manifest)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "processed" / "dblp_acm_u65536"
+            shutil.copytree(
+                ROOT / "tests" / "fixtures" / "real_datasets" / "quick" /
+                "dblp_acm_u65536", destination)
+            manifest = destination / "dataset.manifest.tsv"
+            text = manifest.read_text()
+            text = text.replace("\t7\nsource_manifest_file", "\t20260729\nsource_manifest_file")
+            manifest.write_text(text)
+            _validate_paper_manifest(manifest, "dblp_acm_u65536", 20260729)
+            mutations = {
+                "wrong seed": ("seed\t20260729", "seed\t7"),
+                "wrong dataset": ("dataset\tdblp_acm", "dataset\tenron"),
+                "wrong variant": ("variant\tdblp_acm_u65536", "variant\tenron_u65536"),
+                "wrong profile": ("preprocessing_version\tdblp-acm-trigram-v1",
+                                   "preprocessing_version\twrong-profile"),
+                "wrong universe": ("universe_size\t65536", "universe_size\t1048576"),
+                "wrong count": ("pair_count\t6", "pair_count\t5"),
+                "wrong labels": ("original_positive_count\t3",
+                                  "original_positive_count\t2"),
+                "wrong source binding": ("source_manifest_sha256\t0b40cef7bfe0eb259a66d094b26685a0bb72f5f5a35371a404a8cb1691de81b4",
+                                          "source_manifest_sha256\t" + "0" * 64),
+            }
+            for label, (old, new) in mutations.items():
+                with self.subTest(label=label):
+                    mutated = destination / f"{label.replace(' ', '_')}.tsv"
+                    mutated_lines = []
+                    replaced = False
+                    for line in text.splitlines(keepends=True):
+                        if line.startswith(old):
+                            mutated_lines.append(new + "\n")
+                            replaced = True
+                        else:
+                            mutated_lines.append(line)
+                    self.assertTrue(replaced, label)
+                    mutated.write_text("".join(mutated_lines))
+                    with self.assertRaises(RevisionContractError):
+                        _validate_paper_manifest(mutated, "dblp_acm_u65536", 20260729)
+
+    def test_paper_materialization_uses_explicit_manifests_not_toy_input(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import load_matrix
+        from run_revision_benchmarks import _materialized_command
+
+        document, _ = load_matrix(MATRIX)
+        cells = [cell for cell in document["cells"]
+                 if cell["family"] == "real_dataset" and
+                 cell["axis_value"] in {"accuracy", "std128_timing",
+                                         "std192_encoding"}]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "paper"
+            root.mkdir()
+            build = Path(temporary) / "build"
+            build.mkdir()
+            explicit = {
+                "dblp_acm_u65536": Path(temporary) / "processed" /
+                "dblp_acm_u65536" / "dataset.manifest.tsv",
+                "enron_u65536": Path(temporary) / "processed" /
+                "enron_u65536" / "dataset.manifest.tsv",
+                "enron_u1048576": Path(temporary) / "processed" /
+                "enron_u1048576" / "dataset.manifest.tsv",
+            }
+            for cell in cells:
+                _, command = _materialized_command(
+                    cell, "paper", root=root, build_dir=build,
+                    seed=20260729, threads=2,
+                    variant_manifests=explicit,
+                    dblp_manifest=explicit["dblp_acm_u65536"],
+                )
+                joined = " ".join(command)
+                self.assertNotIn("toy-input", joined)
+                self.assertIn(str(explicit[cell["variant"]]), joined)
 
     def test_results_root_must_be_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
