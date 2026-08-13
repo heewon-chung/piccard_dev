@@ -239,6 +239,16 @@ def _processed_manifest_key_order(dataset: str) -> tuple:
 QUICK_VARIANT = "dblp_acm_u65536"
 PAPER_VARIANTS = frozenset({"dblp_acm_u65536", "enron_u65536", "enron_u1048576"})
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
+VERSIONED_PAPER_PROFILES = (
+    "paper-std128-t40-v1", "paper-std192-encoding-v1")
+PAPER_PROFILE_ALIASES = {
+    "std128-t40-primary": "paper-std128-t40-v1",
+    "std192-t40-primary": "paper-std192-encoding-v1",
+    "paper-std128-t40-v1": "paper-std128-t40-v1",
+    "paper-std192-encoding-v1": "paper-std192-encoding-v1",
+}
+VERSIONED_ENCODING_PROFILES = frozenset(
+    ("paper-std192-encoding-v1", "readiness-toy-v1"))
 QUICK_TIMING_PROFILE = "toy-smoke"
 SINGLE_TRIAL_PROFILES = (
     "work5-std128-t40-single-trial",
@@ -271,6 +281,14 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def fail(message: str) -> None:
     raise VerificationError(message)
+
+
+def canonical_paper_profile(profile: str) -> str:
+    """Mirror the runner's historical-token to versioned-cell mapping."""
+    try:
+        return PAPER_PROFILE_ALIASES[profile]
+    except KeyError:
+        fail(f"unsupported paper profile token: {profile!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -650,11 +668,13 @@ def _validate_cell_id_enumeration(cells: list, evidence_mode: str) -> None:
         expected_variants = set(PAPER_VARIANTS)
         expected_by_variant = {}
         for variant in expected_variants:
-            timing_profiles = ("std128-t40-primary",)
+            timing_profiles = ("paper-std128-t40-v1",)
             expected_by_variant[variant] = {
                 f"{variant}:accuracy",
                 f"{variant}:accuracy-summary",
                 *(f"{variant}:timing:{profile}" for profile in timing_profiles),
+                f"{variant}:encoding:paper-std192-encoding-v1:piccard_encode",
+                f"{variant}:encoding:paper-std192-encoding-v1:piccard_sqrt_encode",
             }
             if variant == QUICK_VARIANT:
                 expected_by_variant[variant].update({
@@ -745,6 +765,24 @@ _ENCODING_WORKLOAD_KEY_ORDER = (
     "profile_id", "method", "root_seed", "hash_seed", "trials",
     "timing_pair", "encoder_warmup_calls", "timed_encoder_calls",
     "correctness_encoder_calls", "signature_derivation_timed", "encoded_slots")
+_VERSIONED_ENCODING_WORKLOAD_KEY_ORDER = (
+    "schema_version", "dataset_manifest_sha256", "pair_id", "record_a",
+    "record_b", "k", "m", "profile_id", "method", "root_seed",
+    "hash_seed", "trials", "timing_pair", "encoder_warmup_pairs",
+    "timed_encoder_pairs", "correctness_pair_calls",
+    "signature_derivation_timed", "encoded_slots_a", "encoded_slots_b")
+_VERSIONED_ENCODING_HEADER = (
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "comparison_scope,primitive,protocol_model,cost_scope,"
+    "secure_division_included,measurement_kind,dataset,variant,"
+    "dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,"
+    "pair_kind,label,record_a,record_b,k,m,method,timing_trials,"
+    "timing_pair,root_seed,hash_seed,encoder_warmup_pairs,"
+    "timed_encoder_pairs,correctness_pair_calls,"
+    "signature_derivation_timed,encode_a_ms,encode_b_ms,"
+    "encode_pair_ms,encoded_slots_a,encoded_slots_b,"
+    "correctness_status,measurement_status")
+VERSIONED_ENCODING_HEADER_FIELDS = tuple(_VERSIONED_ENCODING_HEADER.split(","))
 _ACCURACY_ROWS_HEADER = "pair_id\ttrial_index\thash_seed\trecord_a\trecord_b"
 
 
@@ -1922,6 +1960,111 @@ def _validate_encoding_workload(cell: dict, variant: str, profile: str,
         fail(f"cell {cell_id!r} encoding workload output shape mismatch")
 
 
+def _validate_versioned_encoding_workload(cell: dict, variant: str,
+                                          profile: str, method: str,
+                                          csv_rows: list) -> None:
+    """Validate the Phase 6 two-endpoint encoding contract independently."""
+    cell_id = cell["id"]
+    forbidden = {
+        "actual_ring_dim", "log_q_bits", "plaintext_modulus", "num_limbs",
+        "openfhe_version", "phase_encrypt_ms", "phase_decrypt_ms",
+        "ciphertext_bytes", "upload_bytes", "download_bytes",
+    }
+    if forbidden.intersection(VERSIONED_ENCODING_HEADER_FIELDS):
+        fail(f"cell {cell_id!r} versioned encoding schema contains FHE fields")
+    manifest_path = _output_path_for(
+        cell, f"encoding_{variant}_{profile}_{method}.manifest.tsv")
+    pairs = parse_two_column_tsv(manifest_path)
+    if tuple(key for key, _ in pairs) != _VERSIONED_ENCODING_WORKLOAD_KEY_ORDER:
+        fail(f"cell {cell_id!r} versioned encoding workload key order mismatch")
+    wl = dict(pairs)
+    if wl["schema_version"] != "piccard-real-encoding-pair-workload-v1":
+        fail(f"cell {cell_id!r} versioned encoding workload schema mismatch")
+    for key, flag in (("k", "k"), ("m", "m"), ("root_seed", "seed"),
+                      ("trials", "trials"), ("profile_id", "profile"),
+                      ("method", "method"), ("timing_pair", "timing-pair")):
+        if wl[key] != _argv_value(cell, flag):
+            fail(f"cell {cell_id!r} versioned encoding workload {key!r} does not bind argv")
+    if wl["dataset_manifest_sha256"] != _cell_processed_sha(cell):
+        fail(f"cell {cell_id!r} versioned encoding dataset digest mismatch")
+    if (wl["encoder_warmup_pairs"], wl["timed_encoder_pairs"],
+            wl["correctness_pair_calls"], wl["signature_derivation_timed"]) != \
+            ("1", wl["trials"], "1", "false"):
+        fail(f"cell {cell_id!r} versioned encoding pair-count boundary mismatch")
+    if profile not in VERSIONED_ENCODING_PROFILES or method not in {
+            "piccard_encode", "piccard_sqrt_encode"}:
+        fail(f"cell {cell_id!r} versioned encoding profile/method mismatch")
+    if profile == "readiness-toy-v1" and wl["trials"] != "1":
+        fail(f"cell {cell_id!r} readiness encoding trials must equal one")
+    if profile == "paper-std192-encoding-v1" and wl["trials"] != "30":
+        fail(f"cell {cell_id!r} paper encoding trials must equal thirty")
+    derived = _derive_encoding_hash_seed(
+        int(wl["root_seed"]), bytes.fromhex(_cell_processed_sha(cell)),
+        int(wl["k"]), int(wl["m"]), profile, method)
+    if wl["hash_seed"] != str(derived):
+        fail(f"cell {cell_id!r} versioned encoding hash seed does not recompute")
+
+    processed_manifest_path = next(
+        i for i in cell["inputs"] if i["role"] == "processed-manifest")["resolved"]
+    processed_values = _validate_processed_manifest(
+        processed_manifest_path,
+        dict(parse_two_column_tsv(processed_manifest_path))["dataset"])
+    expected_pair = _median_pair_id(_cell_processed_dir(cell), processed_values)
+    records = {pair_id: (record_a, record_b) for pair_id, record_a, record_b in
+               _read_processed_pairs(_cell_processed_dir(cell), processed_values)}
+    if wl["pair_id"] != expected_pair:
+        fail(f"cell {cell_id!r} versioned encoding pair is not median pair")
+    if (wl["record_a"], wl["record_b"]) != records[expected_pair]:
+        fail(f"cell {cell_id!r} versioned encoding workload endpoints mismatch")
+    if len(csv_rows) != 1:
+        fail(f"cell {cell_id!r} versioned encoding CSV must contain one row")
+    row = csv_rows[0]
+    expected = {
+        "profile_id": profile,
+        "run_class": "smoke" if profile == "readiness-toy-v1" else "primary",
+        "target_security_bits": "0" if profile == "readiness-toy-v1" else "192",
+        "comparison_eligible": False, "comparison_scope": "encoding-only-diagnostic",
+        "primitive": "onehot-encoding" if method == "piccard_encode" else "sqrt-encoding",
+        "protocol_model": "piccard-local-encoding" if method == "piccard_encode"
+        else "piccard-sqrt-local-encoding", "cost_scope": "encoding-only",
+        "secure_division_included": False, "measurement_kind": "encoding-timing",
+        "dataset": processed_values["dataset"], "variant": variant,
+        "dataset_manifest_sha256": _cell_processed_sha(cell),
+        "records_sha256": processed_values["records_sha256"],
+        "pairs_sha256": processed_values["pairs_sha256"], "pair_id": expected_pair,
+        "method": method, "k": wl["k"], "m": wl["m"],
+        "timing_trials": wl["trials"], "timing_pair": "median",
+        "root_seed": wl["root_seed"], "hash_seed": str(derived),
+        "encoder_warmup_pairs": "1", "timed_encoder_pairs": wl["trials"],
+        "correctness_pair_calls": "1", "signature_derivation_timed": "false",
+        "correctness_status": "PASS", "measurement_status": "measured",
+    }
+    for key, value in expected.items():
+        if isinstance(value, bool):
+            actual_matches = row.get(key) is value
+        else:
+            actual_matches = str(row.get(key)) == value
+        if not actual_matches:
+            fail(f"cell {cell_id!r} versioned encoding CSV {key!r} mismatch")
+    if (str(row.get("record_a")), str(row.get("record_b"))) != records[expected_pair]:
+        fail(f"cell {cell_id!r} versioned encoding CSV endpoints mismatch")
+    try:
+        a_ms = float(str(row["encode_a_ms"]))
+        b_ms = float(str(row["encode_b_ms"]))
+        pair_ms = float(str(row["encode_pair_ms"]))
+        slots_a = int(str(row["encoded_slots_a"]))
+        slots_b = int(str(row["encoded_slots_b"]))
+    except (KeyError, ValueError) as error:
+        raise VerificationError(
+            f"cell {cell_id!r} versioned encoding numeric field malformed") from error
+    if any((not math.isfinite(value) or value < 0.0)
+           for value in (a_ms, b_ms, pair_ms)) or pair_ms != a_ms + b_ms:
+        fail(f"cell {cell_id!r} endpoint timing does not sum to pair timing")
+    if slots_a <= 0 or slots_b <= 0 or wl["encoded_slots_a"] != str(slots_a) or \
+            wl["encoded_slots_b"] != str(slots_b):
+        fail(f"cell {cell_id!r} versioned encoding output shape mismatch")
+
+
 def _validate_summary_recomputation(cell: dict, summary_path: Path) -> None:
     """The summary is a pure function of the accuracy CSV; regenerate it
     with the real summarizer and demand byte identity."""
@@ -2304,9 +2447,16 @@ def verify(results_root: Path) -> str:
             _variant, _marker, profile, method = cell["id"].split(":", 3)
             csv_path = _output_path_for(
                 cell, f"real_encoding_{variant}_{profile}_{method}.csv")
-            rows = _read_rows(csv_path, ENCODING_HEADER_FIELDS, cell["id"])
+            header_fields = (VERSIONED_ENCODING_HEADER_FIELDS
+                             if profile in VERSIONED_ENCODING_PROFILES
+                             else ENCODING_HEADER_FIELDS)
+            rows = _read_rows(csv_path, header_fields, cell["id"])
             _validate_eligibility_integrity(rows, cell["id"], evidence_mode)
-            _validate_encoding_workload(cell, variant, profile, method, rows)
+            if profile in VERSIONED_ENCODING_PROFILES:
+                _validate_versioned_encoding_workload(
+                    cell, variant, profile, method, rows)
+            else:
+                _validate_encoding_workload(cell, variant, profile, method, rows)
         elif cell["id"].endswith(":accuracy-summary"):
             csv_path = _output_path_for(cell, f"real_accuracy_summary_{variant}.csv")
             processed_values = processed_manifest_cache[variant]

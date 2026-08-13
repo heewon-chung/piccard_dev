@@ -317,6 +317,43 @@ class ReviewComparisonCliTest(unittest.TestCase):
                     self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
                     self.assertIn("schema", rejected.stderr)
 
+    def test_versioned_encoding_profile_times_both_endpoints_and_audits_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = self.run_cli([
+                str(self.binary),
+                "--suite=readiness-toy-v1",
+                "--profile=readiness-toy-v1",
+                "--security=TOY",
+                "--k=16", "--m=16", "--set-size=10", "--universe=64",
+                "--target-jaccard=0.5", "--trials=1",
+                "--accuracy-trials=0", "--seed=20260729",
+                "--methods=piccard_encode,piccard_sqrt_encode",
+                "--sj16-key-bits=1024", "--allow-unmatched-security",
+                f"--manifest-out={root / 'workload.bin'}",
+                f"--execution-trace-out={root / 'trace.bin'}",
+            ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = list(csv.DictReader(result.stdout.splitlines()))
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["profile_id"], "readiness-toy-v1")
+            self.assertEqual(row["timing_trials"], "1")
+            self.assertEqual(row["accuracy_trials"], "0")
+            self.assertEqual(row["correctness_trials"], "1")
+            self.assertEqual(row["encoder_warmup_pairs"], "1")
+            self.assertEqual(row["timed_encoder_pairs"], "1")
+            self.assertEqual(row["correctness_pair_calls"], "1")
+            self.assertEqual(row["signature_derivation_timed"], "false")
+            self.assertEqual(row["correctness_status"], "PASS")
+            self.assertEqual(float(row["encode_pair_ms"]),
+                             float(row["encode_a_ms"]) +
+                             float(row["encode_b_ms"]))
+            forbidden = {"actual_ring_dim", "log_q_bits", "plaintext_modulus",
+                         "num_limbs", "openfhe_version", "phase_encrypt_ms",
+                         "phase_decrypt_ms"}
+            self.assertFalse(forbidden & set(row))
+
     def test_legacy_baseline_method_is_rejected_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

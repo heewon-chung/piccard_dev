@@ -56,6 +56,14 @@ QUICK_DATASET_MANIFEST = (
     / "dataset.manifest.tsv"
 )
 PAPER_PROFILES = ("std128-t40-primary", "std192-t40-primary")
+VERSIONED_PAPER_PROFILES = (
+    "paper-std128-t40-v1", "paper-std192-encoding-v1")
+PAPER_PROFILE_ALIASES = {
+    "std128-t40-primary": "paper-std128-t40-v1",
+    "std192-t40-primary": "paper-std192-encoding-v1",
+    "paper-std128-t40-v1": "paper-std128-t40-v1",
+    "paper-std192-encoding-v1": "paper-std192-encoding-v1",
+}
 PAPER_VARIANTS = frozenset(("dblp_acm_u65536", "enron_u65536",
                             "enron_u1048576"))
 SINGLE_TRIAL_PROFILES = (
@@ -99,6 +107,14 @@ class RunnerError(ValueError):
 
 def fail(message: str) -> None:
     raise RunnerError(message)
+
+
+def canonical_paper_profile(profile: str) -> str:
+    """Resolve historical paper tokens to their versioned Phase 6 cells."""
+    try:
+        return PAPER_PROFILE_ALIASES[profile]
+    except KeyError:
+        fail(f"unsupported paper profile token: {profile!r}")
 
 
 def argv_sha256(argv) -> str:
@@ -392,7 +408,8 @@ def timing_cell(pair: ManifestPair, results_root: pathlib.Path, processed_root_i
 
 def encoding_cell(pair: ManifestPair, results_root: pathlib.Path,
                   processed_root_id: str, processed_root: pathlib.Path,
-                  profile: str, method: str, seed: int, threads: int) -> Cell:
+                  profile: str, method: str, seed: int, threads: int,
+                  trials: int) -> Cell:
     csv_path = results_root / "csv" / (
         f"real_encoding_{pair.variant}_{profile}_{method}.csv")
     wm_path = results_root / "workloads" / (
@@ -404,7 +421,7 @@ def encoding_cell(pair: ManifestPair, results_root: pathlib.Path,
         f"--profile={profile}",
         f"--method={method}",
         f"--k={ACCURACY_K}", f"--m={ACCURACY_M}",
-        f"--trials={SINGLE_TRIAL_TIMING_TRIALS}",
+        f"--trials={trials}",
         f"--timing-pair={TIMING_PAIR}",
         f"--seed={seed}",
         f"--csv={csv_path}",
@@ -499,14 +516,26 @@ def build_cells(pairs, results_root, roots_by_variant, evidence_mode, seed, thre
             for method in ("piccard_encode", "piccard_sqrt_encode"):
                 cells.append(encoding_cell(
                     pair, results_root, processed_root_id, processed_root,
-                    "work5-std192-t40-single-trial", method, seed, threads))
+                    "work5-std192-t40-single-trial", method, seed, threads,
+                    SINGLE_TRIAL_TIMING_TRIALS))
         else:
-            # Phase 3 exposes only executable STD128 timing. New-paper
-            # STD192 is intentionally absent until Phase 6; the legacy
-            # Work 5 single-trial encoding branch above remains unchanged.
-            cells.append(timing_cell(
-                pair, results_root, processed_root_id, processed_root,
-                "std128-t40-primary", seed, threads, PAPER_TIMING_TRIALS))
+            canonical_profiles = {
+                canonical_paper_profile(profile) for profile in profiles
+            }
+            # The historical std128/std192 tokens are retained at the CLI
+            # boundary, but every paper cell is now versioned.  In particular,
+            # std192-t40-primary is an encoding-only pair cell, never an FHE
+            # timing cell.
+            if "paper-std128-t40-v1" in canonical_profiles:
+                cells.append(timing_cell(
+                    pair, results_root, processed_root_id, processed_root,
+                    "paper-std128-t40-v1", seed, threads, PAPER_TIMING_TRIALS))
+            if "paper-std192-encoding-v1" in canonical_profiles:
+                for method in ("piccard_encode", "piccard_sqrt_encode"):
+                    cells.append(encoding_cell(
+                        pair, results_root, processed_root_id, processed_root,
+                        "paper-std192-encoding-v1", method, seed, threads,
+                        PAPER_TIMING_TRIALS))
             if pair.variant == QUICK_VARIANT:
                 threshold = threshold_cell(
                     pair, results_root, processed_root_id, processed_root,
@@ -1062,9 +1091,13 @@ def parse_args(argv):
                          f"variant set {sorted(PAPER_VARIANTS)!r}, got {sorted(seen)!r}")
         if not args.profile:
             parser.error("evidence_mode=paper requires at least one --profile")
-        if set(args.profile) != set(PAPER_PROFILES) or len(args.profile) != len(PAPER_PROFILES):
+        accepted_profile_sets = (set(PAPER_PROFILES), set(VERSIONED_PAPER_PROFILES))
+        if (set(args.profile) not in accepted_profile_sets or
+                len(args.profile) != len(PAPER_PROFILES)):
             parser.error(
-                f"--profile must specify exactly {PAPER_PROFILES}, got {args.profile!r}")
+                f"--profile must specify exactly one paper profile pair "
+                f"({PAPER_PROFILES} or {VERSIONED_PAPER_PROFILES}), "
+                f"got {args.profile!r}")
         args.profiles = tuple(args.profile)
 
     return args

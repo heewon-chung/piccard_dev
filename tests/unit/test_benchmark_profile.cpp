@@ -135,6 +135,45 @@ TEST(BenchmarkProfile, Work5SingleTrialProfilesAreExactSmokeEvidence) {
     EXPECT_EQ(std192_work5.max_queries, std192_primary.max_queries);
 }
 
+TEST(BenchmarkProfile, VersionedReadinessProfilesFreezePaperAndToyCounts) {
+    const auto& std128 = ResolveBenchmarkProfile("paper-std128-t40-v1");
+    EXPECT_EQ(std128.security, SecurityLevel::STD128);
+    EXPECT_EQ(std128.target_security_bits, 128u);
+    EXPECT_EQ(std128.transcript_stat_bits, 40u);
+    EXPECT_EQ(std128.timing_trials, 30u);
+    EXPECT_EQ(std128.accuracy_trials, 50u);
+    EXPECT_EQ(std128.correctness_trials, 0u);
+    EXPECT_EQ(std128.warmup_calls, 1u);
+    EXPECT_FALSE(std128.encoding_only);
+
+    const auto& std192 = ResolveBenchmarkProfile(
+        "paper-std192-encoding-v1");
+    EXPECT_EQ(std192.security, SecurityLevel::STD192);
+    EXPECT_EQ(std192.target_security_bits, 192u);
+    EXPECT_EQ(std192.transcript_stat_bits, 40u);
+    EXPECT_EQ(std192.timing_trials, 30u);
+    EXPECT_EQ(std192.accuracy_trials, 0u);
+    EXPECT_EQ(std192.correctness_trials, 1u);
+    EXPECT_EQ(std192.warmup_calls, 1u);
+    EXPECT_TRUE(std192.encoding_only);
+    EXPECT_FALSE(std192.comparison_eligible);
+
+    const auto& toy = ResolveBenchmarkProfile("readiness-toy-v1");
+    EXPECT_EQ(toy.security, SecurityLevel::TOY);
+    EXPECT_EQ(toy.timing_trials, 1u);
+    EXPECT_EQ(toy.accuracy_trials, 1u);
+    EXPECT_EQ(toy.correctness_trials, 1u);
+    EXPECT_EQ(toy.warmup_calls, 1u);
+}
+
+TEST(BenchmarkProfile, SquareRootApplicabilityLeavesMatrixStatusCellsExplicit) {
+    EXPECT_TRUE(IsSqrtApplicable(16));
+    EXPECT_TRUE(IsSqrtApplicable(64));
+    EXPECT_TRUE(IsSqrtApplicable(256));
+    EXPECT_FALSE(IsSqrtApplicable(32));
+    EXPECT_FALSE(IsSqrtApplicable(128));
+}
+
 TEST(BenchmarkProfile, FeasibilityProfilesCannotBecomePrimary) {
     for (const char* id : {"std128-t128-feasibility",
                            "std192-t128-feasibility"}) {

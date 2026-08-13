@@ -538,6 +538,39 @@ TEST(ComparisonWorkload, ToySmokeAcceptsOneAccuracyTrialAndRejectsTwo) {
                  std::invalid_argument);
 }
 
+TEST(ComparisonWorkload, ReadinessEncodingWorkloadHasPairCorrectnessRecord) {
+    WorkloadSpec spec;
+    spec.suite = "readiness-toy-v1";
+    spec.profile_id = "readiness-toy-v1";
+    spec.root_seed = 7;
+    spec.k = 4;
+    spec.m = 4;
+    spec.set_size = 10;
+    spec.universe = 64;
+    spec.target_jaccard = ParseExactDecimal("0.5");
+    spec.methods = {"piccard_encode", "piccard_sqrt_encode"};
+    spec.timing_trials = 1;
+    spec.accuracy_trials = 0;
+    spec.correctness_trials = 1;
+
+    const auto workload = ComparisonWorkload::Generate(spec);
+    ASSERT_EQ(workload.Records().size(), 3u);
+    EXPECT_EQ(workload.Records()[0].kind, TrialKind::Warmup);
+    EXPECT_EQ(workload.Records()[1].kind, TrialKind::Timing);
+    EXPECT_EQ(workload.Records()[2].kind, TrialKind::Correctness);
+    EXPECT_EQ(workload.Spec().timing_trials, 1u);
+    EXPECT_EQ(workload.Spec().correctness_trials, 1u);
+    EXPECT_EQ(ComparisonWorkload::ParseAndVerify(workload.Bytes()).Bytes(),
+              workload.Bytes());
+
+    const auto rows = ExpectedAggregateIdentities(workload);
+    ASSERT_EQ(rows.size(), 2u);
+    for (const auto& row : rows) {
+        EXPECT_EQ(row.evidence_arm, "timing");
+        EXPECT_EQ(row.aggregate_trials, 1u);
+    }
+}
+
 TEST(ComparisonWorkload,
      Work5TrialPayloadUsesProductionApiAndIndependentOracle) {
     const auto reference = ComparisonWorkload::Generate(Work5PayloadReferenceSpec());

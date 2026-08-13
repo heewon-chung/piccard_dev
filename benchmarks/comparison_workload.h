@@ -22,7 +22,14 @@ bool operator!=(const ExactRational& lhs, const ExactRational& rhs);
 /** @brief Parse a non-exponent decimal into a reduced exact rational. */
 ExactRational ParseExactDecimal(const std::string& text);
 
-enum class TrialKind : uint8_t { Warmup = 0, Timing = 1, Accuracy = 2 };
+enum class TrialKind : uint8_t {
+    Warmup = 0,
+    Timing = 1,
+    Accuracy = 2,
+    // Versioned local-encoding suites use a deterministic correctness call
+    // which is not an accuracy aggregate row.
+    Correctness = 3,
+};
 
 /** @brief Family-qualified row kind required by reviewer comparison suites. */
 std::string ReviewMeasurementKind(const std::string& method, TrialKind kind);
@@ -72,6 +79,7 @@ struct WorkloadSpec {
     std::vector<std::string> methods;
     uint32_t timing_trials = 0;
     uint32_t accuracy_trials = 0;
+    uint32_t correctness_trials = 0;
 };
 
 /** @brief Canonical workload bytes plus regenerated, immutable trial records. */

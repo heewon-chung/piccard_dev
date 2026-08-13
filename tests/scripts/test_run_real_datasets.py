@@ -90,6 +90,18 @@ THRESHOLD_HEADER_FIELDS = [
     "calibration_fpr", "calibration_fnr", "calibration_balanced_error",
     "calibration_digest", "evaluation_digest", "threshold_workload_sha256",
 ]
+VERSIONED_ENCODING_HEADER_FIELDS = [
+    "profile_id", "run_class", "target_security_bits", "comparison_eligible",
+    "comparison_scope", "primitive", "protocol_model", "cost_scope",
+    "secure_division_included", "measurement_kind", "dataset", "variant",
+    "dataset_manifest_sha256", "records_sha256", "pairs_sha256", "pair_id",
+    "pair_kind", "label", "record_a", "record_b", "k", "m", "method",
+    "timing_trials", "timing_pair", "root_seed", "hash_seed",
+    "encoder_warmup_pairs", "timed_encoder_pairs", "correctness_pair_calls",
+    "signature_derivation_timed", "encode_a_ms", "encode_b_ms",
+    "encode_pair_ms", "encoded_slots_a", "encoded_slots_b", "correctness_status",
+    "measurement_status",
+]
 
 
 def load_verifier_module():
@@ -133,6 +145,7 @@ import sys
 ACCURACY_HEADER = %(accuracy_header)r
 TIMING_HEADER = %(timing_header)r
 THRESHOLD_HEADER = %(threshold_header)r
+VERSIONED_ENCODING_HEADER = %(versioned_encoding_header)r
 
 
 def parse_opts(argv):
@@ -276,6 +289,17 @@ def main():
                    + struct.pack(">I", len(profile_bytes)) + profile_bytes)
         return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
+    def derive_encoding_seed(root_seed, dataset_sha_raw, k, m, profile_id,
+                             method):
+        profile_bytes = profile_id.encode("utf-8")
+        method_bytes = method.encode("utf-8")
+        payload = (b"piccard-real-encoding-crs-v1\x00"
+                   + struct.pack(">Q", root_seed) + dataset_sha_raw
+                   + struct.pack(">I", k) + struct.pack(">I", m)
+                   + struct.pack(">I", len(profile_bytes)) + profile_bytes
+                   + struct.pack(">I", len(method_bytes)) + method_bytes)
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
     def write_kv_file(path, pairs):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("key\tvalue\n")
@@ -349,7 +373,8 @@ def main():
             "jaccard_bucket": bucket,
         }
 
-    header = ACCURACY_HEADER if mode == "accuracy" else TIMING_HEADER
+    header = (ACCURACY_HEADER if mode == "accuracy" else
+              VERSIONED_ENCODING_HEADER if mode == "encoding" else TIMING_HEADER)
     root_seed = int(opts["seed"])
     csv_path = opts["csv"]
 
@@ -621,6 +646,81 @@ def main():
                                accuracy_workload_sha256=workload_sha,
                                **truth_for(pair))
                 writer.writerow([row[name] for name in header])
+    elif mode == "encoding":
+        trials = int(opts["trials"])
+        method = opts["method"]
+        records_lines = open(os.path.join(manifest_dir,
+                                          manifest["records_file"]),
+                             encoding="utf-8").read().split("\n")
+        sizes = {}
+        for line in records_lines[1:]:
+            if not line:
+                continue
+            fields = line.split("\t")
+            sizes[fields[0]] = int(fields[3])
+        combined = [(p["pair_id"], sizes[p["record_a"]] + sizes[p["record_b"]], p)
+                    for p in real_pairs]
+        values = sorted(size for _, size, _ in combined)
+        count = len(values)
+        median = (float(values[count // 2]) if count & 1 else
+                  (values[count // 2 - 1] + values[count // 2]) / 2.0)
+        selected_pair = min(combined,
+                            key=lambda item: (abs(item[1] - median), item[0]))[2]
+        seed = derive_encoding_seed(
+            root_seed, bytes.fromhex(manifest_sha), int(opts["k"]),
+            int(opts["m"]), opts["profile"], method)
+        workload_pairs = [
+            ("schema_version", "piccard-real-encoding-pair-workload-v1"),
+            ("dataset_manifest_sha256", manifest_sha),
+            ("pair_id", selected_pair["pair_id"]),
+            ("record_a", selected_pair["record_a"]),
+            ("record_b", selected_pair["record_b"]),
+            ("k", opts["k"]), ("m", opts["m"]),
+            ("profile_id", opts["profile"]), ("method", method),
+            ("root_seed", opts["seed"]), ("hash_seed", str(seed)),
+            ("trials", opts["trials"]), ("timing_pair", opts["timing-pair"]),
+            ("encoder_warmup_pairs", "1"),
+            ("timed_encoder_pairs", opts["trials"]),
+            ("correctness_pair_calls", "1"),
+            ("signature_derivation_timed", "false"),
+            ("encoded_slots_a", "16"), ("encoded_slots_b", "16"),
+        ]
+        write_kv_file(opts["workload-manifest-out"], workload_pairs)
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            import csv as csv_module
+            writer = csv_module.writer(handle, lineterminator="\n")
+            writer.writerow(VERSIONED_ENCODING_HEADER)
+            row = {
+                "profile_id": opts["profile"], "run_class": "primary",
+                "target_security_bits": "192", "comparison_eligible": "false",
+                "comparison_scope": "encoding-only-diagnostic",
+                "primitive": "onehot-encoding" if method == "piccard_encode"
+                else "sqrt-encoding",
+                "protocol_model": "piccard-local-encoding" if method == "piccard_encode"
+                else "piccard-sqrt-local-encoding",
+                "cost_scope": "encoding-only", "secure_division_included": "false",
+                "measurement_kind": "encoding-timing",
+                "dataset": manifest.get("dataset", ""),
+                "variant": manifest.get("variant", ""),
+                "dataset_manifest_sha256": manifest_sha,
+                "records_sha256": manifest["records_sha256"],
+                "pairs_sha256": manifest["pairs_sha256"],
+                "pair_id": selected_pair["pair_id"],
+                "pair_kind": selected_pair["pair_kind"],
+                "label": selected_pair["label"],
+                "record_a": selected_pair["record_a"],
+                "record_b": selected_pair["record_b"],
+                "k": opts["k"], "m": opts["m"], "method": method,
+                "timing_trials": opts["trials"], "timing_pair": opts["timing-pair"],
+                "root_seed": opts["seed"], "hash_seed": str(seed),
+                "encoder_warmup_pairs": "1", "timed_encoder_pairs": opts["trials"],
+                "correctness_pair_calls": "1", "signature_derivation_timed": "false",
+                "encode_a_ms": "0.1", "encode_b_ms": "0.2",
+                "encode_pair_ms": "0.30000000000000004",
+                "encoded_slots_a": "16", "encoded_slots_b": "16",
+                "correctness_status": "PASS", "measurement_status": "measured",
+            }
+            writer.writerow([row[name] for name in VERSIONED_ENCODING_HEADER])
     else:
         trials = int(opts["trials"])
         # Median-combined-bucketed-size pair selection, mirroring the real
@@ -701,6 +801,7 @@ def write_fake_bench_real_datasets(build_dir: pathlib.Path) -> pathlib.Path:
         "accuracy_header": ACCURACY_HEADER_FIELDS,
         "timing_header": TIMING_HEADER_FIELDS,
         "threshold_header": THRESHOLD_HEADER_FIELDS,
+        "versioned_encoding_header": VERSIONED_ENCODING_HEADER_FIELDS,
     }
     make_executable(path, body)
     make_executable(build_dir / "bench_real_threshold", body)
@@ -971,7 +1072,7 @@ class Phase3RealDataContractTest(unittest.TestCase):
         self.assertEqual({pair["pair_kind"] for pair in loaded["pairs"]},
                          {"thread_related", "cross_thread"})
 
-    def test_paper_dry_run_accepts_all_frozen_real_variants_without_enron_std192(self):
+    def test_paper_dry_run_accepts_all_frozen_real_variants_with_versioned_encoding(self):
         enron_large = prepare_enron_fixture(
             self.tmp / "enron_u1048576", universe=1048576)
         source = ENRON_FIXTURE_DIR / "source.manifest.tsv"
@@ -989,18 +1090,19 @@ class Phase3RealDataContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                      if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 11)
+        self.assertEqual(len(run_lines), 17)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
             self.assertEqual(len(variant_lines),
-                             5 if variant == "dblp_acm_u65536" else 3)
+                             7 if variant == "dblp_acm_u65536" else 5)
             self.assertTrue(any("--mode=accuracy" in line for line in variant_lines))
             self.assertTrue(any("summarize_real_datasets.py" in line
                                 for line in variant_lines))
-            self.assertTrue(any("--profile=std128-t40-primary" in line
+            self.assertTrue(any("--profile=paper-std128-t40-v1" in line
                                 for line in variant_lines))
-            self.assertFalse(any("--profile=std192-t40-primary" in line
-                                 for line in variant_lines))
+            self.assertEqual(sum("--mode=encoding" in line for line in variant_lines), 2)
+            self.assertTrue(all("--profile=paper-std192-encoding-v1" in line
+                                for line in variant_lines if "--mode=encoding" in line))
             if variant == "dblp_acm_u65536":
                 self.assertTrue(any("--mode=threshold" in line and
                                     "--threshold-trials=50" in line
@@ -1011,6 +1113,50 @@ class Phase3RealDataContractTest(unittest.TestCase):
             else:
                 self.assertFalse(any("--mode=threshold" in line
                                      for line in variant_lines))
+
+    def test_phase6_legacy_std192_token_maps_to_versioned_encoding_cells(self):
+        """The Phase 3 token remains accepted, but now selects only the
+        versioned local-encoding paper cells (never an FHE timing cell)."""
+        runner = load_runner_module()
+        self.assertEqual(
+            runner.canonical_paper_profile("std192-t40-primary"),
+            "paper-std192-encoding-v1")
+        self.assertEqual(
+            runner.canonical_paper_profile("std128-t40-primary"),
+            "paper-std128-t40-v1")
+
+        enron_large = prepare_enron_fixture(
+            self.tmp / "phase6-enron_u1048576", universe=1048576)
+        source = ENRON_FIXTURE_DIR / "source.manifest.tsv"
+        result = run_runner(
+            f"--source-manifest={QUICK_SOURCE_MANIFEST}",
+            f"--dataset-manifest={QUICK_DATASET_MANIFEST}",
+            f"--source-manifest={source}",
+            f"--dataset-manifest={self.processed_manifest}",
+            f"--source-manifest={source}",
+            f"--dataset-manifest={enron_large}",
+            "--profile=std128-t40-primary", "--profile=std192-t40-primary",
+            "--seed=20260729", "--threads=2",
+            f"--build-dir={self.tmp / 'missing-build'}",
+            f"--results-root={self.tmp / 'phase6-paper-results'}", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_lines = [line for line in result.stdout.splitlines()
+                     if line.startswith("RUN ")]
+        self.assertEqual(len(run_lines), 17)
+        for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
+            variant_lines = [line for line in run_lines if variant in line]
+            self.assertEqual(len(variant_lines),
+                             7 if variant == "dblp_acm_u65536" else 5)
+            encoding_lines = [line for line in variant_lines
+                              if "--mode=encoding" in line]
+            self.assertEqual(len(encoding_lines), 2)
+            for line in encoding_lines:
+                self.assertIn("--profile=paper-std192-encoding-v1", line)
+                self.assertIn("--trials=30", line)
+                self.assertNotIn("--profile=std192-t40-primary", line)
+            self.assertFalse(any("--mode=timing" in line and
+                                 "paper-std192-encoding-v1" in line
+                                 for line in variant_lines))
 
     def test_paper_dry_run_rejects_incomplete_frozen_variant_set(self):
         result = run_runner(
@@ -1434,16 +1580,17 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         run_lines = [line for line in result.stdout.splitlines()
                     if line.startswith("RUN ")]
-        self.assertEqual(len(run_lines), 11)
+        self.assertEqual(len(run_lines), 17)
         for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576"):
             variant_lines = [line for line in run_lines if variant in line]
             self.assertEqual(len(variant_lines),
-                             5 if variant == "dblp_acm_u65536" else 3)
+                             7 if variant == "dblp_acm_u65536" else 5)
             self.assertTrue(any("--max-pairs=10000" in line for line in variant_lines))
-            self.assertTrue(any("--profile=std128-t40-primary" in line
+            self.assertTrue(any("--profile=paper-std128-t40-v1" in line
                                 for line in variant_lines))
-            self.assertFalse(any("--profile=std192-t40-primary" in line
-                                 for line in variant_lines))
+            self.assertEqual(sum("--mode=encoding" in line for line in variant_lines), 2)
+            self.assertTrue(all("--profile=paper-std192-encoding-v1" in line
+                                for line in variant_lines if "--mode=encoding" in line))
             if variant == "dblp_acm_u65536":
                 self.assertTrue(any("--mode=threshold" in line and
                                     "--threshold-trials=50" in line
@@ -2449,20 +2596,26 @@ class PaperModeScratchRepoTest(unittest.TestCase):
         metadata = read_kv_file(results_root / "run_metadata.tsv")
         self.assertEqual(metadata["evidence_mode"], "paper")
         self.assertEqual(metadata["git_dirty"], "false")
-        self.assertEqual(metadata["cell_count"], "11")
-        ids = {metadata[f"cell.{i:03d}.id"] for i in range(11)}
+        self.assertEqual(metadata["cell_count"], "17")
+        ids = {metadata[f"cell.{i:03d}.id"] for i in range(17)}
         self.assertEqual(ids, {
             "dblp_acm_u65536:accuracy",
             "dblp_acm_u65536:accuracy-summary",
-            "dblp_acm_u65536:timing:std128-t40-primary",
+            "dblp_acm_u65536:timing:paper-std128-t40-v1",
+            "dblp_acm_u65536:encoding:paper-std192-encoding-v1:piccard_encode",
+            "dblp_acm_u65536:encoding:paper-std192-encoding-v1:piccard_sqrt_encode",
             "dblp_acm_u65536:threshold",
             "dblp_acm_u65536:threshold-summary",
             "enron_u65536:accuracy",
             "enron_u65536:accuracy-summary",
-            "enron_u65536:timing:std128-t40-primary",
+            "enron_u65536:timing:paper-std128-t40-v1",
+            "enron_u65536:encoding:paper-std192-encoding-v1:piccard_encode",
+            "enron_u65536:encoding:paper-std192-encoding-v1:piccard_sqrt_encode",
             "enron_u1048576:accuracy",
             "enron_u1048576:accuracy-summary",
-            "enron_u1048576:timing:std128-t40-primary",
+            "enron_u1048576:timing:paper-std128-t40-v1",
+            "enron_u1048576:encoding:paper-std192-encoding-v1:piccard_encode",
+            "enron_u1048576:encoding:paper-std192-encoding-v1:piccard_sqrt_encode",
         })
         verify_result = run_verifier(results_root)
         self.assertEqual(verify_result.returncode, 0, verify_result.stderr)
@@ -2518,7 +2671,7 @@ class PaperModeScratchRepoTest(unittest.TestCase):
                 results_root = self.tmp / f"timing-identity-{variant}"
                 result = self.run_paper(results_root)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                csv_rel = f"csv/real_timing_{variant}_std128-t40-primary.csv"
+                csv_rel = f"csv/real_timing_{variant}_paper-std128-t40-v1.csv"
                 csv_path = results_root / csv_rel
                 lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
                 header = lines[0].rstrip("\n").split(",")

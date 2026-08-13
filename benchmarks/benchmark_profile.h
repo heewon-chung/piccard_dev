@@ -56,6 +56,14 @@ struct BenchmarkProfile {
     BenchmarkRunClass run_class = BenchmarkRunClass::Legacy;
     bool failure_is_blocking = true;
     bool comparison_eligible = false;
+    // Versioned successor profiles freeze producer counts as metadata.  The
+    // legacy Work 5 profiles intentionally retain their old suite-owned
+    // counts; these defaults keep their observable behavior unchanged.
+    uint32_t timing_trials = 1;
+    uint32_t accuracy_trials = 1;
+    uint32_t correctness_trials = 0;
+    uint32_t warmup_calls = 1;
+    bool encoding_only = false;
 };
 
 /** @brief One literal row key in a benchmark suite grid. */
@@ -71,8 +79,11 @@ struct BenchmarkGridPoint {
     std::string Key() const;
 };
 
-/** @brief Resolve one of the nine exact named profiles, or fail closed. */
+/** @brief Resolve one exact named profile, or fail closed. */
 const BenchmarkProfile& ResolveBenchmarkProfile(std::string_view profile_id);
+
+/** @brief Return whether square-root encoding is structurally applicable. */
+bool IsSqrtApplicable(uint32_t m);
 
 /** @brief Explicit provenance used only by pre-profile legacy invocations. */
 BenchmarkProfile LegacyBenchmarkProfile();

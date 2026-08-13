@@ -8,6 +8,7 @@
 #include "core/sqrt_encoder.h"
 #include "data/real_dataset.h"
 #include "data/real_dataset_metrics.h"
+#include "benchmark_profile.h"
 #include "util/params.h"
 
 #include <openssl/evp.h>
@@ -21,6 +22,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -41,6 +44,16 @@ constexpr char kSqrtMethod[] = "piccard_sqrt_encode";
 
 void Require(const bool condition, const std::string& detail) {
     if (!condition) throw std::invalid_argument(detail);
+}
+
+bool IsVersionedEncodingProfile(const std::string& profile_id) {
+    return profile_id == "paper-std192-encoding-v1" ||
+           profile_id == "readiness-toy-v1";
+}
+
+bool IsPaperEncodingVariant(const std::string& variant) {
+    return variant == "dblp_acm_u65536" || variant == "enron_u65536" ||
+           variant == "enron_u1048576";
 }
 
 std::string ReadFileBytes(const fs::path& path) {
@@ -208,6 +221,19 @@ std::string EncodingHeader() {
            "correctness_status,measurement_status\n";
 }
 
+std::string VersionedEncodingHeader() {
+    return "profile_id,run_class,target_security_bits,comparison_eligible,"
+           "comparison_scope,primitive,protocol_model,cost_scope,"
+           "secure_division_included,measurement_kind,dataset,variant,"
+           "dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,"
+           "pair_kind,label,record_a,record_b,k,m,method,timing_trials,"
+           "timing_pair,root_seed,hash_seed,encoder_warmup_pairs,"
+           "timed_encoder_pairs,correctness_pair_calls,"
+           "signature_derivation_timed,encode_a_ms,encode_b_ms,"
+           "encode_pair_ms,encoded_slots_a,encoded_slots_b,"
+           "correctness_status,measurement_status\n";
+}
+
 std::string EncodingWorkload(const std::string& dataset_sha, const std::string& pair_id,
                              const RealEncodingCliArgs& args, const uint64_t hash_seed,
                              const uint64_t encoded_slots) {
@@ -232,15 +258,60 @@ std::string EncodingWorkload(const std::string& dataset_sha, const std::string& 
     return output.str();
 }
 
+std::string VersionedEncodingWorkload(
+    const std::string& dataset_sha, const std::string& pair_id,
+    const std::string& record_a, const std::string& record_b,
+    const RealEncodingCliArgs& args, const uint64_t hash_seed,
+    const uint64_t encoded_slots_a, const uint64_t encoded_slots_b,
+    const uint32_t correctness_calls) {
+    std::ostringstream output;
+    output << "key\tvalue\n"
+           << "schema_version\tpiccard-real-encoding-pair-workload-v1\n"
+           << "dataset_manifest_sha256\t" << dataset_sha << '\n'
+           << "pair_id\t" << pair_id << '\n'
+           << "record_a\t" << record_a << '\n'
+           << "record_b\t" << record_b << '\n'
+           << "k\t" << args.k << '\n'
+           << "m\t" << args.m << '\n'
+           << "profile_id\t" << args.profile_id << '\n'
+           << "method\t" << args.method << '\n'
+           << "root_seed\t" << args.root_seed << '\n'
+           << "hash_seed\t" << hash_seed << '\n'
+           << "trials\t" << args.trials << '\n'
+           << "timing_pair\t" << args.timing_pair << '\n'
+           << "encoder_warmup_pairs\t1\n"
+           << "timed_encoder_pairs\t" << args.trials << '\n'
+           << "correctness_pair_calls\t" << correctness_calls << '\n'
+           << "signature_derivation_timed\tfalse\n"
+           << "encoded_slots_a\t" << encoded_slots_a << '\n'
+           << "encoded_slots_b\t" << encoded_slots_b << '\n';
+    return output.str();
+}
+
 }  // namespace
 
 int RunRealEncodingMode(const RealEncodingCliArgs& args) {
     Require(!args.dataset_manifest_path.empty(), "--dataset-manifest is required");
-    Require(args.profile_id == kProfile, "--mode=encoding requires the Work #5 STD192 profile");
+    const auto& profile = piccard::benchmark::ResolveBenchmarkProfile(args.profile_id);
+    const bool legacy_profile = args.profile_id == kProfile;
+    const bool versioned_profile = IsVersionedEncodingProfile(args.profile_id);
+    Require(legacy_profile || versioned_profile,
+            "--mode=encoding requires a recognized encoding profile");
+    Require(profile.security == piccard::SecurityLevel::STD192 ||
+                args.profile_id == "readiness-toy-v1",
+            "--mode=encoding requires STD192 or readiness toy metadata");
     Require(args.method == kOneHotMethod || args.method == kSqrtMethod,
             "--mode=encoding requires piccard_encode or piccard_sqrt_encode");
-    Require(args.k == 128 && args.m == 64, "--mode=encoding freezes k=128,m=64");
-    Require(args.trials == 1, "--mode=encoding freezes trials=1");
+    if (legacy_profile) {
+        Require(args.k == 128 && args.m == 64,
+                "--mode=encoding freezes k=128,m=64");
+        Require(args.trials == 1, "--mode=encoding freezes trials=1");
+    } else {
+        Require(args.k > 0 && args.m > 0,
+                "versioned encoding requires positive k and m");
+        Require(args.trials == profile.timing_trials,
+                "versioned encoding trials do not match profile");
+    }
     Require(args.timing_pair == "median", "--timing-pair only supports median");
     Require(args.root_seed == 20260729, "--mode=encoding freezes seed=20260729");
     Require(!args.csv_path.empty() && !args.workload_manifest_out_path.empty(),
@@ -251,68 +322,139 @@ int RunRealEncodingMode(const RealEncodingCliArgs& args) {
     const auto dataset_sha_raw = Sha256Raw(manifest_bytes);
     const std::string dataset_sha = Hex(dataset_sha_raw);
     const data::RealDataset dataset = data::LoadRealDataset(manifest_path);
-    Require(dataset.dataset == "dblp_acm" && dataset.variant == "dblp_acm_u65536" &&
-                dataset.universe_size == 65536,
-            "--mode=encoding requires the DBLP-ACM U=65536 processed dataset");
+    if (legacy_profile) {
+        Require(dataset.dataset == "dblp_acm" &&
+                    dataset.variant == "dblp_acm_u65536" &&
+                    dataset.universe_size == 65536,
+                "--mode=encoding requires the DBLP-ACM U=65536 processed dataset");
+    } else {
+        Require(IsPaperEncodingVariant(dataset.variant),
+                "versioned encoding requires a frozen paper dataset variant");
+    }
 
     std::unordered_map<std::string, const data::RealDatasetRecord*> records;
     records.reserve(dataset.records.size());
     for (const auto& record : dataset.records) records.emplace(record.id, &record);
     const auto& pair = dataset.pairs[SelectMedianPair(dataset, records)];
     const auto& record_a = *records.at(pair.record_a);
+    const auto& record_b = *records.at(pair.record_b);
 
     const uint64_t hash_seed = DeriveHashSeed(args.root_seed, dataset_sha_raw, args.k,
                                                args.m, args.profile_id, args.method);
     const MinHasher hasher(args.k, std::numeric_limits<uint64_t>::max(), hash_seed);
-    // Signature derivation is intentionally complete before the warmup/timer.
-    const std::vector<uint64_t> signature = hasher.ComputeSignature(record_a.bucketed_features);
+    // Both signatures are derived before the warmup and every timer.
+    const std::vector<uint64_t> signature_a =
+        hasher.ComputeSignature(record_a.bucketed_features);
+    const std::vector<uint64_t> signature_b =
+        hasher.ComputeSignature(record_b.bucketed_features);
 
     PiccardParams encoder_params;
     encoder_params.k = args.k;
     encoder_params.m = args.m;
-    uint64_t slots = 0;
-    double elapsed_ms = 0.0;
+    std::unique_ptr<OneHotEncoder> onehot_encoder;
+    std::unique_ptr<SqrtEncoder> sqrt_encoder;
     if (args.method == kOneHotMethod) {
         encoder_params.ring_dim = NextPowerOf2(args.k * args.m);
-        OneHotEncoder encoder(encoder_params);
-        const auto warmup = encoder.Encode(signature);
-        (void)warmup;
-        const auto begin = std::chrono::steady_clock::now();
-        const auto timed = encoder.Encode(signature);
-        const auto end = std::chrono::steady_clock::now();
-        const auto correctness = encoder.Encode(signature);
-        VerifyDecoded(encoder.Decode(correctness), signature, args.m);
-        slots = timed.size();
-        elapsed_ms = std::chrono::duration<double, std::milli>(end - begin).count();
+        onehot_encoder = std::make_unique<OneHotEncoder>(encoder_params);
     } else {
         encoder_params.sqrt_base = ExactSqrtBase(args.m);
         encoder_params.ring_dim = NextPowerOf2(args.k * 2 * encoder_params.sqrt_base);
-        SqrtEncoder encoder(encoder_params);
-        const auto warmup = encoder.Encode(signature);
-        (void)warmup;
-        const auto begin = std::chrono::steady_clock::now();
-        const auto timed = encoder.Encode(signature);
-        const auto end = std::chrono::steady_clock::now();
-        const auto correctness = encoder.Encode(signature);
-        VerifyDecoded(encoder.Decode(correctness), signature, args.m);
-        slots = timed.size();
-        elapsed_ms = std::chrono::duration<double, std::milli>(end - begin).count();
+        sqrt_encoder = std::make_unique<SqrtEncoder>(encoder_params);
     }
 
-    const std::string workload = EncodingWorkload(dataset_sha, pair.id, args, hash_seed, slots);
+    auto encode = [&](const std::vector<uint64_t>& signature) {
+        return onehot_encoder ? onehot_encoder->Encode(signature)
+                              : sqrt_encoder->Encode(signature);
+    };
+    // One discarded warmup always encodes both endpoints.
+    static_cast<void>(encode(signature_a));
+    static_cast<void>(encode(signature_b));
+
+    std::vector<double> encode_a_ms;
+    std::vector<double> encode_b_ms;
+    std::vector<double> encode_pair_ms;
+    uint64_t slots_a = 0;
+    uint64_t slots_b = 0;
+    for (uint32_t trial = 0; trial < args.trials; ++trial) {
+        const auto start_a = std::chrono::steady_clock::now();
+        const auto timed_a = encode(signature_a);
+        const auto stop_a = std::chrono::steady_clock::now();
+        const auto start_b = std::chrono::steady_clock::now();
+        const auto timed_b = encode(signature_b);
+        const auto stop_b = std::chrono::steady_clock::now();
+        const double a_ms = std::chrono::duration<double, std::milli>(
+            stop_a - start_a).count();
+        const double b_ms = std::chrono::duration<double, std::milli>(
+            stop_b - start_b).count();
+        encode_a_ms.push_back(a_ms);
+        encode_b_ms.push_back(b_ms);
+        encode_pair_ms.push_back(a_ms + b_ms);
+        if (trial == 0) {
+            slots_a = timed_a.size();
+            slots_b = timed_b.size();
+        } else {
+            Require(slots_a == timed_a.size() && slots_b == timed_b.size(),
+                    "encoder output size changed across pair calls");
+        }
+    }
+
+    // One independent correctness call checks both endpoint encodings.
+    const auto correctness_a = encode(signature_a);
+    const auto correctness_b = encode(signature_b);
+    if (onehot_encoder) {
+        VerifyDecoded(onehot_encoder->Decode(correctness_a), signature_a, args.m);
+        VerifyDecoded(onehot_encoder->Decode(correctness_b), signature_b, args.m);
+    } else {
+        VerifyDecoded(sqrt_encoder->Decode(correctness_a), signature_a, args.m);
+        VerifyDecoded(sqrt_encoder->Decode(correctness_b), signature_b, args.m);
+    }
+
+    auto mean = [](const std::vector<double>& values) {
+        if (values.empty()) throw std::logic_error("no encoding timing samples");
+        return std::accumulate(values.begin(), values.end(), 0.0) /
+               static_cast<double>(values.size());
+    };
+    const double mean_a = mean(encode_a_ms);
+    const double mean_b = mean(encode_b_ms);
+    const double mean_pair = mean_a + mean_b;
+
+    const std::string workload = legacy_profile
+        ? EncodingWorkload(dataset_sha, pair.id, args, hash_seed, slots_a)
+        : VersionedEncodingWorkload(dataset_sha, pair.id, pair.record_a,
+                                    pair.record_b, args, hash_seed, slots_a,
+                                    slots_b, 1);
     std::ostringstream csv;
-    csv << EncodingHeader()
-        << args.profile_id << ",smoke,192,false,encoding-only-diagnostic,"
-        << (args.method == kOneHotMethod ? "onehot-encoding" : "sqrt-encoding") << ','
-        << (args.method == kOneHotMethod ? "piccard-local-encoding" : "piccard-sqrt-local-encoding")
-        << ",encoding-only,false,local-encoder,"
-        << dataset.dataset << ',' << dataset.variant << ',' << dataset_sha << ','
-        << dataset.records_sha256 << ',' << dataset.pairs_sha256 << ',' << pair.id << ','
-        << pair.kind << ',' << pair.label << ',' << pair.record_a << ',' << pair.record_b << ','
-        << args.k << ',' << args.m << ',' << args.method << ',' << args.trials << ','
-        << args.timing_pair << ',' << args.root_seed << ',' << hash_seed
-        << ",1,1,1,false," << data::FormatReal17(elapsed_ms) << ',' << slots
-        << ",PASS,measured\n";
+    if (legacy_profile) {
+        csv << EncodingHeader()
+            << args.profile_id << ",smoke,192,false,encoding-only-diagnostic,"
+            << (args.method == kOneHotMethod ? "onehot-encoding" : "sqrt-encoding") << ','
+            << (args.method == kOneHotMethod ? "piccard-local-encoding" : "piccard-sqrt-local-encoding")
+            << ",encoding-only,false,local-encoder,"
+            << dataset.dataset << ',' << dataset.variant << ',' << dataset_sha << ','
+            << dataset.records_sha256 << ',' << dataset.pairs_sha256 << ',' << pair.id << ','
+            << pair.kind << ',' << pair.label << ',' << pair.record_a << ',' << pair.record_b << ','
+            << args.k << ',' << args.m << ',' << args.method << ',' << args.trials << ','
+            << args.timing_pair << ',' << args.root_seed << ',' << hash_seed
+            << ",1,1,1,false," << data::FormatReal17(mean_pair) << ',' << slots_a
+            << ",PASS,measured\n";
+    } else {
+        csv << VersionedEncodingHeader()
+            << args.profile_id << ','
+            << piccard::benchmark::BenchmarkRunClassName(profile.run_class) << ','
+            << profile.target_security_bits << ",false,encoding-only-diagnostic,"
+            << (args.method == kOneHotMethod ? "onehot-encoding" : "sqrt-encoding") << ','
+            << (args.method == kOneHotMethod ? "piccard-local-encoding" : "piccard-sqrt-local-encoding")
+            << ",encoding-only,false,encoding-timing,"
+            << dataset.dataset << ',' << dataset.variant << ',' << dataset_sha << ','
+            << dataset.records_sha256 << ',' << dataset.pairs_sha256 << ',' << pair.id << ','
+            << pair.kind << ',' << pair.label << ',' << pair.record_a << ',' << pair.record_b << ','
+            << args.k << ',' << args.m << ',' << args.method << ',' << args.trials << ','
+            << args.timing_pair << ',' << args.root_seed << ',' << hash_seed
+            << ",1," << args.trials << ",1,false,"
+            << data::FormatReal17(mean_a) << ',' << data::FormatReal17(mean_b) << ','
+            << data::FormatReal17(mean_pair) << ',' << slots_a << ',' << slots_b
+            << ",PASS,measured\n";
+    }
 
     AtomicWriteNew(fs::path(args.workload_manifest_out_path), workload);
     try {

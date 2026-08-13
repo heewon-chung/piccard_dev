@@ -11,7 +11,7 @@ namespace {
 
 constexpr uint64_t kProfileMaxQueries = UINT64_C(1) << 20;
 
-const std::array<BenchmarkProfile, 9> kProfiles = {{
+const std::array<BenchmarkProfile, 12> kProfiles = {{
     {"std128-t40-primary", SecurityLevel::STD128, 128, 40,
      kProfileMaxQueries, 20, BenchmarkRunClass::Primary, true, true},
     {"std192-t40-primary", SecurityLevel::STD192, 192, 40,
@@ -30,6 +30,15 @@ const std::array<BenchmarkProfile, 9> kProfiles = {{
      kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false},
     {"work5-std192-t40-single-trial", SecurityLevel::STD192, 192, 40,
      kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false},
+    {"paper-std128-t40-v1", SecurityLevel::STD128, 128, 40,
+     kProfileMaxQueries, 20, BenchmarkRunClass::Primary, true, true,
+     30, 50, 0, 1, false},
+    {"paper-std192-encoding-v1", SecurityLevel::STD192, 192, 40,
+     kProfileMaxQueries, 20, BenchmarkRunClass::Primary, true, false,
+     30, 0, 1, 1, true},
+    {"readiness-toy-v1", SecurityLevel::TOY, 0, 40,
+     kProfileMaxQueries, 20, BenchmarkRunClass::Smoke, true, false,
+     1, 1, 1, 1, false},
 }};
 
 void AddKGrid(std::vector<BenchmarkGridPoint>& out,
@@ -88,6 +97,13 @@ const BenchmarkProfile& ResolveBenchmarkProfile(std::string_view profile_id) {
     }
     throw std::invalid_argument("Unknown benchmark profile: " +
                                 std::string(profile_id));
+}
+
+bool IsSqrtApplicable(const uint32_t m) {
+    if (m == 0) return false;
+    uint32_t root = 1;
+    while (root <= m / root && root * root < m) ++root;
+    return static_cast<uint64_t>(root) * root == m;
 }
 
 BenchmarkProfile LegacyBenchmarkProfile() {

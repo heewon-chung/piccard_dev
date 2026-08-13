@@ -742,6 +742,37 @@ class RealDatasetPipelineEncodingTest(unittest.TestCase):
                           "encrypt(", "decrypt(", "eval"):
             self.assertNotIn(forbidden, source)
 
+    def test_versioned_encoding_profile_emits_two_endpoint_pair_timing(self):
+        csv_path = self.out_dir / "versioned-pair.csv"
+        workload = self.out_dir / "versioned-pair.manifest.tsv"
+        result = subprocess.run(
+            [
+                str(BINARY), f"--dataset-manifest={QUICK_FIXTURE_MANIFEST}",
+                "--mode=encoding", "--profile=readiness-toy-v1",
+                "--method=piccard_encode", "--k=16", "--m=16",
+                "--trials=1", "--timing-pair=median", "--seed=20260729",
+                f"--csv={csv_path}", f"--workload-manifest-out={workload}",
+            ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["profile_id"], "readiness-toy-v1")
+        self.assertEqual(row["timing_trials"], "1")
+        self.assertEqual(row["encoder_warmup_pairs"], "1")
+        self.assertEqual(row["timed_encoder_pairs"], "1")
+        self.assertEqual(row["correctness_pair_calls"], "1")
+        self.assertEqual(row["signature_derivation_timed"], "false")
+        self.assertEqual(row["correctness_status"], "PASS")
+        a_ms = float(row["encode_a_ms"])
+        b_ms = float(row["encode_b_ms"])
+        pair_ms = float(row["encode_pair_ms"])
+        self.assertGreaterEqual(a_ms, 0.0)
+        self.assertGreaterEqual(b_ms, 0.0)
+        self.assertEqual(pair_ms, a_ms + b_ms)
+
 
 class SummarizeRealDatasetsTest(unittest.TestCase):
     """scripts/summarize_real_datasets.py (Work 5 Sub-phase 5.5): CLI

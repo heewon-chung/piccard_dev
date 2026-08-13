@@ -269,14 +269,25 @@ struct Observation {
     // FHE-IND exposes the decrypted cardinality in addition to the common
     // Jaccard observation. Other adapters leave this field unset.
     std::optional<int64_t> intersection_count;
+    // Versioned local-encoding timing is a pair measurement.  The legacy
+    // serializer continues to use cost.total_ms, while successor rows expose
+    // these three fields separately.
+    double encode_a_ms = 0.0;
+    double encode_b_ms = 0.0;
+    double encode_pair_ms = 0.0;
 };
 
 struct EncodingAudit {
     uint32_t warmup_calls = 0;
     uint32_t timed_calls = 0;
     uint32_t correctness_calls = 0;
+    uint32_t warmup_pair_calls = 0;
+    uint32_t timed_pair_calls = 0;
+    uint32_t correctness_pair_calls = 0;
     uint32_t feature_size = 0;
+    uint32_t feature_size_b = 0;
     std::string correctness_feature_sha256;
+    std::string correctness_feature_sha256_b;
     bool correctness_passed = false;
 };
 
@@ -358,41 +369,58 @@ public:
     }
 
     Observation Run(const ComparisonTrial& trial) override {
-        // Signature construction is intentionally outside all timed regions.
-        const std::vector<uint64_t> signature = MinHasher(
+        // Both endpoint signatures are constructed before any warmup or
+        // timing boundary.  MinHash is therefore never part of an endpoint
+        // or pair encoder measurement.
+        const MinHasher hasher(
             params_.k, std::numeric_limits<uint64_t>::max(), trial.hash_seed)
-            .ComputeSignature(trial.set_a);
+            ;
+        const std::vector<uint64_t> signature_a =
+            hasher.ComputeSignature(trial.set_a);
+        const std::vector<uint64_t> signature_b =
+            hasher.ComputeSignature(trial.set_b);
         Observation out;
         if (trial.kind == TrialKind::Warmup) {
-            static_cast<void>(Encode(signature));
+            static_cast<void>(Encode(signature_a));
+            static_cast<void>(Encode(signature_b));
             ++audit_.warmup_calls;
+            ++audit_.warmup_pair_calls;
             return out;
         }
         if (trial.kind == TrialKind::Timing) {
-            std::vector<int64_t> feature;
-            if (sqrt_) {
-                const auto start = Clock::now();
-                feature = sqrt_encoder_->Encode(signature);
-                const auto stop = Clock::now();
-                out.cost.total_ms = std::chrono::duration<double, std::milli>(
-                    stop - start).count();
-            } else {
-                const auto start = Clock::now();
-                feature = onehot_encoder_->Encode(signature);
-                const auto stop = Clock::now();
-                out.cost.total_ms = std::chrono::duration<double, std::milli>(
-                    stop - start).count();
-            }
-            audit_.feature_size = static_cast<uint32_t>(feature.size());
+            const auto start_a = Clock::now();
+            const std::vector<int64_t> feature_a = Encode(signature_a);
+            const auto stop_a = Clock::now();
+            const auto start_b = Clock::now();
+            const std::vector<int64_t> feature_b = Encode(signature_b);
+            const auto stop_b = Clock::now();
+            out.encode_a_ms = std::chrono::duration<double, std::milli>(
+                stop_a - start_a).count();
+            out.encode_b_ms = std::chrono::duration<double, std::milli>(
+                stop_b - start_b).count();
+            out.encode_pair_ms = out.encode_a_ms + out.encode_b_ms;
+            out.cost.total_ms = out.encode_pair_ms;
+            audit_.feature_size = static_cast<uint32_t>(feature_a.size());
+            audit_.feature_size_b = static_cast<uint32_t>(feature_b.size());
             ++audit_.timed_calls;
+            ++audit_.timed_pair_calls;
             return out;
         }
-        const std::vector<int64_t> feature = Encode(signature);
-        ValidateFeature(signature, feature);
-        audit_.feature_size = static_cast<uint32_t>(feature.size());
-        audit_.correctness_feature_sha256 = FeatureSha256(feature);
+        if (trial.kind != TrialKind::Accuracy &&
+            trial.kind != TrialKind::Correctness) {
+            throw std::logic_error("unknown encoding trial kind");
+        }
+        const std::vector<int64_t> feature_a = Encode(signature_a);
+        const std::vector<int64_t> feature_b = Encode(signature_b);
+        ValidateFeature(signature_a, feature_a);
+        ValidateFeature(signature_b, feature_b);
+        audit_.feature_size = static_cast<uint32_t>(feature_a.size());
+        audit_.feature_size_b = static_cast<uint32_t>(feature_b.size());
+        audit_.correctness_feature_sha256 = FeatureSha256(feature_a);
+        audit_.correctness_feature_sha256_b = FeatureSha256(feature_b);
         audit_.correctness_passed = true;
         ++audit_.correctness_calls;
+        ++audit_.correctness_pair_calls;
         return out;
     }
 
@@ -674,6 +702,16 @@ std::string OptionalDouble(const std::optional<double>& value) {
     return out.str();
 }
 
+std::string Format17(const double value) {
+    if (!std::isfinite(value) || value < 0.0) {
+        throw std::invalid_argument("encoding timing must be finite and non-negative");
+    }
+    std::ostringstream out;
+    out << std::setprecision(17) << std::defaultfloat
+        << (value == 0.0 ? 0.0 : value);
+    return out.str();
+}
+
 std::string CsvHeader() {
     return "suite,scenario,method,profile_id,run_class,target_security_bits,"
            "cryptographic_profile,nominal_security_bits,security_match,"
@@ -714,11 +752,130 @@ std::string EncodingCsvHeader() {
            "total_ms_sd,total_ms_median,measurement_status\n";
 }
 
+std::string VersionedEncodingCsvHeader() {
+    return "suite,scenario,method,profile_id,run_class,target_security_bits,"
+           "cryptographic_profile,nominal_security_bits,security_match,"
+           "comparison_eligible,comparison_scope,primitive,protocol_model,"
+           "output_semantics,assurance_scope,security_basis,cost_scope,"
+           "precomputation_mode,secure_division_included,measurement_kind,"
+           "evidence_arm,workload_id,workload_manifest_sha256,"
+           "execution_trace_sha256,root_seed,omp_threads,omp_dynamic,k,m,"
+           "set_size,universe_size,target_jaccard_numerator,"
+           "target_jaccard_denominator,target_jaccard,realized_intersection,"
+           "realized_union,realized_jaccard,timing_trials,accuracy_trials,"
+           "correctness_trials,trials,hash_randomness,hash_seed,"
+           "encoder_input_construction,encoder_warmup_pairs,"
+           "timed_encoder_pairs,correctness_pair_calls,"
+           "signature_derivation_timed,encode_a_ms,encode_b_ms,"
+           "encode_pair_ms,encoded_slots_a,encoded_slots_b,"
+           "correctness_feature_sha256_a,correctness_feature_sha256_b,"
+           "correctness_status,measurement_status\n";
+}
+
+std::string SerializeVersionedEncodingAggregate(
+    const Options& options,
+    const BenchmarkProfile& profile,
+    const ComparisonWorkload& workload,
+    const std::string& trace_sha,
+    const Aggregate& aggregate) {
+    const EncodingAudit* audit = aggregate.adapter->Encoding();
+    const uint32_t expected_correctness = workload.Spec().correctness_trials;
+    if (audit == nullptr || audit->warmup_pair_calls != profile.warmup_calls ||
+        audit->timed_pair_calls != profile.timing_trials ||
+        audit->correctness_pair_calls != expected_correctness ||
+        !audit->correctness_passed || audit->feature_size == 0 ||
+        audit->feature_size_b == 0 ||
+        audit->correctness_feature_sha256.empty() ||
+        audit->correctness_feature_sha256_b.empty()) {
+        throw std::logic_error(
+            "versioned encoding adapter did not complete pair audit schedule");
+    }
+    if (aggregate.kind != TrialKind::Timing ||
+        aggregate.observations.size() != profile.timing_trials) {
+        throw std::logic_error(
+            "versioned encoding aggregate has an unexpected arm or count");
+    }
+    const BaselineCapability cap = ResolveBaselineCapability(
+        MethodEnum(aggregate.adapter->Name(), options.sj16_key_bits),
+        profile.target_security_bits, BaselineEvidenceKind::Timing,
+        BaselineSecurityPolicy::AllowDiagnostic);
+    const auto row_policy = ResolveReviewMethodRowPolicy(
+        aggregate.adapter->Name(), TrialKind::Timing, options.k, options.m,
+        workload.Records()[1].hash_seed);
+    std::vector<double> a_values;
+    std::vector<double> b_values;
+    std::vector<double> pair_values;
+    a_values.reserve(aggregate.observations.size());
+    b_values.reserve(aggregate.observations.size());
+    pair_values.reserve(aggregate.observations.size());
+    for (const auto& observation : aggregate.observations) {
+        a_values.push_back(observation.encode_a_ms);
+        b_values.push_back(observation.encode_b_ms);
+        pair_values.push_back(observation.encode_pair_ms);
+    }
+    const Stats a_stats = Summarize(a_values);
+    const Stats b_stats = Summarize(b_values);
+    const Stats pair_stats = Summarize(pair_values);
+    const auto& realized = workload.Records().front();
+    std::ostringstream out;
+    out << options.suite << ",review-" << options.universe << ","
+        << aggregate.adapter->Name() << "," << profile.id << ","
+        << BenchmarkRunClassName(profile.run_class) << ","
+        << profile.target_security_bits << "," << cap.cryptographic_profile << ","
+        << OptionalU32(cap.nominal_security_bits) << ","
+        << (cap.security_match ? "true" : "false") << ",false,"
+        << ComparisonScopeName(cap.comparison_scope) << ","
+        << PrimitiveName(cap.primitive) << ","
+        << ProtocolModelName(cap.protocol_model) << ","
+        << OutputSemanticsName(cap.output_semantics) << ","
+        << AssuranceScopeName(cap.assurance_scope) << ","
+        << SecurityBasisName(cap.security_basis) << ","
+        << CostScopeName(cap.cost_scope) << ","
+        << PrecomputationModeName(cap.precomputation_mode) << ",false,"
+        << ReviewMeasurementKind(aggregate.adapter->Name(), TrialKind::Timing)
+        << ",timing," << workload.WorkloadId() << ","
+        << workload.ManifestSha256Hex() << "," << trace_sha << ","
+        << options.seed << ","
+#ifdef _OPENMP
+        << omp_get_max_threads() << "," << (omp_get_dynamic() ? "true" : "false")
+#else
+        << 1 << ",false"
+#endif
+        << "," << OptionalU64(row_policy.k) << ","
+        << OptionalU64(row_policy.m) << "," << options.set_size << ","
+        << options.universe << "," << realized.exact_jaccard.numerator << ","
+        << realized.exact_jaccard.denominator << ","
+        << Format17(RationalDouble(workload.Spec().target_jaccard)) << ","
+        << realized.exact_intersection << "," << realized.exact_union << ","
+        << Format17(RationalDouble(realized.exact_jaccard)) << ","
+        << workload.Spec().timing_trials << ","
+        << workload.Spec().accuracy_trials << ","
+        << workload.Spec().correctness_trials << ","
+        << aggregate.observations.size()
+        << ",fixed," << OptionalU64(row_policy.hash_seed) << ","
+        << "canonical-minhash-signatures-untimed," << audit->warmup_pair_calls
+        << "," << audit->timed_pair_calls << ","
+        << audit->correctness_pair_calls << ",false,"
+        << Format17(a_stats.mean) << "," << Format17(b_stats.mean) << ","
+        // Compute the pair field from the serialized endpoint values so the
+        // wire-level identity is an exact sum, not a separately rounded mean.
+        << Format17(a_stats.mean + b_stats.mean) << "," << audit->feature_size
+        << "," << audit->feature_size_b << ","
+        << audit->correctness_feature_sha256 << ","
+        << audit->correctness_feature_sha256_b << ",PASS,measured\n";
+    (void)pair_stats;
+    return out.str();
+}
+
 std::string SerializeEncodingAggregate(const Options& options,
                                        const BenchmarkProfile& profile,
                                        const ComparisonWorkload& workload,
                                        const std::string& trace_sha,
                                        const Aggregate& aggregate) {
+    if (workload.Spec().correctness_trials != 0) {
+        return SerializeVersionedEncodingAggregate(
+            options, profile, workload, trace_sha, aggregate);
+    }
     const EncodingAudit* audit = aggregate.adapter->Encoding();
     if (audit == nullptr || audit->warmup_calls != 1 || audit->timed_calls != 1 ||
         audit->correctness_calls != 1 || !audit->correctness_passed ||
@@ -1021,8 +1178,10 @@ int Run(int argc, char** argv) {
         throw std::invalid_argument(
             "work5-std192-sj16 requires literal --allow-unmatched-security");
     }
-    if ((options.suite == "toy-smoke" && options.sj16_key_bits != 1024) ||
-        (options.suite != "toy-smoke" && options.sj16_key_bits != 3072)) {
+    const bool readiness_toy_suite = options.suite == "toy-smoke" ||
+                                     options.suite == "readiness-toy-v1";
+    const unsigned expected_sj16_bits = readiness_toy_suite ? 1024 : 3072;
+    if (options.sj16_key_bits != expected_sj16_bits) {
         throw std::invalid_argument("SJ16 key size does not match frozen suite");
     }
 #ifdef _OPENMP
@@ -1044,6 +1203,14 @@ int Run(int argc, char** argv) {
     spec.methods = options.methods;
     spec.timing_trials = options.trials;
     spec.accuracy_trials = options.accuracy_trials;
+    if (options.suite == "paper-std192-encoding-v1" ||
+        (options.suite == "readiness-toy-v1" &&
+         std::all_of(spec.methods.begin(), spec.methods.end(),
+                     [](const std::string& method) {
+                         return IsEncodingMethod(method);
+                     }))) {
+        spec.correctness_trials = 1;
+    }
 
     // Contract boundary: every set/seed is generated and persisted before any
     // adapter construction, group setup, Paillier keygen, or FHE keygen.
@@ -1083,7 +1250,8 @@ int Run(int argc, char** argv) {
             for (const auto& method : workload.ExecutionOrder(trial)) {
                 trace.AppendDispatch(method);  // must precede adapter invocation
                 Observation observation = by_name.at(method)->Run(trial);
-                if (trial.kind != TrialKind::Warmup) {
+                if (trial.kind == TrialKind::Timing ||
+                    trial.kind == TrialKind::Accuracy) {
                     aggregates.at({method, trial.kind}).observations.push_back(
                         std::move(observation));
                 }
@@ -1146,7 +1314,11 @@ int Run(int argc, char** argv) {
     ValidateAggregateMembership(workload, identities);
 
     // Aggregate CSV is emitted only after the complete trace is durably bound.
-    std::cout << (encoding_only ? EncodingCsvHeader() : CsvHeader());
+    const bool versioned_encoding =
+        encoding_only && workload.Spec().correctness_trials != 0;
+    std::cout << (versioned_encoding
+        ? VersionedEncodingCsvHeader()
+        : (encoding_only ? EncodingCsvHeader() : CsvHeader()));
     for (const auto& row : rows) std::cout << row;
     return 0;
 }

@@ -29,6 +29,8 @@ constexpr char kSetDomain[] = "piccard-review-set-v1";
 constexpr char kWarmupHashDomain[] = "piccard-review-hash-warmup-v1";
 constexpr char kTimingHashDomain[] = "piccard-review-hash-timing-v1";
 constexpr char kAccuracyHashDomain[] = "piccard-review-hash-accuracy-v1";
+constexpr char kCorrectnessHashDomain[] =
+    "piccard-review-hash-correctness-v1";
 constexpr char kTraceDomain[] = "piccard-review-execution-trace-v1";
 constexpr char kTrialPayloadDomain[] = "piccard-work5-trial-payload-v1";
 
@@ -176,11 +178,26 @@ const FrozenSuite* FindWork5Suite(const std::string& suite) {
     return nullptr;
 }
 
+bool IsEncodingMethodName(const std::string& method) {
+    return method == "piccard_encode" || method == "piccard_sqrt_encode";
+}
+
+bool AllEncodingMethods(const std::vector<std::string>& methods) {
+    return !methods.empty() && std::all_of(
+        methods.begin(), methods.end(), IsEncodingMethodName);
+}
+
+bool HasCorrectnessField(const std::string& suite) {
+    return suite == "paper-std192-encoding-v1" ||
+           suite == "readiness-toy-v1";
+}
+
 void ValidateSuite(const WorkloadSpec& spec) {
     const std::vector<std::string>* expected = nullptr;
     const char* profile = nullptr;
     uint32_t timing = 0;
     uint32_t accuracy = 0;
+    uint32_t correctness = 0;
     if (spec.suite == "primary-review") {
         expected = &PrimaryMethods();
         profile = "std128-t40-primary";
@@ -196,6 +213,35 @@ void ValidateSuite(const WorkloadSpec& spec) {
         profile = "std128-t64-sensitivity";
         timing = 3;
         accuracy = 0;
+    } else if (spec.suite == "paper-std128-t40-v1") {
+        static const std::vector<std::string> methods = {
+            "piccard", "piccard_sqrt"};
+        expected = &methods;
+        profile = "paper-std128-t40-v1";
+        timing = 30;
+        accuracy = 50;
+    } else if (spec.suite == "paper-std192-encoding-v1") {
+        static const std::vector<std::string> methods = {
+            "piccard_encode", "piccard_sqrt_encode"};
+        expected = &methods;
+        profile = "paper-std192-encoding-v1";
+        timing = 30;
+        correctness = 1;
+    } else if (spec.suite == "readiness-toy-v1") {
+        profile = "readiness-toy-v1";
+        timing = 1;
+        if (AllEncodingMethods(spec.methods)) {
+            expected = &spec.methods;
+            correctness = 1;
+        } else {
+            // The readiness profile is shared by the STD128 and local
+            // encoding matrix identities.  It only permits the concrete
+            // methods already represented by the Work 5 adapters.
+            static const std::vector<std::string> methods = {
+                "piccard", "piccard_sqrt"};
+            expected = &methods;
+            accuracy = 1;
+        }
     } else if (const FrozenSuite* work5 = FindWork5Suite(spec.suite)) {
         expected = &work5->methods;
         profile = work5->profile;
@@ -206,7 +252,8 @@ void ValidateSuite(const WorkloadSpec& spec) {
                                     spec.suite);
     }
     if (spec.profile_id != profile || spec.methods != *expected ||
-        spec.timing_trials != timing || spec.accuracy_trials != accuracy) {
+        spec.timing_trials != timing || spec.accuracy_trials != accuracy ||
+        spec.correctness_trials != correctness) {
         throw std::invalid_argument(
             "suite profile, ordered methods, or trial counts do not match the frozen policy");
     }
@@ -251,7 +298,7 @@ void ValidateSpec(const WorkloadSpec& spec) {
     }
     if (spec.methods.empty()) throw std::invalid_argument("method list is empty");
     const uint64_t record_count = UINT64_C(1) + spec.timing_trials +
-                                  spec.accuracy_trials;
+                                  spec.accuracy_trials + spec.correctness_trials;
     if (record_count > std::numeric_limits<uint32_t>::max()) {
         throw std::invalid_argument("record_count exceeds BE32");
     }
@@ -289,11 +336,18 @@ uint64_t HashSeed(uint64_t root_seed, TrialKind kind, uint32_t index) {
         AppendDomain(input, kWarmupHashDomain);
     } else if (kind == TrialKind::Timing) {
         AppendDomain(input, kTimingHashDomain);
-    } else {
+    } else if (kind == TrialKind::Accuracy) {
         AppendDomain(input, kAccuracyHashDomain);
+    } else {
+        AppendDomain(input, kCorrectnessHashDomain);
     }
     AppendBE64(input, root_seed);
-    if (kind == TrialKind::Accuracy) AppendBE32(input, index);
+    // Work 5 timing hashes intentionally omit the index; preserve that
+    // payload byte-for-byte while versioned correctness rows get their own
+    // indexed domain.
+    if (kind == TrialKind::Accuracy || kind == TrialKind::Correctness) {
+        AppendBE32(input, index);
+    }
     return First8BE(Sha256(input));
 }
 
@@ -388,6 +442,11 @@ Bytes SerializeWorkload(const WorkloadSpec& spec,
     for (const auto& method : spec.methods) AppendString(out, method);
     AppendBE32(out, spec.timing_trials);
     AppendBE32(out, spec.accuracy_trials);
+    // Preserve every Work 5 workload byte exactly: the additional count is
+    // present only in the versioned successor encoding suites.
+    if (HasCorrectnessField(spec.suite)) {
+        AppendBE32(out, spec.correctness_trials);
+    }
     AppendBE32(out, static_cast<uint32_t>(records.size()));
     for (const auto& record : records) {
         const Bytes bytes = SerializeTrial(record);
@@ -587,6 +646,10 @@ std::string ReviewMeasurementKind(const std::string& method, TrialKind kind) {
     if (kind == TrialKind::Warmup) {
         throw std::invalid_argument("warmup records do not emit aggregate rows");
     }
+    if (kind == TrialKind::Correctness) {
+        throw std::invalid_argument(
+            "correctness records do not emit aggregate rows");
+    }
     return kind == TrialKind::Accuracy
         ? AccuracyKind(method) : TimingKind(method);
 }
@@ -599,6 +662,10 @@ ReviewMethodRowPolicy ResolveReviewMethodRowPolicy(
     uint64_t timing_hash_seed) {
     if (kind == TrialKind::Warmup) {
         throw std::invalid_argument("warmup records do not emit aggregate rows");
+    }
+    if (kind == TrialKind::Correctness) {
+        throw std::invalid_argument(
+            "correctness records do not emit aggregate rows");
     }
     // Piccard consumes both configured dimensions. BCG12 MinHash consumes k
     // and the shared full-range CRS, but not one-hot m. Exact BCG12 and SJ16
@@ -693,6 +760,10 @@ ComparisonWorkload ComparisonWorkload::Generate(const WorkloadSpec& spec) {
         workload.records_.push_back(
             GenerateTrial(spec, TrialKind::Accuracy, i, intersection));
     }
+    for (uint32_t i = 0; i < spec.correctness_trials; ++i) {
+        workload.records_.push_back(
+            GenerateTrial(spec, TrialKind::Correctness, i, intersection));
+    }
     workload.bytes_ = SerializeWorkload(spec, workload.records_);
     workload.digest_ = Sha256(workload.bytes_);
     workload.digest_hex_ = Hex(workload.digest_);
@@ -724,13 +795,17 @@ ComparisonWorkload ComparisonWorkload::ParseAndVerify(
     }
     spec.timing_trials = reader.BE32();
     spec.accuracy_trials = reader.BE32();
+    if (HasCorrectnessField(spec.suite)) {
+        spec.correctness_trials = reader.BE32();
+    }
     const uint32_t record_count = reader.BE32();
-    if (record_count != UINT64_C(1) + spec.timing_trials + spec.accuracy_trials) {
+    if (record_count != UINT64_C(1) + spec.timing_trials +
+                           spec.accuracy_trials + spec.correctness_trials) {
         throw std::invalid_argument("workload record_count mismatch");
     }
     for (uint32_t i = 0; i < record_count; ++i) {
         const uint8_t kind = reader.U8();
-        if (kind > static_cast<uint8_t>(TrialKind::Accuracy)) {
+        if (kind > static_cast<uint8_t>(TrialKind::Correctness)) {
             throw std::invalid_argument("invalid trial kind");
         }
         (void)reader.BE32();
