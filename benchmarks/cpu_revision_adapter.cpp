@@ -1,6 +1,7 @@
 #include "cpu_revision_adapter.h"
 
 #include <charconv>
+#include <initializer_list>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -72,6 +73,16 @@ void Require(const std::set<std::string>& seen,
              std::initializer_list<const char*> fields) {
     for (const char* field : fields) {
         if (seen.find(field) == seen.end()) Reject(std::string("missing ") + field);
+    }
+}
+
+void RejectUnexpected(const std::set<std::string>& seen,
+                      std::initializer_list<const char*> fields) {
+    const std::set<std::string> allowed(fields.begin(), fields.end());
+    for (const std::string& field : seen) {
+        if (allowed.find(field) == allowed.end()) {
+            Reject("option " + field + " is not accepted by this producer");
+        }
     }
 }
 
@@ -197,13 +208,16 @@ CpuRevisionRequest ParseCpuRevisionArgs(
 
     switch (producer) {
         case CpuRevisionProducer::EstimatorBias:
+            RejectUnexpected(seen, {"--revision-cell", "--profile", "--cell",
+                                    "--k", "--m", "--set_size", "--universe",
+                                    "--trials", "--jaccard-grid", "--seed"});
             Require(seen, {"--revision-cell", "--profile", "--cell", "--k",
                            "--m", "--set_size", "--universe", "--trials",
                            "--jaccard-grid", "--seed"});
             if (!request.output.empty() ||
                 (request.cell != "estimator-j" &&
                  request.cell != "estimator-k")) {
-                if (seen.find("output") != seen.end()) {
+                if (seen.find("--output") != seen.end()) {
                     Reject("estimator does not accept --output");
                 }
                 Reject("invalid estimator --cell");
@@ -211,6 +225,9 @@ CpuRevisionRequest ParseCpuRevisionArgs(
             if (request.jaccard_grid.empty()) Reject("missing --jaccard-grid");
             break;
         case CpuRevisionProducer::DeletionSurvival:
+            RejectUnexpected(seen, {"--revision-cell", "--profile", "--cell",
+                                    "--k", "--m", "--set_size", "--universe",
+                                    "--trials", "--seed"});
             Require(seen, {"--revision-cell", "--profile", "--cell", "--k",
                            "--m", "--set_size", "--universe", "--trials",
                            "--seed"});
@@ -225,6 +242,11 @@ CpuRevisionRequest ParseCpuRevisionArgs(
             }
             break;
         case CpuRevisionProducer::Sj16Calibrate:
+            RejectUnexpected(seen, {"--revision-cell", "--profile", "--cell",
+                                    "--key-bits", "--sizes", "--held-out",
+                                    "--threads", "--precomputed",
+                                    "--query-trials", "--enc-iters", "--warmup",
+                                    "--seed", "--output"});
             Require(seen, {"--revision-cell", "--profile", "--cell",
                            "--key-bits", "--sizes", "--held-out", "--threads",
                            "--precomputed", "--query-trials", "--enc-iters",
