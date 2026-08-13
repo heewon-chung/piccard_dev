@@ -1,6 +1,8 @@
 #include "benchmark_utils.h"
 #include "benchmark_provenance.h"
 #include "raw_timing_schema.h"
+#include "revision_matrix.h"
+#include "threshold_revision_adapter.h"
 #include "threshold_csv_schema.h"
 #include "threshold_fpfn_schema.h"
 #include "protocol/threshold_piccard.h"
@@ -22,6 +24,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1156,10 +1159,19 @@ static void BenchVarySetSize(const BenchmarkConfig& config,
 // ============================================================================
 
 static void BenchAccuracyVaryK(const BenchmarkConfig& config,
-                                ThresholdCSVWriter& csv) {
-    std::vector<uint32_t> k_values = QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
-    std::vector<double> overlaps = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
-                                    0.6, 0.7, 0.8, 0.9, 1.0};
+                                ThresholdCSVWriter& csv,
+                                std::optional<uint32_t> selected_k = std::nullopt,
+                                const std::string& revision_cell = {}) {
+    std::vector<uint32_t> k_values = selected_k.has_value()
+        ? std::vector<uint32_t>{*selected_k}
+        : QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
+    // The revision agreement cell is a one-point successor of this legacy
+    // path.  Keep the same engine->Run/MakeTruthContext calculation, but
+    // suppress the historical k/overlap sweep when a cell selector is bound.
+    const std::vector<double> overlaps = selected_k.has_value()
+        ? std::vector<double>{0.5}
+        : std::vector<double>{0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                              0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t k : k_values) {
         uint32_t tau = static_cast<uint32_t>(0.6 * k);
@@ -1212,9 +1224,11 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
                 j_hat = std::max(0.0, std::min(1.0, j_hat));
 
                 ThresholdResult tr;
-                tr.label = "accuracy_k" + std::to_string(k) +
-                           "_" + std::to_string(frac) +
-                           "_t" + std::to_string(t);
+                tr.label = selected_k.has_value()
+                    ? revision_cell + "::trial=" + std::to_string(t)
+                    : "accuracy_k" + std::to_string(k) +
+                      "_" + std::to_string(frac) +
+                      "_t" + std::to_string(t);
                 tr.k = k;
                 tr.m = config.m;
                 tr.set_size = config.set_size;
@@ -1596,9 +1610,11 @@ static void BenchFpfnVaryK(const BenchmarkConfig& config,
 // u_tau construction & evaluation parameter dump (R3-4 paper table)
 // ============================================================================
 
-static void BenchSpecDump(const BenchmarkConfig& config) {
-    std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
-        {16, 32, 64, 128, 256, 512}, config.security_level);
+static void BenchSpecDump(const BenchmarkConfig& config,
+                          std::optional<uint32_t> selected_k = std::nullopt) {
+    std::vector<uint32_t> k_values = selected_k.has_value()
+        ? std::vector<uint32_t>{*selected_k}
+        : QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
 
     // The historical timing/accuracy writer remains separate.  Spec mode
     // has an additive successor contract so the old ring/depth aliases cannot
@@ -1762,6 +1778,163 @@ static void BenchSpecDump(const BenchmarkConfig& config) {
 // Main
 // ============================================================================
 
+static bool HasThresholdRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::vector<std::string> CanonicalizeThresholdPlannerArgv(
+    int argc, char** argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(static_cast<size_t>(argc > 0 ? argc - 1 : 0));
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
+            canonical.push_back("--seed={seed}");
+        } else {
+            canonical.push_back(arg);
+        }
+    }
+    return canonical;
+}
+
+static uint64_t ParseThresholdConcreteSeed(int argc, char** argv) {
+    bool seen = false;
+    uint64_t seed = 0;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--seed=", 0) != 0) continue;
+        if (seen) throw std::invalid_argument("duplicate --seed");
+        seen = true;
+        const std::string value = arg.substr(7);
+        if (value == "{seed}" || value.empty() || value.front() == '-' ||
+            value.front() == '+') {
+            throw std::invalid_argument(
+                "threshold revision requires a concrete --seed value");
+        }
+        const auto result = std::from_chars(
+            value.data(), value.data() + value.size(), seed);
+        if (result.ec != std::errc{} ||
+            result.ptr != value.data() + value.size() || seed == 0 ||
+            std::to_string(seed) != value) {
+            throw std::invalid_argument("invalid concrete threshold --seed");
+        }
+    }
+    if (!seen) throw std::invalid_argument("missing concrete threshold --seed");
+    return seed;
+}
+
+static SecurityLevel ThresholdSecurityForRevisionProfile(
+    const std::string& profile) {
+    if (profile == "readiness-toy-v1") return SecurityLevel::TOY;
+    if (profile == "paper-v1") return SecurityLevel::STD128;
+    throw std::invalid_argument("unsupported threshold revision profile");
+}
+
+static int RunThresholdRevisionCell(
+    const ThresholdRevisionRequest& request,
+    const ThresholdRevisionExecutionPlan& execution,
+    uint64_t concrete_seed) {
+    if (execution.selected_point_count != 1 || execution.native_sweep ||
+        execution.keygen_calls != 0) {
+        throw std::logic_error(
+            "threshold revision execution plan is not a one-cell plan");
+    }
+
+    if (execution.selection.kind == "synthetic_fpfn") {
+        FpfnConfig fpfn;
+        fpfn.profile = request.profile;
+        fpfn.security = request.security.empty()
+            ? (request.profile == "readiness-toy-v1" ? "TOY" : "STD128")
+            : request.security;
+        fpfn.hash_randomness = request.hash_randomness;
+        fpfn.root_seed = concrete_seed;
+        fpfn.trials = static_cast<size_t>(request.trials);
+        fpfn.m = request.m;
+        fpfn.set_size = request.set_size;
+        fpfn.point_k = request.point_k;
+        fpfn.grid_index = request.grid_index;
+        return RunSyntheticThresholdPoint(fpfn);
+    }
+
+    BenchmarkConfig config;
+    config.k = execution.k;
+    config.m = execution.m;
+    config.set_size = execution.set_size;
+    config.trials = static_cast<size_t>(execution.trials);
+    config.seed = concrete_seed;
+    config.mode = execution.selection.kind == "agreement"
+        ? "accuracy" : execution.selection.kind;
+    config.security_level =
+        ThresholdSecurityForRevisionProfile(request.profile);
+    config.hash_randomness = HashRandomness::Resampled;
+    config.profile = request.profile == "readiness-toy-v1"
+        ? ResolveBenchmarkProfile("readiness-toy-v1")
+        : ResolveBenchmarkProfile("paper-std128-t40-v1");
+
+    if (execution.selection.kind == "spec") {
+        // BenchSpecDump writes the diagnostic schema and receives an explicit
+        // point, so the historical k sweep cannot accidentally run here.
+        BenchSpecDump(config, execution.k);
+        return 0;
+    }
+
+    ThresholdCSVWriter csv;
+    csv.WriteHeader();
+    if (execution.selection.kind == "agreement") {
+        // Reuse the existing FHE accuracy/agreement calculation while binding
+        // it to one k and one overlap point.  The selected cell's trial count
+        // is the only loop left in this successor path.
+        BenchAccuracyVaryK(config, csv, execution.k,
+                           execution.selection.cell.cell_id);
+        return 0;
+    }
+
+    PiccardParams params;
+    std::string error;
+    const uint32_t tau = static_cast<uint32_t>(0.6 * execution.k);
+    auto engine = TryCreateThresholdEngine(
+        execution.k, execution.m, tau, config.security_level, params, error);
+    if (!engine) {
+        throw std::runtime_error(
+            "threshold revision timing cannot create engine: " + error);
+    }
+    engine->SetHashSeed(concrete_seed);
+    auto [set_a, set_b] = MakeSetsWithOverlap(execution.set_size, 0.5);
+    const TruthContext truth = MakeTruthContext(*engine, set_a, set_b);
+    const auto row = RunMultiTrialThreshold(
+        *engine, set_a, set_b, truth, execution.selection.cell.cell_id,
+        static_cast<size_t>(execution.trials));
+    csv.WriteRow(row);
+    return 0;
+}
+
+static int RunThresholdRevisionSuccessor(int argc, char** argv) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+    const uint64_t concrete_seed = ParseThresholdConcreteSeed(argc, argv);
+    const std::vector<std::string> planner_argv =
+        CanonicalizeThresholdPlannerArgv(argc, argv);
+    const ThresholdRevisionRequest request =
+        ParseThresholdRevisionArgs(planner_argv);
+    const RevisionRunMode mode = request.profile == "readiness-toy-v1"
+        ? RevisionRunMode::Toy : RevisionRunMode::Paper;
+    const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+        PICCARD_REVISION_MATRIX_PATH);
+    const ThresholdRevisionExecutionPlan execution =
+        PlanThresholdRevisionExecution(matrix, planner_argv, mode);
+    return RunThresholdRevisionCell(request, execution, concrete_seed);
+#else
+    (void)argc;
+    (void)argv;
+    throw std::runtime_error(
+        "bench_threshold was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+}
+
 static std::string ParseRequestedMode(int argc, char** argv) {
     bool saw_mode = false;
     std::string mode;
@@ -1789,6 +1962,15 @@ int main(int argc, char** argv) {
                   << "  --mode=MODE        'accuracy', 'timing', 'fpfn', or 'spec' (default: timing)\n"
                   << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
         return 0;
+    }
+
+    if (HasThresholdRevisionCell(argc, argv)) {
+        try {
+            return RunThresholdRevisionSuccessor(argc, argv);
+        } catch (const std::exception& error) {
+            std::cerr << "bench_threshold: " << error.what() << "\n";
+            return 2;
+        }
     }
 
     std::string requested_mode;
