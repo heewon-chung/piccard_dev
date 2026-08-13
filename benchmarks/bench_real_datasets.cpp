@@ -11,8 +11,10 @@
 // any FHE code path exists.
 #include "real_accuracy_driver.h"
 #include "real_encoding_driver.h"
+#include "real_dataset_revision_adapter.h"
 #include "real_threshold_driver.h"
 #include "real_timing_driver.h"
+#include "revision_matrix.h"
 
 #include <cstdint>
 #include <iostream>
@@ -30,6 +32,13 @@ using piccard::bench::RunRealAccuracyMode;
 using piccard::bench::RunRealEncodingMode;
 using piccard::bench::RunRealThresholdMode;
 using piccard::bench::RunRealTimingMode;
+using piccard::benchmark::LoadAndValidateRevisionMatrix;
+using piccard::benchmark::PlanRealDatasetRevisionExecution;
+using piccard::benchmark::RealDatasetRevisionExecutionPlan;
+using piccard::benchmark::RealDatasetRevisionSelection;
+using piccard::benchmark::RevisionRunMode;
+using piccard::benchmark::SelectRealDatasetRevisionCell;
+using piccard::benchmark::ValidateRealDatasetRevisionManifest;
 
 void PrintUsage(std::ostream& out) {
     out << "usage:\n"
@@ -100,6 +109,181 @@ std::string ExtractMode(int argc, char** argv) {
         }
     }
     throw std::invalid_argument("--mode is required (accuracy|timing|encoding)");
+}
+
+bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Mode-specific parsers are defined below.  The revision dispatch seam is
+// kept near the common option helpers, so declare the private functions here
+// before ExecuteRealDatasetRevisionCell uses them.
+RealAccuracyCliArgs ParseAccuracyArguments(int argc, char** argv);
+RealTimingCliArgs ParseTimingArguments(int argc, char** argv);
+RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv);
+RealThresholdCliArgs ParseThresholdArguments(int argc, char** argv);
+
+std::string FindOptionValue(int argc, char** argv, const std::string& option) {
+    std::string value;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        const std::string prefix = option + "=";
+        if (argument.rfind(prefix, 0) == 0) {
+            if (!value.empty()) {
+                throw std::invalid_argument("duplicate " + option);
+            }
+            value = argument.substr(prefix.size());
+        }
+    }
+    return value;
+}
+
+bool HasOption(const std::vector<std::string>& argv,
+               const std::string& option) {
+    const std::string prefix = option + "=";
+    return std::any_of(argv.begin(), argv.end(), [&](const std::string& arg) {
+        return arg.rfind(prefix, 0) == 0;
+    });
+}
+
+void AppendOptionIfMissing(std::vector<std::string>& argv,
+                           const std::string& option,
+                           const std::string& value) {
+    if (!HasOption(argv, option)) argv.push_back(option + "=" + value);
+}
+
+RevisionRunMode InferRevisionMode(const std::vector<std::string>& argv) {
+    for (const std::string& arg : argv) {
+        if (arg == "--profile=readiness-toy-v1") return RevisionRunMode::Toy;
+    }
+    return RevisionRunMode::Paper;
+}
+
+std::vector<std::string> PrepareLegacyRevisionArguments(
+    const std::vector<std::string>& planner_argv,
+    const RealDatasetRevisionSelection& selection) {
+    std::vector<std::string> args;
+    args.reserve(planner_argv.size() + 6);
+    for (const std::string& arg : planner_argv) {
+        const auto omit = [&](const char* prefix) {
+            return arg.rfind(prefix, 0) == 0;
+        };
+        // These are revision-bound control flags.  The historical parsers
+        // must not see them; the adapter has already checked them against the
+        // canonical plan before this filtering step.
+        if (omit("--revision-cell=") || omit("--security=") ||
+            omit("--raw-timing-dir=") || omit("--raw-timing-profile=") ||
+            omit("--methods=") || omit("--encoding-iters=") ||
+            omit("--correctness-trials=") || omit("--cell=")) {
+            continue;
+        }
+        args.push_back(arg);
+    }
+
+    const std::string artifact = selection.cell.axis_value;
+    if (selection.cell.family == "threshold_dblp_fpfn") {
+        AppendOptionIfMissing(args, "--mode", "threshold");
+        // The threshold driver predates the matrix and requires a pair cap;
+        // the cell's frozen n-axis is the only admissible cap.
+        AppendOptionIfMissing(args, "--max-pairs",
+                              selection.cell.axes.at("n"));
+    } else if (artifact == "accuracy") {
+        AppendOptionIfMissing(args, "--k", "128");
+        AppendOptionIfMissing(args, "--m", "64");
+        AppendOptionIfMissing(args, "--accuracy_trials", "1");
+        AppendOptionIfMissing(args, "--hash_randomness", "resampled");
+    } else if (artifact == "std128_timing") {
+        AppendOptionIfMissing(args, "--timing-pair", "median");
+    } else if (artifact == "std192_encoding") {
+        // The legacy encoder is a one-method entry point.  The canonical
+        // revision cell records the one-hot/sqrt arm pair; the outer runner
+        // owns the two method invocations while this C++ process accepts one
+        // concrete arm at a time.  No FHE flag is introduced here.
+        AppendOptionIfMissing(args, "--method", "piccard_encode");
+        AppendOptionIfMissing(args, "--timing-pair", "median");
+        const auto it = std::find_if(
+            planner_argv.begin(), planner_argv.end(), [](const std::string& arg) {
+                return arg.rfind("--encoding-iters=", 0) == 0;
+            });
+        if (it != planner_argv.end()) {
+            AppendOptionIfMissing(args, "--trials",
+                                  it->substr(std::string("--encoding-iters=").size()));
+        }
+    }
+    return args;
+}
+
+int ExecuteRealDatasetRevisionCell(int argc, char** argv) {
+#ifndef PICCARD_REVISION_MATRIX_PATH
+    (void)argc;
+    (void)argv;
+    throw std::runtime_error(
+        "revision-cell support is unavailable: matrix path was not compiled in");
+#else
+    std::vector<std::string> planner_argv;
+    planner_argv.reserve(static_cast<size_t>(argc > 1 ? argc - 1 : 0));
+    for (int index = 1; index < argc; ++index) planner_argv.emplace_back(argv[index]);
+
+    const RevisionRunMode revision_mode = InferRevisionMode(planner_argv);
+    const auto matrix = LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
+    const RealDatasetRevisionSelection selection =
+        SelectRealDatasetRevisionCell(matrix, planner_argv, revision_mode);
+    const RealDatasetRevisionExecutionPlan execution =
+        PlanRealDatasetRevisionExecution(matrix, planner_argv, revision_mode);
+    if (execution.selected_cell_count != 1 || execution.keygen_calls != 0 ||
+        execution.native_sweep || execution.expected_row_count != 1) {
+        throw std::invalid_argument(
+            "real-dataset revision execution must be exactly one row and zero KeyGen");
+    }
+
+    const std::string manifest =
+        FindOptionValue(argc, argv, "--dataset-manifest");
+    if (manifest.empty()) {
+        throw std::invalid_argument(
+            "revision-cell real-data execution requires --dataset-manifest");
+    }
+    ValidateRealDatasetRevisionManifest(selection.cell, manifest);
+
+    const std::vector<std::string> prepared =
+        PrepareLegacyRevisionArguments(planner_argv, selection);
+    std::vector<std::string> storage;
+    storage.reserve(prepared.size() + 1);
+    storage.emplace_back("bench_real_datasets");
+    storage.insert(storage.end(), prepared.begin(), prepared.end());
+    std::vector<char*> prepared_argv;
+    prepared_argv.reserve(storage.size());
+    for (std::string& value : storage) {
+        prepared_argv.push_back(value.data());
+    }
+    const int prepared_argc = static_cast<int>(prepared_argv.size());
+
+    if (selection.cell.family == "threshold_dblp_fpfn") {
+        const RealThresholdCliArgs args =
+            ParseThresholdArguments(prepared_argc, prepared_argv.data());
+        return RunRealThresholdMode(args);
+    }
+    if (selection.cell.axis_value == "accuracy") {
+        const RealAccuracyCliArgs args =
+            ParseAccuracyArguments(prepared_argc, prepared_argv.data());
+        return RunRealAccuracyMode(args);
+    }
+    if (selection.cell.axis_value == "std128_timing") {
+        const RealTimingCliArgs args =
+            ParseTimingArguments(prepared_argc, prepared_argv.data());
+        return RunRealTimingMode(args);
+    }
+    if (selection.cell.axis_value == "std192_encoding") {
+        const RealEncodingCliArgs args =
+            ParseEncodingArguments(prepared_argc, prepared_argv.data());
+        return RunRealEncodingMode(args);
+    }
+    throw std::invalid_argument("unsupported C++ real-data revision artifact");
+#endif
 }
 
 RealAccuracyCliArgs ParseAccuracyArguments(int argc, char** argv) {
@@ -393,6 +577,9 @@ RealThresholdCliArgs ParseThresholdArguments(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
+        if (HasRevisionCell(argc, argv)) {
+            return ExecuteRealDatasetRevisionCell(argc, argv);
+        }
         const std::string mode = ExtractMode(argc, argv);
         if (mode == "accuracy") {
             const RealAccuracyCliArgs args = ParseAccuracyArguments(argc, argv);
