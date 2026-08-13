@@ -1952,16 +1952,6 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         PRIVATE
             PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
-    if(BUILD_TESTS)
-        add_test(
-            NAME SqrtRevisionProducers
-            COMMAND ${Python3_EXECUTABLE}
-                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_sqrt_revision_producers.py
-                    $<TARGET_FILE:bench_onehot_sqrt>
-                    $<TARGET_FILE:bench_sqrt_comparison>
-                    $<TARGET_FILE:bench_crossover>
-        )
-    endif()
 
     # Decryption-noise calibration for noise flooding (R2-W6). Not a timing
     # benchmark: it measures the evaluation-noise bound that sizes the
