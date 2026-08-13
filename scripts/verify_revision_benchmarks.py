@@ -22,6 +22,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -874,6 +875,98 @@ def _review_taxonomy(method: str, target_bits: int,
     return {}
 
 
+def _bind_review_sidecars(output: Path, rows: list[dict[str, str]],
+                          cell: dict[str, Any], plan: dict[str, Any],
+                          mode: str, cid: str) -> None:
+    """Bind review rows to the canonical workload and execution trace bytes."""
+    workload_path = output / "workload.bin"
+    trace_path = output / "execution-trace.bin"
+    if any(path.is_symlink() or not path.is_file()
+           for path in (workload_path, trace_path)):
+        fail(f"review workload/trace sidecars are missing for {cid}")
+    try:
+        from verify_review_comparison import (
+            WORKLOAD_DOMAIN, Reader, Trial, VerificationError,
+            Workload, expected_kind, hash_seed, realized_intersection,
+            regenerate_sets, trial_seed, verify_trace)
+        data = workload_path.read_bytes()
+        reader = Reader(data, "revision workload")
+        reader.domain(WORKLOAD_DOMAIN)
+        suite = reader.string()
+        profile_id = reader.string()
+        root_seed = reader.u64()
+        k, m, set_size, universe = (reader.u64() for _ in range(4))
+        numerator, denominator = reader.u64(), reader.u64()
+        if denominator == 0:
+            fail(f"review workload target denominator is zero for {cid}")
+        method_count = reader.u32()
+        methods = tuple(reader.string() for _ in range(method_count))
+        timing_trials, accuracy_trials, record_count = (
+            reader.u32(), reader.u32(), reader.u32())
+        records = []
+        for _ in range(record_count):
+            records.append(Trial(reader.u8(), reader.u32(), reader.u64(), reader.u64(),
+                                 tuple(reader.vector()), tuple(reader.vector()),
+                                 reader.u64(), reader.u64()))
+        reader.finish()
+        command = plan.get("command", [])
+        abstract_profile = _command_value_once(command, "--profile=", cid)
+        expected_profile = abstract_profile
+        if (cell.get("expected_artifact_schema") ==
+                "review-comparison-csv-v1" and abstract_profile == "paper-v1"):
+            expected_profile = "std128-t40-primary"
+        axes = cell["axes"]
+        expected_methods = tuple(
+            str(item["method"]) for item in cell["expected_rows"]
+            if item.get("terminal_status") != "NOT_APPLICABLE")
+        expected_timing = int(cell["expected_rows"][0][
+            "toy_measured_count" if mode == "toy" else "paper_measured_count"])
+        expected_seed = _command_int_once(command, "--seed=", cid)
+        if suite != cell["family"] or profile_id != expected_profile or \
+                expected_seed is None or root_seed != expected_seed or \
+                (k, m, set_size, universe) != tuple(
+                    int(axes[name]) for name in ("k", "m", "n", "u")) or \
+                (numerator, denominator) != (1, 2) or \
+                methods != expected_methods or timing_trials != expected_timing or \
+                accuracy_trials != 0 or record_count != 1 + timing_trials:
+            fail(f"review workload identity/topology mismatch for {cid}")
+        target = Fraction(numerator, denominator)
+        if target.numerator != numerator or target.denominator != denominator or \
+                not 0 <= target <= 1:
+            fail(f"review workload target is not canonical for {cid}")
+        expected_intersection = realized_intersection(set_size, target)
+        expected_records = [(0, 0)] + [(1, index) for index in range(timing_trials)]
+        for record, identity in zip(records, expected_records):
+            if (record.kind, record.index) != identity or \
+                    record.trial_seed != trial_seed(root_seed, *identity) or \
+                    record.hash_seed != hash_seed(root_seed, *identity):
+                fail(f"review workload trial identity mismatch for {cid}")
+            expected_a, expected_b = regenerate_sets(
+                universe, set_size, expected_intersection, record.trial_seed)
+            if record.set_a != expected_a or record.set_b != expected_b or \
+                    record.intersection != expected_intersection or \
+                    record.union != 2 * set_size - expected_intersection:
+                fail(f"review workload trial payload mismatch for {cid}")
+        workload = Workload(
+            suite, profile_id, root_seed, k, m, set_size, universe,
+            target, methods,
+            timing_trials, accuracy_trials, tuple(records), sha256_file(workload_path))
+        trace_digest = verify_trace(trace_path, workload)
+    except (OSError, VerificationError) as exc:
+        fail(f"review workload/trace sidecars are invalid for {cid}: {exc}")
+    for row in rows:
+        _require_value(row, "workload_id", workload.workload_id, cid)
+        _require_value(row, "workload_manifest_sha256", workload.digest, cid)
+        _require_value(row, "execution_trace_sha256", trace_digest, cid)
+        _require_value(row, "evidence_arm", "timing", cid)
+        method = _row_value(row, "method", cid)
+        try:
+            kind = expected_kind(method, "timing")
+        except VerificationError as exc:
+            fail(f"review measurement method is invalid for {cid}: {exc}")
+        _require_value(row, "measurement_kind", kind, cid)
+
+
 def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
                      plan: dict[str, Any], cid: str) -> None:
     """Bind every shape/security field exposed by a family CSV header.
@@ -959,9 +1052,8 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         target_bits = int(_profile_security(profile, command)[1] or 128) \
             if profile is not None else 128
         universe = expected_axes.get("u")
-        suite = _command_value_once(command, "--suite=", cid)
         for row in rows:
-            _require_value(row, "suite", suite or cell["family"], cid)
+            _require_value(row, "suite", cell["family"], cid)
             if universe is not None:
                 _require_value(row, "scenario", f"review-{universe}", cid)
             method = _row_value(row, "method", cid)
@@ -998,14 +1090,13 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
             "signature_derivation_timed": "false",
         }
         review_encoding = cell.get("family") == "piccard_std192_encoding"
-        suite = _command_value_once(command, "--suite=", cid)
         for row in rows:
             for field, expected in taxonomy.items():
                 if field in row:
                     _require_value(row, field, expected, cid,
                                    optional=(field == "nominal_security_bits"))
             if review_encoding:
-                _require_value(row, "suite", suite or "encoding", cid)
+                _require_value(row, "suite", cell["family"], cid)
                 if "u" in expected_axes:
                     _require_value(row, "scenario",
                                    f"review-{expected_axes['u']}", cid)
@@ -1875,6 +1966,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         if schema == "review-encoding-csv-v1":
             rows = _csv_table(stdout, _REVIEW_ENCODING_HEADER, f"review encoding {cid}")
             _bind_cell_shape(rows, cell, plan, cid)
+            _bind_review_sidecars(output, rows, cell, plan, mode, cid)
             applicable = [row for row in cell["expected_rows"]
                           if row.get("terminal_status") != "NOT_APPLICABLE"]
             wanted = {str(row["method"]) for row in applicable}
@@ -2055,6 +2147,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                     _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"FHE-IND cell/trial taxonomy mismatch for {cid}")
         elif schema == "review-comparison-csv-v1":
+            _bind_review_sidecars(output, rows, cell, plan, mode, cid)
             expected_by_method = {
                 str(item["method"]): int(item["toy_measured_count"] if mode == "toy"
                                           else item["paper_measured_count"])

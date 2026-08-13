@@ -872,12 +872,12 @@ class RevisionVerifierContractTest(unittest.TestCase):
         cell = self.matrix_cell("review-comparison-csv-v1",
                                 family="bcg12_minhash",
                                 axis="control", axis_value="default")
-        row = {
+        base = {
             "k": "128", "m": "64", "set_size": "1000",
-            "universe_size": "65536", "comparison_eligible": "true",
+            "universe_size": "65536",
             "suite": "bcg12_minhash", "scenario": "review-65536",
             "method": "bcg12_mh_ec", "cryptographic_profile": "P-256",
-            "nominal_security_bits": "128", "security_match": "true",
+            "nominal_security_bits": "128",
             "comparison_scope": "matched-estimator-component",
             "primitive": "bcg12-ec",
             "protocol_model": "bcg12-cardinality-on-minhash",
@@ -890,7 +890,103 @@ class RevisionVerifierContractTest(unittest.TestCase):
             "workload_manifest_sha256": "a" * 64,
             "execution_trace_sha256": "b" * 64,
         }
-        _bind_cell_shape([row], cell, {"command": []}, cell["cell_id"])
+        for abstract_profile, row_profile, run_class, target, match, eligible in (
+                ("readiness-toy-v1", "readiness-toy-v1", "smoke", "0",
+                 "false", "false"),
+                ("paper-v1", "std128-t40-primary", "primary", "128",
+                 "true", "true")):
+            with self.subTest(profile=abstract_profile):
+                row = dict(base, profile_id=row_profile, run_class=run_class,
+                           target_security_bits=target, security_match=match,
+                           comparison_eligible=eligible)
+                command = [f"--profile={abstract_profile}",
+                           "--suite=bcg12-minhash", "--security=STD128",
+                           "--k=128", "--m=64", "--n=1000",
+                           "--universe=65536"]
+                _bind_cell_shape([row], cell, {"command": command},
+                                 cell["cell_id"])
+
+    def test_r6_review_rows_bind_exact_workload_trace_and_timing_arm(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import hashlib
+        from tests.scripts import review_verifier_fixtures as fixture
+        from verify_revision_benchmarks import (
+            _bind_review_sidecars, RevisionContractError)
+        methods = ("bcg12_mh_ec", "bcg12_mh_ff")
+        seed, k, m, n, universe = 7, 16, 16, 10, 64
+        intersection = fixture._realized_intersection(n, 1, 2)
+        identities = ((0, 0), (1, 0))
+        encoded = []
+        workload = bytearray(fixture.WORKLOAD_DOMAIN)
+        workload.extend(fixture._string("revision-test"))
+        workload.extend(fixture._string("readiness-toy-v1"))
+        workload.extend(fixture._be64(seed))
+        for value in (k, m, n, universe, 1, 2):
+            workload.extend(fixture._be64(value))
+        workload.extend(fixture._be32(len(methods)))
+        for method in methods:
+            workload.extend(fixture._string(method))
+        workload.extend(fixture._be32(1) + fixture._be32(0) +
+                        fixture._be32(len(identities)))
+        for kind, index in identities:
+            trial_seed = fixture._trial_seed(seed, kind, index)
+            hash_value = fixture._hash_seed(seed, kind, index)
+            encoded.append((kind, index, trial_seed))
+            set_a, set_b = fixture._regenerate_sets(
+                universe, n, intersection, trial_seed)
+            workload.extend(bytes([kind]) + fixture._be32(index) +
+                            fixture._be64(trial_seed) + fixture._be64(hash_value))
+            for values in (set_a, set_b):
+                workload.extend(fixture._be64(len(values)))
+                for value in values:
+                    workload.extend(fixture._be64(value))
+            workload.extend(fixture._be64(intersection) +
+                            fixture._be64(2 * n - intersection))
+        workload_bytes = bytes(workload)
+        workload_digest = hashlib.sha256(workload_bytes).digest()
+        trace = bytearray(fixture.TRACE_DOMAIN + workload_digest)
+        trace.extend(fixture._be32(2) + fixture._be32(2))
+        for kind, index, trial_seed in encoded:
+            order = methods[trial_seed % 2:] + methods[:trial_seed % 2]
+            trace.extend(bytes([kind]) + fixture._be32(index) +
+                         fixture._be32(2) + fixture._be32(2) + b"\0")
+            for method in order:
+                trace.extend(fixture._string(method))
+        trace_bytes = bytes(trace)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "workload.bin").write_bytes(workload_bytes)
+            (output / "execution-trace.bin").write_bytes(trace_bytes)
+            timing = {
+                "method": "bcg12_mh_ec", "evidence_arm": "timing",
+                "measurement_kind": "psi-timing",
+                "workload_id": f"review-{universe}-{workload_digest.hex()[:16]}",
+                "workload_manifest_sha256": workload_digest.hex(),
+                "execution_trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
+            }
+            cell = {
+                "family": "revision-test", "axes": {"k": k, "m": m,
+                    "n": n, "u": universe},
+                "expected_artifact_schema": "review-comparison-csv-v1",
+                "expected_rows": [
+                    {"method": method, "terminal_status": "MEASURED",
+                     "toy_measured_count": 1, "paper_measured_count": 1}
+                    for method in methods],
+            }
+            plan = {"command": ["--profile=readiness-toy-v1", "--seed=7"]}
+            _bind_review_sidecars(output, [timing], cell, plan, "toy", "cell")
+            for field, forged in (
+                    ("workload_id", "FORGED-WORKLOAD"),
+                    ("workload_manifest_sha256", "not-a-digest"),
+                    ("execution_trace_sha256", "also-forged"),
+                    ("measurement_kind", "FORGED-TIMING-KIND"),
+                    ("evidence_arm", "FORGED-ARM")):
+                with self.subTest(field=field):
+                    mutation = dict(timing)
+                    mutation[field] = forged
+                    with self.assertRaises(RevisionContractError):
+                        _bind_review_sidecars(
+                            output, [mutation], cell, plan, "toy", "cell")
 
     def test_r5_encoding_signature_timing_forgery_is_rejected(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
