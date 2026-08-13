@@ -16,6 +16,70 @@ MATRIX = ROOT / "benchmarks" / "revision_matrix.json"
 
 
 class RevisionVerifierContractTest(unittest.TestCase):
+    THRESHOLD_SPEC_HEADER = (
+        "k,tau,degree,ps_baby_s,ps_num_chunks,baby_depth,giant_mults,"
+        "natural_mult_depth,mult_depth,scaling_mod_size,ring_dim,"
+        "plaintext_mod,log2_q,eval_noise_bits,flood_noise_bits,ct_bytes,"
+        "poly_build_ms,status,note,schema_version,requested_ring_dim,"
+        "natural_ring_dim,provisioned_ring_dim,realized_ring_dim,"
+        "natural_depth,provisioned_depth,log_q_bits,log2_q_over_t_bits,"
+        "plaintext_modulus,num_limbs,realized_scaling_mod_size,"
+        "ordered_rns_moduli,ordered_rns_limb_bits,ordered_rns_limb_bits_sum,"
+        "openfhe_version,flooding_assurance,transcript_stat_bits,max_queries,"
+        "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
+        "required_capacity_bits,residual_capacity_definition,"
+        "residual_capacity_bits,residual_capacity_status"
+    )
+    SQRT_HEADER = (
+        "encoding,k,m,N,Depth,Encode,Encrypt,Evaluate,Decrypt,Total(ms),"
+        "|err|,rel_err,security,transcript_stat_bits,max_queries,"
+        "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
+        "eval_noise_bits,flood_noise_bits,sanitizer_model,"
+        "sanitizer_assurance,estimator_model,profile_id,run_class,"
+        "target_security_bits,comparison_eligible,measurement_kind,"
+        "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+        "openfhe_version"
+    )
+
+    def write_family_stdout(self, root: Path, cell: dict, payload: str) -> None:
+        from revision_benchmark_common import cell_output
+        output = cell_output(root, cell["cell_id"])
+        output.mkdir(parents=True)
+        (output / "stdout.log").write_text(payload, encoding="utf-8")
+        (output / "stderr.log").write_text("", encoding="utf-8")
+        (output / "receipt.json").write_text(
+            json.dumps({"artifact_inventory": []}) + "\n", encoding="utf-8")
+
+    def write_artifact(self, root: Path, cell: dict, name: str,
+                       payload: str, command_prefix: str = "--output=") -> list[str]:
+        from revision_benchmark_common import cell_output, file_inventory
+        output = cell_output(root, cell["cell_id"])
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "stdout.log").write_text("", encoding="utf-8")
+        (output / "stderr.log").write_text("", encoding="utf-8")
+        path = output / name
+        path.write_text(payload, encoding="utf-8")
+        receipt = {"artifact_inventory": file_inventory(
+            output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+        (output / "receipt.json").write_text(
+            json.dumps(receipt) + "\n", encoding="utf-8")
+        return [f"{command_prefix}{path}"]
+
+    def matrix_cell(self, schema: str, *, family: str | None = None,
+                    axis: str | None = None, axis_value: str | None = None) -> dict:
+        document = json.loads(MATRIX.read_text())
+        for cell in document["cells"]:
+            if cell["expected_artifact_schema"] != schema:
+                continue
+            if family is not None and cell["family"] != family:
+                continue
+            if axis is not None and cell.get("axis") != axis:
+                continue
+            if axis_value is not None and str(cell.get("axis_value")) != axis_value:
+                continue
+            return cell
+        raise AssertionError(f"no cell for {schema}/{family}/{axis}={axis_value}")
+
     def make_dry_root(self, temporary: str) -> Path:
         root = Path(temporary) / "dry"
         build = Path(temporary) / "build"
@@ -218,6 +282,233 @@ class RevisionVerifierContractTest(unittest.TestCase):
             with self.assertRaises(RevisionContractError):
                 _check_family_artifacts(root, "toy", [cell],
                                         {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_accepts_threshold_spec_success_row(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _check_family_artifacts
+        cell = self.matrix_cell("threshold-csv-v1", family="threshold_spec",
+                                axis="k", axis_value="64")
+        fields = self.THRESHOLD_SPEC_HEADER.split(",")
+        values = ["N/A"] * len(fields)
+        values[fields.index("k")] = "64"
+        values[fields.index("status")] = "ok"
+        values[fields.index("schema_version")] = "piccard-threshold-spec-v2"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_family_stdout(root, cell,
+                                     self.THRESHOLD_SPEC_HEADER + "\n" +
+                                     ",".join(values) + "\n")
+            _check_family_artifacts(
+                root, "toy", [cell], {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_accepts_sqrt_accuracy_onehot_shape(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import _check_family_artifacts
+        cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
+                                axis="accuracy_m", axis_value="128")
+        fields = self.SQRT_HEADER.split(",")
+        values = ["0"] * len(fields)
+        values[fields.index("encoding")] = "OneHot"
+        values[fields.index("k")] = "128"
+        values[fields.index("m")] = "128"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_family_stdout(root, cell,
+                                     self.SQRT_HEADER + "\n" +
+                                     ",".join(values) + "\n")
+            (cell_output(root, cell["cell_id"]) / "stderr.log").write_text(
+                "revision_terminal,schema=sqrt-revision-terminal-v1,"
+                f"cell_id={cell['cell_id']},row_id=sqrt,status=NOT_APPLICABLE,"
+                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
+                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n",
+                encoding="utf-8")
+            _check_family_artifacts(
+                root, "toy", [cell], {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_rejects_threshold_spec_header_drift(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
+        cell = self.matrix_cell("threshold-csv-v1", family="threshold_spec",
+                                axis="k", axis_value="64")
+        fields = self.THRESHOLD_SPEC_HEADER.replace("status", "status_drift").split(",")
+        values = ["N/A"] * len(fields)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_family_stdout(root, cell,
+                                     ",".join(fields) + "\n" +
+                                     ",".join(values) + "\n")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(
+                    root, "toy", [cell], {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_accepts_sqrt_timing_legacy_shape(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import (
+            _SQRT_TIMING_HEADER, _check_family_artifacts)
+        cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
+                                axis="timing_m", axis_value="128")
+        fields = _SQRT_TIMING_HEADER.rstrip("\n").split(",")
+        values = ["0"] * len(fields)
+        values[fields.index("label")] = "revision_" + cell["cell_id"]
+        values[fields.index("k")] = "128"
+        values[fields.index("m")] = "128"
+        values[fields.index("encoding")] = "onehot"
+        values[fields.index("trials")] = "1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_family_stdout(root, cell,
+                                     _SQRT_TIMING_HEADER + ",".join(values) + "\n")
+            cell_output(root, cell["cell_id"]).joinpath("stderr.log").write_text(
+                "revision_terminal,schema=sqrt-revision-terminal-v1,"
+                f"cell_id={cell['cell_id']},row_id=sqrt,status=NOT_APPLICABLE,"
+                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
+                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n",
+                encoding="utf-8")
+            _check_family_artifacts(root, "toy", [cell],
+                                    {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_accepts_real_versioned_encoding_pair(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _REAL_ENCODING_HEADER, _check_family_artifacts)
+        from revision_benchmark_common import cell_output
+        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
+                                axis_value="std192_encoding",
+                                axis="dblp_acm_u65536_artifact")
+        fields = _REAL_ENCODING_HEADER.rstrip("\n").split(",")
+        rows = []
+        for method in ("piccard_encode", "piccard_sqrt_encode"):
+            values = ["0"] * len(fields)
+            values[fields.index("dataset")] = "dblp_acm"
+            values[fields.index("variant")] = "dblp_acm_u65536"
+            values[fields.index("k")] = "128"
+            values[fields.index("m")] = "64"
+            values[fields.index("method")] = method
+            values[fields.index("timed_encoder_pairs")] = "1"
+            values[fields.index("correctness_pair_calls")] = "1"
+            values[fields.index("correctness_status")] = "PASS"
+            rows.append(",".join(values))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            command = self.write_artifact(
+                root, cell, "encoding.csv",
+                _REAL_ENCODING_HEADER + "\n".join(rows) + "\n",
+                "--csv=")
+            _check_family_artifacts(root, "toy", [cell],
+                                    {cell["cell_id"]: {"command": command}})
+
+    def test_family_verifier_accepts_sj16_calibration_contract(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _check_family_artifacts
+        cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
+                                axis="fit", axis_value="per_element")
+        text = ("overall_status=PASS\nkey_bits=3072\ntrials_per_size=1\n"
+                "held_out=32768\nheld_measured_ms=0\n"
+                "# columns: key_bits,t_enc_median_ms,t_enc_iqr_ms,alpha_ms_per_m,"
+                "beta_ms,r2,held_measured_ms,held_pred_ms,held_residual,gate\n"
+                "3072,0,0,0,0,0,0,0,0,PASS\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(root, cell, "calibration.csv", text)
+            _check_family_artifacts(root, "toy", [cell],
+                                    {cell["cell_id"]: {"command": command}})
+
+    def test_family_verifier_accepts_nested_noise_shard_contract(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from revision_flooding_adapter import select_noise_partition
+        from verify_revision_benchmarks import _check_family_artifacts
+        cell = self.matrix_cell("noise-profile-v1", family="flooding",
+                                axis="profile", axis_value="primary40")
+        matrix = json.loads((ROOT / "scripts" / "noise_profiles.json").read_text())
+        partition = select_noise_partition(matrix, "primary40")
+        key_id = partition["key_id"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            shard = output / "payload" / "profiles" / "primary40" / key_id
+            details = shard / "details"
+            details.mkdir(parents=True)
+            payload = output / "payload"
+            (payload / "run_manifest.json").write_text(json.dumps({
+                "schema": "piccard-noise-revision-run-v1", "profile_id": "primary40",
+                "run_profile": "readiness-toy-v1", "status": "READINESS_ONLY",
+                "table_eligible": False, "repetitions_per_pattern": 1,
+                "patterns": ["zero", "random", "adversarial"], "invocation_count": 1}),
+                encoding="utf-8")
+            (payload / "resolved_noise_profiles.json").write_text(
+                json.dumps({"source_commit": "a" * 40, "profiles": []}), encoding="utf-8")
+            (payload / "profiles" / "primary40" / "profile_manifest.json").write_text(
+                json.dumps({"schema": "piccard-noise-revision-profile-v1",
+                            "profile_id": "primary40", "key_count": 1,
+                            "key_verdicts": {key_id: "SELECTED"},
+                            "source_commit": "a" * 40,
+                            "profile_verdict": "READINESS_ONLY",
+                            "table_eligible": False}), encoding="utf-8")
+            (shard / "revision_identity.json").write_text(json.dumps({
+                "schema": "piccard-noise-revision-shard-v1",
+                "cell_id": cell["cell_id"], "run_profile": "readiness-toy-v1",
+                "profile_id": "primary40", "key_id": key_id,
+                "source_commit": "a" * 40,
+                "repetitions_per_pattern": 1,
+                "patterns": ["zero", "random", "adversarial"],
+                "status": "READINESS_ONLY", "table_eligible": False}), encoding="utf-8")
+            (shard / "candidates.json").write_text("{}", encoding="utf-8")
+            aggregate_header = (
+                "profile,circuit,shape_id,security,consumer_count,consumer_set_sha256,"
+                "worst_consumer_k,worst_consumer_m,pattern_count,repetitions_per_pattern,"
+                "detail_row_count,detail_sha256,seed,requested_ring_dim,natural_ring_dim,"
+                "realized_ring_dim,ring_growth_factor,ring_dim_calibrated,natural_depth,"
+                "provisioned_depth,scaling_mod_size,num_limbs,plaintext_mod,log_q,log_delta,"
+                "eval_noise_bits,headroom_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+                "flood_margin_bits,flood_noise_bits,decrypt_ok,saturated,ct_bytes,openfhe_version,"
+                "source_commit,status_code,error_message,consumer_results_sha256\n")
+            aggregate = [""] * len(aggregate_header.rstrip("\n").split(","))
+            af = aggregate_header.rstrip("\n").split(",")
+            for name, value in (("profile", "primary40"),
+                                ("source_commit", "a" * 40),
+                                ("consumer_count", str(len(partition["consumer_points"]))),
+                                ("consumer_set_sha256", partition["consumer_set_sha256"]),
+                                ("pattern_count", "3"),
+                                ("repetitions_per_pattern", "1"),
+                                ("detail_row_count", str(len(partition["consumer_points"]) * 3))):
+                aggregate[af.index(name)] = value
+            (shard / "aggregate.csv").write_text(
+                aggregate_header + ",".join(aggregate) + "\n", encoding="utf-8")
+            detail_header = (
+                "profile,key_id,candidate_id,circuit,shape_id,security,consumer_k,consumer_m,"
+                "pattern,rep_index,rep_seed,requested_ring_dim,natural_ring_dim,"
+                "ring_dim_calibrated,realized_ring_dim,ring_growth_factor,natural_depth,"
+                "provisioned_depth,scaling_mod_size,num_limbs,plaintext_mod,log_q,log_delta,"
+                "eval_noise_bits,headroom_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+                "flood_margin_bits,flood_noise_bits,decrypt_ok,saturated,ct_bytes,openfhe_version,"
+                "source_commit,status_code,error_message\n")
+            df = detail_header.rstrip("\n").split(",")
+            detail_rows = []
+            for k, m in ((str(p["k"]), str(p["m"]))
+                         for p in partition["consumer_points"]):
+                for pattern in ("zero", "random", "adversarial"):
+                    values = [""] * len(df)
+                    for name, value in (("profile", "primary40"), ("key_id", key_id),
+                                        ("source_commit", "a" * 40),
+                                        ("candidate_id", "N8192-d1-s40"),
+                                        ("consumer_k", k), ("consumer_m", m),
+                                        ("pattern", pattern), ("rep_index", "0")):
+                        values[df.index(name)] = value
+                    detail_rows.append(",".join(values))
+            (details / "N8192-d1-s40.csv").write_text(
+                detail_header + "\n".join(detail_rows) + "\n", encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+            _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
+                "command": ["scripts/run_noise_profiles.sh",
+                            f"--results-root={payload}"]}})
 
 
 if __name__ == "__main__":

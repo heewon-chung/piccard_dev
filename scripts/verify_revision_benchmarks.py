@@ -45,8 +45,9 @@ from revision_benchmark_common import (  # noqa: E402
     write_json,
     script_hashes,
     binary_metadata,
-    materialize_argv,
+    materialize_cell_argv,
     command_for_producer,
+    producer_output_dir,
     tool_metadata,
 )
 
@@ -235,8 +236,8 @@ def _check_plans(root: Path, mode: str, cells: list[dict[str, Any]], manifest: d
         if record.get("canonical_argv") != canonical:
             fail(f"canonical argv mismatch: {cid}")
         output_dir = cell_output(root, cid)
-        materialized = materialize_argv(
-            canonical, root=root, output=output_dir,
+        materialized = materialize_cell_argv(
+            cell, mode, root=root, output=output_dir,
             seed=manifest["seed"], threads=manifest["threads"],
             variant_manifests=variants, dblp_manifest=dblp)
         producer = cell["producer"]
@@ -370,14 +371,607 @@ def _check_family_taxonomy(cells: list[dict[str, Any]]) -> None:
             fail("threshold evaluator is forbidden for Enron")
 
 
+_REVIEW_HEADER = (
+    "suite,scenario,method,profile_id,run_class,target_security_bits,"
+    "cryptographic_profile,nominal_security_bits,security_match,"
+    "comparison_eligible,comparison_scope,primitive,protocol_model,"
+    "output_semantics,assurance_scope,security_basis,cost_scope,"
+    "precomputation_mode,secure_division_included,measurement_kind,"
+    "evidence_arm,workload_id,workload_manifest_sha256,"
+    "execution_trace_sha256,root_seed,omp_threads,omp_dynamic,k,m,"
+    "set_size,universe_size,target_semantics,target_jaccard_numerator,"
+    "target_jaccard_denominator,target_jaccard,realized_intersection,"
+    "realized_union,realized_jaccard,timing_trials,accuracy_trials,"
+    "trials,hash_randomness,hash_seed,estimator_model,sanitizer_model,"
+    "sanitizer_assurance,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,"
+    "flood_noise_bits,scaling_mod_size,actual_ring_dim,log_q_bits,"
+    "plaintext_modulus,num_limbs,openfhe_version,total_ms,total_ms_sd,"
+    "total_ms_median,jaccard_computed,jaccard_expected,jaccard_error,"
+    "intersection_count,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,ct_size_bytes,comm_bytes,"
+    "measurement_status\n"
+)
+_REVIEW_ENCODING_HEADER = (
+    "suite,scenario,method,profile_id,run_class,target_security_bits,"
+    "cryptographic_profile,nominal_security_bits,security_match,"
+    "comparison_eligible,comparison_scope,primitive,protocol_model,"
+    "output_semantics,assurance_scope,security_basis,cost_scope,"
+    "precomputation_mode,secure_division_included,measurement_kind,"
+    "evidence_arm,workload_id,workload_manifest_sha256,"
+    "execution_trace_sha256,root_seed,omp_threads,omp_dynamic,k,m,"
+    "set_size,universe_size,target_semantics,target_jaccard_numerator,"
+    "target_jaccard_denominator,target_jaccard,realized_intersection,"
+    "realized_union,realized_jaccard,timing_trials,accuracy_trials,"
+    "correctness_trials,trials,hash_randomness,hash_seed,"
+    "encoder_input_construction,encoder_warmup_pairs,"
+    "timed_encoder_pairs,correctness_pair_calls,"
+    "signature_derivation_timed,encode_a_ms,encode_b_ms,"
+    "encode_pair_ms,encoded_slots_a,encoded_slots_b,"
+    "correctness_feature_sha256_a,correctness_feature_sha256_b,"
+    "correctness_status,measurement_status\n"
+)
+_SQRT_HEADER = (
+    "encoding,k,m,N,Depth,Encode,Encrypt,Evaluate,Decrypt,Total(ms),"
+    "|err|,rel_err,security,transcript_stat_bits,max_queries,"
+    "query_stat_bits,coefficient_stat_bits,flood_margin_bits,"
+    "eval_noise_bits,flood_noise_bits,sanitizer_model,"
+    "sanitizer_assurance,estimator_model,profile_id,run_class,"
+    "target_security_bits,comparison_eligible,measurement_kind,"
+    "actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version\n"
+)
+_SQRT_TIMING_HEADER = (
+    "label,k,m,set_size,ring_dim,time_ms,phase_minhash_ms,phase_encode_ms,"
+    "phase_encrypt_ms,phase_multiply_ms,phase_rotate_sum_ms,phase_decrypt_ms,"
+    "phase_bias_correction_ms,memory_bytes,ct_size_bytes,jaccard_computed,"
+    "jaccard_expected,jaccard_error,jaccard_rel_error,accuracy_median,"
+    "accuracy_p25,accuracy_p75,accuracy_p95,accuracy_max,encoding,mult_depth,"
+    "num_cts,comm_bytes,phase_intra_digit_rotate_ms,phase_digit_and_ms,"
+    "phase_cross_k_sum_ms,trials,time_ms_sd,time_ms_median,phase_minhash_ms_sd,"
+    "phase_minhash_ms_median,phase_encode_ms_sd,phase_encode_ms_median,"
+    "phase_encrypt_ms_sd,phase_encrypt_ms_median,phase_multiply_ms_sd,"
+    "phase_multiply_ms_median,phase_rotate_sum_ms_sd,"
+    "phase_rotate_sum_ms_median,phase_decrypt_ms_sd,phase_decrypt_ms_median,"
+    "phase_bias_correction_ms_sd,phase_bias_correction_ms_median,"
+    "rel_error_eligible_n,hash_randomness,hash_seed,hash_root_seed,"
+    "accuracy_trials,phase_flood_ms,phase_flood_ms_sd,phase_flood_ms_median,"
+    "transcript_stat_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+    "flood_margin_bits,eval_noise_bits,flood_noise_bits,scaling_mod_size,"
+    "sanitizer_model,sanitizer_assurance,estimator_model,profile_id,run_class,"
+    "target_security_bits,comparison_eligible,measurement_kind,actual_ring_dim,"
+    "log_q_bits,plaintext_modulus,num_limbs,openfhe_version\n"
+)
+_CROSSOVER_HEADER = (
+    "k,m,onehot_feature_dim,sqrt_feature_dim,onehot_N,sqrt_N,"
+    "onehot_total_ms,sqrt_total_ms,sqrt_faster,speedup_ratio,"
+    "sanitizer_model,sanitizer_assurance,transcript_stat_bits,"
+    "max_queries,query_stat_bits,flood_margin_bits,"
+    "onehot_coefficient_stat_bits,onehot_eval_noise_bits,"
+    "onehot_flood_noise_bits,sqrt_coefficient_stat_bits,"
+    "sqrt_eval_noise_bits,sqrt_flood_noise_bits,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,openfhe_version,onehot_actual_ring_dim,"
+    "onehot_log_q_bits,onehot_plaintext_modulus,onehot_num_limbs,"
+    "sqrt_actual_ring_dim,sqrt_log_q_bits,sqrt_plaintext_modulus,"
+    "sqrt_num_limbs\n"
+)
+_THRESHOLD_HEADER = (
+    "label,k,m,set_size,ring_dim,tau,mult_depth,"
+    "phase_minhash_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_multiply_ms,phase_rotate_sum_ms,phase_mask_ms,"
+    "phase_poly_eval_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "threshold_result,threshold_expected,threshold_correct,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,note,"
+    "trials,total_ms_sd,total_ms_median,phase_minhash_ms_sd,"
+    "phase_minhash_ms_median,phase_encode_ms_sd,phase_encode_ms_median,"
+    "phase_encrypt_ms_sd,phase_encrypt_ms_median,phase_multiply_ms_sd,"
+    "phase_multiply_ms_median,phase_rotate_sum_ms_sd,"
+    "phase_rotate_sum_ms_median,phase_mask_ms_sd,phase_mask_ms_median,"
+    "phase_poly_eval_ms_sd,phase_poly_eval_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,j_tau,match_count,"
+    "matchcount_expected,fhe_agrees,outcome,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,flood_lambda_stat,flood_eval_noise_bits,"
+    "flood_margin_bits,flood_noise_bits,scaling_mod_size\n"
+)
+_THRESHOLD_SPEC_HEADER = (
+    "k,tau,degree,ps_baby_s,ps_num_chunks,baby_depth,giant_mults,"
+    "natural_mult_depth,mult_depth,scaling_mod_size,ring_dim,plaintext_mod,"
+    "log2_q,eval_noise_bits,flood_noise_bits,ct_bytes,poly_build_ms,status,"
+    "note,schema_version,requested_ring_dim,natural_ring_dim,"
+    "provisioned_ring_dim,realized_ring_dim,natural_depth,provisioned_depth,"
+    "log_q_bits,log2_q_over_t_bits,plaintext_modulus,num_limbs,"
+    "realized_scaling_mod_size,ordered_rns_moduli,ordered_rns_limb_bits,"
+    "ordered_rns_limb_bits_sum,openfhe_version,flooding_assurance,"
+    "transcript_stat_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+    "flood_margin_bits,required_capacity_bits,residual_capacity_definition,"
+    "residual_capacity_bits,residual_capacity_status\n"
+)
+_THRESHOLD_FPFN_HEADER = (
+    "schema_version,profile,security,estimator_model,hash_randomness,"
+    "root_seed,k,m,set_size,tau_count,j_tau,grid_index,target_j,"
+    "signed_delta,absolute_delta,alpha,realized_intersection,realized_union,"
+    "realized_j,trial_index,row_seed,match_count,decision,exact_j_truth,"
+    "outcome,predicted_decision_probability,predicted_error_probability,"
+    "gaussian_error_approx\n"
+)
+_DELETION_HEADER = (
+    "model,n,d,k,required_survival,r,exact_survival,union_bound_survival,"
+    "mc_survival,mc_standard_error,maximum_safe_deletions,"
+    "exact_expected_first_failure,exact_expected_safe_deletions,"
+    "mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\n"
+)
+_ESTIMATOR_HEADER = (
+    "estimator_model,k,m,set_size,target_jaccard,realized_jaccard,"
+    "intersection_size,trials,seed,mean_raw_rank_estimate,raw_rank_bias,"
+    "raw_rank_mae,raw_rank_sample_sd,raw_standard_error,"
+    "mean_bucket_match_probability,bucket_match_bias,bucket_match_mae,"
+    "bucket_match_sample_sd,bucket_standard_error,"
+    "mean_bias_corrected_estimate,corrected_bias,corrected_mae,"
+    "corrected_sample_sd,corrected_standard_error,raw_bias_limit,"
+    "corrected_bias_limit,raw_passed,corrected_passed\n"
+)
+_FHE_IND_HEADER = (
+    "cell_id,circuit,shape_id,security,k,m,universe,set_size,target_jaccard,"
+    "realized_intersection,realized_union,realized_jaccard,seed,trials,"
+    "requested_ring_dim,natural_ring_dim,realized_ring_dim,natural_depth,"
+    "provisioned_depth,scaling_mod_size,num_limbs,plaintext_modulus,"
+    "bfv_context_fingerprint,log_q_bits,ordered_rns_moduli,"
+    "ordered_rns_moduli_sha256,openfhe_version,sanitizer_profile,"
+    "context_tuple_sha256,calibration_origin,workload_id,"
+    "workload_manifest_sha256,timing_hash_seed,setup_context_ms,"
+    "setup_keygen_ms,phase_encode_ms,phase_encrypt_ms,phase_evaluate_ms,"
+    "phase_decrypt_ms,online_e2e_ms,full_e2e_ms,match_count,jaccard_estimate,"
+    "status,reason,method,fhe_ind_binary_sha256,capabilities_sha256\n"
+)
+_REAL_PREFIX = (
+    "profile_id,run_class,target_security_bits,cryptographic_profile,"
+    "nominal_security_bits,security_match,comparison_eligible,comparison_scope,"
+    "primitive,protocol_model,output_semantics,assurance_scope,security_basis,"
+    "cost_scope,precomputation_mode,secure_division_included,measurement_kind,"
+    "workload_id,workload_manifest_sha256,execution_trace_sha256,root_seed,"
+    "omp_threads,estimator_model,sanitizer_model,sanitizer_assurance,"
+    "transcript_stat_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+    "flood_margin_bits,eval_noise_bits,flood_noise_bits,actual_ring_dim,"
+    "log_q_bits,plaintext_modulus,num_limbs,openfhe_version,target_semantics,"
+    "target_jaccard,realized_intersection,realized_union,realized_jaccard,"
+    "timing_trials,accuracy_trials,omp_dynamic,measurement_status"
+)
+_REAL_ACCURACY_HEADER = _REAL_PREFIX + ",dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,label,record_a,record_b,k,m,hash_randomness,accuracy_trial_index,hash_seed,set_size_a_raw,set_size_b_raw,set_size_a_bucketed,set_size_b_bucketed,exact_jaccard_raw,exact_jaccard_bucketed,estimated_jaccard,bucket_match_fraction,abs_error,rel_error,jaccard_bucket,accuracy_workload_sha256\n"
+_REAL_TIMING_HEADER = _REAL_PREFIX + ",dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,label,record_a,record_b,k,m,hash_seed,trial_index,phase_minhash_ms,phase_encode_ms,phase_encrypt_ms,phase_cloud_multiply_ms,phase_cloud_rotate_ms,phase_sanitize_ms,phase_decrypt_ms,phase_bias_correction_ms,total_query_ms,result_value,ciphertext_bytes,upload_bytes,download_bytes\n"
+_REAL_ENCODING_HEADER = (
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "comparison_scope,primitive,protocol_model,cost_scope,"
+    "secure_division_included,measurement_kind,dataset,variant,"
+    "dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,"
+    "label,record_a,record_b,k,m,method,timing_trials,timing_pair,root_seed,"
+    "hash_seed,encoder_warmup_pairs,timed_encoder_pairs,"
+    "correctness_pair_calls,signature_derivation_timed,encode_a_ms,"
+    "encode_b_ms,encode_pair_ms,encoded_slots_a,encoded_slots_b,"
+    "correctness_status,measurement_status\n"
+)
+_REAL_THRESHOLD_HEADER = "schema_version,dataset,variant,dataset_manifest_sha256,records_sha256,pairs_sha256,pair_id,pair_kind,label,record_a,record_b,k,m,hash_randomness,root_seed,split,rank_position,threshold_trial_index,hash_seed,match_count,decision,label_truth,label_outcome,exact_j_truth,exact_j_outcome,exact_jaccard_bucketed,requested_j_threshold,tau_count,realized_j_tau,calibration_fpr,calibration_fnr,calibration_balanced_error,calibration_digest,evaluation_digest,threshold_workload_sha256\n"
+_DYNAMIC_HEADER = (
+    "label,k,m,set_size,ring_dim,depth,phase_init_ms,phase_insert_ms,"
+    "phase_delete_ms,phase_signature_ms,phase_encode_ms,phase_encrypt_ms,"
+    "phase_compute_ms,phase_decrypt_ms,total_ms,memory_bytes,ct_size_bytes,"
+    "jaccard_computed,jaccard_expected,jaccard_error,jaccard_rel_error,"
+    "ops_insert_per_sec,ops_delete_per_sec,trials,total_ms_sd,total_ms_median,"
+    "phase_init_ms_sd,phase_init_ms_median,phase_insert_ms_sd,"
+    "phase_insert_ms_median,phase_delete_ms_sd,phase_delete_ms_median,"
+    "phase_signature_ms_sd,phase_signature_ms_median,phase_encode_ms_sd,"
+    "phase_encode_ms_median,phase_encrypt_ms_sd,phase_encrypt_ms_median,"
+    "phase_compute_ms_sd,phase_compute_ms_median,phase_decrypt_ms_sd,"
+    "phase_decrypt_ms_median,rel_error_eligible_n,hash_randomness,hash_seed,"
+    "hash_root_seed,accuracy_trials,phase_flood_ms,phase_flood_ms_sd,"
+    "phase_flood_ms_median,transcript_stat_bits,max_queries,query_stat_bits,"
+    "coefficient_stat_bits,flood_margin_bits,eval_noise_bits,flood_noise_bits,"
+    "scaling_mod_size,sanitizer_model,sanitizer_assurance,estimator_model,"
+    "profile_id,run_class,target_security_bits,comparison_eligible,"
+    "measurement_kind,actual_ring_dim,log_q_bits,plaintext_modulus,num_limbs,"
+    "openfhe_version,dynamic_scenario,updates_requested,updates_applied,"
+    "initial_epoch,final_epoch,owner_b_unchanged,ciphertext_upload_count,"
+    "local_inner_product,decrypted_inner_product,correctness_status,"
+    "refresh_owner_set_id,refresh_updates,refresh_epoch_before,"
+    "refresh_epoch_after,refresh_status,phase_refresh_update_ms,"
+    "phase_refresh_signature_ms,phase_refresh_encode_ms,"
+    "phase_refresh_encrypt_ms,phase_refresh_serialize_ms,phase_cloud_replace_ms,"
+    "refresh_total_ms,refresh_upload_bytes,refresh_ciphertexts_uploaded,"
+    "refresh_context_fingerprint,refresh_public_key_fingerprint\n"
+)
+
+_EXACT_HEADERS = {
+    "review-comparison-csv-v1": _REVIEW_HEADER,
+    "review-encoding-csv-v1": _REVIEW_ENCODING_HEADER,
+    "sqrt-comparison-csv-v1": _SQRT_HEADER,
+    "threshold-csv-v1": _THRESHOLD_HEADER,
+    "threshold-fpfn-csv-v1": _THRESHOLD_FPFN_HEADER,
+    "deletion-survival-csv-v1": _DELETION_HEADER,
+    "estimator-diagnostic-csv-v1": _ESTIMATOR_HEADER,
+    "fhe-ind-csv-v1": _FHE_IND_HEADER,
+    "piccard-benchmark-csv-v1": _SQRT_TIMING_HEADER,
+    "dynamic-benchmark-csv-v1": _DYNAMIC_HEADER,
+    "real-threshold-csv-v1": _REAL_THRESHOLD_HEADER,
+}
+
+
+def _csv_table(payload: bytes, header: str, label: str) -> list[dict[str, str]]:
+    """Parse one CSV artifact and require its exact, byte-stable header."""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} is not UTF-8 CSV")
+    if not text.startswith(header):
+        fail(f"{label} header mismatch")
+    reader = csv.reader(io.StringIO(text, newline=""))
+    rows_raw = list(reader)
+    expected_fields = header.rstrip("\n").split(",")
+    if not rows_raw or rows_raw[0] != expected_fields:
+        fail(f"{label} header fields mismatch")
+    if any(len(row) != len(expected_fields) for row in rows_raw[1:]):
+        fail(f"{label} contains a malformed row")
+    return [dict(zip(expected_fields, row)) for row in rows_raw[1:]]
+
+
+def _output_path(root: Path, output: Path, value: str, label: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        path.resolve(strict=False).relative_to(output.resolve())
+    except ValueError:
+        fail(f"{label} escapes its canonical cell output")
+    if path.is_symlink() or not path.is_file():
+        fail(f"{label} is missing or unsafe")
+    return path
+
+
+def _command_value(command: list[str], prefix: str) -> list[str]:
+    return [arg[len(prefix):] for arg in command if arg.startswith(prefix)]
+
+
+def _canonical_payload(root: Path, output: Path, plan: dict[str, Any],
+                      schema: str) -> tuple[bytes, str]:
+    """Return the producer's canonical primary artifact, never an arbitrary CSV."""
+    command = plan.get("command", [])
+    if not isinstance(command, list):
+        fail("planned producer command is malformed")
+    if schema == "noise-profile-v1":
+        roots = _command_value(command, "--results-root=")
+        if roots:
+            if len(roots) != 1:
+                fail("noise producer has duplicate results-root bindings")
+            bound = Path(roots[0]).resolve(strict=False)
+            payload = producer_output_dir({"family": "flooding"}, output)
+            if bound != payload.resolve():
+                fail("noise producer results-root is not the canonical payload root")
+            # The wrapper creates a nested profiles/<profile>/<key> shard;
+            # the family validator resolves that path from its manifests.
+            return b"", "payload"
+    prefixes = ("--csv=", "--output=")
+    for prefix in prefixes:
+        values = _command_value(command, prefix)
+        if not values:
+            continue
+        if len(values) != 1:
+            fail(f"producer has duplicate {prefix[:-1]} bindings")
+        # review-comparison's --output is an abstract planner token; its
+        # successor intentionally emits the versioned CSV on stdout.
+        if schema in {"review-comparison-csv-v1", "review-encoding-csv-v1"}:
+            break
+        path = _output_path(root, output, values[0], prefix[:-1])
+        return path.read_bytes(), path.relative_to(output).as_posix()
+    # These producers are deliberately stdout-only.  An unrelated CSV in the
+    # cell directory must never be promoted to evidence by a generic scan.
+    return (output / "stdout.log").read_bytes(), "stdout.log"
+
+
+def _reject_unrelated_csvs(output: Path, receipt: dict[str, Any], allowed: set[str],
+                           allowed_prefixes: tuple[str, ...] = ()) -> None:
+    for item in receipt.get("artifact_inventory", []):
+        path = str(item.get("path", ""))
+        if path.endswith(".csv") and path not in allowed and not any(
+                path.startswith(prefix) for prefix in allowed_prefixes):
+            # Dynamic/FHE identity sidecars are bound separately by their
+            # explicit selector and are not the primary family artifact.
+            if path != "identity.csv":
+                fail(f"unrelated CSV artifact is not admissible: {path}")
+
+
+def _terminal_records(stderr: bytes, cell_id: str) -> list[dict[str, str]]:
+    records = []
+    for line in stderr.decode("utf-8", errors="strict").splitlines():
+        if not line.startswith("revision_terminal,"):
+            continue
+        values: dict[str, str] = {}
+        for token in line.split(",")[1:]:
+            key, separator, value = token.partition("=")
+            if not separator or not key or key in values:
+                fail(f"malformed revision terminal row for {cell_id}")
+            values[key] = value
+        if values.get("cell_id") != cell_id:
+            fail(f"revision terminal row identity mismatch for {cell_id}")
+        records.append(values)
+    return records
+
+
+def _int_field(row: dict[str, str], field: str, cid: str) -> int:
+    try:
+        value = int(row[field])
+    except (KeyError, ValueError):
+        fail(f"invalid {field} field for {cid}")
+    return value
+
+
+def _command_int(command: list[str], prefix: str, label: str) -> int | None:
+    values = _command_value(command, prefix)
+    if not values:
+        return None
+    if len(values) != 1:
+        fail(f"{label} has duplicate {prefix} bindings")
+    try:
+        return int(values[0])
+    except ValueError:
+        fail(f"{label} has a non-integer {prefix} binding")
+
+
+def _command_file(root: Path, command: list[str], prefix: str,
+                  label: str) -> Path | None:
+    values = _command_value(command, prefix)
+    if not values:
+        return None
+    if len(values) != 1:
+        fail(f"{label} has duplicate {prefix} bindings")
+    path = Path(values[0])
+    if not path.is_absolute():
+        path = root / path
+    if path.is_symlink() or not path.is_file():
+        fail(f"{label} binding is missing or unsafe")
+    return path
+
+
+def _tsv_rows(path: Path, label: str) -> list[dict[str, str]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        fail(f"{label} is not readable UTF-8 TSV")
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    if not reader.fieldnames:
+        fail(f"{label} has no TSV header")
+    return [dict(row) for row in reader]
+
+
+def _expected_dataset_name(variant: str) -> str:
+    return "dblp_acm" if variant.startswith("dblp_acm_") else "enron"
+
+
+def _check_n_a_terminal(stderr: bytes, cell: dict[str, Any], *, row_id: str,
+                        reason: str) -> None:
+    rows = _terminal_records(stderr, cell["cell_id"])
+    matching = [row for row in rows if row.get("row_id") == row_id]
+    if len(matching) != 1:
+        fail(f"missing or duplicate NOT_APPLICABLE terminal row for {cell['cell_id']}")
+    row = matching[0]
+    if row.get("status") != "NOT_APPLICABLE" or \
+            row.get("terminal_status") != "NOT_APPLICABLE" or \
+            row.get("reason") != reason or row.get("reason_code") != reason or \
+            row.get("measured_count") != "0":
+        fail(f"NOT_APPLICABLE terminal binding mismatch for {cell['cell_id']}")
+
+
+def _check_terminal_ids(stderr: bytes, cell: dict[str, Any],
+                        expected: set[str], *, reason: str) -> None:
+    """Require the complete terminal-row set for a producer family.
+
+    A valid N/A row is bound to the logical method it replaces.  Accepting an
+    additional terminal row would let a producer silently drop a second
+    method while keeping the receipt's aggregate count unchanged.
+    """
+    rows = _terminal_records(stderr, cell["cell_id"])
+    observed = [str(row.get("row_id", "")) for row in rows]
+    if len(observed) != len(set(observed)) or set(observed) != expected:
+        fail(f"terminal row taxonomy mismatch for {cell['cell_id']}")
+    for row_id in expected:
+        row = next(row for row in rows if row.get("row_id") == row_id)
+        if row.get("status") != "NOT_APPLICABLE" or \
+                row.get("terminal_status") != "NOT_APPLICABLE" or \
+                row.get("reason") != reason or row.get("reason_code") != reason or \
+                row.get("measured_count") != "0":
+            fail(f"terminal N/A binding mismatch for {cell['cell_id']}")
+
+
+def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
+                           plan: dict[str, Any], cell: dict[str, Any],
+                           mode: str) -> None:
+    """Validate the wrapper's manifest-bound nested flooding shard.
+
+    ``run_noise_profiles.sh`` deliberately owns a payload directory below the
+    lifecycle cell directory.  The aggregate and detail CSVs are therefore
+    admissible only at the key selected by the run/profile/revision manifests;
+    a flat or copied CSV must not satisfy this family.
+    """
+    command = plan.get("command", [])
+    roots = _command_value(command, "--results-root=")
+    if len(roots) != 1:
+        fail(f"noise producer must bind exactly one results-root for {cell['cell_id']}")
+    payload = Path(roots[0])
+    if not payload.is_absolute():
+        payload = root / payload
+    try:
+        payload.resolve(strict=False).relative_to(output.resolve())
+    except ValueError:
+        fail(f"noise payload escapes canonical output for {cell['cell_id']}")
+    if payload.resolve() != (output / "payload").resolve():
+        fail(f"noise payload path is not the canonical cell payload for {cell['cell_id']}")
+    if payload.is_symlink() or not payload.is_dir():
+        fail(f"noise payload directory is missing or unsafe for {cell['cell_id']}")
+
+    def safe_payload(relative: str, label: str) -> Path:
+        path = _safe_relative(payload, relative, label)
+        if path.is_symlink() or not path.is_file():
+            fail(f"{label} is missing or unsafe for {cell['cell_id']}")
+        return path
+
+    run_manifest = load_json(safe_payload("run_manifest.json", "noise run manifest"),
+                             "noise run manifest")
+    profile = str(cell.get("axis_value"))
+    expected_profile = "readiness-toy-v1" if mode == "toy" else "paper-v1"
+    repetitions = 1 if mode == "toy" else 5
+    if run_manifest.get("schema") != "piccard-noise-revision-run-v1" or \
+            run_manifest.get("profile_id") != profile or \
+            run_manifest.get("run_profile") != expected_profile or \
+            run_manifest.get("status") != "READINESS_ONLY" or \
+            run_manifest.get("table_eligible") is not False or \
+            run_manifest.get("repetitions_per_pattern") != repetitions or \
+            run_manifest.get("patterns") != ["zero", "random", "adversarial"] or \
+            run_manifest.get("invocation_count") != 1:
+        fail(f"noise run manifest identity/topology mismatch for {cell['cell_id']}")
+
+    resolved = load_json(safe_payload("resolved_noise_profiles.json",
+                                      "resolved noise profile matrix"),
+                         "resolved noise profile matrix")
+    if not isinstance(resolved, dict) or not isinstance(resolved.get("profiles"), list):
+        fail(f"resolved noise profile matrix is malformed for {cell['cell_id']}")
+    source_commit = str(resolved.get("source_commit", ""))
+    if source_commit in {"runtime-source-commit", ""} or len(source_commit) != 40:
+        fail(f"resolved noise profile source is not bound for {cell['cell_id']}")
+
+    profiles_root = payload / "profiles" / profile
+    profile_manifest_path = profiles_root / "profile_manifest.json"
+    if profile_manifest_path.is_symlink() or not profile_manifest_path.is_file():
+        fail(f"noise profile manifest is missing for {cell['cell_id']}")
+    profile_manifest = load_json(profile_manifest_path, "noise profile manifest")
+    if profile_manifest.get("schema") != "piccard-noise-revision-profile-v1" or \
+            profile_manifest.get("profile_id") != profile or \
+            profile_manifest.get("source_commit") != source_commit or \
+            profile_manifest.get("key_count") != 1 or \
+            profile_manifest.get("profile_verdict") != "READINESS_ONLY" or \
+            profile_manifest.get("table_eligible") is not False:
+        fail(f"noise profile manifest identity mismatch for {cell['cell_id']}")
+    key_verdicts = profile_manifest.get("key_verdicts")
+    if not isinstance(key_verdicts, dict) or len(key_verdicts) != 1:
+        fail(f"noise profile key verdict topology mismatch for {cell['cell_id']}")
+    key_id, key_verdict = next(iter(key_verdicts.items()))
+    if key_verdict != "SELECTED" or not isinstance(key_id, str) or not key_id:
+        fail(f"noise profile key verdict mismatch for {cell['cell_id']}")
+
+    shard = profiles_root / key_id
+    identity_path = shard / "revision_identity.json"
+    if identity_path.is_symlink() or not identity_path.is_file():
+        fail(f"noise shard revision identity is missing for {cell['cell_id']}")
+    identity = load_json(identity_path, "noise shard revision identity")
+    if identity.get("schema") != "piccard-noise-revision-shard-v1" or \
+            identity.get("cell_id") != cell["cell_id"] or \
+            identity.get("run_profile") != expected_profile or \
+            identity.get("profile_id") != profile or \
+            identity.get("key_id") != key_id or \
+            identity.get("source_commit") != source_commit or \
+            identity.get("repetitions_per_pattern") != repetitions or \
+            identity.get("patterns") != ["zero", "random", "adversarial"] or \
+            identity.get("status") != "READINESS_ONLY" or \
+            identity.get("table_eligible") is not False:
+        fail(f"noise shard revision identity mismatch for {cell['cell_id']}")
+    # Resolve the expected consumer set independently from the tracked noise
+    # matrix; manifests identify the artifact but cannot redefine its family.
+    try:
+        from revision_flooding_adapter import select_noise_partition
+        noise_matrix = json.loads((ROOT / "scripts" / "noise_profiles.json").read_text(
+            encoding="utf-8"))
+        partition = select_noise_partition(noise_matrix, profile)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        fail(f"cannot resolve canonical noise partition: {exc}")
+    expected_consumers = {(str(point["k"]), str(point["m"]))
+                          for point in partition["consumer_points"]}
+
+    aggregate_path = shard / "aggregate.csv"
+    details_dir = shard / "details"
+    candidates_path = shard / "candidates.json"
+    if any(path.is_symlink() or not path.is_file()
+           for path in (aggregate_path, candidates_path)) or \
+            details_dir.is_symlink() or not details_dir.is_dir():
+        fail(f"noise shard payload is incomplete for {cell['cell_id']}")
+    aggregate_header = (
+        "profile,circuit,shape_id,security,consumer_count,consumer_set_sha256,"
+        "worst_consumer_k,worst_consumer_m,pattern_count,repetitions_per_pattern,"
+        "detail_row_count,detail_sha256,seed,requested_ring_dim,natural_ring_dim,"
+        "realized_ring_dim,ring_growth_factor,ring_dim_calibrated,natural_depth,"
+        "provisioned_depth,scaling_mod_size,num_limbs,plaintext_mod,log_q,log_delta,"
+        "eval_noise_bits,headroom_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+        "flood_margin_bits,flood_noise_bits,decrypt_ok,saturated,ct_bytes,openfhe_version,"
+        "source_commit,status_code,error_message,consumer_results_sha256\n")
+    aggregate_rows = _csv_table(aggregate_path.read_bytes(), aggregate_header,
+                                f"noise aggregate {cell['cell_id']}")
+    if not aggregate_rows or any(
+            row.get("profile") != profile or
+            row.get("consumer_count") != str(len(expected_consumers)) or
+            row.get("consumer_set_sha256") != partition["consumer_set_sha256"] or
+            row.get("pattern_count") != "3" or
+            row.get("repetitions_per_pattern") != str(repetitions) or
+            row.get("source_commit") != source_commit
+            for row in aggregate_rows):
+        fail(f"noise aggregate identity/repetition mismatch for {cell['cell_id']}")
+    detail_paths = sorted(path for path in details_dir.glob("*.csv")
+                          if path.is_file() and not path.is_symlink())
+    if not detail_paths:
+        fail(f"noise detail CSVs are missing for {cell['cell_id']}")
+    detail_header = (
+        "profile,key_id,candidate_id,circuit,shape_id,security,consumer_k,consumer_m,"
+        "pattern,rep_index,rep_seed,requested_ring_dim,natural_ring_dim,"
+        "ring_dim_calibrated,realized_ring_dim,ring_growth_factor,natural_depth,"
+        "provisioned_depth,scaling_mod_size,num_limbs,plaintext_mod,log_q,log_delta,"
+        "eval_noise_bits,headroom_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
+        "flood_margin_bits,flood_noise_bits,decrypt_ok,saturated,ct_bytes,openfhe_version,"
+        "source_commit,status_code,error_message\n")
+    observed: set[tuple[str, str, str, str]] = set()
+    for detail_path in detail_paths:
+        rows = _csv_table(detail_path.read_bytes(), detail_header,
+                          f"noise detail {cell['cell_id']}")
+        for row in rows:
+            key = (row.get("consumer_k", ""), row.get("consumer_m", ""),
+                   row.get("pattern", ""), row.get("rep_index", ""))
+            if (row.get("profile") != profile or row.get("key_id") != key_id or
+                    row.get("pattern") not in {"zero", "random", "adversarial"} or
+                    row.get("source_commit") != source_commit or
+                    (row.get("consumer_k"), row.get("consumer_m"))
+                    not in expected_consumers):
+                fail(f"noise detail identity/pattern mismatch for {cell['cell_id']}")
+            try:
+                rep_index = int(row["rep_index"])
+            except (KeyError, ValueError):
+                fail(f"noise detail repetition index is invalid for {cell['cell_id']}")
+            if rep_index not in range(repetitions) or key in observed:
+                fail(f"noise detail repetition topology mismatch for {cell['cell_id']}")
+            observed.add(key)
+    expected_detail_count = len(expected_consumers) * 3 * repetitions
+    if len(observed) != expected_detail_count or any(
+            int(row.get("detail_row_count", "-1")) != expected_detail_count
+            for row in aggregate_rows):
+        fail(f"noise detail row count mismatch for {cell['cell_id']}")
+
+    allowed = {
+        "payload/run_manifest.json", "payload/resolved_noise_profiles.json",
+        f"payload/profiles/{profile}/profile_manifest.json",
+        f"payload/profiles/{profile}/{key_id}/revision_identity.json",
+        f"payload/profiles/{profile}/{key_id}/aggregate.csv",
+        f"payload/profiles/{profile}/{key_id}/candidates.json",
+    }
+    allowed.update(path.relative_to(output).as_posix()
+                   for path in detail_paths)
+    actual = {str(item.get("path", "")) for item in receipt.get("artifact_inventory", [])}
+    if actual != allowed:
+        fail(f"noise artifact inventory contains unrelated or missing files for {cell['cell_id']}")
+
+
 def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                             plans: dict[str, dict[str, Any]]) -> None:
-    """Validate producer evidence independently of runner inventories.
+    """Validate each producer's canonical artifact and semantic row shape.
 
-    Each matrix schema must be explicitly registered.  Generic CSV producers
-    must emit non-empty evidence containing every terminal method/status token;
-    the real-data summary is stronger: it is recomputed byte-for-byte from its
-    bound accuracy CSV using the checked-in summarizer.
+    This registry is deliberately explicit.  A CSV is evidence only when it
+    comes from the producer-declared stdout/path (or the flooding directory
+    contract); an arbitrary CSV copied into a cell can never satisfy a row
+    check.  The parser is family-aware because several producers share a
+    logical schema while using different terminal/N/A conventions.
     """
     if mode == "dry-run":
         return
@@ -398,181 +992,394 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             fail(f"no independent artifact validator is registered for {schema}")
         output = cell_output(root, cid)
         receipt = load_json(output / "receipt.json", f"receipt {cid}")
-        evidence_paths = [output / "stdout.log", output / "stderr.log"]
-        evidence = b"".join(path.read_bytes() for path in evidence_paths
-                            if path.is_file())
-        for item in receipt.get("artifact_inventory", []):
-            path = output / item["path"]
-            if path.is_file():
-                evidence += path.read_bytes()
-        if not evidence.strip():
-            fail(f"producer evidence is empty for {cid}")
-        is_summary = (cell["family"] == "real_dataset" and
-                      str(cell["axis_value"]) == "summary")
-        for row in cell["expected_rows"] if not is_summary else []:
-            tokens = [str(row.get("method", ""))]
-            if row.get("terminal_status") == "NOT_APPLICABLE":
-                tokens.extend(("NOT_APPLICABLE", str(row.get("reason_code", ""))))
-            for token in tokens:
-                if token and token.encode("utf-8") not in evidence:
-                    fail(f"producer evidence lacks terminal token {token!r} for {cid}")
-
+        stdout = (output / "stdout.log").read_bytes()
+        stderr = (output / "stderr.log").read_bytes()
+        plan = plans[cid]
+        # The real summary is independently regenerated from its canonical
+        # accuracy input.  It is the only summary producer without a fixed
+        # C++ CSV header.
+        is_summary = cell["family"] == "real_dataset" and \
+            str(cell.get("axis_value")) == "summary"
+        allowed_csvs: set[str] = set()
+        if schema == "noise-profile-v1":
+            # The successor wrapper owns a nested profiles/<profile>/<key>
+            # tree; its aggregate/detail CSVs are checked below by their
+            # manifest-bound paths rather than by a flat basename allowlist.
+            allowed_csvs = {str(item.get("path", ""))
+                            for item in receipt.get("artifact_inventory", [])
+                            if str(item.get("path", "")).endswith(".csv")}
+        elif is_summary:
+            allowed_csvs = {"summary.csv"}
+        elif schema not in {"review-comparison-csv-v1", "review-encoding-csv-v1",
+                            "sqrt-comparison-csv-v1", "threshold-csv-v1",
+                            "threshold-fpfn-csv-v1", "dynamic-benchmark-csv-v1",
+                            "piccard-benchmark-csv-v1", "estimator-diagnostic-csv-v1",
+                            "deletion-survival-csv-v1", "fhe-ind-csv-v1"}:
+            for prefix in ("--csv=", "--output="):
+                values = _command_value(plan.get("command", []), prefix)
+                if len(values) == 1:
+                    allowed_csvs.add(Path(values[0]).name)
+        if schema != "noise-profile-v1":
+            _reject_unrelated_csvs(output, receipt, allowed_csvs)
         if is_summary:
-            argv = plans[cid]["command"]
-            def option(prefix: str) -> Path:
-                values = [Path(arg[len(prefix):]) for arg in argv if arg.startswith(prefix)]
+            argv = plan.get("command", [])
+            def one_path(prefix: str) -> Path:
+                values = _command_value(argv, prefix)
                 if len(values) != 1:
                     fail(f"summary plan lacks exactly one {prefix} binding")
-                return values[0]
-            accuracy = option("--accuracy-csv=")
-            actual = option("--output=")
-            variant_values = [arg.split("=", 1)[1] for arg in argv
-                              if arg.startswith("--variant=")]
+                return Path(values[0])
+            accuracy = one_path("--accuracy-csv=")
+            actual = one_path("--output=")
+            variant_values = _command_value(argv, "--variant=")
             if len(variant_values) != 1:
                 fail("summary plan lacks one variant binding")
+            actual = _output_path(root, output, str(actual), "summary output")
+            if not accuracy.is_file() or accuracy.is_symlink():
+                fail(f"summary accuracy input is missing for {cid}")
             with tempfile.TemporaryDirectory(prefix="piccard-summary-verify.") as temporary:
-                verify_cells = Path(temporary) / "cells"
-                verify_accuracy = verify_cells / accuracy.parent.name / "accuracy.csv"
+                verify_root_dir = Path(temporary) / "cells"
+                verify_accuracy = verify_root_dir / accuracy.parent.name / "accuracy.csv"
                 verify_accuracy.parent.mkdir(parents=True)
                 verify_accuracy.write_bytes(accuracy.read_bytes())
-                recomputed = verify_cells / output.name / "summary.csv"
+                recomputed = verify_root_dir / output.name / "summary.csv"
                 recomputed.parent.mkdir(parents=True)
                 command = [sys.executable, str(ROOT / "scripts" / "summarize_real_datasets.py"),
                            f"--revision-cell={cid}", f"--accuracy-csv={verify_accuracy}",
                            f"--output={recomputed}", f"--variant={variant_values[0]}"]
                 completed = subprocess.run(command, cwd=ROOT, capture_output=True,
                                            text=True, check=False)
-                if completed.returncode != 0 or not actual.is_file() or \
-                        actual.read_bytes() != recomputed.read_bytes():
+                if completed.returncode != 0 or actual.read_bytes() != recomputed.read_bytes():
                     fail(f"real summary artifact is not independently reproducible: {cid}")
             continue
 
-        required_columns = {
-            "review-comparison-csv-v1": {"method", "measurement_status"},
-            "deletion-survival-csv-v1": {"model", "trials"},
-            "dynamic-benchmark-csv-v1": {"label", "trials"},
-            "estimator-diagnostic-csv-v1": {"estimator_model", "trials"},
-            "fhe-ind-csv-v1": {"cell_id", "method", "status"},
-            "noise-profile-v1": {"profile"},
-            "piccard-benchmark-csv-v1": {"label", "trials"},
-            "review-encoding-csv-v1": {"method", "measurement_status"},
-            "sqrt-comparison-csv-v1": {"encoding", "Total(ms)"},
-            "real-dataset-csv-v1": {"dataset", "variant"},
-            "real-threshold-csv-v1": {"schema_version", "dataset", "variant"},
-            "sj16-calibration-v1": {"key_bits", "heldout_actual_ms"},
-            "threshold-csv-v1": {"label", "trials"},
-            "threshold-fpfn-csv-v1": {"schema_version", "grid_index"},
-        }[schema]
-        candidates: list[bytes] = []
-        stdout_bytes = (output / "stdout.log").read_bytes()
-        if b"," in stdout_bytes:
-            candidates.append(stdout_bytes)
-        for item in receipt.get("artifact_inventory", []):
-            if str(item.get("path", "")).endswith(".csv"):
-                candidates.append((output / item["path"]).read_bytes())
-        valid_tables: list[list[dict[str, str]]] = []
-        for payload in candidates:
+        # SJ16 writes a structured key=value artifact, not a CSV stream.
+        if schema == "sj16-calibration-v1":
+            values = _command_value(plan.get("command", []), "--output=")
+            if len(values) != 1:
+                fail(f"SJ16 calibration lacks one canonical --output for {cid}")
+            artifact = _output_path(root, output, values[0], "SJ16 calibration")
+            text = artifact.read_text(encoding="utf-8")
+            required = ("overall_status=PASS", "key_bits=3072",
+                        "trials_per_size=1" if mode == "toy" else "trials_per_size=30",
+                        "held_out=32768", "held_measured_ms=", "gate")
+            if any(token not in text for token in required) or \
+                    "# columns: key_bits," not in text or "\n3072," not in text:
+                fail(f"SJ16 calibration identity/count artifact mismatch for {cid}")
+            if not any(line.startswith("3072,") and line.rstrip().endswith(",PASS")
+                       for line in text.splitlines()):
+                fail(f"SJ16 calibration gate is not PASS for {cid}")
+            continue
+
+        if schema == "noise-profile-v1":
+            _check_noise_artifacts(root, output, receipt, plan, cell, mode)
+            continue
+
+        if schema == "sqrt-comparison-csv-v1":
+            axis = str(cell.get("axis"))
+            expected = [row for row in cell["expected_rows"]
+                        if row.get("terminal_status") != "NOT_APPLICABLE"]
+            if axis == "accuracy_m":
+                rows = _csv_table(stdout, _SQRT_HEADER, f"sqrt accuracy {cid}")
+                wanted = {"onehot": "OneHot", "sqrt": "Sqrt"}
+                if len(rows) != len(expected) or \
+                        {row.get("encoding") for row in rows} != \
+                        {wanted[str(item["method"])] for item in expected}:
+                    fail(f"sqrt accuracy row taxonomy mismatch for {cid}")
+                na = any(item.get("terminal_status") == "NOT_APPLICABLE"
+                         for item in cell["expected_rows"])
+                _check_terminal_ids(stderr, cell,
+                                    {"sqrt"} if na else set(),
+                                    reason="sqrt-m-not-perfect-square")
+            elif axis == "timing_m":
+                rows = _csv_table(stdout, _SQRT_TIMING_HEADER,
+                                  f"sqrt timing {cid}")
+                wanted = {"onehot", "sqrt"}
+                applicable_methods = {str(item["method"]) for item in expected}
+                if len(rows) != len(expected) or \
+                        {row.get("encoding") for row in rows} != \
+                        (wanted & applicable_methods) or \
+                        any(row.get("label") != "revision_" + cid or
+                            _int_field(row, "trials", cid) !=
+                            int(item["toy_measured_count"] if mode == "toy" else
+                                item["paper_measured_count"])
+                            for row, item in zip(
+                                sorted(rows, key=lambda value: value.get("encoding", "")),
+                                sorted(expected, key=lambda value: value.get("method", "")))):
+                    fail(f"sqrt timing row/trial taxonomy mismatch for {cid}")
+                na = any(item.get("terminal_status") == "NOT_APPLICABLE"
+                         for item in cell["expected_rows"])
+                _check_terminal_ids(stderr, cell,
+                                    {"sqrt"} if na else set(),
+                                    reason="sqrt-m-not-perfect-square")
+            else:
+                rows = _csv_table(stdout, _CROSSOVER_HEADER, f"sqrt crossover {cid}")
+                if len(rows) != 1:
+                    fail(f"sqrt crossover/ciphertext requires one combined row for {cid}")
+                nonsquare = any(item.get("terminal_status") == "NOT_APPLICABLE"
+                                for item in cell["expected_rows"])
+                if nonsquare and rows[0].get("sqrt_N") != "N/A":
+                    fail(f"sqrt N/A crossover fields are not bound for {cid}")
+                _check_terminal_ids(stderr, cell,
+                                    {"sqrt"} if nonsquare else set(),
+                                    reason="sqrt-m-not-perfect-square")
+            continue
+
+        if schema == "threshold-csv-v1":
+            if cell["family"] == "threshold_spec":
+                rows = _csv_table(stdout, _THRESHOLD_SPEC_HEADER, f"threshold spec {cid}")
+                if len(rows) != 1 or rows[0].get("schema_version") != "piccard-threshold-spec-v2" or \
+                        _int_field(rows[0], "k", cid) != int(cell["axes"]["k"]):
+                    fail(f"threshold spec k/schema topology mismatch for {cid}")
+                if rows[0].get("status") not in {"ok", "SKIPPED"}:
+                    fail(f"threshold spec status mismatch for {cid}")
+                if rows[0].get("status") == "SKIPPED":
+                    live = ("requested_ring_dim", "natural_ring_dim", "provisioned_ring_dim",
+                            "realized_ring_dim", "log_q_bits", "plaintext_modulus",
+                            "openfhe_version", "ordered_rns_moduli")
+                    if any(rows[0].get(field) != "N/A" for field in live):
+                        fail(f"threshold spec SKIPPED row fabricated live metadata for {cid}")
+                continue
+            rows = _csv_table(stdout, _THRESHOLD_HEADER, f"threshold {cid}")
+            expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
+                                 if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
+            if cell["family"] == "threshold_agreement":
+                labels = [f"{cid}::trial={index}" for index in range(expected_count)]
+                if len(rows) != expected_count or [row.get("label") for row in rows] != labels or \
+                        any(_int_field(row, "trials", cid) != 0 or
+                            _int_field(row, "accuracy_trials", cid) != 1
+                            for row in rows):
+                    fail(f"threshold agreement row/trial topology mismatch for {cid}")
+            else:
+                if len(rows) != 1 or rows[0].get("label") != cid or \
+                        _int_field(rows[0], "trials", cid) != expected_count:
+                    fail(f"threshold timing row/trial topology mismatch for {cid}")
+            continue
+
+        if schema == "threshold-fpfn-csv-v1":
+            rows = _csv_table(stdout, _THRESHOLD_FPFN_HEADER, f"threshold FP/FN {cid}")
+            expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
+                                 if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
+            trials = [_int_field(row, "trial_index", cid) for row in rows]
+            if len(rows) != expected_count or sorted(trials) != list(range(expected_count)) or \
+                    any(_int_field(row, "k", cid) != int(cell["point_k"]) or
+                        _int_field(row, "grid_index", cid) != int(cell["grid_index"])
+                        for row in rows):
+                fail(f"threshold FP/FN point/trial topology mismatch for {cid}")
+            continue
+
+        if schema == "review-encoding-csv-v1":
+            rows = _csv_table(stdout, _REVIEW_ENCODING_HEADER, f"review encoding {cid}")
+            applicable = [row for row in cell["expected_rows"]
+                          if row.get("terminal_status") != "NOT_APPLICABLE"]
+            wanted = {str(row["method"]) for row in applicable}
+            if {row.get("method") for row in rows} != wanted or len(rows) != len(wanted) or \
+                    any(_int_field(row, "timed_encoder_pairs", cid) !=
+                        int(item["toy_measured_count"] if mode == "toy" else item["paper_measured_count"])
+                        for row, item in zip(sorted(rows, key=lambda x: x.get("method", "")),
+                                              sorted(applicable, key=lambda x: x.get("method", "")))):
+                fail(f"review encoding method/timed-pair topology mismatch for {cid}")
+            if any(row.get("correctness_pair_calls") != "1" for row in rows):
+                fail(f"review encoding correctness-pair count mismatch for {cid}")
+            _check_terminal_ids(
+                stderr, cell,
+                {"piccard_sqrt_encode"}
+                if len(applicable) != len(cell["expected_rows"]) else set(),
+                reason="sqrt-m-not-perfect-square")
+            continue
+
+        # All remaining schemas are stdout or explicitly bound single-file
+        # CSV producers.  Their semantic checks are intentionally family-
+        # specific; there is no global method-token scan.
+        if schema == "real-dataset-csv-v1":
+            artifact = str(cell.get("axis_value"))
+            variant = str(cell["variant"])
+            expected_dataset = _expected_dataset_name(variant)
+            if artifact == "std192_encoding":
+                payload, _ = _canonical_payload(root, output, plan, schema)
+                rows = _csv_table(payload, _REAL_ENCODING_HEADER,
+                                  f"real encoding {cid}")
+                expected_trials = int(cell["expected_rows"][0][
+                    "toy_measured_count" if mode == "toy" else "paper_measured_count"])
+                if len(rows) != 2 or \
+                        {row.get("method") for row in rows} != {
+                            "piccard_encode", "piccard_sqrt_encode"} or \
+                        any(_int_field(row, "timed_encoder_pairs", cid) != expected_trials or
+                            row.get("correctness_pair_calls") != "1" or
+                            row.get("correctness_status") != "PASS"
+                            for row in rows):
+                    fail(f"real encoding method/count taxonomy mismatch for {cid}")
+            else:
+                header = (_REAL_ACCURACY_HEADER if artifact == "accuracy"
+                          else _REAL_TIMING_HEADER)
+                payload, _ = _canonical_payload(root, output, plan, schema)
+                rows = _csv_table(payload, header, f"real dataset {cid}")
+            if not rows or any(row.get("dataset") != expected_dataset or
+                               row.get("variant") != variant or
+                               _int_field(row, "k", cid) != int(cell["axes"]["k"]) or
+                               _int_field(row, "m", cid) != int(cell["axes"]["m"])
+                               for row in rows):
+                fail(f"real dataset variant binding mismatch for {cid}")
+            if artifact == "accuracy":
+                trials = (_command_int(plan.get("command", []),
+                                       "--accuracy_trials=", cid) or
+                          int(cell["expected_rows"][0][
+                              "toy_measured_count" if mode == "toy" else
+                              "paper_measured_count"]))
+                keys = set()
+                for row in rows:
+                    pair_id = row.get("pair_id", "")
+                    if not pair_id or row.get("pair_kind", "") == "":
+                        fail(f"real accuracy pair identity is incomplete for {cid}")
+                    trial = _int_field(row, "accuracy_trial_index", cid)
+                    if trial not in range(trials) or (pair_id, trial) in keys:
+                        fail(f"real accuracy pair/trial topology mismatch for {cid}")
+                    keys.add((pair_id, trial))
+                by_pair: dict[str, set[int]] = {}
+                for pair_id, trial in keys:
+                    by_pair.setdefault(pair_id, set()).add(trial)
+                if any(indices != set(range(trials)) for indices in by_pair.values()):
+                    fail(f"real accuracy trial coverage mismatch for {cid}")
+                workload = _command_file(root, plan.get("command", []),
+                                         "--workload-rows-out=", cid)
+                if workload is not None:
+                    workload_rows = _tsv_rows(workload, f"real accuracy workload {cid}")
+                    wanted: set[tuple[str, int]] = set()
+                    for workload_row in workload_rows:
+                        try:
+                            workload_trial = int(workload_row.get("trial_index", "-1"))
+                        except ValueError:
+                            fail(f"real accuracy workload trial is malformed for {cid}")
+                        workload_pair = str(workload_row.get("pair_id", ""))
+                        if not workload_pair or (workload_pair, workload_trial) in wanted:
+                            fail(f"real accuracy workload topology is malformed for {cid}")
+                        wanted.add((workload_pair, workload_trial))
+                    if keys != wanted:
+                        fail(f"real accuracy rows do not match workload topology for {cid}")
+            elif artifact == "std128_timing":
+                trials = (_command_int(plan.get("command", []), "--trials=", cid) or
+                          int(cell["expected_rows"][0][
+                              "toy_measured_count" if mode == "toy" else
+                              "paper_measured_count"]))
+                pair_keys = {(row.get("pair_id", ""), row.get("record_a", ""),
+                              row.get("record_b", "")) for row in rows}
+                indices = {_int_field(row, "trial_index", cid) for row in rows}
+                if len(pair_keys) != 1 or len(rows) != trials or \
+                        indices != set(range(trials)) or \
+                        any(not row.get("pair_id") or row.get("pair_kind", "") == ""
+                            for row in rows):
+                    fail(f"real timing pair/trial topology mismatch for {cid}")
+            continue
+        if schema == "real-threshold-csv-v1":
+            payload, _ = _canonical_payload(root, output, plan, schema)
+            rows = _csv_table(payload, _REAL_THRESHOLD_HEADER,
+                              f"real threshold {cid}")
+            trials = (_command_int(plan.get("command", []),
+                                   "--threshold-trials=", cid) or
+                      int(cell["expected_rows"][0][
+                          "toy_measured_count" if mode == "toy" else
+                          "paper_measured_count"]))
+            keys: set[tuple[str, int]] = set()
+            for row in rows:
+                pair_id = row.get("pair_id", "")
+                trial = _int_field(row, "threshold_trial_index", cid)
+                if row.get("dataset") != "dblp_acm" or \
+                        row.get("variant") != "dblp_acm_u65536" or \
+                        _int_field(row, "k", cid) != int(cell["axes"]["k"]) or \
+                        _int_field(row, "m", cid) != int(cell["axes"]["m"]) or \
+                        row.get("split") != "evaluation" or not pair_id or \
+                        trial not in range(trials) or (pair_id, trial) in keys:
+                    fail(f"real threshold row identity/trial mismatch for {cid}")
+                keys.add((pair_id, trial))
+            by_pair: dict[str, set[int]] = {}
+            for pair_id, trial in keys:
+                by_pair.setdefault(pair_id, set()).add(trial)
+            if not rows or any(indices != set(range(trials))
+                               for indices in by_pair.values()):
+                fail(f"real threshold dataset binding mismatch for {cid}")
+            workload = _command_file(root, plan.get("command", []),
+                                     "--workload-rows-out=", cid)
+            if workload is not None:
+                workload_rows = _tsv_rows(workload, f"real threshold workload {cid}")
+                evaluation_pairs: dict[str, str] = {}
+                for workload_row in workload_rows:
+                    if workload_row.get("split") != "evaluation":
+                        continue
+                    pair_id = str(workload_row.get("pair_id", ""))
+                    rank = str(workload_row.get("rank_position", ""))
+                    if pair_id in evaluation_pairs:
+                        fail(f"real threshold held-out workload has duplicate pair for {cid}")
+                    evaluation_pairs[pair_id] = rank
+                if not evaluation_pairs or any(not pair_id or not rank
+                                               for pair_id, rank in evaluation_pairs.items()):
+                    fail(f"real threshold held-out workload is malformed for {cid}")
+                output_ranks = {
+                    str(row.get("pair_id", "")): str(row.get("rank_position", ""))
+                    for row in rows
+                }
+                if output_ranks != evaluation_pairs:
+                    fail(f"real threshold held-out rank binding mismatch for {cid}")
+                wanted = {(pair_id, trial) for pair_id in evaluation_pairs
+                          for trial in range(trials)}
+                if keys != wanted:
+                    fail(f"real threshold rows do not match held-out workload for {cid}")
+            continue
+        header = _EXACT_HEADERS.get(schema)
+        payload, source = _canonical_payload(root, output, plan, schema)
+        if header is not None:
+            rows = _csv_table(payload, header, f"{schema} {cid}")
+        else:
             try:
-                table = list(csv.reader(io.StringIO(payload.decode("utf-8"))))
-            except (UnicodeDecodeError, csv.Error):
-                continue
-            if len(table) < 2 or len(table[0]) != len(set(table[0])) or \
-                    not required_columns.issubset(set(table[0])):
-                continue
-            width = len(table[0])
-            if any(len(row) != width for row in table[1:]):
-                continue
-            valid_tables.append([dict(zip(table[0], row)) for row in table[1:]])
-        applicable_rows = sum(row.get("terminal_status") != "NOT_APPLICABLE"
-                              for row in cell["expected_rows"])
-        if len(valid_tables) != 1:
-            fail(f"{schema} CSV structure/terminal row count mismatch for {cid}")
-        rows = valid_tables[0]
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                fail(f"{schema} artifact is not UTF-8 for {cid}")
+            rows = list(csv.DictReader(io.StringIO(text)))
         expected_rows = [row for row in cell["expected_rows"]
                          if row.get("terminal_status") != "NOT_APPLICABLE"]
-        expected_methods = [str(row.get("method", "")) for row in expected_rows]
         expected_counts = [int(row["toy_measured_count"] if mode == "toy"
                                else row["paper_measured_count"])
                            for row in expected_rows]
-
-        def integers(column: str) -> list[int]:
-            try:
-                return [int(row[column]) for row in rows]
-            except (KeyError, ValueError):
-                fail(f"{schema} has an invalid {column} binding for {cid}")
-
         if schema == "fhe-ind-csv-v1":
-            if len(rows) != 1 or rows[0]["cell_id"] != cid or \
-                    rows[0]["method"] != "fhe_ind" or integers("trials") != expected_counts:
+            if len(rows) != 1 or rows[0].get("cell_id") != cid or \
+                    rows[0].get("method") != "fhe_ind" or \
+                    _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"FHE-IND cell/trial taxonomy mismatch for {cid}")
         elif schema == "review-comparison-csv-v1":
-            if len(rows) != len(expected_rows) or \
-                    sorted(row["method"] for row in rows) != sorted(expected_methods) or \
-                    sorted(integers("trials")) != sorted(expected_counts):
-                fail(f"review comparison row/trial taxonomy mismatch for {cid}")
-        elif schema == "review-encoding-csv-v1":
-            if len(rows) != len(expected_rows) or \
-                    sorted(row["method"] for row in rows) != sorted(expected_methods) or \
-                    sorted(integers("encoder_timed_calls")) != sorted(expected_counts):
-                fail(f"encoding row/call taxonomy mismatch for {cid}")
-        elif schema == "piccard-benchmark-csv-v1":
-            if len(rows) != 2 or any(row["label"] != cid for row in rows):
-                fail(f"Piccard cell identity/row topology mismatch for {cid}")
-            observed_counts = []
+            expected_by_method = {
+                str(item["method"]): int(item["toy_measured_count"] if mode == "toy"
+                                          else item["paper_measured_count"])
+                for item in expected_rows
+            }
+            observed_by_method: dict[str, int] = {}
             for row in rows:
-                trial = int(row.get("trials", "0"))
-                accuracy = int(row.get("accuracy_trials", "0"))
-                observed_counts.append(max(trial, accuracy))
-            if sorted(observed_counts) != sorted(expected_counts):
+                method = str(row.get("method", ""))
+                if method in observed_by_method:
+                    fail(f"review comparison has duplicate method row for {cid}")
+                observed_by_method[method] = _int_field(row, "trials", cid)
+            if observed_by_method != expected_by_method:
+                fail(f"review comparison row/trial taxonomy mismatch for {cid}")
+        elif schema == "piccard-benchmark-csv-v1":
+            if len(rows) != 2 or any(row.get("label") != cid for row in rows):
+                fail(f"Piccard cell identity/row topology mismatch for {cid}")
+            observed = [max(_int_field(row, "trials", cid),
+                            _int_field(row, "accuracy_trials", cid)) for row in rows]
+            if sorted(observed) != sorted(expected_counts):
                 fail(f"Piccard measured-count binding mismatch for {cid}")
         elif schema == "estimator-diagnostic-csv-v1":
-            if len(rows) != 1 or integers("trials") != expected_counts:
+            if len(rows) != 1 or _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"estimator trial topology mismatch for {cid}")
         elif schema == "dynamic-benchmark-csv-v1":
-            labels = sorted(row["label"] for row in rows)
-            expected_labels = sorted(
-                [cid + "::insert_correctness", cid + "::delete_correctness"]
-                if cell["family"] == "dynamic_accuracy" else [cid])
-            if labels != expected_labels or sorted(integers("trials")) != sorted(expected_counts):
-                fail(f"dynamic identity/trial topology mismatch for {cid}")
-        elif schema == "threshold-fpfn-csv-v1":
-            expected_total = expected_counts[0]
-            if len(rows) != expected_total or \
-                    len({row["trial_index"] for row in rows}) != expected_total or \
-                    any(int(row["k"]) != int(cell["point_k"]) or
-                        int(row["grid_index"]) != int(cell["grid_index"])
-                        for row in rows):
-                fail(f"threshold FP/FN point/trial topology mismatch for {cid}")
-        elif schema == "threshold-csv-v1":
-            if len(rows) != 1 or rows[0].get("label") != cid:
-                fail(f"threshold cell identity mismatch for {cid}")
-            if "trials" in rows[0] and integers("trials") != expected_counts:
-                fail(f"threshold trial count mismatch for {cid}")
-        elif schema == "sqrt-comparison-csv-v1":
-            if len(rows) != len(expected_rows):
-                fail(f"sqrt row topology mismatch for {cid}")
-            if "encoding" in rows[0] and \
-                    sorted(row["encoding"] for row in rows) != sorted(expected_methods):
-                fail(f"sqrt method taxonomy mismatch for {cid}")
+            if cell["family"] == "dynamic_accuracy":
+                labels = sorted(row.get("label") for row in rows)
+                wanted = sorted((cid + "::insert_correctness", cid + "::delete_correctness"))
+                if labels != wanted or sorted(_int_field(row, "trials", cid) for row in rows) != sorted(expected_counts):
+                    fail(f"dynamic accuracy row/trial topology mismatch for {cid}")
+            elif len(rows) != 1 or rows[0].get("label") != cid or \
+                    _int_field(rows[0], "trials", cid) != expected_counts[0]:
+                fail(f"dynamic aggregate row/trial topology mismatch for {cid}")
         elif schema == "deletion-survival-csv-v1":
-            if len(rows) != 3 or len({row["r"] for row in rows}) != 3 or \
-                    any(int(row["trials"]) != expected_counts[0] for row in rows):
-                fail(f"deletion diagnostic topology mismatch for {cid}")
-        elif schema == "sj16-calibration-v1":
-            if len(rows) != 1 or rows[0]["key_bits"] != "3072":
-                fail(f"SJ16 calibration topology mismatch for {cid}")
-        elif schema == "real-dataset-csv-v1":
-            variant = str(cell["variant"])
-            if not rows or any(row["variant"] != variant for row in rows):
-                fail(f"real-data variant binding mismatch for {cid}")
-        elif schema == "real-threshold-csv-v1":
-            if not rows or any(row["dataset"] != "dblp_acm" or
-                               row["variant"] != "dblp_acm_u65536" for row in rows):
-                fail(f"real-threshold dataset binding mismatch for {cid}")
-        elif schema == "noise-profile-v1":
-            if not rows or any(row["profile"] != str(cell["axis_value"])
-                               for row in rows):
-                fail(f"noise profile binding mismatch for {cid}")
+            if len(rows) != 3 or {row.get("r") for row in rows} != {"1", "4", "8"} or \
+                    any(_int_field(row, "trials", cid) != expected_counts[0] for row in rows):
+                fail(f"deletion survival topology mismatch for {cid}")
 
 
 def verify_root(root: Path, *, mode: str, write_receipt: bool = False,
