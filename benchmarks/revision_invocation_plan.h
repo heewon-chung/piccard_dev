@@ -56,5 +56,15 @@ RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
 RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
                                               RevisionRunMode mode);
 
+/**
+ * @brief Plan one synthetic threshold timing/spec/agreement matrix cell.
+ *
+ * Only the fifteen `threshold_timing`, `threshold_spec`, and
+ * `threshold_agreement` cells are accepted.  The returned argv is pure data;
+ * no threshold producer or FHE context is launched.
+ */
+RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
+                                                 RevisionRunMode mode);
+
 }  // namespace benchmark
 }  // namespace piccard

@@ -18,6 +18,7 @@ using piccard::benchmark::RevisionMatrix;
 using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::PlanPiccardRevisionCell;
 using piccard::benchmark::PlanFheIndRevisionCell;
+using piccard::benchmark::PlanThresholdRevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -37,6 +38,24 @@ std::vector<const RevisionCell*> FheIndCells(const RevisionMatrix& matrix) {
         if (cell.family == "fhe_ind") cells.push_back(&cell);
     }
     return cells;
+}
+
+std::vector<const RevisionCell*> ThresholdCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "threshold_timing" ||
+            cell.family == "threshold_spec" ||
+            cell.family == "threshold_agreement") {
+            cells.push_back(&cell);
+        }
+    }
+    return cells;
+}
+
+bool HasArg(const RevisionInvocationPlan& plan, const std::string& prefix) {
+    return std::any_of(
+        plan.argv.begin(), plan.argv.end(),
+        [&](const std::string& arg) { return arg.rfind(prefix, 0) == 0; });
 }
 
 std::string Arg(const RevisionInvocationPlan& plan, size_t index) {
@@ -298,5 +317,162 @@ TEST(RevisionInvocationPlan, RejectsInvalidFheIndIdentityGeometryAndRows) {
     cell = source;
     cell.expected_artifact_schema = "other-schema";
     EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFifteenThresholdFheCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = ThresholdCells(matrix);
+    ASSERT_EQ(cells.size(), 15u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanThresholdRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanThresholdRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanThresholdRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        ASSERT_EQ(paper.cell_id, cell->cell_id);
+        ASSERT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(dry_run.argv, paper.argv);
+        ASSERT_EQ(dry_run.concrete_profile, "paper-v1");
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+        EXPECT_EQ(paper.expected_rows.front().measured_count,
+                  paper.expected_rows.front().paper_measured_count);
+        EXPECT_EQ(toy.expected_rows.front().measured_count,
+                  toy.expected_rows.front().toy_measured_count);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
+                  dry_run.expected_rows.front().paper_measured_count);
+
+        if (cell->family == "threshold_timing" ||
+            cell->family == "threshold_spec" ||
+            cell->family == "threshold_agreement") {
+            const std::string mode =
+                cell->family == "threshold_timing"
+                    ? "timing"
+                    : (cell->family == "threshold_spec" ? "spec" : "accuracy");
+            const std::string row_id =
+                cell->family == "threshold_timing"
+                    ? "timing"
+                    : (cell->family == "threshold_spec" ? "spec" : "agreement");
+            const std::string cell_selector = "--cell=" + row_id;
+            const std::string paper_trials =
+                cell->family == "threshold_timing"
+                    ? "30"
+                    : (cell->family == "threshold_spec" ? "0" : "50");
+            const std::vector<std::string> expected_paper = {
+                "--revision-cell=" + cell->cell_id,
+                "--profile=paper-v1",
+                "--mode=" + mode,
+                cell_selector,
+                "--security=STD128",
+                "--k=" + cell->axes.at("k"),
+                "--m=64",
+                "--set_size=1000",
+                "--trials=" + paper_trials,
+                "--seed={seed}",
+            };
+            const std::vector<std::string> expected_toy = {
+                "--revision-cell=" + cell->cell_id,
+                "--profile=readiness-toy-v1",
+                "--mode=" + mode,
+                cell_selector,
+                "--security=TOY",
+                "--k=" + cell->axes.at("k"),
+                "--m=64",
+                "--set_size=1000",
+                "--trials=1",
+                "--seed={seed}",
+            };
+            EXPECT_EQ(paper.argv, expected_paper);
+            EXPECT_EQ(toy.argv, expected_toy);
+            EXPECT_EQ(paper.producer, "bench_threshold");
+            EXPECT_EQ(toy.producer, "bench_threshold");
+            EXPECT_EQ(paper.concrete_profile, "paper-v1");
+            EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+            EXPECT_EQ(paper.expected_rows.front().row_id, row_id);
+            EXPECT_EQ(paper.expected_rows.front().method, row_id);
+            EXPECT_EQ(paper.expected_rows.front().status,
+                      cell->family == "threshold_spec" ? "DIAGNOSTIC"
+                                                        : "MEASURED");
+            EXPECT_EQ(paper.expected_rows.front().attributes.at("k"),
+                      cell->axes.at("k"));
+            EXPECT_FALSE(HasArg(paper, "--raw"));
+        } else {
+            FAIL() << "unexpected threshold family: " << cell->family;
+        }
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan, RejectsInvalidThresholdFamilyGeometryCountsAndRows) {
+    RevisionMatrix matrix = Load();
+    const auto cells = ThresholdCells(matrix);
+    ASSERT_FALSE(cells.empty());
+
+    const RevisionCell timing = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "threshold_timing";
+        });
+    RevisionCell cell = timing;
+    cell.family = "fhe_ind";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.family = "threshold_synthetic_fpfn";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axes["k"] = "512";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.paper_counts["timing"] = 29;
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_rows.front().attributes["k"] = "32";
+    EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }

@@ -295,6 +295,110 @@ std::string FheIndProfileForMode(RevisionRunMode mode) {
     RejectFheInd("unknown run mode");
 }
 
+[[noreturn]] void RejectThreshold(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid threshold FHE revision invocation cell: " + reason);
+}
+
+bool IsThresholdFheFamily(const std::string& family) {
+    return family == "threshold_timing" || family == "threshold_spec" ||
+           family == "threshold_agreement";
+}
+
+std::string ThresholdCellKind(const RevisionCell& cell) {
+    if (cell.family == "threshold_timing") return "timing";
+    if (cell.family == "threshold_spec") return "spec";
+    if (cell.family == "threshold_agreement") return "agreement";
+    RejectThreshold("unsupported threshold family");
+}
+
+void ValidateThresholdFheCell(const RevisionCell& cell) {
+    if (!IsThresholdFheFamily(cell.family)) {
+        RejectThreshold("family must be threshold_timing/spec/agreement");
+    }
+    if (cell.producer != "bench_threshold") {
+        RejectThreshold("producer must be bench_threshold");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectThreshold("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectThreshold("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "threshold-csv-v1") {
+        RejectThreshold("unexpected threshold artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectThreshold("cell is not RUN");
+    }
+
+    const std::string kind = ThresholdCellKind(cell);
+    if (cell.cell_id != "paper-v1::" + cell.family + "::k=" +
+                            cell.axis_value ||
+        cell.axis != "k" || cell.axes.size() != 4u) {
+        RejectThreshold("cell ID/selector/axis topology mismatch");
+    }
+    const uint64_t k = Axis(cell, "k");
+    if (!IsOneOf(k, {16, 32, 64, 128, 256}) ||
+        cell.axis_value != std::to_string(k)) {
+        RejectThreshold("invalid k selector");
+    }
+    RequireAxisValue(cell, "m", 64);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+
+    const uint64_t paper_trials = kind == "timing" ? 30 :
+                                  (kind == "spec" ? 0 : 50);
+    const std::string expected_eligibility = kind == "spec"
+                                                 ? "DIAGNOSTIC_ONLY"
+                                                 : "TABLE_ELIGIBLE";
+    const bool eligible = kind != "spec";
+    if (cell.eligibility != expected_eligibility ||
+        cell.table_eligible != eligible || cell.comparison_eligible != eligible) {
+        RejectThreshold("eligibility contract mismatch");
+    }
+    if (cell.paper_count != paper_trials || cell.toy_count != 1 ||
+        cell.paper_trials != paper_trials || cell.toy_trials != 1 ||
+        cell.paper_counts != std::map<std::string, uint64_t>{{kind, paper_trials}} ||
+        cell.toy_counts != std::map<std::string, uint64_t>{{kind, 1}}) {
+        RejectThreshold("paper/toy count contract mismatch");
+    }
+    const auto cell_k = cell.attributes.find("k");
+    if (cell.attributes.size() != 1u || cell_k == cell.attributes.end() ||
+        cell_k->second != std::to_string(k) ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectThreshold("threshold cell attribute contract mismatch");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectThreshold("threshold cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    const std::string expected_status = kind == "spec" ? "DIAGNOSTIC" : "MEASURED";
+    const auto row_k = row.attributes.find("k");
+    if (row.row_id != kind || row.status != expected_status ||
+        row.terminal_status != expected_status || row.method != kind ||
+        !row.reason.empty() || !row.reason_code.empty() ||
+        row.measured_count != paper_trials ||
+        row.paper_measured_count != paper_trials ||
+        row.toy_measured_count != 1 || row.attributes.size() != 1u ||
+        row_k == row.attributes.end() || row_k->second != std::to_string(k) ||
+        !row.list_attributes.empty()) {
+        RejectThreshold("expected threshold row contract mismatch");
+    }
+}
+
+std::string ThresholdProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectThreshold("unknown run mode");
+}
+
 }  // namespace
 
 RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
@@ -362,6 +466,44 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
         std::string("--trials=") + (toy ? "1" : "30"),
         "--raw-timing-out={output}/raw",
         "--raw-timing-profile=" + profile,
+        "--seed={seed}",
+    };
+
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
+                                                 RevisionRunMode mode) {
+    ValidateThresholdFheCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const std::string profile = ThresholdProfileForMode(mode);
+    const std::string kind = ThresholdCellKind(cell);
+    const auto& k = cell.axes.at("k");
+    const std::string trials =
+        toy ? "1" : (kind == "timing" ? "30" :
+                     (kind == "spec" ? "0" : "50"));
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        "--mode=" + (kind == "agreement" ? "accuracy" : kind),
+        "--cell=" + kind,
+        std::string("--security=") + (toy ? "TOY" : "STD128"),
+        "--k=" + k,
+        "--m=64",
+        "--set_size=1000",
+        "--trials=" + trials,
         "--seed={seed}",
     };
 
