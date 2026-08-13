@@ -43,7 +43,9 @@ CANDIDATES = {
 }
 WORKLOAD_SCHEMA = "piccard-std-security-workload-v1"
 CALIBRATION_SCHEMA = "piccard-std-security-diagnostic-calibration-v1"
+CALIBRATION_SCHEMA_V2 = "piccard-std-security-diagnostic-calibration-v2"
 SUMMARY_SCHEMA = "piccard-std-security-tuple-summary-v1"
+SUMMARY_SCHEMA_V2 = "piccard-std-security-tuple-summary-v2"
 SUMMARY_FILES = ("parameter-tuples.csv", "parameter-tuples.md")
 FHE_IND_CAPABILITIES_SCHEMA = "piccard-std-security-fhe-ind-capabilities-v1"
 FHE_IND_PREFLIGHT_SCHEMA = "piccard-std-security-fhe-ind-preflight-v1"
@@ -119,6 +121,12 @@ FHE_MEASUREMENT_COLUMNS = {
     "status", "reason", "method",
     "fhe_ind_binary_sha256", "capabilities_sha256",
 }
+
+ACTIVE_SCHEMA_VERSION = "v1"
+V2_PRELIGHT_SCHEMA = "piccard-std-security-preflight-v2"
+V2_MEASUREMENT_COLUMNS = frozenset({
+    "complete_provenance_json", "complete_provenance_sha256",
+})
 
 
 class RunnerError(RuntimeError):
@@ -240,6 +248,181 @@ def ordered_rns_sha256(moduli: list[str]) -> str:
         framed.extend(len(encoded).to_bytes(4, "big"))
         framed.extend(encoded)
     return sha256_bytes(bytes(framed))
+
+
+def _v2_frame(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    return len(encoded).to_bytes(4, "big") + encoded
+
+
+def _v2_optional(value: Any, *, floating: bool = False) -> bytes:
+    if value is None:
+        return b"\x00"
+    if floating:
+        # This is the spelling emitted by std::ostringstream with precision 17
+        # for the finite values used by the diagnostic artifacts.
+        text = format(float(value), ".17g")
+    else:
+        text = str(value)
+    return b"\x01" + _v2_frame(text)
+
+
+def complete_provenance_canonical(provenance: dict[str, Any]) -> bytes:
+    """Mirror the C++ V2 domain/framing exactly for independent verification."""
+
+    fields = [
+        provenance["kind"], provenance["circuit"], provenance["shape_id"],
+        provenance["security"], provenance["bfv_context_fingerprint"],
+    ]
+    result = bytearray(b"piccard-std-security-parameter-provenance-v2\x00")
+    for value in fields:
+        result.extend(_v2_frame(value))
+    for key in ("requested_ring_dim", "natural_ring_dim", "provisioned_ring_dim",
+                "realized_ring_dim", "natural_depth", "provisioned_depth"):
+        result.extend(_v2_optional(provenance.get(key)))
+    result.extend(_v2_optional(provenance.get("log_q_bits"), floating=True))
+    result.extend(_v2_optional(provenance.get("log_q_over_t_bits"), floating=True))
+    result.extend(_v2_optional(provenance.get("plaintext_modulus")))
+    result.extend(_v2_optional(provenance.get("num_limbs")))
+    result.extend(_v2_optional(provenance.get("scaling_mod_size")))
+    moduli = provenance["ordered_rns_moduli"]
+    result.extend(len(moduli).to_bytes(4, "big"))
+    for value in moduli:
+        result.extend(_v2_frame(value))
+    limbs = provenance["ordered_rns_limb_bits"]
+    result.extend(len(limbs).to_bytes(4, "big"))
+    for value in limbs:
+        result.extend(int(value).to_bytes(4, "big"))
+    result.extend(_v2_frame(provenance["openfhe_version"]))
+    for key in ("transcript_stat_bits", "max_queries", "query_stat_bits",
+                "coefficient_stat_bits", "flood_margin_bits", "eval_noise_bits",
+                "flood_noise_bits", "required_capacity_bits"):
+        result.extend(_v2_optional(provenance.get(key)))
+    result.extend(_v2_frame(provenance["flooding_assurance"]))
+    residual = provenance["residual_capacity"]
+    result.extend(_v2_frame(residual["status"]))
+    result.extend(_v2_frame(residual["definition"]))
+    result.extend(_v2_optional(residual.get("bits"), floating=True))
+    result.extend(_v2_frame(provenance.get("context_tuple_sha256", "")))
+    result.extend(_v2_frame(provenance["status"]))
+    result.extend(_v2_frame(provenance.get("reason", "")))
+    result.extend(_v2_frame(provenance.get("legacy_encoding_note", "")))
+    return bytes(result)
+
+
+def validate_complete_provenance(provenance: Any) -> dict[str, Any]:
+    if not isinstance(provenance, dict) or \
+       provenance.get("schema") != "piccard-std-security-parameter-provenance-v2":
+        raise RunnerError("complete provenance schema mismatch")
+    required = ("kind", "circuit", "shape_id", "security",
+                "bfv_context_fingerprint", "openfhe_version",
+                "ordered_rns_moduli", "ordered_rns_limb_bits",
+                "flooding_assurance", "residual_capacity", "status")
+    if any(key not in provenance for key in required):
+        raise RunnerError("complete provenance field set is incomplete")
+    if provenance.get("kind") not in ("piccard", "threshold", "fhe-ind", "encoding-only"):
+        raise RunnerError("complete provenance kind is unknown")
+    if not all(isinstance(provenance.get(key), str) and provenance[key]
+               for key in ("circuit", "shape_id", "security",
+                           "bfv_context_fingerprint", "openfhe_version")):
+        raise RunnerError("complete provenance identity is incomplete")
+    residual = provenance.get("residual_capacity")
+    if not isinstance(residual, dict) or \
+       not isinstance(residual.get("status"), str) or \
+       not isinstance(residual.get("definition"), str):
+        raise RunnerError("complete provenance residual evidence is malformed")
+    if residual["status"] not in ("measured", "not-exposed-by-openfhe", "not-applicable"):
+        raise RunnerError("complete provenance residual status is unknown")
+    if residual["status"] == "not-exposed-by-openfhe" and residual.get("bits") is not None:
+        raise RunnerError("complete provenance contains fabricated residual capacity")
+    if residual["status"] == "not-exposed-by-openfhe" and \
+       residual["definition"] != "log2(q/t)-required_flood_budget_bits":
+        raise RunnerError("complete provenance residual definition mismatch")
+    if residual["status"] == "not-applicable" and residual.get("bits") is not None:
+        raise RunnerError("non-FHE residual capacity has a value")
+    if provenance["kind"] == "encoding-only":
+        if provenance["security"] != "not-applicable" or \
+           provenance["bfv_context_fingerprint"] != "not-applicable" or \
+           provenance["openfhe_version"] != "not-applicable" or \
+           provenance["flooding_assurance"] != "not-applicable" or \
+           residual["status"] != "not-applicable":
+            raise RunnerError("encoding-only provenance is not N/A")
+        return provenance
+    if provenance["security"] not in ("TOY", "STD128", "STD192", "STD256"):
+        raise RunnerError("complete provenance security is unknown")
+    numeric = ("requested_ring_dim", "natural_ring_dim", "provisioned_ring_dim",
+               "realized_ring_dim", "natural_depth", "provisioned_depth",
+               "plaintext_modulus", "num_limbs", "scaling_mod_size")
+    if any(isinstance(provenance.get(key), bool) or
+           not isinstance(provenance.get(key), int) or provenance[key] <= 0
+           for key in numeric):
+        raise RunnerError("complete provenance numeric fields are incomplete")
+    if provenance["requested_ring_dim"] > provenance["natural_ring_dim"] or \
+       provenance["natural_ring_dim"] > provenance["provisioned_ring_dim"] or \
+       provenance["natural_depth"] > provenance["provisioned_depth"]:
+        raise RunnerError("complete provenance dimensions are not monotone")
+    for key in ("log_q_bits", "log_q_over_t_bits"):
+        if isinstance(provenance.get(key), bool) or \
+           not isinstance(provenance.get(key), (int, float)) or \
+           not math.isfinite(float(provenance[key])) or provenance[key] <= 0:
+            raise RunnerError(f"complete provenance {key} is malformed")
+    expected_q_over_t = provenance["log_q_bits"] - math.log2(
+        provenance["plaintext_modulus"])
+    if not math.isclose(expected_q_over_t, provenance["log_q_over_t_bits"],
+                        rel_tol=0.0, abs_tol=1e-7):
+        raise RunnerError("complete provenance q/t mismatch")
+    moduli = provenance["ordered_rns_moduli"]
+    limbs = provenance["ordered_rns_limb_bits"]
+    if not isinstance(moduli, list) or not isinstance(limbs, list) or \
+       len(moduli) != provenance["num_limbs"] or \
+       len(limbs) != provenance["num_limbs"]:
+        raise RunnerError("complete provenance ordered RNS metadata is incomplete")
+    if any(not isinstance(value, str) or not value.isdigit() or value.startswith("0")
+           for value in moduli) or \
+       any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
+           for value in limbs):
+        raise RunnerError("complete provenance ordered RNS metadata is malformed")
+    if [int(value).bit_length() for value in moduli] != limbs:
+        raise RunnerError("complete provenance ordered RNS order/bit mismatch")
+    if round(provenance["log_q_bits"]) != sum(limbs):
+        raise RunnerError("complete provenance log_q/RNS mismatch")
+    assurance = provenance["flooding_assurance"]
+    if assurance not in ("not-applicable",
+                         "empirical-phase-statistical+ciphertext-computational",
+                         "legacy-coefficient-level"):
+        raise RunnerError("complete provenance assurance taxonomy is unknown")
+    expected_assurance = {
+        "piccard": "empirical-phase-statistical+ciphertext-computational",
+        "threshold": "legacy-coefficient-level",
+        "fhe-ind": "not-applicable",
+    }[provenance["kind"]]
+    if assurance != expected_assurance:
+        raise RunnerError("complete provenance assurance/kind mismatch")
+    if provenance["kind"] == "piccard":
+        sanitizer = ("transcript_stat_bits", "max_queries", "query_stat_bits",
+                     "coefficient_stat_bits", "flood_margin_bits", "eval_noise_bits",
+                     "flood_noise_bits", "required_capacity_bits")
+        if any(isinstance(provenance.get(key), bool) or
+               not isinstance(provenance.get(key), int) or provenance[key] < 0
+               for key in sanitizer):
+            raise RunnerError("complete provenance sanitizer fields are incomplete")
+    elif any(provenance.get(key) is not None for key in (
+            "transcript_stat_bits", "max_queries", "query_stat_bits",
+            "coefficient_stat_bits", "flood_margin_bits", "eval_noise_bits",
+            "flood_noise_bits", "required_capacity_bits")):
+        raise RunnerError("non-Piccard provenance contains sanitizer fields")
+    return provenance
+
+
+def validate_v2_provenance_binding(data: dict[str, Any]) -> dict[str, Any]:
+    provenance = validate_complete_provenance(data.get("provenance"))
+    digest = data.get("provenance_sha256")
+    expected = sha256_bytes(complete_provenance_canonical(provenance))
+    if digest != expected:
+        raise RunnerError("complete provenance hash binding mismatch")
+    if provenance.get("context_tuple_sha256") != data.get("context_tuple_sha256"):
+        raise RunnerError("complete provenance/context tuple binding mismatch")
+    return provenance
 
 
 def derive_timing_hash_seed(root_seed: int) -> int:
@@ -811,7 +994,9 @@ def validate_workload_against_binary(path: Path, binary: Path,
 def validate_preflight(data: dict[str, Any], cell: dict[str, Any],
                        depth: int, scaling: int,
                        identity: dict[str, Any] | None = None) -> None:
-    if data.get("schema") != "piccard-std-security-preflight-v1" or \
+    expected_schema = V2_PRELIGHT_SCHEMA if ACTIVE_SCHEMA_VERSION == "v2" \
+        else "piccard-std-security-preflight-v1"
+    if data.get("schema") != expected_schema or \
        data.get("mode") != "preflight" or data.get("keygen_started") is not False:
         raise RunnerError("preflight schema/stage contract mismatch")
     for key in ("circuit", "shape_id", "security", "k", "m"):
@@ -849,6 +1034,14 @@ def validate_preflight(data: dict[str, Any], cell: dict[str, Any],
     expected_reason = preflight_reason(data)
     if bool(expected_reason) != data["skipped"] or data["reason"] != expected_reason:
         raise RunnerError("preflight skip decision/reason mismatch")
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        provenance = validate_v2_provenance_binding(data)
+        if provenance["circuit"] != cell["circuit"] or \
+           provenance["shape_id"] != cell["shape_id"] or \
+           provenance["security"] != cell["security"] or \
+           provenance["provisioned_depth"] != depth or \
+           provenance["scaling_mod_size"] != scaling:
+            raise RunnerError("preflight complete provenance identity mismatch")
 
 
 def preflight_candidate(binary: Path, results_root: Path, cell: dict[str, Any],
@@ -868,6 +1061,8 @@ def preflight_candidate(binary: Path, results_root: Path, cell: dict[str, Any],
                f"--security={cell['security']}", f"--shape-id={cell['shape_id']}",
                "--k=16", "--m=16", "--seed=7", f"--depth={depth}",
                f"--scaling-mod-size={scaling}", f"--output={path}"]
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        command.insert(2, "--schema=v2")
     completed = run_process(command, env)
     log.append("$ " + " ".join(command))
     if completed.stdout:
@@ -899,6 +1094,8 @@ def validate_preflight_against_binary(path: Path, binary: Path,
                    "--seed=7", f"--depth={depth}",
                    f"--scaling-mod-size={scaling}",
                    f"--output={temporary_path}"]
+        if ACTIVE_SCHEMA_VERSION == "v2":
+            command.insert(2, "--schema=v2")
         completed = run_process(command, env)
         if completed.returncode != 0:
             raise RunnerError("resume preflight derivation failed")
@@ -931,7 +1128,9 @@ def validate_calibration(data: dict[str, Any], cell: dict[str, Any],
         data.get("log_q_over_t_bits"), "calibration log_q_over_t_bits")
     if type(data.get("build_dirty")) is not bool:
         raise RunnerError("calibration build_dirty is malformed")
-    if data.get("schema") != CALIBRATION_SCHEMA or \
+    expected_schema = CALIBRATION_SCHEMA_V2 if ACTIVE_SCHEMA_VERSION == "v2" \
+        else CALIBRATION_SCHEMA
+    if data.get("schema") != expected_schema or \
        data.get("calibration_quality") != "diagnostic-one-repetition" or \
        data.get("table_eligible") is not False:
         raise RunnerError("calibration policy mismatch")
@@ -1045,6 +1244,30 @@ def validate_calibration(data: dict[str, Any], cell: dict[str, Any],
        required_capacity_bits > log_q_over_t or \
        log_q_over_t - 1.0 - worst_noise < 0.5:
         raise RunnerError("calibration capacity fit/saturation mismatch")
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        provenance = validate_v2_provenance_binding(data)
+        if provenance["circuit"] != cell["circuit"] or \
+           provenance["shape_id"] != cell["shape_id"] or \
+           provenance["security"] != cell["security"] or \
+           provenance["provisioned_depth"] != depth or \
+           provenance["scaling_mod_size"] != scaling:
+            raise RunnerError("calibration complete provenance identity mismatch")
+        preflight_provenance = preflight.get("provenance")
+        expected_preflight = preflight_provenance \
+            if isinstance(preflight_provenance, dict) else None
+        if expected_preflight is None:
+            raise RunnerError("calibration/preflight complete provenance mismatch")
+        for key in ("schema", "kind", "circuit", "shape_id", "security",
+                    "bfv_context_fingerprint", "requested_ring_dim",
+                    "natural_ring_dim", "provisioned_ring_dim",
+                    "realized_ring_dim", "natural_depth", "provisioned_depth",
+                    "log_q_bits", "log_q_over_t_bits", "plaintext_modulus",
+                    "num_limbs", "scaling_mod_size", "ordered_rns_moduli",
+                    "ordered_rns_limb_bits", "openfhe_version",
+                    "flooding_assurance", "residual_capacity"):
+            if provenance.get(key) != expected_preflight.get(key):
+                raise RunnerError(
+                    f"calibration/preflight complete provenance mismatch: {key}")
 
 
 def calibrate_candidate(binary: Path, results_root: Path, cell: dict[str, Any],
@@ -1062,6 +1285,8 @@ def calibrate_candidate(binary: Path, results_root: Path, cell: dict[str, Any],
                f"--security={cell['security']}", f"--shape-id={cell['shape_id']}",
                "--k=16", "--m=16", "--seed=7", f"--depth={depth}",
                f"--scaling-mod-size={scaling}", f"--output={path}"]
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        command.insert(2, "--schema=v2")
     completed = run_process(command, env)
     log.append("$ " + " ".join(command))
     if completed.stdout:
@@ -1092,7 +1317,9 @@ def validate_measurement(path: Path, cell: dict[str, Any], workload: dict[str, A
     if len(rows) != 2:
         raise RunnerError("measurement must contain exactly one CSV data row")
     header, row = rows
-    if set(header) != MEASUREMENT_COLUMNS or len(header) != len(MEASUREMENT_COLUMNS):
+    expected_columns = MEASUREMENT_COLUMNS | V2_MEASUREMENT_COLUMNS \
+        if ACTIVE_SCHEMA_VERSION == "v2" else MEASUREMENT_COLUMNS
+    if set(header) != expected_columns or len(header) != len(expected_columns):
         raise RunnerError("measurement CSV header mismatch")
     if len(row) != len(header):
         raise RunnerError("measurement CSV row width mismatch")
@@ -1135,6 +1362,27 @@ def validate_measurement(path: Path, cell: dict[str, Any], workload: dict[str, A
        data.get("provisioned_depth") != str(calibration.get("provisioned_depth")) or \
        data.get("scaling_mod_size") != str(calibration.get("scaling_mod_size")):
         raise RunnerError("measurement/calibration tuple binding mismatch")
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        try:
+            measurement_provenance = json.loads(
+                data["complete_provenance_json"])
+        except (KeyError, json.JSONDecodeError) as exc:
+            raise RunnerError("measurement complete provenance JSON is malformed") from exc
+        measurement_wrapper = {
+            "provenance": measurement_provenance,
+            "provenance_sha256": data["complete_provenance_sha256"],
+            "context_tuple_sha256": data["context_tuple_sha256"],
+        }
+        validate_v2_provenance_binding(measurement_wrapper)
+        calibration_provenance = validate_v2_provenance_binding(calibration)
+        comparable = dict(measurement_provenance)
+        expected = dict(calibration_provenance)
+        comparable.pop("status", None)
+        comparable.pop("reason", None)
+        expected.pop("status", None)
+        expected.pop("reason", None)
+        if comparable != expected:
+            raise RunnerError("measurement/calibration complete provenance mismatch")
     for key in ("requested_ring_dim", "natural_ring_dim", "realized_ring_dim",
                 "natural_depth", "provisioned_depth", "scaling_mod_size",
                 "num_limbs", "plaintext_modulus"):
@@ -1398,6 +1646,8 @@ def measure_cell(binary: Path, results_root: Path, cell: dict[str, Any],
                f"--scaling-mod-size={scaling}", f"--calibration={calibration_path}",
                f"--workload={results_root / 'workload' / 'workload.json'}",
                "--format=csv", f"--output={path}"]
+    if ACTIVE_SCHEMA_VERSION == "v2":
+        command.insert(2, "--schema=v2")
     completed = run_process(command, env)
     log.append("$ " + " ".join(command))
     if completed.stdout:
@@ -1856,8 +2106,10 @@ def validate_summary_artifacts(manifest: dict[str, Any],
     expected_pair_ids = ["onehot", "sqrt"]
     if isinstance(gate, dict) and gate.get("mode") != "off":
         expected_pair_ids.append("fhe_ind")
+    expected_summary_schema = "piccard-std-security-tuple-summary-v2" \
+        if ACTIVE_SCHEMA_VERSION == "v2" else SUMMARY_SCHEMA
     if summary_metadata != {
-            "schema": SUMMARY_SCHEMA,
+            "schema": expected_summary_schema,
             "status": "GENERATED",
             "pair_ids": expected_pair_ids,
     }:
@@ -2065,6 +2317,8 @@ def dry_run(binary: Path | None, results_root: Path | None,
 
 
 def process(args: argparse.Namespace) -> int:
+    global ACTIVE_SCHEMA_VERSION
+    ACTIVE_SCHEMA_VERSION = args.schema
     binary = binary_path(Path(args.build_dir))
     env = command_env()
     fhe_binary = Path(args.fhe_ind_binary).resolve() \
@@ -2107,9 +2361,11 @@ def process(args: argparse.Namespace) -> int:
         (results_root / name).mkdir(exist_ok=True)
 
     manifest_path = results_root / "manifest.json"
+    manifest_schema = "piccard-std-security-evidence-manifest-v2" \
+        if args.schema == "v2" else "piccard-std-security-evidence-manifest-v1"
     if args.resume:
         manifest = read_canonical_json(manifest_path)
-        if manifest.get("schema") != "piccard-std-security-evidence-manifest-v1":
+        if manifest.get("schema") != manifest_schema:
             raise RunnerError("resume manifest schema mismatch")
         recorded = manifest.get("identity", {})
         if recorded.get("source_commit") != identity["source_commit"] or \
@@ -2123,7 +2379,8 @@ def process(args: argparse.Namespace) -> int:
             raise RunnerError("resume source/binary identity mismatch")
     else:
         manifest = {
-            "schema": "piccard-std-security-evidence-manifest-v1",
+            "schema": manifest_schema,
+            "artifact_schema": args.schema,
             "identity": {
                 **identity,
                 "binary": str(binary),
@@ -2320,6 +2577,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
                         default="auto")
     parser.add_argument("--fhe-ind-binary")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--schema", choices=("v1", "v2"), default="v1")
     args = parser.parse_args(list(argv))
     if args.threads != 1:
         parser.error("--threads is frozen at 1")

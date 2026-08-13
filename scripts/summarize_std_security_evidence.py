@@ -49,6 +49,13 @@ TUPLE_FIELDS = (
     "context_tuple_sha256",
     "sanitizer_profile",
 )
+TUPLE_FIELDS_V2 = TUPLE_FIELDS + (
+    "provenance_schema", "provenance_kind", "provisioned_ring_dim",
+    "log_q_over_t_bits", "ordered_rns_limb_bits", "required_capacity_bits",
+    "flooding_assurance", "residual_capacity_definition",
+    "residual_capacity_status", "residual_capacity_bits",
+    "complete_provenance_sha256",
+)
 TIMING_FIELDS = (
     "setup_context_ms",
     "setup_keygen_ms",
@@ -108,6 +115,9 @@ CSV_FIELDS = (
     "timing_ratio_std192_over_std128_full",
     "timing_ratio_label",
 )
+CSV_FIELDS_V2 = CSV_FIELDS + tuple(
+    field for field in (*TUPLE_FIELDS_V2, "complete_provenance_json")
+    if field not in CSV_FIELDS)
 
 
 class SummaryError(RuntimeError):
@@ -427,9 +437,15 @@ def validate_manifest(path: Path) -> tuple[dict[str, Any], Path, dict[str, Any],
     if not path.is_absolute():
         fail("--manifest must be absolute")
     manifest = runner.read_canonical_json(path)
-    if manifest.get("schema") != "piccard-std-security-evidence-manifest-v1" or \
+    manifest_schema = manifest.get("schema")
+    if manifest_schema not in ("piccard-std-security-evidence-manifest-v1",
+                               "piccard-std-security-evidence-manifest-v2") or \
        manifest.get("complete") is not True:
         fail("summary requires a complete runner manifest")
+    runner.ACTIVE_SCHEMA_VERSION = "v2" if manifest_schema.endswith("-v2") else "v1"
+    if runner.ACTIVE_SCHEMA_VERSION == "v2" and \
+       manifest.get("artifact_schema") != "v2":
+        fail("summary V2 manifest artifact schema is missing")
     root = path.parent.resolve()
     identity = _validate_identity(manifest)
     workload = _validate_workload(manifest, root)
@@ -516,7 +532,8 @@ def _ratio(numerator: str, denominator: str) -> str:
 
 def _row_for_csv(pair_id: str, security: str, entry: dict[str, Any],
                  binding: dict[str, str], ratios: dict[str, str]) -> dict[str, str]:
-    row = {field: "" for field in CSV_FIELDS}
+    fields = CSV_FIELDS_V2 if runner.ACTIVE_SCHEMA_VERSION == "v2" else CSV_FIELDS
+    row = {field: "" for field in fields}
     row.update({"pair_id": pair_id, "circuit": entry["cell"]["circuit"],
                 "cell_id": entry["cell"]["cell_id"], "security": security,
                 "status": entry["status"],
@@ -534,6 +551,33 @@ def _row_for_csv(pair_id: str, security: str, entry: dict[str, Any],
                     *TIMING_FIELDS, "match_count", "jaccard_estimate"):
             if key in data:
                 row[key] = data[key]
+        if runner.ACTIVE_SCHEMA_VERSION == "v2":
+            try:
+                complete = json.loads(data["complete_provenance_json"])
+                runner.validate_v2_provenance_binding({
+                    "provenance": complete,
+                    "provenance_sha256": data["complete_provenance_sha256"],
+                    "context_tuple_sha256": data["context_tuple_sha256"],
+                })
+            except (KeyError, json.JSONDecodeError) as exc:
+                fail("summary complete provenance is malformed")
+                raise AssertionError from exc
+            row.update({
+                "provenance_schema": complete["schema"],
+                "provenance_kind": complete["kind"],
+                "provisioned_ring_dim": str(complete["provisioned_ring_dim"]),
+                "log_q_over_t_bits": str(complete["log_q_over_t_bits"]),
+                "ordered_rns_limb_bits": json.dumps(
+                    complete["ordered_rns_limb_bits"], separators=(",", ":")),
+                "required_capacity_bits": str(complete["required_capacity_bits"]),
+                "flooding_assurance": complete["flooding_assurance"],
+                "residual_capacity_definition": complete["residual_capacity"]["definition"],
+                "residual_capacity_status": complete["residual_capacity"]["status"],
+                "residual_capacity_bits": "" if complete["residual_capacity"].get("bits") is None
+                else str(complete["residual_capacity"]["bits"]),
+                "complete_provenance_json": data["complete_provenance_json"],
+                "complete_provenance_sha256": data["complete_provenance_sha256"],
+            })
         row["timing_ratio_std192_over_std128_online"] = ratios["online"]
         row["timing_ratio_std192_over_std128_full"] = ratios["full"]
         row["timing_ratio_label"] = ratios["label"]
@@ -541,7 +585,8 @@ def _row_for_csv(pair_id: str, security: str, entry: dict[str, Any],
 
 
 def _row_for_fhe_csv(entry: dict[str, Any], workload: dict[str, Any]) -> dict[str, str]:
-    row = {field: "" for field in CSV_FIELDS}
+    fields = CSV_FIELDS_V2 if runner.ACTIVE_SCHEMA_VERSION == "v2" else CSV_FIELDS
+    row = {field: "" for field in fields}
     cell = entry["cell"]
     data = entry["row"] or {}
     preflight = entry["preflight"] or {}
@@ -588,7 +633,8 @@ def render_csv(pairs: dict[str, dict[str, Any]],
                workload: dict[str, Any] | None = None) -> bytes:
     import io
     stream = io.StringIO(newline="")
-    writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS, lineterminator="\n")
+    fields = CSV_FIELDS_V2 if runner.ACTIVE_SCHEMA_VERSION == "v2" else CSV_FIELDS
+    writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
     for circuit in ("onehot", "sqrt"):
         pair = pairs[circuit]
@@ -637,6 +683,9 @@ def render_markdown(manifest_path: Path, workload: dict[str, Any],
     if fhe is not None and fhe.get("mode") != "off":
         scope += "; FHE-IND (readiness-gated)"
     scope += "; Threshold excluded"
+    summary_schema = "piccard-std-security-tuple-summary-v2" \
+        if runner.ACTIVE_SCHEMA_VERSION == "v2" else SUMMARY_SCHEMA
+    tuple_fields = TUPLE_FIELDS_V2 if runner.ACTIVE_SCHEMA_VERSION == "v2" else TUPLE_FIELDS
     lines = [
         "# STD128/STD192 Diagnostic Parameter-Tuple Comparison",
         "",
@@ -644,7 +693,7 @@ def render_markdown(manifest_path: Path, workload: dict[str, Any],
         "",
         "## Material Passport",
         "",
-        f"- Artifact type: `{SUMMARY_SCHEMA}`",
+        f"- Artifact type: `{summary_schema}`",
         "- Verification status: `VERIFIED` after manifest and artifact hash validation",
         f"- Source manifest: `{manifest_path}`",
         f"- Scope: {scope}",
@@ -670,7 +719,7 @@ def render_markdown(manifest_path: Path, workload: dict[str, Any],
             "| Context tuple field | STD128 | STD192 | Comparison |",
             "| --- | --- | --- | --- |",
         ])
-        for field in TUPLE_FIELDS:
+        for field in tuple_fields:
             left_value = _report_field(left, field)
             right_value = _report_field(right, field)
             compared = left["row"] is not None and right["row"] is not None
@@ -805,7 +854,8 @@ def write_reports(manifest_path: Path, root: Path, manifest: dict[str, Any],
         },
     }
     manifest["summary"] = {
-        "schema": SUMMARY_SCHEMA,
+        "schema": "piccard-std-security-tuple-summary-v2"
+        if runner.ACTIVE_SCHEMA_VERSION == "v2" else SUMMARY_SCHEMA,
         "status": "GENERATED",
         "pair_ids": ["onehot", "sqrt"] +
                     (["fhe_ind"] if fhe is not None and

@@ -1410,6 +1410,7 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
     target_link_libraries(
         bench_std_security_evidence
         piccard_fhe
+        piccard_benchmark_serializers
         piccard_noise_calibration_probe
         piccard_std_security_evidence_schema
         piccard_comparison_workload

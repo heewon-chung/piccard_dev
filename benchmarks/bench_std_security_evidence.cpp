@@ -9,6 +9,7 @@
  */
 
 #include "build_info.h"
+#include "benchmark_provenance.h"
 #include "benchmark_utils.h"
 #include "comparison_workload.h"
 #include "noise_calibration_probe.h"
@@ -32,6 +33,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -69,6 +71,7 @@ struct Options {
     std::string calibration;
     std::string workload;
     std::string format = "json";
+    std::string schema_version = "v1";
     uint32_t k = 16;
     uint32_t m = 16;
     uint32_t provisioned_depth = 0;
@@ -277,6 +280,9 @@ Options ParseOptions(int argc, char** argv) {
         } else if (const auto value = OptionValue(argument, "format");
                    !value.empty()) {
             options.format = value;
+        } else if (const auto value = OptionValue(argument, "schema");
+                   !value.empty()) {
+            options.schema_version = value;
         } else if (const auto value = OptionValue(argument, "k");
                    !value.empty()) {
             options.k = ParseUint32(value, "--k");
@@ -328,6 +334,9 @@ Options ParseOptions(int argc, char** argv) {
     }
     if (options.format != "json" && options.format != "csv") {
         throw std::invalid_argument("--format must be json or csv");
+    }
+    if (options.schema_version != "v1" && options.schema_version != "v2") {
+        throw std::invalid_argument("--schema must be v1 or v2");
     }
     if (options.mode != "workload" && options.mode != "e2e" &&
         options.circuit != "onehot" &&
@@ -607,6 +616,35 @@ std::string JsonStringField(const std::string& json, const std::string& key) {
     throw std::invalid_argument("unterminated calibration string: " + key);
 }
 
+std::string JsonObjectField(const std::string& json, const std::string& key) {
+    size_t position = JsonKeyPosition(json, key);
+    while (position < json.size() &&
+           (json[position] == ' ' || json[position] == '\n' ||
+            json[position] == '\r' || json[position] == '\t')) {
+        ++position;
+    }
+    if (position >= json.size() || json[position] != '{')
+        throw std::invalid_argument("calibration field is not an object: " + key);
+    const size_t begin = position;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; position < json.size(); ++position) {
+        const char character = json[position];
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (character == '\\') escaped = true;
+            else if (character == '"') in_string = false;
+            continue;
+        }
+        if (character == '"') in_string = true;
+        else if (character == '{') ++depth;
+        else if (character == '}' && --depth == 0)
+            return json.substr(begin, position - begin + 1);
+    }
+    throw std::invalid_argument("unterminated calibration object: " + key);
+}
+
 std::string JsonScalarField(const std::string& json, const std::string& key) {
     size_t position = JsonKeyPosition(json, key);
     while (position < json.size() &&
@@ -710,6 +748,8 @@ size_t CountToken(const std::string& json, const std::string& token) {
 }
 
 struct CalibrationArtifact {
+    bool provenance_v2 = false;
+    schema::CompleteProvenance complete_provenance;
     std::string circuit;
     std::string shape_id;
     std::string security;
@@ -822,8 +862,11 @@ int64_t JsonSignedField(const std::string& json, const std::string& key) {
 CalibrationArtifact ReadCalibrationArtifact(const std::string& path) {
     const std::string json = ReadFile(path);
     CalibrationArtifact artifact;
-    if (JsonStringField(json, "schema") !=
-        "piccard-std-security-diagnostic-calibration-v1" ||
+    const std::string artifact_schema = JsonStringField(json, "schema");
+    if ((artifact_schema !=
+         "piccard-std-security-diagnostic-calibration-v1" &&
+         artifact_schema !=
+         "piccard-std-security-diagnostic-calibration-v2") ||
         JsonStringField(json, "calibration_quality") !=
             "diagnostic-one-repetition" ||
         JsonBoolField(json, "table_eligible") ||
@@ -834,6 +877,9 @@ CalibrationArtifact ReadCalibrationArtifact(const std::string& path) {
         JsonStringField(json, "consumer_set_sha256") != kConsumerSetSha256) {
         throw std::invalid_argument("calibration artifact policy mismatch");
     }
+    artifact.provenance_v2 = artifact_schema.size() >= 3 &&
+                             artifact_schema.compare(artifact_schema.size() - 3,
+                                                     3, "-v2") == 0;
     if (CountToken(json, "\"pattern\"") != 3 ||
         CountToken(json, "\"repetition_index\":0") != 3 ||
         json.find("warmup") != std::string::npos) {
@@ -867,6 +913,23 @@ CalibrationArtifact ReadCalibrationArtifact(const std::string& path) {
     artifact.log_q_bits = JsonDoubleField(json, "log_q_bits");
     artifact.ordered_rns_moduli =
         JsonStringArrayField(json, "ordered_rns_moduli");
+    if (artifact.provenance_v2) {
+        const std::string provenance_json =
+            JsonObjectField(json, "provenance") + "\n";
+        artifact.complete_provenance =
+            schema::ParseCompleteProvenanceJson(provenance_json);
+        if (schema::CompleteProvenanceSha256(artifact.complete_provenance) !=
+            JsonStringField(json, "provenance_sha256") ||
+            artifact.complete_provenance.context_tuple_sha256 !=
+                artifact.context_tuple_sha256 ||
+            artifact.complete_provenance.circuit != artifact.circuit ||
+            artifact.complete_provenance.shape_id != artifact.shape_id ||
+            artifact.complete_provenance.security != artifact.security ||
+            artifact.complete_provenance.ordered_rns_moduli !=
+                artifact.ordered_rns_moduli) {
+            throw std::invalid_argument("calibration complete provenance binding mismatch");
+        }
+    }
     artifact.eval_noise_bits = JsonUint32Field(json, "eval_noise_bits");
     artifact.query_stat_bits = JsonUint32Field(json, "query_stat_bits");
     artifact.coefficient_stat_bits =
@@ -987,8 +1050,8 @@ piccard::PiccardParams BuildParams(const Options& options) {
 }
 
 schema::ContextTuple MakeTuple(const Options& options,
-                               const piccard::PiccardParams& params,
-                               const probe::ContextDescription& context) {
+                                const piccard::PiccardParams& params,
+                                const probe::ContextDescription& context) {
     const auto& metadata = context.metadata;
     schema::ContextTuple tuple;
     tuple.bfv_context_fingerprint = metadata.context_fingerprint;
@@ -1013,6 +1076,84 @@ schema::ContextTuple MakeTuple(const Options& options,
     tuple.ordered_rns_moduli = metadata.ordered_rns_moduli;
     tuple.openfhe_version = metadata.openfhe_version;
     return tuple;
+}
+
+schema::CompleteProvenance MakeCompleteProvenance(
+    const workload::BenchmarkProvenance& source,
+    const schema::ContextTuple& tuple,
+    const std::string& status = "MEASURED",
+    const std::string& reason = "") {
+    workload::ValidateBenchmarkProvenance(source);
+    schema::CompleteProvenance result;
+    result.kind = schema::ProvenanceKind::Piccard;
+    result.circuit = tuple.circuit;
+    result.shape_id = tuple.shape_id;
+    result.security = schema::SecurityName(tuple.security);
+    result.bfv_context_fingerprint = tuple.bfv_context_fingerprint;
+    result.requested_ring_dim = source.requested_ring_dim;
+    result.natural_ring_dim = source.natural_ring_dim;
+    result.provisioned_ring_dim = source.provisioned_ring_dim;
+    result.realized_ring_dim = source.realized_ring_dim;
+    result.natural_depth = source.natural_depth;
+    result.provisioned_depth = source.provisioned_depth;
+    result.log_q_bits = source.log_q_bits;
+    result.log_q_over_t_bits = source.log2_q_over_t_bits;
+    result.plaintext_modulus = source.plaintext_modulus;
+    result.num_limbs = source.num_limbs;
+    result.scaling_mod_size = source.realized_scaling_mod_size;
+    result.ordered_rns_moduli = source.ordered_rns_moduli;
+    result.ordered_rns_limb_bits = source.ordered_rns_limb_bits;
+    result.openfhe_version = source.openfhe_version;
+    result.transcript_stat_bits = source.transcript_stat_bits;
+    result.max_queries = source.max_queries;
+    result.query_stat_bits = source.query_stat_bits;
+    result.coefficient_stat_bits = source.coefficient_stat_bits;
+    result.flood_margin_bits = source.flood_margin_bits;
+    result.eval_noise_bits = source.eval_noise_bits;
+    result.flood_noise_bits = source.flood_noise_bits;
+    if (source.flood_noise_bits)
+        result.required_capacity_bits = *source.flood_noise_bits + 2;
+    result.flooding_assurance = source.flooding_assurance;
+    result.residual_capacity.status = source.residual_capacity_status;
+    result.residual_capacity.definition = source.residual_capacity_definition;
+    result.residual_capacity.bits = source.residual_capacity_bits;
+    result.context_tuple_sha256 = schema::ContextTupleSha256(tuple);
+    result.status = status;
+    result.reason = reason;
+    schema::ValidateCompleteProvenance(result);
+    return result;
+}
+
+workload::BenchmarkProvenance MakePreflightProvenance(
+    const piccard::BFVContext& context,
+    const piccard::PiccardParams& params) {
+    auto result = workload::MakeFheIndBenchmarkProvenance(context);
+    result.sanitizer_applicable = true;
+    result.transcript_stat_bits = params.transcript_stat_bits;
+    result.max_queries = params.max_queries;
+    const auto budget = probe::ComputeBudget(
+        0.0, context.GetRuntimeMetadata().actual_ring_dim,
+        context.GetRuntimeMetadata().log_q_bits,
+        context.GetRuntimeMetadata().plaintext_modulus,
+        params.transcript_stat_bits, params.max_queries,
+        params.flood_margin_bits,
+        context.GetRuntimeMetadata().log_q_bits -
+            std::log2(static_cast<double>(context.GetRuntimeMetadata().plaintext_modulus)));
+    result.query_stat_bits = budget.query_stat_bits;
+    result.coefficient_stat_bits = budget.coefficient_stat_bits;
+    result.flood_margin_bits = params.flood_margin_bits;
+    result.eval_noise_bits = params.eval_noise_bits;
+    result.flood_noise_bits = budget.flood_noise_bits;
+    result.scaling_mod_size = params.scaling_mod_size;
+    result.flooding_assurance =
+        params.threshold_mode
+            ? workload::kFloodingAssuranceLegacyCoefficientLevel
+            : workload::kFloodingAssuranceEmpiricalPhaseStatisticalCiphertextComputational;
+    result.residual_capacity_definition = workload::kResidualCapacityDefinition;
+    result.residual_capacity_status =
+        workload::kResidualCapacityStatusNotExposedByOpenFhe;
+    workload::ValidateBenchmarkProvenance(result);
+    return result;
 }
 
 piccard::PiccardParams SelectDiagnosticParams(
@@ -1099,7 +1240,8 @@ std::string PreflightJson(const Options& options,
                           const piccard::PiccardParams& params,
                           const probe::ContextDescription& context,
                           const schema::ContextTuple& tuple,
-                          const schema::PreflightDecision& decision) {
+                          const schema::PreflightDecision& decision,
+                          const schema::CompleteProvenance* complete = nullptr) {
     const auto& metadata = context.metadata;
     CanonicalJsonObject object;
     object.AddString("build_id", PICCARD_BUILD_ID);
@@ -1126,12 +1268,20 @@ std::string PreflightJson(const Options& options,
     object.AddString("reason", JoinReasons(decision));
     object.AddNumber("requested_ring_dim", params.ring_dim);
     object.AddNumber("scaling_mod_size", metadata.scaling_mod_size);
-    object.AddString("schema", "piccard-std-security-preflight-v1");
+    object.AddString("schema", complete == nullptr
+                                  ? "piccard-std-security-preflight-v1"
+                                  : "piccard-std-security-preflight-v2");
     object.AddString("security", options.security);
     object.AddString("shape_id", options.shape_id);
     object.AddBool("skipped", decision.skipped);
     object.AddBool("table_eligible", false);
     object.AddString("source_commit", PICCARD_BUILD_COMMIT);
+    if (complete != nullptr) {
+        const std::string serialized = schema::CompleteProvenanceJson(*complete);
+        object.Add("provenance", serialized.substr(0, serialized.size() - 1));
+        object.AddString("provenance_sha256",
+                         schema::CompleteProvenanceSha256(*complete));
+    }
     return object.Serialize() + "\n";
 }
 
@@ -1249,6 +1399,7 @@ struct CalibrationResult {
     schema::ContextTuple tuple;
     std::vector<Observation> observations;
     probe::CalibrationBudget budget;
+    workload::BenchmarkProvenance provenance;
 };
 
 CalibrationResult RunCalibration(const Options& options) {
@@ -1281,12 +1432,18 @@ CalibrationResult RunCalibration(const Options& options) {
         engine.KeyGen();
         result.context = probe::DescribeContext(engine.GetBFVContext());
         result.tuple = MakeTuple(options, params, result.context);
+        if (options.schema_version == "v2")
+            result.provenance = workload::MakePiccardBenchmarkProvenance(
+                engine.GetBFVContext());
         result.observations = MeasurePatterns(engine, options, result.context);
     } else {
         piccard::SqrtPiccard engine(params);
         engine.KeyGen();
         result.context = probe::DescribeContext(engine.GetBFVContext());
         result.tuple = MakeTuple(options, params, result.context);
+        if (options.schema_version == "v2")
+            result.provenance = workload::MakePiccardBenchmarkProvenance(
+                engine.GetBFVContext());
         result.observations = MeasurePatterns(engine, options, result.context);
     }
 
@@ -1384,12 +1541,22 @@ std::string CalibrationJson(const Options& options,
     object.AddNumber("required_capacity_bits", budget.required_capacity_bits);
     object.AddNumber("requested_ring_dim", result.tuple.requested_ring_dim);
     object.AddNumber("scaling_mod_size", result.tuple.scaling_mod_size);
-    object.AddString("schema", "piccard-std-security-diagnostic-calibration-v1");
+    object.AddString("schema", options.schema_version == "v2"
+                                  ? "piccard-std-security-diagnostic-calibration-v2"
+                                  : "piccard-std-security-diagnostic-calibration-v1");
     object.AddString("security", options.security);
     object.AddNumber("seed", options.seed);
     object.AddString("shape_id", options.shape_id);
     object.AddString("source_commit", PICCARD_BUILD_COMMIT);
     object.AddBool("table_eligible", false);
+    if (options.schema_version == "v2") {
+        const auto complete = MakeCompleteProvenance(result.provenance,
+                                                      result.tuple);
+        const std::string serialized = schema::CompleteProvenanceJson(complete);
+        object.Add("provenance", serialized.substr(0, serialized.size() - 1));
+        object.AddString("provenance_sha256",
+                         schema::CompleteProvenanceSha256(complete));
+    }
     return object.Serialize() + "\n";
 }
 
@@ -1418,6 +1585,7 @@ Options OptionsFromArtifact(const Options& requested,
     options.provisioned_depth = artifact.provisioned_depth;
     options.scaling_mod_size = artifact.scaling_mod_size;
     options.seed = artifact.seed;
+    options.schema_version = artifact.provenance_v2 ? "v2" : "v1";
     return options;
 }
 
@@ -1463,6 +1631,7 @@ std::string Lowercase(std::string value) {
 struct WorkloadMeasurement {
     schema::ContextTuple tuple;
     probe::ContextDescription context;
+    workload::BenchmarkProvenance provenance;
     piccard::JaccardResult result;
     double setup_context_ms = 0.0;
     double setup_keygen_ms = 0.0;
@@ -1531,6 +1700,10 @@ WorkloadMeasurement ExecuteWorkloadCell(
     }
     measurement.context = live;
     measurement.tuple = live_tuple;
+    if (options.schema_version == "v2") {
+        measurement.provenance = workload::MakePiccardBenchmarkProvenance(
+            engine.GetBFVContext());
+    }
 
     const auto minhash_start = std::chrono::steady_clock::now();
     const auto sig_a = engine.ComputeSignature(timing.set_a);
@@ -1614,6 +1787,10 @@ std::string WorkloadCsv(const Options& options,
         "setup_context_ms,setup_keygen_ms,phase_minhash_ms,phase_encode_ms,"
         "phase_encrypt_ms,phase_evaluate_ms,phase_flood_ms,phase_decrypt_ms,"
         "online_e2e_ms,full_e2e_ms,match_count,jaccard_estimate,status,reason\n";
+    const std::string effective_header = options.schema_version == "v2"
+        ? header.substr(0, header.size() - 1) +
+              ",complete_provenance_json,complete_provenance_sha256\n"
+        : header;
     std::ostringstream row;
     row << CsvCell(cell_id) << ',' << CsvCell(options.circuit) << ','
         << CsvCell(options.shape_id) << ',' << CsvCell(options.security) << ','
@@ -1646,8 +1823,15 @@ std::string WorkloadCsv(const Options& options,
         << Number(measurement.phase_flood_ms) << ','
         << Number(measurement.phase_decrypt_ms) << ',' << Number(online) << ','
         << Number(full) << ',' << measurement.result.match_count << ','
-        << Number(measurement.result.jaccard_estimate) << ",MEASURED,\n";
-    return header + row.str();
+        << Number(measurement.result.jaccard_estimate) << ",MEASURED,";
+    if (options.schema_version == "v2") {
+        const auto complete = MakeCompleteProvenance(
+            measurement.provenance, measurement.tuple);
+        row << CsvCell(schema::CompleteProvenanceJson(complete)) << ','
+            << schema::CompleteProvenanceSha256(complete);
+    }
+    row << '\n';
+    return effective_header + row.str();
 }
 
 void Emit(const std::string& text, const std::string& output,
@@ -1715,7 +1899,9 @@ std::string E2eJson(const Options& options,
     object.AddString("reason", "");
     object.AddNumber("seed", options.seed);
     object.AddNumber("set_size", 10u);
-    object.AddString("schema", "piccard-std-security-e2e-v1");
+    object.AddString("schema", options.schema_version == "v2"
+                                  ? "piccard-std-security-e2e-v2"
+                                  : "piccard-std-security-e2e-v1");
     object.AddString("security", options.security);
     object.AddString("shape_id", options.shape_id);
     object.AddString("source_commit", PICCARD_BUILD_COMMIT);
@@ -1727,6 +1913,14 @@ std::string E2eJson(const Options& options,
     object.AddString("workload_id", measurement.workload_id);
     object.AddString("workload_manifest_sha256",
                      measurement.workload_manifest_sha256);
+    if (options.schema_version == "v2") {
+        const auto complete = MakeCompleteProvenance(
+            measurement.provenance, tuple);
+        const std::string serialized = schema::CompleteProvenanceJson(complete);
+        object.Add("provenance", serialized.substr(0, serialized.size() - 1));
+        object.AddString("provenance_sha256",
+                         schema::CompleteProvenanceSha256(complete));
+    }
     return object.Serialize() + "\n";
 }
 
@@ -1786,6 +1980,36 @@ int RunE2e(const Options& requested) {
     if (schema::ContextTupleSha256(preflight_tuple) !=
         artifact.context_tuple_sha256) {
         throw std::invalid_argument("calibration context tuple digest mismatch");
+    }
+    if (artifact.provenance_v2) {
+        const auto live_complete = MakeCompleteProvenance(
+            MakePreflightProvenance(preflight, profile),
+            preflight_tuple);
+        const auto same_context = [&](const schema::CompleteProvenance& left,
+                                      const schema::CompleteProvenance& right) {
+            return left.circuit == right.circuit && left.shape_id == right.shape_id &&
+                   left.security == right.security &&
+                   left.bfv_context_fingerprint == right.bfv_context_fingerprint &&
+                   left.requested_ring_dim == right.requested_ring_dim &&
+                   left.natural_ring_dim == right.natural_ring_dim &&
+                   left.provisioned_ring_dim == right.provisioned_ring_dim &&
+                   left.realized_ring_dim == right.realized_ring_dim &&
+                   left.natural_depth == right.natural_depth &&
+                   left.provisioned_depth == right.provisioned_depth &&
+                   left.log_q_bits == right.log_q_bits &&
+                   left.log_q_over_t_bits == right.log_q_over_t_bits &&
+                   left.plaintext_modulus == right.plaintext_modulus &&
+                   left.num_limbs == right.num_limbs &&
+                   left.scaling_mod_size == right.scaling_mod_size &&
+                   left.ordered_rns_moduli == right.ordered_rns_moduli &&
+                   left.ordered_rns_limb_bits == right.ordered_rns_limb_bits &&
+                   left.openfhe_version == right.openfhe_version &&
+                   left.flooding_assurance == right.flooding_assurance &&
+                   left.residual_capacity.status == right.residual_capacity.status &&
+                   left.residual_capacity.definition == right.residual_capacity.definition;
+        };
+        if (!same_context(live_complete, artifact.complete_provenance))
+            throw std::invalid_argument("calibration complete provenance does not match live context");
     }
     const auto budget = probe::ComputeBudget(
         artifact.eval_noise_bits,
@@ -1915,7 +2139,14 @@ int Run(const Options& options) {
         if (context.HasGeneratedKeysForTesting()) {
             throw std::logic_error("preflight generated keys");
         }
-        Emit(PreflightJson(options, params, described, tuple, decision),
+        std::optional<schema::CompleteProvenance> complete;
+        if (options.schema_version == "v2") {
+            complete = MakeCompleteProvenance(
+                MakePreflightProvenance(context, params), tuple,
+                "PREFLIGHT", JoinReasons(decision));
+        }
+        Emit(PreflightJson(options, params, described, tuple, decision,
+                           complete ? &*complete : nullptr),
              options.output);
         return 0;
     }

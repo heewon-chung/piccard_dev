@@ -225,3 +225,87 @@ TEST(StdSecurityEvidenceSchema, TerminalRowsAreFailClosed) {
     EXPECT_THROW(ValidateTerminalRecord(fhe_measured, fhe_cell),
                  std::invalid_argument);
 }
+
+TEST(StdSecurityEvidenceSchema, CompleteV2ProvenanceBindsEveryBoundaryField) {
+    CompleteProvenance provenance;
+    provenance.schema = kCompleteProvenanceSchemaV2;
+    provenance.kind = ProvenanceKind::Piccard;
+    provenance.circuit = "onehot";
+    provenance.shape_id = "onehot-v1";
+    provenance.security = "STD128";
+    provenance.bfv_context_fingerprint =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    provenance.requested_ring_dim = 8192;
+    provenance.natural_ring_dim = 8192;
+    provenance.provisioned_ring_dim = 8192;
+    provenance.realized_ring_dim = 8192;
+    provenance.natural_depth = 1;
+    provenance.provisioned_depth = 3;
+    provenance.log_q_bits = 120;
+    provenance.log_q_over_t_bits = 103.99997798638864;
+    provenance.plaintext_modulus = 65537;
+    provenance.num_limbs = 2;
+    provenance.scaling_mod_size = 40;
+    provenance.ordered_rns_moduli = {"576460752303423487", "2305843009213693951"};
+    provenance.ordered_rns_limb_bits = {59, 61};
+    provenance.openfhe_version = "1.5.0";
+    provenance.transcript_stat_bits = 40;
+    provenance.max_queries = 1048576;
+    provenance.query_stat_bits = 60;
+    provenance.coefficient_stat_bits = 73;
+    provenance.flood_margin_bits = 8;
+    provenance.eval_noise_bits = 20;
+    provenance.flood_noise_bits = 101;
+    provenance.required_capacity_bits = 103;
+    provenance.flooding_assurance = kFloodingAssurancePiccard;
+    provenance.residual_capacity = {
+        kResidualCapacityNotExposedByOpenFhe, std::nullopt};
+    provenance.residual_capacity.definition = kResidualCapacityDefinition;
+    provenance.status = "MEASURED";
+    EXPECT_NO_THROW(ValidateCompleteProvenance(provenance));
+    const auto digest = CompleteProvenanceSha256(provenance);
+    EXPECT_EQ(digest.size(), 64u);
+
+    auto reordered = provenance;
+    std::reverse(reordered.ordered_rns_limb_bits.begin(),
+                 reordered.ordered_rns_limb_bits.end());
+    EXPECT_THROW(ValidateCompleteProvenance(reordered), std::invalid_argument);
+    auto missing = provenance;
+    missing.ordered_rns_limb_bits.pop_back();
+    EXPECT_THROW(ValidateCompleteProvenance(missing), std::invalid_argument);
+    auto wrong_ring = provenance;
+    wrong_ring.provisioned_ring_dim = *wrong_ring.provisioned_ring_dim * 2;
+    EXPECT_NO_THROW(ValidateCompleteProvenance(wrong_ring));
+    EXPECT_NE(digest, CompleteProvenanceSha256(wrong_ring));
+    auto unknown_assurance = provenance;
+    unknown_assurance.flooding_assurance = "invented";
+    EXPECT_THROW(ValidateCompleteProvenance(unknown_assurance), std::invalid_argument);
+    auto fabricated_residual = provenance;
+    fabricated_residual.residual_capacity.bits = 4.0;
+    EXPECT_THROW(ValidateCompleteProvenance(fabricated_residual), std::invalid_argument);
+    auto downgraded = provenance;
+    downgraded.schema = "piccard-std-security-context-v1";
+    EXPECT_THROW(ValidateCompleteProvenance(downgraded), std::invalid_argument);
+}
+
+TEST(StdSecurityEvidenceSchema, CompleteV2JsonAndCsvRoundTrip) {
+    CompleteProvenance provenance;
+    provenance.schema = kCompleteProvenanceSchemaV2;
+    provenance.kind = ProvenanceKind::EncodingOnly;
+    provenance.circuit = "encoding";
+    provenance.shape_id = "encoding-v1";
+    provenance.security = "not-applicable";
+    provenance.bfv_context_fingerprint = "not-applicable";
+    provenance.openfhe_version = "not-applicable";
+    provenance.flooding_assurance = kNotApplicable;
+    provenance.residual_capacity = {kResidualCapacityNotApplicable,
+                                    std::nullopt};
+    provenance.legacy_encoding_note =
+        "legacy-encoding-schema-superseded-by-piccard-benchmark-provenance-v2";
+    EXPECT_NO_THROW(ValidateCompleteProvenance(provenance));
+    EXPECT_EQ(ParseCompleteProvenanceJson(CompleteProvenanceJson(provenance)),
+              provenance);
+    EXPECT_EQ(ParseCompleteProvenanceCsv(
+                  CompleteProvenanceCsvHeader() +
+                  CompleteProvenanceCsvRow(provenance)), provenance);
+}
