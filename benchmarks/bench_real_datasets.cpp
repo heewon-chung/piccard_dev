@@ -160,6 +160,11 @@ void AppendOptionIfMissing(std::vector<std::string>& argv,
 RevisionRunMode InferRevisionMode(const std::vector<std::string>& argv) {
     for (const std::string& arg : argv) {
         if (arg == "--profile=readiness-toy-v1") return RevisionRunMode::Toy;
+        // The canonical DBLP threshold producer argv intentionally has no
+        // --profile option.  Its frozen trial count is the mode discriminator
+        // (1 for readiness, 50 for paper); SelectRealDatasetRevisionCell still
+        // performs the exact count check against the selected plan below.
+        if (arg == "--threshold-trials=1") return RevisionRunMode::Toy;
     }
     return RevisionRunMode::Paper;
 }

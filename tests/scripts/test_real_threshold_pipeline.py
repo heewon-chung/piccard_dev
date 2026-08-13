@@ -75,6 +75,53 @@ class RealThresholdPipelineTest(unittest.TestCase):
         )
         return result, csv_path, manifest_path, rows_path
 
+    def run_revision_threshold(self, *, suffix="", trials=1,
+                               manifest=FIXTURE, seed=20260729,
+                               binary=BINARY):
+        """Invoke the real producer with the exact threshold cell argv.
+
+        The canonical real-threshold plan intentionally has no ``--profile``;
+        toy/paper selection is represented by the frozen trial count.  Keep
+        this command in canonical planner order so the test reaches the
+        producer boundary rather than only exercising the pure adapter.
+        """
+        cell = "paper-v1::threshold_dblp_fpfn::control=default"
+        output_root = self.root / f"revision{suffix}"
+        output_root.mkdir()
+        csv_path = output_root / "threshold.csv"
+        manifest_path = output_root / "threshold.manifest.tsv"
+        rows_path = output_root / "threshold.rows.tsv"
+        result = subprocess.run(
+            [str(binary), f"--revision-cell={cell}", "--mode=threshold",
+             f"--dataset-manifest={manifest}", "--k=128", "--m=64",
+             f"--threshold-trials={trials}", f"--seed={seed}",
+             "--hash_randomness=resampled", f"--csv={csv_path}",
+             f"--workload-manifest-out={manifest_path}",
+             f"--workload-rows-out={rows_path}"],
+            capture_output=True, text=True,
+        )
+        return result, csv_path, manifest_path, rows_path
+
+    def test_revision_threshold_toy_count_one_dispatches_without_profile(self):
+        result, csv_path, manifest_path, rows_path = self.run_revision_threshold(
+            suffix="-toy", trials=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(csv_path.is_file())
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(rows_path.is_file())
+        with csv_path.open(newline="") as handle:
+            self.assertEqual(len(list(csv.DictReader(handle))), 2)
+
+    def test_revision_threshold_paper_count_fifty_remains_canonical(self):
+        result, csv_path, manifest_path, rows_path = self.run_revision_threshold(
+            suffix="-paper", trials=50)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(csv_path.is_file())
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(rows_path.is_file())
+        with csv_path.open(newline="") as handle:
+            self.assertEqual(len(list(csv.DictReader(handle))), 100)
+
     def test_isolated_threshold_cli_requires_exactly_one_threshold_mode(self):
         for mode_args, label in (
                 ((), "missing"),
