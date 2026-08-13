@@ -207,6 +207,19 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
                     cell, command, output = self.run_revision_cell(family, root)
                     self.verify_revision_cell(root, output, cell, command)
 
+                    producer_stdout = output.joinpath("producer.stdout")
+                    stdout_payload = producer_stdout.read_text(encoding="utf-8")
+                    stdout_rows = list(csv.reader(io.StringIO(stdout_payload)))
+                    seed_column = stdout_rows[0].index("hash_root_seed")
+                    for row in stdout_rows[1:]:
+                        row[seed_column] = "999999"
+                    mutated_stdout = io.StringIO(newline="")
+                    csv.writer(mutated_stdout, lineterminator="\n").writerows(stdout_rows)
+                    producer_stdout.write_text(mutated_stdout.getvalue(), encoding="utf-8")
+                    with self.assertRaises(Exception):
+                        self.verify_revision_cell(root, output, cell, command)
+                    producer_stdout.write_text(stdout_payload, encoding="utf-8")
+
                     identity = output / "identity.csv"
                     identity_payload = identity.read_text()
                     identity.write_text(identity_payload.replace(
@@ -217,7 +230,8 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
 
                     if family != "dynamic_accuracy":
                         raw_path = next((output / "raw").glob("*.tsv"))
-                        raw_lines = raw_path.read_text(encoding="utf-8").splitlines()
+                        raw_payload = raw_path.read_text(encoding="utf-8")
+                        raw_lines = raw_payload.splitlines()
                         sample_index = next(index for index, line in enumerate(raw_lines)
                                             if line.startswith("sample\t"))
                         fields = raw_lines[sample_index].split("\t")
@@ -227,6 +241,41 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
                                             encoding="utf-8")
                         with self.assertRaises(Exception):
                             self.verify_revision_cell(root, output, cell, command)
+                        raw_path.write_text(raw_payload, encoding="utf-8")
+
+                        if family == "dynamic_timing":
+                            raw_lines = raw_payload.splitlines()
+                            measured = [index for index, line in enumerate(raw_lines)
+                                        if "\tmeasured\t" in line]
+                            init_index = next(index for index in measured
+                                              if "\tinit\t" in raw_lines[index])
+                            insert_index = next(index for index in measured
+                                                if "\tinsert\t" in raw_lines[index])
+                            raw_lines[init_index] = raw_lines[insert_index]
+                            raw_path.write_text("\n".join(raw_lines) + "\n",
+                                                encoding="utf-8")
+                            with self.assertRaises(Exception):
+                                self.verify_revision_cell(root, output, cell, command)
+                            raw_path.write_text(raw_payload, encoding="utf-8")
+
+                            raw_lines = raw_payload.splitlines()
+                            aggregate_index = next(
+                                index for index, line in enumerate(raw_lines)
+                                if line.startswith("aggregate\t") and
+                                "\tcompute\t" in line)
+                            aggregate = raw_lines[aggregate_index].split("\t")
+                            aggregate[6] = "nan"
+                            raw_lines[aggregate_index] = "\t".join(aggregate)
+                            raw_path.write_text("\n".join(raw_lines) + "\n",
+                                                encoding="utf-8")
+                            with self.assertRaises(Exception):
+                                self.verify_revision_cell(root, output, cell, command)
+                            aggregate[6] = "999999"
+                            raw_lines[aggregate_index] = "\t".join(aggregate)
+                            raw_path.write_text("\n".join(raw_lines) + "\n",
+                                                encoding="utf-8")
+                            with self.assertRaises(Exception):
+                                self.verify_revision_cell(root, output, cell, command)
 
     def test_revision_runtime_bindings_fail_before_benchmark_setup(self):
         for family in ("dynamic_accuracy", "dynamic_timing", "dynamic_refresh"):

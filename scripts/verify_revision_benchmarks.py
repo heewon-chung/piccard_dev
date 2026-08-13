@@ -916,7 +916,9 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
             fail(f"dynamic raw timing aggregate row shape mismatch for {cid}")
         aggregates.append({
             "producer": fields[1], "profile": fields[2], "cell": fields[3],
-            "phase": fields[4], "count": fields[5], "format": fields[11],
+            "phase": fields[4], "count": fields[5], "mean": fields[6],
+            "sd": fields[7], "median": fields[8], "ci_low": fields[9],
+            "ci_high": fields[10], "format": fields[11],
         })
         index += 1
 
@@ -941,6 +943,17 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
         root_seed = int(seed_values[0])
     except ValueError:
         fail(f"dynamic successor seed binding is malformed for {cid}")
+    expected_sample_keys = {
+        (phase, "measured", trial)
+        for phase in phases for trial in range(expected_count)
+    }
+    if expected_warmup == "discard_one":
+        expected_sample_keys.update(
+            (phase, "discarded_warmup", 0) for phase in phases)
+    observed_sample_keys: list[tuple[str, str, int]] = []
+    measured_by_phase: dict[str, list[tuple[int, float]]] = {
+        phase: [] for phase in phases
+    }
     for sample in samples:
         if sample["producer"] != expected_producer or \
                 sample["profile"] != expected_profile or sample["cell"] != cid:
@@ -953,6 +966,7 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
             fail(f"dynamic raw timing numeric field mismatch for {cid}")
         if trial < 0 or seed < 0 or not math.isfinite(value) or value < 0.0:
             fail(f"dynamic raw timing numeric domain mismatch for {cid}")
+        observed_sample_keys.append((sample["phase"], sample["kind"], trial))
         if sample["kind"] == "discarded_warmup":
             if expected_warmup != "discard_one" or trial != 0:
                 fail(f"dynamic raw timing warmup topology mismatch for {cid}")
@@ -964,8 +978,54 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
             expected_seed = root_seed + trial * 10007 + 500
             if seed != expected_seed:
                 fail(f"dynamic raw timing trial seed mismatch for {cid}")
+            measured_by_phase[sample["phase"]].append((trial, value))
         else:
             fail(f"dynamic raw timing sample kind mismatch for {cid}")
+    if len(observed_sample_keys) != len(expected_sample_keys) or \
+            set(observed_sample_keys) != expected_sample_keys:
+        fail(f"dynamic raw timing sample topology mismatch for {cid}")
+
+    def optional_stat(value: str, field: str) -> float | None:
+        if value == "N/A":
+            return None
+        try:
+            parsed = float(value)
+        except ValueError:
+            fail(f"dynamic raw timing aggregate {field} is malformed for {cid}")
+        if not math.isfinite(parsed):
+            fail(f"dynamic raw timing aggregate {field} is non-finite for {cid}")
+        return parsed
+
+    # The producer freezes Student-t 95% critical values for N=2..30.  The
+    # successor uses only N=1 (toy) or N=30 (paper), but keeping the complete
+    # table makes this verifier agree with the versioned raw timing schema.
+    student_t95 = (
+        0.0, 12.706204736432095, 4.302652729911275,
+        3.182446305284264, 2.7764451051977987, 2.570581835636305,
+        2.4469118487916806, 2.3646242515927844, 2.3060041350333704,
+        2.2621571628540993, 2.2281388519649385, 2.200985160082949,
+        2.1788128296634177, 2.1603686564610127, 2.1447866879169273,
+        2.131449545559323, 2.119905299221011, 2.1098155778331806,
+        2.10092204024096, 2.093024054408263, 2.0859634472658364,
+        2.079613844727662, 2.0738730679040147, 2.0686576104190406,
+        2.0638985616280205, 2.059538552753294, 2.055529438642871,
+        2.0518305164802833, 2.048407141795244, 2.045229642132703,
+    )
+
+    def require_computed(actual: float | None, expected: float | None,
+                         field: str) -> None:
+        if actual is None or expected is None:
+            if actual is not None or expected is not None:
+                fail(f"dynamic raw timing aggregate {field} N/A mismatch for {cid}")
+            return
+        # Both implementations operate on the same IEEE-754 values and emit
+        # 17 significant digits.  A two-ulp allowance covers libm sqrt
+        # differences without accepting a scientifically distinct aggregate.
+        tolerance = 2.0 * math.ulp(expected) if expected != 0.0 else 1e-323
+        if abs(actual - expected) > tolerance:
+            fail(f"dynamic raw timing aggregate {field} mismatch for {cid}")
+
+    aggregates_by_phase: dict[str, dict[str, str]] = {}
     for aggregate in aggregates:
         if aggregate["producer"] != expected_producer or \
                 aggregate["profile"] != expected_profile or \
@@ -973,6 +1033,42 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
                 aggregate["count"] != str(expected_count) or \
                 aggregate["format"] != "17-digit":
             fail(f"dynamic raw timing aggregate identity mismatch for {cid}")
+        if aggregate["phase"] in aggregates_by_phase:
+            fail(f"dynamic raw timing aggregate phase is duplicated for {cid}")
+        aggregates_by_phase[aggregate["phase"]] = aggregate
+    if set(aggregates_by_phase) != phases:
+        fail(f"dynamic raw timing aggregate topology mismatch for {cid}")
+
+    for phase in phases:
+        values = [value for _, value in sorted(measured_by_phase[phase])]
+        mean = sum(values) / len(values)
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        median = (ordered[middle] if len(ordered) % 2 else
+                  (ordered[middle - 1] + ordered[middle]) / 2.0)
+        sd: float | None = None
+        ci_low: float | None = None
+        ci_high: float | None = None
+        if len(values) >= 2:
+            sd = math.sqrt(sum((value - mean) ** 2 for value in values) /
+                           (len(values) - 1))
+            margin = student_t95[len(values) - 1] * sd / math.sqrt(len(values))
+            ci_low, ci_high = mean - margin, mean + margin
+        aggregate = aggregates_by_phase[phase]
+        actual_mean = optional_stat(aggregate["mean"], "mean_ms")
+        actual_sd = optional_stat(aggregate["sd"], "sample_sd_ms")
+        actual_median = optional_stat(aggregate["median"], "median_ms")
+        actual_low = optional_stat(aggregate["ci_low"], "ci95_low_ms")
+        actual_high = optional_stat(aggregate["ci_high"], "ci95_high_ms")
+        if actual_mean is None or actual_median is None or \
+                actual_mean < 0.0 or actual_median < 0.0 or \
+                (actual_sd is not None and actual_sd < 0.0):
+            fail(f"dynamic raw timing aggregate numeric domain mismatch for {cid}")
+        require_computed(actual_mean, mean, "mean_ms")
+        require_computed(actual_sd, sd, "sample_sd_ms")
+        require_computed(actual_median, median, "median_ms")
+        require_computed(actual_low, ci_low, "ci95_low_ms")
+        require_computed(actual_high, ci_high, "ci95_high_ms")
 
 
 def _check_dynamic_sidecars(output: Path, cell: dict[str, Any],
@@ -2621,6 +2717,16 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             if len(rows) != 1 or _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"estimator trial topology mismatch for {cid}")
         elif schema == "dynamic-benchmark-csv-v1":
+            seed_values = _command_value(plan.get("command", []), "--seed=")
+            if len(seed_values) != 1:
+                fail(f"dynamic successor seed binding count mismatch for {cid}")
+            try:
+                root_seed = int(seed_values[0])
+            except ValueError:
+                fail(f"dynamic successor seed binding is malformed for {cid}")
+            if any(_int_field(row, "hash_root_seed", cid) != root_seed
+                   for row in rows):
+                fail(f"dynamic CSV root seed mismatch for {cid}")
             if cell["family"] == "dynamic_accuracy":
                 labels = sorted(row.get("label") for row in rows)
                 wanted = sorted((cid + "::insert_correctness", cid + "::delete_correctness"))
