@@ -122,6 +122,48 @@ class RevisionRunnerContractTest(unittest.TestCase):
                 self.assertTrue("thread_related" in pair_text or
                                 "cross_thread" in pair_text)
 
+    def test_toy_flooding_uses_wrapper_executable_and_binds_logical_binary(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import load_matrix, select_cells
+        from run_revision_benchmarks import _binary_metadata, _materialized_command
+
+        document, _ = load_matrix(MATRIX)
+        cell = next(item for item in select_cells(document, "toy")
+                    if item["family"] == "flooding")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "results"
+            root.mkdir()
+            build = Path(temporary) / "build"
+            build.mkdir()
+            wrapper = ROOT / "scripts" / "run_noise_profiles.sh"
+            binary = build / "bench_noise"
+            binary.write_text("fake producer\n", encoding="utf-8")
+            manifests = {"dblp_acm_u65536": root / "dblp.manifest.tsv"}
+            manifests["dblp_acm_u65536"].write_text("fixture\n", encoding="utf-8")
+            canonical, command = _materialized_command(
+                cell, "toy", root=root, build_dir=build, seed=7, threads=2,
+                variant_manifests=manifests,
+                dblp_manifest=manifests["dblp_acm_u65536"],
+            )
+            self.assertEqual(cell["producer"], "bench_noise")
+            self.assertEqual(command[0], str(wrapper))
+            self.assertIn("--bench-noise=" + str(binary), command)
+            self.assertIn("--revision-cell=" + cell["cell_id"], command)
+            metadata = _binary_metadata(build, [cell])
+            self.assertEqual(metadata["bench_noise"]["path"], str(binary.resolve()))
+            self.assertNotEqual(command[0], str(binary))
+
+    def test_real_summary_uses_python_summary_executable_mapping(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import executable_for_cell, load_matrix
+
+        document, _ = load_matrix(MATRIX)
+        cell = next(item for item in document["cells"]
+                    if item["family"] == "real_dataset" and
+                    item["axis_value"] == "summary")
+        self.assertEqual(cell["producer"], "summarize_real_datasets.py")
+        self.assertEqual(executable_for_cell(cell), "summarize_real_datasets.py")
+
 
 if __name__ == "__main__":
     unittest.main()

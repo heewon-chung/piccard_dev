@@ -39,6 +39,8 @@ PAPER_STD128_PROFILE = "paper-std128-t40-v1"
 PAPER_STD192_PROFILE = "paper-std192-encoding-v1"
 CELL_SCHEMA = "piccard-revision-cell-receipt-v1"
 EVENT_SCHEMA = "piccard-revision-event-v1"
+FLOODING_EXECUTABLE = "scripts/run_noise_profiles.sh"
+SUMMARY_EXECUTABLE = "summarize_real_datasets.py"
 
 
 class RevisionContractError(RuntimeError):
@@ -406,12 +408,78 @@ def materialize_argv(
     return result
 
 
+def executable_for_cell(cell: dict[str, Any]) -> str:
+    """Return the concrete executable selected by the revision planner.
+
+    ``producer`` is the logical producer recorded in the canonical matrix.
+    Two planner branches deliberately dispatch through a source-tree wrapper:
+    flooding uses ``run_noise_profiles.sh`` while real-dataset summaries use
+    the Python summarizer.  Keeping this mapping here mirrors C++
+    ``ExecutableForCell`` and prevents lifecycle code from silently treating
+    a logical producer name as an executable path.
+    """
+    family = str(cell.get("family", ""))
+    if family == "flooding":
+        return FLOODING_EXECUTABLE
+    if family == "real_dataset" and str(cell.get("axis_value", "")) == "summary":
+        return SUMMARY_EXECUTABLE
+    return _executable_for_logical_producer(str(cell["producer"]))
+
+
+def _executable_for_logical_producer(producer: str) -> str:
+    if producer == "bench_noise":
+        return FLOODING_EXECUTABLE
+    return producer
+
+
 def command_for_producer(producer: str, *, root: Path, build_dir: Path) -> list[str]:
-    if producer.endswith(".py"):
-        return [sys.executable, str(SCRIPT_ROOT / "scripts" / producer)]
-    if producer.startswith("scripts/"):
-        return [str(SCRIPT_ROOT / producer)]
-    return [str(build_dir / producer)]
+    """Resolve one logical producer to its concrete command.
+
+    The two logical names that are not direct executables are handled here as
+    well as in :func:`executable_for_cell`, so independent rematerialization
+    that only has the matrix producer field still receives the planner's
+    executable.  Flooding's wrapper must be explicitly bound to the selected
+    build's ``bench_noise`` binary; it must never fall back to ``repo/build``.
+    """
+    logical_producer = producer
+    executable = _executable_for_logical_producer(producer)
+    if executable.endswith(".py"):
+        command = [sys.executable, str(SCRIPT_ROOT / "scripts" / executable)]
+    elif executable.startswith("scripts/"):
+        command = [str(SCRIPT_ROOT / executable)]
+    else:
+        command = [str(build_dir / executable)]
+    if logical_producer == "bench_noise":
+        command.append(f"--bench-noise={build_dir / 'bench_noise'}")
+    return command
+
+
+def command_for_cell(cell: dict[str, Any], *, root: Path,
+                     build_dir: Path) -> list[str]:
+    """Resolve a canonical cell using the authoritative executable mapping."""
+    executable = executable_for_cell(cell)
+    command = command_for_producer(cell["producer"], root=root,
+                                   build_dir=build_dir)
+    # ``command_for_producer`` binds the flooding logical binary.  Assert that
+    # its executable agrees with the family mapping before returning it; this
+    # catches accidental future divergence between the two call paths.
+    if cell["producer"] != "bench_noise" and command[0] != (
+            sys.executable if executable.endswith(".py") else
+            str(SCRIPT_ROOT / executable) if executable.startswith("scripts/") else
+            str(build_dir / executable)):
+        raise RevisionContractError("cell executable mapping is inconsistent")
+    return command
+
+
+def producer_extra_args(cell: dict[str, Any], output: Path) -> list[str]:
+    """Return deterministic output bindings appended outside canonical argv."""
+    producer = cell["producer"]
+    if producer == "bench_fhe_ind":
+        return [f"--output={output / 'fhe_ind.csv'}",
+                f"--revision-identity-out={output / 'identity.csv'}"]
+    if producer == "bench_dynamic":
+        return [f"--revision-identity-out={output / 'identity.csv'}"]
+    return []
 
 
 def command_label(command: list[str]) -> str:

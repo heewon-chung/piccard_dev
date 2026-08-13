@@ -34,12 +34,14 @@ from revision_benchmark_common import (  # noqa: E402
     canonical_json,
     canonical_plan_argv,
     cell_output,
-    command_for_producer,
+    command_for_cell,
+    binary_metadata,
     expected_row_count,
     file_inventory,
     load_matrix,
     materialize_argv,
     phase_for_cell,
+    producer_extra_args,
     select_cells,
     sha256_file,
     source_metadata,
@@ -148,17 +150,6 @@ def _script_hashes() -> dict[str, str]:
     return result
 
 
-def _producer_extra_args(cell: dict[str, Any], output: Path) -> list[str]:
-    producer = cell["producer"]
-    extras: list[str] = []
-    if producer == "bench_fhe_ind":
-        extras += [f"--output={output / 'fhe_ind.csv'}",
-                   f"--revision-identity-out={output / 'identity.csv'}"]
-    elif producer == "bench_dynamic":
-        extras += [f"--revision-identity-out={output / 'identity.csv'}"]
-    return extras
-
-
 def _materialized_command(
     cell: dict[str, Any], mode: str, *, root: Path, build_dir: Path,
     seed: int, threads: int, variant_manifests: dict[str, Path],
@@ -170,9 +161,8 @@ def _materialized_command(
     argv = materialize_argv(canonical, root=root, output=output, seed=seed,
                             threads=threads, variant_manifests=variant_manifests,
                             dblp_manifest=dblp_manifest)
-    argv.extend(_producer_extra_args(cell, output))
-    command = command_for_producer(cell["producer"], root=root,
-                                   build_dir=build_dir)
+    argv.extend(producer_extra_args(cell, output))
+    command = command_for_cell(cell, root=root, build_dir=build_dir)
     return canonical, command + argv
 
 
@@ -221,22 +211,9 @@ def _write_initial_manifest(
 
 
 def _binary_metadata(build_dir: Path, cells: list[dict[str, Any]]) -> dict[str, Any]:
-    producers = sorted({cell["producer"] for cell in cells})
-    result: dict[str, Any] = {}
-    for producer in producers:
-        if producer.endswith(".py") or producer.startswith("scripts/"):
-            path = ROOT / ("scripts" if producer.endswith(".py") else "") / producer \
-                if producer.endswith(".py") else ROOT / producer
-        else:
-            path = build_dir / producer
-        if path.is_file() and not path.is_symlink():
-            result[producer] = {"path": str(path.resolve()),
-                                "sha256": sha256_file(path),
-                                "size": path.stat().st_size}
-        else:
-            result[producer] = {"path": str(path), "sha256": "MISSING",
-                                "size": 0}
-    return result
+    # Keep this compatibility shim for callers/tests while sharing the exact
+    # logical-producer registry with independent verification.
+    return binary_metadata(build_dir, cells)
 
 
 def _event(root: Path, sequence: int, event: str, **fields: Any) -> None:
