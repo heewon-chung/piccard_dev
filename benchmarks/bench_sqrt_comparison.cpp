@@ -1,5 +1,6 @@
 #include "benchmark_utils.h"
 #include "raw_timing_schema.h"
+#include "sqrt_revision_adapter.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -86,6 +87,32 @@ static void ResolveRawTimingOptions(RawTimingOptions& options,
 }
 
 }  // namespace
+
+static bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static RevisionRunMode RevisionModeForProfile(const std::string& profile) {
+    return profile == "readiness-toy-v1" ? RevisionRunMode::Toy
+                                         : RevisionRunMode::Paper;
+}
+
+static void PrintSqrtRevisionTerminalRow(
+    const SqrtRevisionExecutionPlan& execution) {
+    const auto& row = execution.selection.plan.expected_rows.at(1);
+    std::cerr << "revision_terminal,schema=sqrt-revision-terminal-v1"
+              << ",cell_id=" << execution.selection.cell.cell_id
+              << ",row_id=" << row.row_id
+              << ",status=" << row.status
+              << ",reason=" << row.reason
+              << ",reason_code=" << row.reason_code
+              << ",measured_count=" << row.measured_count << "\n";
+}
 
 double TrueJaccard(const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
     std::vector<uint64_t> sa(a.begin(), a.end()), sb(b.begin(), b.end());
@@ -271,8 +298,72 @@ int main(int argc, char** argv) {
     RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     const SqrtComparisonConfig config =
         ResolveSqrtComparisonConfig(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    RejectUnknownBenchmarkOptions(argc, argv,
+                                  {"--raw_timing_dir=", "--cell="});
     ResolveRawTimingOptions(raw_options, config);
+
+    const bool revision_cell = HasRevisionCell(argc, argv);
+    if (revision_cell) {
+        const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        const auto execution = PlanSqrtRevisionExecution(
+            matrix, std::vector<std::string>(argv + 1, argv + argc),
+            RevisionModeForProfile(config.sanitizer.profile.id));
+        if (execution.role != "accuracy") {
+            throw std::invalid_argument(
+                "bench_sqrt_comparison revision cells require accuracy_m role");
+        }
+
+        const int num_trials = static_cast<int>(execution.onehot_runs);
+        std::cerr << "=== Revision sqrt accuracy cell "
+                  << execution.selection.cell.cell_id << " (trials="
+                  << num_trials << ") ===\n";
+        PrintHeader(num_trials);
+        std::mt19937_64 revision_rng(config.seed);
+        const auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+            execution.point.set_size, 0.5, revision_rng);
+        const double j_true = TrueJaccard(set_a, set_b);
+        std::vector<BenchResult> onehot_results;
+        onehot_results.reserve(execution.onehot_runs);
+        for (size_t trial = 0; trial < execution.onehot_runs; ++trial) {
+            PiccardParams params;
+            params.k = execution.point.k;
+            params.m = execution.point.m;
+            params.security = config.sanitizer.security_level;
+            ApplyBenchmarkProfile(config.sanitizer, params);
+            params.flood_margin_bits = config.flood_margin_bits;
+            Piccard engine(params);
+            engine.KeyGen();
+            onehot_results.push_back(
+                RunBench(engine, set_a, set_b, j_true));
+        }
+        PrintRow(config.sanitizer, "OneHot", execution.point.k,
+                 execution.point.m, onehot_results);
+
+        if (!execution.sqrt_applicable) {
+            PrintSqrtRevisionTerminalRow(execution);
+            return 0;
+        }
+
+        std::vector<BenchResult> sqrt_results;
+        sqrt_results.reserve(execution.sqrt_runs);
+        for (size_t trial = 0; trial < execution.sqrt_runs; ++trial) {
+            PiccardParams params;
+            params.k = execution.point.k;
+            params.m = execution.point.m;
+            params.security = config.sanitizer.security_level;
+            ApplyBenchmarkProfile(config.sanitizer, params);
+            params.flood_margin_bits = config.flood_margin_bits;
+            SqrtPiccard engine(params);
+            engine.KeyGen();
+            sqrt_results.push_back(
+                RunBench(engine, set_a, set_b, j_true));
+        }
+        PrintRow(config.sanitizer, "Sqrt", execution.point.k,
+                 execution.point.m, sqrt_results);
+        return 0;
+    }
+
     (void)ResolveBenchmarkGrid(
         config.sanitizer.profile, BenchmarkProducer::SqrtComparison,
         BenchmarkMode::Timing, false, {});

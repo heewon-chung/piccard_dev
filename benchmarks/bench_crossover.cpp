@@ -1,5 +1,6 @@
 #include "benchmark_utils.h"
 #include "raw_timing_schema.h"
+#include "sqrt_revision_adapter.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -94,6 +95,32 @@ static void AddRawTimingSample(
 }
 
 }  // namespace
+
+static bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static RevisionRunMode RevisionModeForProfile(const std::string& profile) {
+    return profile == "readiness-toy-v1" ? RevisionRunMode::Toy
+                                         : RevisionRunMode::Paper;
+}
+
+static void PrintSqrtRevisionTerminalRow(
+    const SqrtRevisionExecutionPlan& execution) {
+    const auto& row = execution.selection.plan.expected_rows.at(1);
+    std::cerr << "revision_terminal,schema=sqrt-revision-terminal-v1"
+              << ",cell_id=" << execution.selection.cell.cell_id
+              << ",row_id=" << row.row_id
+              << ",status=" << row.status
+              << ",reason=" << row.reason
+              << ",reason_code=" << row.reason_code
+              << ",measured_count=" << row.measured_count << "\n";
+}
 
 // ============================================================================
 // CSV output
@@ -323,6 +350,97 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
     }
 }
 
+/** @brief Run one ciphertext/crossover matrix point, preserving legacy sweeps. */
+static void RunRevisionCell(const BenchmarkConfig& config,
+                            const SqrtRevisionExecutionPlan& execution,
+                            CrossoverCSVWriter& csv) {
+    if (execution.role != "ciphertext" && execution.role != "crossover") {
+        throw std::invalid_argument(
+            "bench_crossover revision cells require ciphertext_m or crossover_m role");
+    }
+
+    PiccardParams onehot_params;
+    onehot_params.k = execution.point.k;
+    onehot_params.m = execution.point.m;
+    onehot_params.security = config.security_level;
+    ApplyBenchmarkProfile(config, onehot_params);
+    onehot_params.Validate();
+    Piccard onehot(onehot_params);
+    onehot.KeyGen();
+
+    std::mt19937_64 revision_rng(config.seed);
+    const auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+        execution.point.set_size, 0.5, revision_rng);
+    CrossoverResult result;
+    result.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    result.k = execution.point.k;
+    result.m = execution.point.m;
+    result.onehot_feature_dim = execution.point.k * execution.point.m;
+    result.onehot_ring_dim = onehot.GetParams().ring_dim;
+    result.onehot_provenance =
+        MakePiccardBenchmarkProvenance(onehot.GetBFVContext());
+    result.onehot_coefficient_stat_bits =
+        onehot.GetParams().CoefficientStatBits();
+    result.onehot_eval_noise_bits = onehot.GetParams().eval_noise_bits;
+    result.onehot_flood_noise_bits = onehot.GetParams().FloodNoiseBits();
+    result.sanitizer = MakeSanitizerMetadata(onehot.GetParams());
+
+    std::vector<double> onehot_times;
+    onehot_times.reserve(execution.onehot_runs);
+    for (size_t trial = 0; trial < execution.onehot_runs; ++trial) {
+        onehot_times.push_back(RunOneHotTotal(
+            onehot, set_a, set_b));
+    }
+    result.onehot_total_ms = Median(onehot_times);
+
+    if (!execution.sqrt_applicable) {
+        result.sqrt_applicable = false;
+        result.sqrt_feature_dim = 0;
+        result.sqrt_ring_dim = 0;
+        result.sqrt_total_ms = 0.0;
+        result.sqrt_faster = false;
+        result.speedup_ratio = 0.0;
+        csv.WriteRow(result);
+        PrintSqrtRevisionTerminalRow(execution);
+        return;
+    }
+
+    PiccardParams sqrt_params = onehot_params;
+    sqrt_params.ValidateSqrt();
+    SqrtPiccard sqrt_engine(sqrt_params);
+    sqrt_engine.KeyGen();
+    uint32_t sqrt_base = 1;
+    {
+        uint32_t tmp = execution.point.m;
+        uint32_t log2m = 0;
+        while (tmp > 1) {
+            ++log2m;
+            tmp >>= 1;
+        }
+        sqrt_base = 1u << (log2m / 2);
+    }
+    result.sqrt_feature_dim = execution.point.k * 2 * sqrt_base;
+    result.sqrt_ring_dim = sqrt_engine.GetParams().ring_dim;
+    result.sqrt_provenance =
+        MakePiccardBenchmarkProvenance(sqrt_engine.GetBFVContext());
+    result.sqrt_coefficient_stat_bits =
+        sqrt_engine.GetParams().CoefficientStatBits();
+    result.sqrt_eval_noise_bits = sqrt_engine.GetParams().eval_noise_bits;
+    result.sqrt_flood_noise_bits = sqrt_engine.GetParams().FloodNoiseBits();
+
+    std::vector<double> sqrt_times;
+    sqrt_times.reserve(execution.sqrt_runs);
+    for (size_t trial = 0; trial < execution.sqrt_runs; ++trial) {
+        sqrt_times.push_back(RunSqrtTotal(
+            sqrt_engine, set_a, set_b));
+    }
+    result.sqrt_total_ms = Median(sqrt_times);
+    result.sqrt_faster = result.sqrt_total_ms < result.onehot_total_ms;
+    result.speedup_ratio = result.sqrt_total_ms > 0.0
+        ? result.onehot_total_ms / result.sqrt_total_ms : 0.0;
+    csv.WriteRow(result);
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -355,15 +473,27 @@ int main(int argc, char** argv) {
 
     RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    RejectUnknownBenchmarkOptions(argc, argv,
+                                  {"--raw_timing_dir=", "--cell="});
     ResolveRawTimingOptions(raw_options, config);
-    (void)ResolveBenchmarkGrid(
-        config.profile, BenchmarkProducer::Crossover, BenchmarkMode::Timing,
-        false, {});
     config.Print();
 
     CrossoverCSVWriter csv(config);
     csv.WriteHeader();
+
+    if (HasRevisionCell(argc, argv)) {
+        const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        const auto execution = PlanSqrtRevisionExecution(
+            matrix, std::vector<std::string>(argv + 1, argv + argc),
+            RevisionModeForProfile(config.profile.id));
+        RunRevisionCell(config, execution, csv);
+        return 0;
+    }
+
+    (void)ResolveBenchmarkGrid(
+        config.profile, BenchmarkProducer::Crossover, BenchmarkMode::Timing,
+        false, {});
 
     std::cerr << "\n=== Crossover sweep (median of "
               << config.trials << " trials) ===\n";

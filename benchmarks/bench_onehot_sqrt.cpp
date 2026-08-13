@@ -1,5 +1,6 @@
 #include "benchmark_utils.h"
 #include "raw_timing_schema.h"
+#include "sqrt_revision_adapter.h"
 #include "protocol/piccard.h"
 #include "protocol/sqrt_piccard.h"
 
@@ -802,6 +803,82 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
     }
 }
 
+static bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static RevisionRunMode RevisionModeForProfile(const std::string& profile) {
+    return profile == "readiness-toy-v1" ? RevisionRunMode::Toy
+                                         : RevisionRunMode::Paper;
+}
+
+static void PrintSqrtRevisionTerminalRow(
+    const SqrtRevisionExecutionPlan& execution) {
+    const auto& row = execution.selection.plan.expected_rows.at(1);
+    std::cerr << "revision_terminal,schema=sqrt-revision-terminal-v1"
+              << ",cell_id=" << execution.selection.cell.cell_id
+              << ",row_id=" << row.row_id
+              << ",status=" << row.status
+              << ",reason=" << row.reason
+              << ",reason_code=" << row.reason_code
+              << ",measured_count=" << row.measured_count << "\n";
+}
+
+/**
+ * @brief Run exactly one timing_m matrix cell after pure selection.
+ *
+ * The matrix's one-hot row is always executed.  For a non-square m the sqrt
+ * row is emitted as the versioned terminal metadata above and no invalid sqrt
+ * context is constructed.
+ */
+static void RunRevisionCell(const BenchmarkConfig& config,
+                            const SqrtRevisionExecutionPlan& execution,
+                            CSVWriter& csv) {
+    if (execution.role != "timing") {
+        throw std::invalid_argument(
+            "bench_onehot_sqrt revision cells require timing_m role");
+    }
+    PiccardParams onehot_params;
+    onehot_params.k = execution.point.k;
+    onehot_params.m = execution.point.m;
+    onehot_params.security = config.security_level;
+    onehot_params.hash_seed = config.seed;
+    ApplyBenchmarkProfile(config, onehot_params);
+    onehot_params.Validate();
+    Piccard onehot(onehot_params);
+    onehot.KeyGen();
+
+    std::mt19937_64 revision_rng(config.seed);
+    const auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+        execution.point.set_size, 0.5, revision_rng);
+    const double j_true = ExactJaccard(set_a, set_b);
+    const auto onehot_row = RunMultiTrial(
+        onehot, set_a, set_b, j_true,
+        "revision_" + execution.selection.cell.cell_id, "onehot", 1,
+        execution.onehot_runs);
+    csv.WriteRow(onehot_row);
+
+    if (!execution.sqrt_applicable) {
+        PrintSqrtRevisionTerminalRow(execution);
+        return;
+    }
+
+    PiccardParams sqrt_params = onehot_params;
+    sqrt_params.ValidateSqrt();
+    SqrtPiccard sqrt_engine(sqrt_params);
+    sqrt_engine.KeyGen();
+    const auto sqrt_row = RunMultiTrial(
+        sqrt_engine, set_a, set_b, j_true,
+        "revision_" + execution.selection.cell.cell_id, "sqrt", 3,
+        execution.sqrt_runs);
+    csv.WriteRow(sqrt_row);
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -846,12 +923,23 @@ int main(int argc, char** argv) {
 
     RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    RejectUnknownBenchmarkOptions(argc, argv,
+                                  {"--raw_timing_dir=", "--cell="});
     ResolveRawTimingOptions(raw_options, config);
     config.Print();
 
     CSVWriter csv;
     csv.WriteHeader();
+
+    if (HasRevisionCell(argc, argv)) {
+        const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        const auto execution = PlanSqrtRevisionExecution(
+            matrix, std::vector<std::string>(argv + 1, argv + argc),
+            RevisionModeForProfile(config.profile.id));
+        RunRevisionCell(config, execution, csv);
+        return 0;
+    }
 
     if (config.profile.run_class != BenchmarkRunClass::Legacy) {
         RunProfileGrid(config, csv,
