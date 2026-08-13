@@ -220,6 +220,23 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c["expected_rows"][0].__setitem__(
                    "variant", "enron_u65536"))
 
+    def test_reciprocal_family_payload_swap_fails_closed(self):
+        document = copy.deepcopy(self.document)
+        first = next(c for c in document["cells"]
+                     if c["cell_id"] == "paper-v1::piccard_std128::control=default")
+        second = next(c for c in document["cells"]
+                      if c["cell_id"] == "paper-v1::piccard_std192_encoding::control=default")
+        first_id, second_id = first["cell_id"], second["cell_id"]
+        first_payload = copy.deepcopy(first)
+        second_payload = copy.deepcopy(second)
+        first.clear()
+        first.update(second_payload)
+        second.clear()
+        second.update(first_payload)
+        first["cell_id"], second["cell_id"] = first_id, second_id
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(document, FIXTURES)
+
     def test_toy_inventory_is_exact_and_drift_is_rejected(self):
         expected = {
             "paper-v1::bcg12_exact::control=default",
@@ -252,6 +269,30 @@ class RevisionMatrixTest(unittest.TestCase):
                 (root / path.name).write_text(path.read_text())
             drifted = ["paper-v1::piccard_std128::k=16"] + toy[1:]
             (root / "toy_cell_ids.txt").write_text("\n".join(drifted) + "\n")
+            with self.assertRaises(ValueError):
+                validate_revision_matrix.validate_document(self.document, root)
+
+    def test_coordinated_toy_inventory_drift_fails_closed(self):
+        toy = (FIXTURES / "toy_cell_ids.txt").read_text().splitlines()
+        executable = (FIXTURES / "executable_toy_cell_ids.txt").read_text().splitlines()
+        old_id = "paper-v1::piccard_std128::control=default"
+        replacement = "paper-v1::piccard_std128::k=16"
+        self.assertIn(old_id, toy)
+        self.assertNotIn(replacement, toy)
+        self.assertIn(old_id, executable)
+        self.assertNotIn(replacement, executable)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for path in FIXTURES.iterdir():
+                (root / path.name).write_text(path.read_text())
+            drifted_toy = sorted(replacement if value == old_id else value
+                                 for value in toy)
+            drifted_executable = sorted(replacement if value == old_id else value
+                                        for value in executable)
+            (root / "toy_cell_ids.txt").write_text("\n".join(drifted_toy) + "\n")
+            (root / "executable_toy_cell_ids.txt").write_text(
+                "\n".join(drifted_executable) + "\n")
             with self.assertRaises(ValueError):
                 validate_revision_matrix.validate_document(self.document, root)
 

@@ -500,6 +500,43 @@ std::set<std::string> ExpectedIds() {
     return ids;
 }
 
+const std::set<std::string>& ExpectedRepresentativeToyIds() {
+    static const std::set<std::string> ids = {
+        "paper-v1::bcg12_exact::control=default",
+        "paper-v1::bcg12_minhash::control=default",
+        "paper-v1::deletion_exact::control=default",
+        "paper-v1::deletion_mc::control=default",
+        "paper-v1::dynamic_accuracy::control=default",
+        "paper-v1::dynamic_refresh::control=default",
+        "paper-v1::dynamic_timing::control=default",
+        "paper-v1::estimator_accuracy::j=0.5",
+        "paper-v1::fhe_ind::control=default",
+        "paper-v1::flooding::profile=primary40",
+        "paper-v1::piccard_std128::control=default",
+        "paper-v1::piccard_std192_encoding::control=default",
+        "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
+        "paper-v1::real_dataset::enron_u65536_artifact=accuracy",
+        "paper-v1::sj16::fit=per_element",
+        "paper-v1::sqrt_comparison::timing_m=64",
+        "paper-v1::threshold_agreement::k=64",
+        "paper-v1::threshold_dblp_fpfn::control=default",
+        "paper-v1::threshold_spec::k=64",
+        "paper-v1::threshold_timing::k=64",
+    };
+    return ids;
+}
+
+std::set<std::string> ExpectedExecutableToyIds() {
+    std::set<std::string> ids = ExpectedRepresentativeToyIds();
+    for (const auto& value_k : {"64", "128", "256", "512"}) {
+        for (int index = -10; index <= 10; ++index) {
+            ids.insert("paper-v1::threshold_synthetic_fpfn::point=k" +
+                       std::string(value_k) + "_j" + std::to_string(index));
+        }
+    }
+    return ids;
+}
+
 const std::map<std::string, size_t>& ExpectedFamilyCounts() {
     static const std::map<std::string, size_t> values = {
         {"piccard_std128", 20}, {"piccard_std192_encoding", 20}, {"fhe_ind", 9},
@@ -733,14 +770,22 @@ void RequireEligibility(const RevisionCell& cell, const char* eligibility,
 }
 
 void ValidateFamilyCell(const RevisionCell& cell) {
+    const auto profile_separator = cell.cell_id.find("::");
+    const auto family_separator = profile_separator == std::string::npos
+                                      ? std::string::npos
+                                      : cell.cell_id.find("::", profile_separator + 2);
     const auto id_separator = cell.cell_id.rfind("::");
     const auto id_equals = cell.cell_id.find('=', id_separator == std::string::npos
                                                   ? 0
                                                   : id_separator + 2);
-    if (id_separator == std::string::npos || id_equals == std::string::npos ||
+    if (profile_separator == std::string::npos || family_separator == std::string::npos ||
+        id_separator == std::string::npos || id_equals == std::string::npos ||
+        cell.cell_id.substr(0, profile_separator) != cell.profile ||
+        cell.cell_id.substr(profile_separator + 2,
+                            family_separator - profile_separator - 2) != cell.family ||
         cell.cell_id.substr(id_separator + 2, id_equals - id_separator - 2) != cell.axis ||
         cell.cell_id.substr(id_equals + 1) != cell.axis_value) {
-        throw std::invalid_argument("revision matrix cell axis does not match its ID");
+        throw std::invalid_argument("revision matrix cell identity does not match its ID");
     }
     if (cell.producer != ExpectedProducer(cell)) {
         throw std::invalid_argument("revision matrix producer/family binding mismatch");
@@ -1219,6 +1264,29 @@ void ValidateRevisionMatrix(const RevisionMatrix& matrix) {
     std::map<std::string, uint64_t> expected_counts;
     for (const auto& [family, count] : ExpectedFamilyCounts()) expected_counts[family] = count;
     if (matrix.family_counts != expected_counts) throw std::invalid_argument("revision matrix family counts differ from inventory");
+}
+
+void ValidateRevisionMatrixToyFixtures(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& representative_ids,
+    const std::vector<std::string>& executable_ids) {
+    ValidateRevisionMatrix(matrix);
+
+    const auto expected_representative = ExpectedRepresentativeToyIds();
+    const auto expected_executable = ExpectedExecutableToyIds();
+    const std::vector<std::string> representative_sorted(
+        expected_representative.begin(), expected_representative.end());
+    const std::vector<std::string> executable_sorted(
+        expected_executable.begin(), expected_executable.end());
+    if (representative_ids != representative_sorted ||
+        representative_ids.size() != 20u) {
+        throw std::invalid_argument(
+            "revision matrix representative toy inventory mismatch");
+    }
+    if (executable_ids != executable_sorted || executable_ids.size() != 104u) {
+        throw std::invalid_argument(
+            "revision matrix executable toy inventory mismatch");
+    }
 }
 
 RevisionMatrix LoadAndValidateRevisionMatrix(const std::filesystem::path& path) {

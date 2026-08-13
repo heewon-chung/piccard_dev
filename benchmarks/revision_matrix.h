@@ -87,6 +87,19 @@ RevisionMatrix LoadRevisionMatrix(const std::filesystem::path& path);
 /** @brief Validate schema, cardinalities, IDs, rows, and frozen literals. */
 void ValidateRevisionMatrix(const RevisionMatrix& matrix);
 
+/**
+ * @brief Validate the frozen representative and derived executable toy IDs.
+ *
+ * The JSON remains the sole source of cell payloads.  These two fixture
+ * inventories are a deliberately small, frozen selection contract: the
+ * executable inventory is the representative selection plus the synthetic
+ * threshold point domain.
+ */
+void ValidateRevisionMatrixToyFixtures(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& representative_ids,
+    const std::vector<std::string>& executable_ids);
+
 /** @brief Parse and validate one matrix file in a single call. */
 RevisionMatrix LoadAndValidateRevisionMatrix(
     const std::filesystem::path& path);

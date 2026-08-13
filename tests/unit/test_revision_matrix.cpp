@@ -16,6 +16,7 @@ using piccard::benchmark::RevisionMatrix;
 using piccard::benchmark::RevisionMatrixCellIds;
 using piccard::benchmark::LoadRevisionMatrix;
 using piccard::benchmark::ValidateRevisionMatrix;
+using piccard::benchmark::ValidateRevisionMatrixToyFixtures;
 
 RevisionMatrix Load() {
     return LoadRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -159,42 +160,29 @@ TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
 }
 
 TEST(RevisionMatrix, ToyInventoriesAreExactAndDerived) {
-    const std::set<std::string> expected_toy = {
-        "paper-v1::bcg12_exact::control=default",
-        "paper-v1::bcg12_minhash::control=default",
-        "paper-v1::deletion_exact::control=default",
-        "paper-v1::deletion_mc::control=default",
-        "paper-v1::dynamic_accuracy::control=default",
-        "paper-v1::dynamic_refresh::control=default",
-        "paper-v1::dynamic_timing::control=default",
-        "paper-v1::estimator_accuracy::j=0.5",
-        "paper-v1::fhe_ind::control=default",
-        "paper-v1::flooding::profile=primary40",
-        "paper-v1::piccard_std128::control=default",
-        "paper-v1::piccard_std192_encoding::control=default",
-        "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
-        "paper-v1::real_dataset::enron_u65536_artifact=accuracy",
-        "paper-v1::sj16::fit=per_element",
-        "paper-v1::sqrt_comparison::timing_m=64",
-        "paper-v1::threshold_agreement::k=64",
-        "paper-v1::threshold_dblp_fpfn::control=default",
-        "paper-v1::threshold_spec::k=64",
-        "paper-v1::threshold_timing::k=64",
-    };
+    const auto matrix = Load();
     const auto toy_lines = Lines(PICCARD_REVISION_MATRIX_TOY_GOLDEN);
-    ASSERT_EQ(toy_lines.size(), expected_toy.size());
-    EXPECT_EQ(std::set<std::string>(toy_lines.begin(), toy_lines.end()), expected_toy);
-
     const auto executable_lines = Lines(PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN);
+    ASSERT_EQ(toy_lines.size(), 20u);
     ASSERT_EQ(executable_lines.size(), 104u);
-    std::set<std::string> expected_executable = expected_toy;
-    for (const auto& cell : Load().cells) {
-        if (cell.family == "threshold_synthetic_fpfn") {
-            expected_executable.insert(cell.cell_id);
-        }
-    }
-    EXPECT_EQ(std::set<std::string>(executable_lines.begin(), executable_lines.end()),
-              expected_executable);
+    EXPECT_NO_THROW(ValidateRevisionMatrixToyFixtures(
+        matrix, toy_lines, executable_lines));
+}
+
+TEST(RevisionMatrix, ValidationRejectsCoordinatedToyInventoryDrift) {
+    const auto matrix = Load();
+    auto toy_lines = Lines(PICCARD_REVISION_MATRIX_TOY_GOLDEN);
+    auto executable_lines = Lines(PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN);
+    const std::string original = "paper-v1::piccard_std128::control=default";
+    const std::string replacement = "paper-v1::piccard_std128::k=16";
+    ASSERT_NE(std::find(toy_lines.begin(), toy_lines.end(), original), toy_lines.end());
+    ASSERT_NE(std::find(executable_lines.begin(), executable_lines.end(), original), executable_lines.end());
+    std::replace(toy_lines.begin(), toy_lines.end(), original, replacement);
+    std::replace(executable_lines.begin(), executable_lines.end(), original, replacement);
+    std::sort(toy_lines.begin(), toy_lines.end());
+    std::sort(executable_lines.begin(), executable_lines.end());
+    EXPECT_THROW(ValidateRevisionMatrixToyFixtures(
+        matrix, toy_lines, executable_lines), std::invalid_argument);
 }
 
 TEST(RevisionMatrix, ValidationRejectsOmittedDuplicateAndSilentRows) {
@@ -300,4 +288,38 @@ TEST(RevisionMatrix, ValidationRejectsRunnerContractMutations) {
     matrix = Load();
     MutableFind(matrix, "paper-v1::sqrt_comparison::timing_m=32").expected_rows[1].status = "MEASURED";
     expect_rejected(matrix);
+}
+
+TEST(RevisionMatrix, ValidationRejectsReciprocalFamilyPayloadSwaps) {
+    auto matrix = Load();
+    const std::string std128_id =
+        "paper-v1::piccard_std128::control=default";
+    const std::string std192_id =
+        "paper-v1::piccard_std192_encoding::control=default";
+    auto& std128 = MutableFind(matrix, std128_id);
+    auto& std192 = MutableFind(matrix, std192_id);
+    std::swap(std128.family, std192.family);
+    std::swap(std128.producer, std192.producer);
+    std::swap(std128.profile, std192.profile);
+    std::swap(std128.dataset, std192.dataset);
+    std::swap(std128.axes, std192.axes);
+    std::swap(std128.axis, std192.axis);
+    std::swap(std128.axis_value, std192.axis_value);
+    std::swap(std128.paper_count, std192.paper_count);
+    std::swap(std128.toy_count, std192.toy_count);
+    std::swap(std128.paper_trials, std192.paper_trials);
+    std::swap(std128.toy_trials, std192.toy_trials);
+    std::swap(std128.paper_counts, std192.paper_counts);
+    std::swap(std128.toy_counts, std192.toy_counts);
+    std::swap(std128.eligibility, std192.eligibility);
+    std::swap(std128.table_eligible, std192.table_eligible);
+    std::swap(std128.comparison_eligible, std192.comparison_eligible);
+    std::swap(std128.timeout_class, std192.timeout_class);
+    std::swap(std128.expected_artifact_schema, std192.expected_artifact_schema);
+    std::swap(std128.invocation_status, std192.invocation_status);
+    std::swap(std128.attributes, std192.attributes);
+    std::swap(std128.list_attributes, std192.list_attributes);
+    std::swap(std128.object_attributes, std192.object_attributes);
+    std::swap(std128.expected_rows, std192.expected_rows);
+    EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument);
 }

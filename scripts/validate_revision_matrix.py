@@ -46,6 +46,38 @@ U_VALUES = ("16384", "65536", "262144", "1048576")
 SQRT_M = {"16", "64", "256"}
 ID_RE = re.compile(r"^paper-v1::[a-z0-9_]+::[a-z0-9_]+=[A-Za-z0-9_.-]+$")
 STATUSES = {"MEASURED", "DIAGNOSTIC", "EXTRAPOLATED", "NOT_APPLICABLE"}
+REPRESENTATIVE_TOY_IDS = frozenset({
+    "paper-v1::bcg12_exact::control=default",
+    "paper-v1::bcg12_minhash::control=default",
+    "paper-v1::deletion_exact::control=default",
+    "paper-v1::deletion_mc::control=default",
+    "paper-v1::dynamic_accuracy::control=default",
+    "paper-v1::dynamic_refresh::control=default",
+    "paper-v1::dynamic_timing::control=default",
+    "paper-v1::estimator_accuracy::j=0.5",
+    "paper-v1::fhe_ind::control=default",
+    "paper-v1::flooding::profile=primary40",
+    "paper-v1::piccard_std128::control=default",
+    "paper-v1::piccard_std192_encoding::control=default",
+    "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
+    "paper-v1::real_dataset::enron_u65536_artifact=accuracy",
+    "paper-v1::sj16::fit=per_element",
+    "paper-v1::sqrt_comparison::timing_m=64",
+    "paper-v1::threshold_agreement::k=64",
+    "paper-v1::threshold_dblp_fpfn::control=default",
+    "paper-v1::threshold_spec::k=64",
+    "paper-v1::threshold_timing::k=64",
+})
+
+
+def expected_executable_toy_ids() -> set[str]:
+    ids = set(REPRESENTATIVE_TOY_IDS)
+    ids.update(
+        f"paper-v1::threshold_synthetic_fpfn::point=k{k}_j{index}"
+        for k in ("64", "128", "256", "512")
+        for index in range(-10, 11)
+    )
+    return ids
 
 
 def load_document(path: pathlib.Path | str) -> dict[str, Any]:
@@ -573,10 +605,12 @@ def validate_document(document: dict[str, Any], fixture_root: pathlib.Path | str
         toy = (fixture_root / "toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
         executable = (fixture_root / "executable_toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
         _require(ids == paper and len(paper) == 263, "paper ID golden mismatch")
-        _require(len(toy) == 20 and toy == sorted(toy), "toy ID golden cardinality/order mismatch")
-        synthetic = [value for value in ids if "::threshold_synthetic_fpfn::" in value]
-        _require(executable == sorted(toy + synthetic) and len(executable) == 104,
-                 "executable toy ID golden mismatch")
+        expected_toy = sorted(REPRESENTATIVE_TOY_IDS)
+        _require(toy == expected_toy and len(toy) == 20,
+                 "toy ID golden representative selection mismatch")
+        expected_executable = sorted(expected_executable_toy_ids())
+        _require(executable == expected_executable and len(executable) == 104,
+                 "executable toy ID golden derived selection mismatch")
 
 
 def validate_file(path: pathlib.Path | str, fixture_root: pathlib.Path | str | None = None) -> dict[str, Any]:
