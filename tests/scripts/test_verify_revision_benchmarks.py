@@ -502,6 +502,14 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     detail_rows.append(",".join(values))
             (details / "N8192-d1-s40.csv").write_text(
                 detail_header + "\n".join(detail_rows) + "\n", encoding="utf-8")
+            aggregate[af.index("ring_dim_calibrated")] = "8192"
+            aggregate[af.index("provisioned_depth")] = "1"
+            aggregate[af.index("scaling_mod_size")] = "40"
+            aggregate[af.index("detail_sha256")] = sha256_file(
+                details / "N8192-d1-s40.csv")
+            aggregate[af.index("status_code")] = "OK"
+            (shard / "aggregate.csv").write_text(
+                aggregate_header + ",".join(aggregate) + "\n", encoding="utf-8")
             (shard / "candidates.json").write_text(json.dumps({
                 "schema": "piccard-candidate-manifest", "version": 1,
                 "key_id": key_id, "source_commit": "a" * 40,

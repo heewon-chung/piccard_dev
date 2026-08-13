@@ -945,6 +945,26 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             not candidate_ids or len(candidate_ids) != len(set(candidate_ids)) or \
             {path.stem for path in detail_paths} != set(candidate_ids):
         fail(f"noise candidate/detail topology mismatch for {cell['cell_id']}")
+    aggregate_by_candidate: dict[str, dict[str, str]] = {}
+    for aggregate in aggregate_rows:
+        try:
+            aggregate_id = (
+                f"N{int(aggregate['ring_dim_calibrated'])}-d"
+                f"{int(aggregate['provisioned_depth'])}-s"
+                f"{int(aggregate['scaling_mod_size'])}")
+        except (KeyError, ValueError):
+            fail(f"noise aggregate candidate identity is malformed for {cell['cell_id']}")
+        if aggregate_id in aggregate_by_candidate:
+            fail(f"noise aggregate has duplicate candidate identity for {cell['cell_id']}")
+        aggregate_by_candidate[aggregate_id] = aggregate
+    if set(aggregate_by_candidate) != set(candidate_ids):
+        fail(f"noise aggregate/candidate topology mismatch for {cell['cell_id']}")
+    for candidate in candidate_records:
+        aggregate = aggregate_by_candidate[candidate["candidate_id"]]
+        if candidate.get("status_code") != aggregate.get("status_code") or \
+                candidate.get("detail_sha256") != aggregate.get("detail_sha256") or \
+                str(candidate.get("detail_row_count")) != aggregate.get("detail_row_count"):
+            fail(f"noise aggregate/candidate binding mismatch for {cell['cell_id']}")
     detail_header = (
         "profile,key_id,candidate_id,circuit,shape_id,security,consumer_k,consumer_m,"
         "pattern,rep_index,rep_seed,requested_ring_dim,natural_ring_dim,"
