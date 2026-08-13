@@ -92,6 +92,7 @@ using piccard::benchmark::ReviewRevisionRequest;
 using piccard::benchmark::RevisionMatrix;
 using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::MakeConcreteReviewArgs;
+using piccard::benchmark::SerializeReviewEncodingTerminalRowsV1;
 using piccard::baseline::BaselineEngine;
 using piccard::baseline::BaselineParams;
 using piccard::baselines::BCG12;
@@ -1552,6 +1553,19 @@ int Run(int argc, char** argv) {
         }
     }
     ValidateAggregateMembership(workload, identities);
+
+    // The frozen stdout encoding CSV remains unchanged.  For revision
+    // encoding cells, publish the versioned terminal rows on stderr so the
+    // runner can bind the applicable one-hot measurement and the structural
+    // sqrt NOT_APPLICABLE row without mistaking it for a NO_SPAWN cell.
+    if (successor.enabled &&
+        successor.execution.selection.cell.family ==
+            "piccard_std192_encoding") {
+        for (const std::string& terminal_row :
+             SerializeReviewEncodingTerminalRowsV1(successor.execution)) {
+            std::cerr << terminal_row << "\n";
+        }
+    }
 
     // Aggregate CSV is emitted only after the complete trace is durably bound.
     const bool versioned_encoding =

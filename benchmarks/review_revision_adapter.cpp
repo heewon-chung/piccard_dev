@@ -217,6 +217,8 @@ ReviewRevisionExecutionPlan PlanReviewRevisionExecution(
         : (encoding ? "paper-std192-encoding-v1" : "std128-t40-primary");
     execution.concrete_suite = cell.family;
     execution.concrete_security = toy ? "TOY" : (encoding ? "STD192" : "STD128");
+    execution.terminal_artifact_schema =
+        encoding ? kReviewEncodingTerminalSchemaV1 : "";
     execution.concrete_methods = request.methods;
     if (execution.concrete_methods.empty() && !request.method.empty()) {
         execution.concrete_methods.push_back(request.method);
@@ -292,6 +294,82 @@ bool ReviewSqrtEncodingApplicable(
     return result.ec == std::errc{} &&
            result.ptr == it->second.data() + it->second.size() &&
            IsSquare(m);
+}
+
+std::vector<std::string> SerializeReviewEncodingTerminalRowsV1(
+    const ReviewRevisionExecutionPlan& execution) {
+    if (execution.selection.cell.family != "piccard_std192_encoding") {
+        throw std::invalid_argument(
+            "review encoding terminal rows require the STD192 encoding family");
+    }
+    if (execution.terminal_artifact_schema !=
+        kReviewEncodingTerminalSchemaV1) {
+        throw std::invalid_argument(
+            "review encoding terminal schema is not versioned as expected");
+    }
+    if (execution.selection.cell.invocation_status != "RUN" ||
+        execution.selected_point_count != 1 || !execution.producer_must_spawn) {
+        throw std::invalid_argument(
+            "review encoding terminal rows require one selected RUN point");
+    }
+
+    const auto& rows = execution.selection.plan.expected_rows;
+    if (rows.size() != 2u) {
+        throw std::invalid_argument(
+            "review encoding terminal rows require onehot and sqrt rows");
+    }
+    const auto& onehot = rows.at(0);
+    const auto& sqrt = rows.at(1);
+    if (onehot.row_id != "piccard_encode" ||
+        onehot.method != "piccard_encode" || onehot.status != "DIAGNOSTIC" ||
+        onehot.terminal_status != "DIAGNOSTIC" || !onehot.reason.empty() ||
+        !onehot.reason_code.empty() || onehot.measured_count == 0) {
+        throw std::invalid_argument(
+            "review encoding onehot terminal row contract mismatch");
+    }
+
+    const bool sqrt_applicable = ReviewSqrtEncodingApplicable(execution);
+    const std::string expected_sqrt_status =
+        sqrt_applicable ? "DIAGNOSTIC" : "NOT_APPLICABLE";
+    const uint64_t expected_sqrt_count =
+        sqrt_applicable ? execution.timing_trials : 0;
+    const std::string expected_sqrt_reason =
+        sqrt_applicable ? "" : "sqrt-m-not-perfect-square";
+    if (sqrt.row_id != "piccard_sqrt_encode" ||
+        sqrt.method != "piccard_sqrt_encode" ||
+        sqrt.status != expected_sqrt_status ||
+        sqrt.terminal_status != expected_sqrt_status ||
+        sqrt.reason != expected_sqrt_reason ||
+        sqrt.reason_code != expected_sqrt_reason ||
+        sqrt.measured_count != expected_sqrt_count) {
+        throw std::invalid_argument(
+            "review encoding sqrt terminal row contract mismatch");
+    }
+
+    const auto has_method = [&](const std::string& method) {
+        return std::find(execution.concrete_methods.begin(),
+                         execution.concrete_methods.end(), method) !=
+               execution.concrete_methods.end();
+    };
+    if (!has_method("piccard_encode") ||
+        has_method("piccard_sqrt_encode") != sqrt_applicable) {
+        throw std::invalid_argument(
+            "review encoding concrete method applicability mismatch");
+    }
+
+    const std::string& cell_id = execution.selection.cell.cell_id;
+    if (cell_id.empty() || cell_id.find_first_of(",\n\r") != std::string::npos) {
+        throw std::invalid_argument("review encoding terminal cell ID is malformed");
+    }
+    const auto serialize = [&](const RevisionRow& row) {
+        return std::string("revision_terminal,schema=") +
+               kReviewEncodingTerminalSchemaV1 + ",cell_id=" + cell_id +
+               ",row_id=" + row.row_id + ",status=" + row.status +
+               ",terminal_status=" + row.terminal_status + ",reason=" +
+               row.reason + ",reason_code=" + row.reason_code +
+               ",measured_count=" + std::to_string(row.measured_count);
+    };
+    return {serialize(onehot), serialize(sqrt)};
 }
 
 }  // namespace piccard::benchmark

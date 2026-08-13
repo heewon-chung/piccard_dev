@@ -21,6 +21,9 @@
 namespace piccard {
 namespace benchmark {
 
+inline constexpr const char* kReviewEncodingTerminalSchemaV1 =
+    "review-encoding-terminal-v1";
+
 /** @brief Strictly parsed planner argv for one review-comparison cell. */
 struct ReviewRevisionRequest {
     std::vector<std::string> argv;
@@ -57,6 +60,9 @@ struct ReviewRevisionExecutionPlan {
     std::string concrete_suite;
     std::string concrete_profile;
     std::string concrete_security;
+    // Empty for the legacy comparison CSV; revision encoding cells publish
+    // terminal rows on stderr under this explicit versioned schema.
+    std::string terminal_artifact_schema;
     std::vector<std::string> concrete_methods;
     uint64_t timing_trials = 0;
     uint64_t accuracy_trials = 0;
@@ -102,6 +108,17 @@ std::vector<std::string> MakeConcreteReviewArgs(
 
 /** @brief True only for matrix rows whose sqrt encoding is structurally valid. */
 bool ReviewSqrtEncodingApplicable(const ReviewRevisionExecutionPlan& execution);
+
+/**
+ * @brief Serialize the versioned stderr terminal rows for review encoding.
+ *
+ * The lines are intentionally separate from the frozen stdout CSV.  They
+ * include the applicable one-hot measurement row and the structural sqrt
+ * terminal row, including NOT_APPLICABLE and its reason for non-square m.
+ * Only a selected RUN cell may reach this seam; NO_SPAWN is never serialized.
+ */
+std::vector<std::string> SerializeReviewEncodingTerminalRowsV1(
+    const ReviewRevisionExecutionPlan& execution);
 
 }  // namespace benchmark
 }  // namespace piccard

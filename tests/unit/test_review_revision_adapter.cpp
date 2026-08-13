@@ -152,6 +152,8 @@ TEST(ReviewRevisionAdapter,
     const auto non_square_execution = PlanReviewRevisionExecution(
         matrix, PlanRevisionCell(*non_square, RevisionRunMode::Toy).argv,
         RevisionRunMode::Toy);
+    EXPECT_EQ(non_square_execution.terminal_artifact_schema,
+              kReviewEncodingTerminalSchemaV1);
     ASSERT_EQ(non_square_execution.selection.plan.expected_rows.size(), 2u);
     EXPECT_EQ(non_square_execution.selection.plan.expected_rows[1].status,
               "NOT_APPLICABLE");
@@ -164,10 +166,76 @@ TEST(ReviewRevisionAdapter,
     const auto square_execution = PlanReviewRevisionExecution(
         matrix, PlanRevisionCell(*square, RevisionRunMode::Toy).argv,
         RevisionRunMode::Toy);
+    EXPECT_EQ(square_execution.terminal_artifact_schema,
+              kReviewEncodingTerminalSchemaV1);
     EXPECT_TRUE(ReviewSqrtEncodingApplicable(square_execution));
     EXPECT_EQ(square_execution.concrete_methods,
               (std::vector<std::string>{"piccard_encode",
                                         "piccard_sqrt_encode"}));
+}
+
+TEST(ReviewRevisionAdapter,
+     EncodingTerminalArtifactDeclaresOnehotMeasurementAndNonSquareSqrtNA) {
+    const RevisionMatrix matrix = Load();
+    const RevisionCell* non_square = nullptr;
+    const RevisionCell* square = nullptr;
+    for (const auto& cell : matrix.cells) {
+        if (cell.cell_id ==
+            "paper-v1::piccard_std192_encoding::m=32") non_square = &cell;
+        if (cell.cell_id ==
+            "paper-v1::piccard_std192_encoding::m=64") square = &cell;
+    }
+    ASSERT_NE(non_square, nullptr);
+    ASSERT_NE(square, nullptr);
+
+    const auto non_square_execution = PlanReviewRevisionExecution(
+        matrix, PlanRevisionCell(*non_square, RevisionRunMode::Toy).argv,
+        RevisionRunMode::Toy);
+    const auto non_square_lines =
+        SerializeReviewEncodingTerminalRowsV1(non_square_execution);
+    ASSERT_EQ(non_square_lines.size(), 2u);
+    EXPECT_EQ(non_square_lines[0],
+              "revision_terminal,schema=review-encoding-terminal-v1,"
+              "cell_id=paper-v1::piccard_std192_encoding::m=32,"
+              "row_id=piccard_encode,status=DIAGNOSTIC,"
+              "terminal_status=DIAGNOSTIC,reason=,reason_code=,"
+              "measured_count=1");
+    EXPECT_EQ(non_square_lines[1],
+              "revision_terminal,schema=review-encoding-terminal-v1,"
+              "cell_id=paper-v1::piccard_std192_encoding::m=32,"
+              "row_id=piccard_sqrt_encode,status=NOT_APPLICABLE,"
+              "terminal_status=NOT_APPLICABLE,"
+              "reason=sqrt-m-not-perfect-square,"
+              "reason_code=sqrt-m-not-perfect-square,measured_count=0");
+    EXPECT_EQ(std::count_if(non_square_lines.begin(), non_square_lines.end(),
+                            [](const std::string& line) {
+                                return line.find("NOT_APPLICABLE") !=
+                                       std::string::npos;
+                            }),
+              1);
+    EXPECT_TRUE(std::all_of(non_square_lines.begin(), non_square_lines.end(),
+                            [](const std::string& line) {
+                                return line.find("NO_SPAWN") ==
+                                       std::string::npos;
+                            }));
+
+    const auto square_execution = PlanReviewRevisionExecution(
+        matrix, PlanRevisionCell(*square, RevisionRunMode::Toy).argv,
+        RevisionRunMode::Toy);
+    const auto square_lines =
+        SerializeReviewEncodingTerminalRowsV1(square_execution);
+    ASSERT_EQ(square_lines.size(), 2u);
+    EXPECT_TRUE(std::all_of(square_lines.begin(), square_lines.end(),
+                            [](const std::string& line) {
+                                return line.find("NOT_APPLICABLE") ==
+                                       std::string::npos;
+                            }));
+    EXPECT_TRUE(std::all_of(square_lines.begin(), square_lines.end(),
+                            [](const std::string& line) {
+                                return line.find(
+                                           "cell_id=paper-v1::piccard_std192_encoding::m=64") !=
+                                       std::string::npos;
+                            }));
 }
 
 TEST(ReviewRevisionAdapter, RejectsNoSpawnSj16ExtrapolationBeforeProducer) {
