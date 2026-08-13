@@ -1625,6 +1625,18 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_summarize_revision_cells
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RunRevisionBenchmarks
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_revision_benchmarks
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME VerifyRevisionBenchmarks
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_verify_revision_benchmarks
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SealRevisionBenchmarks
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_seal_revision_benchmarks
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
