@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "dynamic_revision_adapter.h"
 #include "dynamic_refresh_benchmark.h"
 #include "raw_timing_schema.h"
 #include "protocol/dynamic_piccard.h"
@@ -12,6 +13,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <limits>
@@ -89,6 +92,112 @@ struct RawTimingOptions {
     bool saw_profile = false;
     bool saw_cell = false;
 };
+
+// Revision-cell arguments are parsed separately from the legacy benchmark
+// options.  The planner owns the canonical argv; this shim only removes the
+// optional output path before the pure adapter validates the remaining argv.
+struct DynamicSuccessorOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    std::string identity_output;
+};
+
+static DynamicSuccessorOptions ParseDynamicSuccessorOptions(
+    int argc, char** argv) {
+    DynamicSuccessorOptions options;
+    bool identity_seen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--revision-cell=", 0) == 0) {
+            options.enabled = true;
+            options.planner_argv.push_back(arg);
+        } else if (arg.rfind("--revision-identity-out=", 0) == 0) {
+            if (identity_seen) {
+                throw std::invalid_argument(
+                    "duplicate --revision-identity-out");
+            }
+            identity_seen = true;
+            options.identity_output = arg.substr(24);
+            if (options.identity_output.empty()) {
+                throw std::invalid_argument(
+                    "--revision-identity-out must not be empty");
+            }
+        } else {
+            options.planner_argv.push_back(arg);
+        }
+    }
+    if (!options.enabled) {
+        if (identity_seen) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    if (!identity_seen) {
+        throw std::invalid_argument(
+            "successor --revision-cell requires --revision-identity-out");
+    }
+    return options;
+}
+
+static std::vector<std::string> NormalizeDynamicConfigArgv(
+    int argc, char** argv, bool successor) {
+    std::vector<std::string> normalized;
+    normalized.reserve(static_cast<size_t>(argc));
+    for (int index = 0; index < argc; ++index) {
+        std::string arg(argv[index]);
+        // BenchmarkConfig has no refresh mode; the successor adapter binds
+        // refresh to the timing engine while the scenario is selected below.
+        if (successor && arg == "--mode=refresh") arg = "--mode=timing";
+        if (arg.rfind("--target_jaccard=", 0) == 0) {
+            arg = "--target-jaccard=" + arg.substr(17);
+        }
+        normalized.push_back(std::move(arg));
+    }
+    return normalized;
+}
+
+static void WriteDynamicRevisionIdentityAtomic(
+    const std::string& output_path,
+    const DynamicRevisionSelection& selection) {
+    namespace fs = std::filesystem;
+    const fs::path final_path(output_path);
+    const fs::path temporary_path = final_path.string() + ".tmp";
+    const auto universe = selection.cell.axes.find("u");
+    if (universe == selection.cell.axes.end()) {
+        throw std::invalid_argument(
+            "dynamic revision cell is missing universe axis");
+    }
+    {
+        std::ofstream output(temporary_path,
+                             std::ios::out | std::ios::trunc);
+        if (!output.is_open()) {
+            throw std::runtime_error(
+                "failed to open dynamic revision identity temporary file: " +
+                temporary_path.string());
+        }
+        output << "schema,cell_id,universe_size\n"
+               << "dynamic-revision-cell-v1," << selection.cell.cell_id << ","
+               << universe->second << "\n";
+        if (!output.good()) {
+            output.close();
+            std::error_code remove_error;
+            fs::remove(temporary_path, remove_error);
+            throw std::runtime_error(
+                "failed to write dynamic revision identity: " + output_path);
+        }
+    }
+    std::error_code rename_error;
+    fs::rename(temporary_path, final_path, rename_error);
+    if (rename_error) {
+        std::error_code remove_error;
+        fs::remove(temporary_path, remove_error);
+        throw std::runtime_error(
+            "failed to publish dynamic revision identity: " +
+            rename_error.message());
+    }
+}
 
 static void SetRawTimingOption(std::string& destination,
                                bool& seen,
@@ -629,7 +738,8 @@ static void RunRawTimingDynamic(const BenchmarkConfig& config,
     const std::string cell_id = options.cell_id.empty()
                                     ? DefaultDynamicRawCell(config, depth)
                                     : options.cell_id;
-    const std::string label = cell_id + "_timing";
+    const std::string label = options.cell_id.empty()
+        ? cell_id + "_timing" : cell_id;
     DynamicResult warmup;
     std::vector<DynamicResult> measured;
     auto row = RunMultiTrialDynamic(engine, set_a, set_b, j_true, depth, label,
@@ -680,7 +790,9 @@ static void RunRawTimingRefresh(const BenchmarkConfig& config,
                                     : options.cell_id;
     const auto measured = RunSingleOwnerRefreshTrials(
         engine, set_a, set_b, depth, refresh_updates, expected_trials);
-    auto row = AggregateRefreshResults(measured, cell_id + "_timing");
+    const std::string label = options.cell_id.empty()
+        ? cell_id + "_timing" : cell_id;
+    auto row = AggregateRefreshResults(measured, label);
     ApplyBenchmarkProfile(config, row, BenchmarkMeasurementKind::FheTiming);
     csv.WriteRow(row);
 
@@ -1063,6 +1175,160 @@ static void BenchAccuracyVarySetSize(const BenchmarkConfig& config, uint32_t dep
     }
 }
 
+// The revision accuracy cell is deliberately a versioned update check, not a
+// re-encryption accuracy sweep.  One owner structure is mutated in place,
+// evaluated after INSERT, then evaluated after DELETE.  The two emitted rows
+// therefore correspond to the matrix's insert_correctness and
+// delete_correctness records while retaining the legacy DynamicResult schema.
+static DynamicResult AggregateRevisionAccuracyRows(
+    const std::vector<DynamicResult>& samples,
+    const std::string& label) {
+    if (samples.empty()) {
+        throw std::invalid_argument(
+            "cannot aggregate empty dynamic revision accuracy rows");
+    }
+    double computed = 0.0;
+    double expected = 0.0;
+    double error = 0.0;
+    double relative = 0.0;
+    size_t relative_count = 0;
+    for (const auto& sample : samples) {
+        computed += sample.jaccard_computed;
+        expected += sample.jaccard_expected;
+        error += sample.jaccard_error;
+        if (sample.jaccard_rel_error >= 0.0) {
+            relative += sample.jaccard_rel_error;
+            ++relative_count;
+        }
+    }
+    const double count = static_cast<double>(samples.size());
+    DynamicResult result = samples.front();
+    result.label = label;
+    result.trials = samples.size();
+    result.accuracy_trials = samples.size();
+    result.jaccard_computed = computed / count;
+    result.jaccard_expected = expected / count;
+    result.jaccard_error = error / count;
+    result.jaccard_rel_error = relative_count == 0
+        ? -1.0 : relative / static_cast<double>(relative_count);
+    result.rel_error_eligible_n = relative_count;
+    result.total_ms = 0.0;
+    result.total_ms_sd = -1.0;
+    result.total_ms_median = 0.0;
+    return result;
+}
+
+static DynamicResult MakeRevisionAccuracySample(
+    const DynamicPiccard& engine,
+    const BenchmarkConfig& config,
+    uint32_t depth,
+    const std::string& label,
+    const JaccardResult& computed,
+    double expected,
+    uint64_t initial_epoch,
+    uint64_t final_epoch) {
+    DynamicResult row;
+    row.label = label;
+    row.k = engine.GetParams().k;
+    row.m = engine.GetParams().m;
+    row.set_size = config.set_size;
+    row.ring_dim = engine.GetParams().ring_dim;
+    row.depth = depth;
+    row.jaccard_computed = computed.jaccard_estimate;
+    row.jaccard_expected = expected;
+    row.jaccard_error = std::abs(row.jaccard_computed - expected);
+    row.jaccard_rel_error = expected > 0.0
+        ? row.jaccard_error / expected : -1.0;
+    row.rel_error_eligible_n = expected > 0.0 ? 1 : 0;
+    row.trials = 1;
+    row.accuracy_trials = 1;
+    row.hash_randomness = "fixed";
+    row.hash_seed = engine.GetParams().hash_seed;
+    row.hash_root_seed = engine.GetParams().hash_seed;
+    row.dynamic_scenario = "revision_accuracy";
+    row.updates_requested = 1;
+    row.updates_applied = 1;
+    row.initial_epoch = initial_epoch;
+    row.final_epoch = final_epoch;
+    row.correctness_status = std::isfinite(row.jaccard_computed)
+        ? std::optional<std::string>("PASS")
+        : std::optional<std::string>("FAIL");
+    row.local_inner_product = computed.match_count;
+    row.decrypted_inner_product = computed.match_count;
+    row.estimator_model = EstimatorModel::Sha256RandomRankingPocV1;
+    row.sanitizer = MakeSanitizerMetadata(engine.GetParams());
+    row.provenance = MakePiccardBenchmarkProvenance(engine.GetBFVContext());
+    row.scaling_mod_size = engine.GetParams().scaling_mod_size;
+    return row;
+}
+
+static void RunRevisionAccuracy(
+    const BenchmarkConfig& config,
+    uint32_t depth,
+    const DynamicRevisionExecutionPlan& execution,
+    DynamicCSVWriter& csv) {
+    if (execution.kind != "accuracy" || execution.update_count != 1u) {
+        throw std::invalid_argument(
+            "dynamic revision accuracy execution contract mismatch");
+    }
+    PiccardParams params;
+    params.k = execution.point.k;
+    params.m = execution.point.m;
+    params.bottom_depth = depth;
+    params.security = config.security_level;
+    params.hash_seed = config.seed;
+    ApplyBenchmarkProfile(config, params);
+    params.Validate();
+
+    DynamicPiccard engine(params);
+    engine.KeyGen();
+    std::vector<DynamicResult> insert_samples;
+    std::vector<DynamicResult> delete_samples;
+    insert_samples.reserve(config.trials);
+    delete_samples.reserve(config.trials);
+
+    for (size_t trial = 0; trial < config.trials; ++trial) {
+        const BoundedOverlapSets workload = MakeBoundedOverlapSets(
+            execution.point.set_size, execution.point.target_jaccard,
+            execution.point.universe_size);
+        auto owner_a = engine.InitSet(workload.set_a);
+        auto owner_b = engine.InitSet(workload.set_b);
+
+        // The bounded workload occupies the beginning of U, so U-1 is a
+        // deterministic, versioned INSERT that is outside both initial sets.
+        const uint64_t update_value =
+            static_cast<uint64_t>(execution.point.universe_size) - 1u;
+        engine.Insert(*owner_a, update_value);
+        auto inserted_set = workload.set_a;
+        inserted_set.push_back(update_value);
+        const JaccardResult inserted = engine.Run(*owner_a, *owner_b);
+        insert_samples.push_back(MakeRevisionAccuracySample(
+            engine, config, depth,
+            execution.selection.cell.cell_id + "::insert_correctness",
+            inserted, ExactJaccard(inserted_set, workload.set_b), 0, 1));
+
+        engine.Delete(*owner_a, update_value);
+        const JaccardResult deleted = engine.Run(*owner_a, *owner_b);
+        delete_samples.push_back(MakeRevisionAccuracySample(
+            engine, config, depth,
+            execution.selection.cell.cell_id + "::delete_correctness",
+            deleted, ExactJaccard(workload.set_a, workload.set_b), 1, 2));
+    }
+
+    auto insert_row = AggregateRevisionAccuracyRows(
+        insert_samples,
+        execution.selection.cell.cell_id + "::insert_correctness");
+    auto delete_row = AggregateRevisionAccuracyRows(
+        delete_samples,
+        execution.selection.cell.cell_id + "::delete_correctness");
+    ApplyBenchmarkProfile(config, insert_row,
+                          BenchmarkMeasurementKind::FheAccuracy);
+    ApplyBenchmarkProfile(config, delete_row,
+                          BenchmarkMeasurementKind::FheAccuracy);
+    csv.WriteRow(insert_row);
+    csv.WriteRow(delete_row);
+}
+
 static double IntersectionFractionForJaccard(double target_jaccard) {
     return target_jaccard == 0.0
         ? 0.0
@@ -1128,6 +1394,59 @@ static void RunProfileGrid(const BenchmarkConfig& config,
     }
 }
 
+static RevisionRunMode RevisionModeForDynamicRequest(
+    const DynamicRevisionRequest& request) {
+    if (request.profile == "readiness-toy-v1") return RevisionRunMode::Toy;
+    if (request.profile == "paper-std128-t40-v1") return RevisionRunMode::Paper;
+    throw std::invalid_argument("unsupported dynamic successor profile");
+}
+
+static void ValidateDynamicSuccessorConfig(
+    const BenchmarkConfig& config,
+    const DynamicRevisionRequest& request,
+    const DynamicRevisionExecutionPlan& execution) {
+    if (config.profile.run_class == BenchmarkRunClass::Legacy ||
+        config.profile.id != request.profile || !config.evidence_point) {
+        throw std::invalid_argument(
+            "dynamic successor requires the exact evidence profile");
+    }
+    const std::string expected_mode = request.cell == "refresh"
+        ? "timing" : request.cell;
+    const SecurityLevel expected_security =
+        request.profile == "readiness-toy-v1"
+            ? SecurityLevel::TOY : SecurityLevel::STD128;
+    if (config.mode != expected_mode ||
+        config.security_level != expected_security ||
+        config.k != execution.point.k || config.m != execution.point.m ||
+        config.set_size != execution.point.set_size ||
+        config.universe_size != execution.point.universe_size ||
+        config.trials != request.trials || execution.selected_point_count != 1u ||
+        execution.native_sweep) {
+        throw std::invalid_argument(
+            "dynamic successor flags do not match selected matrix cell");
+    }
+    const uint64_t expected_count = request.profile == "readiness-toy-v1"
+        ? 1u : (request.cell == "accuracy" ? 50u : 30u);
+    if (execution.selection.plan.expected_rows.empty()) {
+        throw std::invalid_argument(
+            "dynamic successor selected cell has no expected rows");
+    }
+    for (const auto& row : execution.selection.plan.expected_rows) {
+        if (row.measured_count != expected_count) {
+            throw std::invalid_argument(
+                "dynamic successor row count disagrees with profile");
+        }
+    }
+    if (request.cell == "accuracy" && execution.raw_timing) {
+        throw std::invalid_argument(
+            "dynamic accuracy successor must not request raw timing");
+    }
+    if (request.cell != "accuracy" && !execution.raw_timing) {
+        throw std::invalid_argument(
+            "dynamic timing/refresh successor requires raw timing");
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1151,19 +1470,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    const DynamicSuccessorOptions successor_options =
+        ParseDynamicSuccessorOptions(argc, argv);
     // The frozen Work #5 dynamic argv historically spells this one evidence
     // field with an underscore.  Normalize it locally rather than widening
-    // the shared benchmark CLI contract; the canonical parser still owns all
-    // numeric validation and duplicate detection.
-    std::vector<std::string> normalized_args;
-    normalized_args.reserve(static_cast<size_t>(argc));
-    for (int i = 0; i < argc; ++i) {
-        std::string arg(argv[i]);
-        if (arg.rfind("--target_jaccard=", 0) == 0) {
-            arg = "--target-jaccard=" + arg.substr(17);
-        }
-        normalized_args.push_back(std::move(arg));
-    }
+    // the shared benchmark CLI contract; the canonical adapter still owns
+    // revision-cell numeric validation and duplicate detection.
+    std::vector<std::string> normalized_args = NormalizeDynamicConfigArgv(
+        argc, argv, successor_options.enabled);
     std::vector<char*> normalized_argv;
     normalized_argv.reserve(normalized_args.size());
     for (auto& arg : normalized_args) {
@@ -1199,10 +1513,40 @@ int main(int argc, char** argv) {
     RejectUnknownBenchmarkOptions(
         argc, normalized_argv.data(),
         {"--depth=", "--scenario=", "--refresh_updates=",
+         "--cell=", "--updates=", "--revision-identity-out=",
          "--raw-timing-dir=", "--raw_timing_dir=",
          "--raw-timing-output-dir=", "--raw_timing_output_dir=",
          "--raw-timing-profile=", "--raw_timing_profile=",
          "--raw-timing-cell=", "--raw_timing_cell="});
+
+    std::optional<DynamicRevisionExecutionPlan> revision_execution;
+    std::optional<DynamicRevisionRequest> revision_request;
+    if (successor_options.enabled) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+        const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        revision_request = ParseDynamicRevisionArgs(
+            successor_options.planner_argv);
+        const RevisionRunMode mode = RevisionModeForDynamicRequest(
+            *revision_request);
+        revision_execution = PlanDynamicRevisionExecution(
+            matrix, successor_options.planner_argv, mode);
+        ValidateDynamicSuccessorConfig(
+            config, *revision_request, *revision_execution);
+        WriteDynamicRevisionIdentityAtomic(
+            successor_options.identity_output,
+            revision_execution->selection);
+        raw_timing.cell_id = revision_request->revision_cell;
+        if (revision_request->cell == "refresh") {
+            scenario = "refresh";
+            saw_refresh_updates = true;
+            refresh_updates = revision_request->updates;
+        }
+#else
+        throw std::runtime_error(
+            "bench_dynamic was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+    }
 
     config.Print();
     std::cerr << "  Depth:     " << depth << "\n";
@@ -1258,6 +1602,15 @@ int main(int argc, char** argv) {
 
     if (raw_timing.enabled) {
         RunRawTimingDynamic(config, depth, raw_timing, csv);
+        return 0;
+    }
+
+    if (revision_execution.has_value()) {
+        if (revision_request->cell != "accuracy") {
+            throw std::invalid_argument(
+                "dynamic revision timing cell requires raw timing mode");
+        }
+        RunRevisionAccuracy(config, depth, *revision_execution, csv);
         return 0;
     }
 
