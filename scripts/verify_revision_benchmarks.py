@@ -1075,6 +1075,9 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         if (cell.get("expected_artifact_schema") ==
                 "review-comparison-csv-v1" and profile == "paper-v1"):
             row_profile = "std128-t40-primary"
+        elif (cell.get("family") == "piccard_std192_encoding" and
+              profile == "paper-v1"):
+            row_profile = "paper-std192-encoding-v1"
         for row in rows:
             _require_value(row, "profile_id", row_profile, cid)
             _require_value(row, "run_class", run_class, cid)
@@ -1149,7 +1152,11 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
                     _require_value(row, field, expected, cid,
                                    optional=(field == "nominal_security_bits"))
             if review_encoding:
-                _require_value(row, "suite", cell["family"], cid)
+                expected_suite = _revision_suite_for_family(
+                    str(cell.get("family", "")))
+                if not expected_suite:
+                    fail(f"unsupported versioned review family for {cid}")
+                _require_value(row, "suite", expected_suite, cid)
                 if "u" in expected_axes:
                     _require_value(row, "scenario",
                                    f"review-{expected_axes['u']}", cid)

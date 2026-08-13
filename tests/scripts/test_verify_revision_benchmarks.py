@@ -1007,6 +1007,164 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _bind_review_sidecars(output, rows, cell, plan, mode, cell["cell_id"])
             return output
 
+    def _write_full_versioned_encoding_fixture(
+            self, root: Path, *, cell: dict, mode: str,
+            command_profile: str, row_profile: str,
+            methods: tuple[str, ...], timing_trials: int) -> dict:
+        """Write a producer-shaped review-encoding cell for the full verifier.
+
+        The planner command deliberately carries the abstract paper profile
+        in paper mode, while the wire row/workload carries the concrete
+        profile emitted by the revision adapter.  This is the boundary where
+        the family verifier must apply the same mapping as its sidecar path.
+        """
+        from revision_benchmark_common import cell_output, file_inventory
+        from tests.scripts import review_verifier_fixtures as fixture
+        from verify_review_comparison import expected_kind
+        from verify_revision_benchmarks import _REVIEW_ENCODING_HEADER
+
+        cid = cell["cell_id"]
+        output = cell_output(root, cid)
+        output.mkdir(parents=True, exist_ok=True)
+        axes = cell["axes"]
+        k, m, set_size, universe = (
+            int(axes[name]) for name in ("k", "m", "n", "u"))
+        workload_digest, trace_digest = self._write_versioned_review_sidecars(
+            output, suite="revision-std192-encoding-v1", profile=row_profile,
+            methods=methods, timing_trials=timing_trials, k=k, m=m,
+            set_size=set_size, universe=universe, seed=7)
+        realized_intersection = fixture._realized_intersection(set_size, 1, 2)
+        realized_union = 2 * set_size - realized_intersection
+        hash_seed = fixture._hash_seed(7, 1, 0)
+        run_class = "smoke" if mode == "toy" else "primary"
+        target_bits = "0" if mode == "toy" else "192"
+        rows = []
+        for method in methods:
+            sqrt = method == "piccard_sqrt_encode"
+            feature_dimension = (k * 2 * int(m ** 0.5)
+                                 if sqrt else k * m)
+            encoded_slots = 1 << (feature_dimension - 1).bit_length()
+            values = {
+                "suite": "revision-std192-encoding-v1",
+                "scenario": f"review-{universe}",
+                "method": method,
+                "profile_id": row_profile,
+                "run_class": run_class,
+                "target_security_bits": target_bits,
+                "cryptographic_profile": "local-encoding-only",
+                "nominal_security_bits": "",
+                "security_match": "false",
+                "comparison_eligible": "false",
+                "comparison_scope": "encoding-only-diagnostic",
+                "primitive": "sqrt-encoding" if sqrt else "onehot-encoding",
+                "protocol_model": ("piccard-sqrt-local-encoding"
+                                    if sqrt else "piccard-local-encoding"),
+                "output_semantics": "encoded-feature-vector",
+                "assurance_scope": "deterministic-encoder-correctness",
+                "security_basis": "local-encoding-no-cryptographic-security-claim",
+                "cost_scope": "encoding-only",
+                "precomputation_mode": "not-applicable",
+                "secure_division_included": "false",
+                "measurement_kind": expected_kind(method, "timing"),
+                "evidence_arm": "timing",
+                "workload_id": f"review-{universe}-{workload_digest[:16]}",
+                "workload_manifest_sha256": workload_digest,
+                "execution_trace_sha256": trace_digest,
+                "root_seed": "7",
+                "omp_threads": "1",
+                "omp_dynamic": "false",
+                "k": str(k),
+                "m": str(m),
+                "set_size": str(set_size),
+                "universe_size": str(universe),
+                "target_semantics": "jaccard",
+                "target_jaccard_numerator": "1",
+                "target_jaccard_denominator": "2",
+                "target_jaccard": "0.5",
+                "realized_intersection": str(realized_intersection),
+                "realized_union": str(realized_union),
+                "realized_jaccard": str(realized_intersection / realized_union),
+                "timing_trials": str(timing_trials),
+                "accuracy_trials": "0",
+                "correctness_trials": "1",
+                "trials": str(timing_trials),
+                "hash_randomness": "fixed",
+                "hash_seed": str(hash_seed),
+                "encoder_input_construction": "canonical-minhash-signatures-untimed",
+                "encoder_warmup_pairs": "1",
+                "timed_encoder_pairs": str(timing_trials),
+                "correctness_pair_calls": "1",
+                "signature_derivation_timed": "false",
+                "encode_a_ms": "0.1",
+                "encode_b_ms": "0.2",
+                "encode_pair_ms": "0.3",
+                "encoded_slots_a": str(encoded_slots),
+                "encoded_slots_b": str(encoded_slots),
+                "correctness_feature_sha256_a": "a" * 64,
+                "correctness_feature_sha256_b": "b" * 64,
+                "correctness_status": "PASS",
+                "measurement_status": "measured",
+            }
+            fields = _REVIEW_ENCODING_HEADER.rstrip("\n").split(",")
+            rows.append(",".join(values.get(field, "") for field in fields))
+        (output / "stdout.log").write_text(
+            _REVIEW_ENCODING_HEADER + "\n".join(rows) + "\n", encoding="utf-8")
+        (output / "stderr.log").write_text("", encoding="utf-8")
+        (output / "receipt.json").write_text(
+            json.dumps({"artifact_inventory": []}) + "\n", encoding="utf-8")
+        terminal = ""
+        if len(methods) == 1:
+            terminal = (
+                "revision_terminal,schema=review-encoding-terminal-v1,"
+                f"cell_id={cid},row_id=piccard_sqrt_encode,status=NOT_APPLICABLE,"
+                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
+                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n")
+        (output / "stderr.log").write_text(terminal, encoding="utf-8")
+        receipt = json.loads((output / "receipt.json").read_text())
+        receipt["artifact_inventory"] = file_inventory(
+            output, exclude={"stdout.log", "stderr.log", "receipt.json"})
+        (output / "receipt.json").write_text(
+            json.dumps(receipt) + "\n", encoding="utf-8")
+        plan = {
+            "command": [
+                f"--revision-cell={cid}", f"--profile={command_profile}",
+                "--suite=encoding", "--methods=piccard_encode,piccard_sqrt_encode",
+                "--security=STD192", f"--k={k}", f"--m={m}",
+                f"--n={set_size}", f"--universe={universe}",
+                f"--encoding-iters={timing_trials}",
+                "--correctness-trials=1", "--seed=7",
+                f"--output={output / 'encoding.csv'}",
+            ]
+        }
+        return plan
+
+    def test_r8_encoding_full_path_kat_accepts_toy_and_paper_square_and_nonsquare(self) -> None:
+        """Versioned encoding rows pass the same full family path as producers."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _check_family_artifacts
+
+        cases = (
+            ("toy", "readiness-toy-v1", "readiness-toy-v1", 1),
+            ("paper", "paper-v1", "paper-std192-encoding-v1", 30),
+        )
+        for mode, command_profile, row_profile, timing_trials in cases:
+            for axis_value, methods in (
+                    ("64", ("piccard_encode", "piccard_sqrt_encode")),
+                    ("32", ("piccard_encode",))):
+                with self.subTest(mode=mode, m=axis_value):
+                    cell = self.matrix_cell(
+                        "review-encoding-csv-v1", family="piccard_std192_encoding",
+                        axis="m", axis_value=axis_value)
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        plan = self._write_full_versioned_encoding_fixture(
+                            root, cell=cell, mode=mode,
+                            command_profile=command_profile,
+                            row_profile=row_profile, methods=methods,
+                            timing_trials=timing_trials)
+                        _check_family_artifacts(root, mode, [cell],
+                                                {cell["cell_id"]: plan})
+
     def test_r7_encoding_wire_kat_accepts_toy_and_paper_square_and_nonsquare(self) -> None:
         """The exact C++ versioned wire is accepted in all encoding branches."""
         for mode, profile, timing in (("toy", "readiness-toy-v1", 1),
