@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
+import math
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -746,6 +749,523 @@ def _expected_dataset_name(variant: str) -> str:
     return "dblp_acm" if variant.startswith("dblp_acm_") else "enron"
 
 
+def _row_value(row: dict[str, str], field: str, cid: str) -> str:
+    """Return a required CSV value, rejecting a missing/blank identity field."""
+    value = row.get(field)
+    if value is None or value == "":
+        fail(f"missing {field} identity field for {cid}")
+    return value
+
+
+def _float_value(row: dict[str, str], field: str, cid: str) -> float:
+    value = _row_value(row, field, cid)
+    try:
+        parsed = float(value)
+    except ValueError:
+        fail(f"invalid {field} field for {cid}")
+    if not math.isfinite(parsed):
+        fail(f"non-finite {field} field for {cid}")
+    return parsed
+
+
+def _require_value(row: dict[str, str], field: str, expected: Any, cid: str,
+                   *, optional: bool = True) -> None:
+    """Bind a row field to an independently derived value.
+
+    The small direct unit fixtures used by the readiness tests intentionally
+    leave unrelated provenance columns empty.  Real producer rows are not
+    allowed to do that: when a field is present in a non-empty artifact it is
+    checked, and fields marked ``optional=False`` are mandatory.  This keeps
+    the verifier useful for focused schema KATs while making every available
+    identity/security field load-bearing for actual output.
+    """
+    actual = row.get(field)
+    if actual is None:
+        return
+    if actual == "":
+        if not optional:
+            fail(f"missing {field} identity field for {cid}")
+        return
+    expected_text = str(expected).lower() if isinstance(expected, bool) else str(expected)
+    if actual != expected_text:
+        fail(f"{field} is not bound to canonical cell {cid}")
+
+
+def _command_value_once(command: list[str], prefix: str, cid: str) -> str | None:
+    values = _command_value(command, prefix)
+    if len(values) > 1:
+        fail(f"{cid} has duplicate {prefix} bindings")
+    return values[0] if values else None
+
+
+def _command_int_once(command: list[str], prefix: str, cid: str) -> int | None:
+    value = _command_value_once(command, prefix, cid)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        fail(f"{cid} has a non-integer {prefix} binding")
+
+
+def _profile_security(profile_id: str, command: list[str]) -> tuple[str, str]:
+    """Return (run_class, target security bits) for a named plan profile."""
+    if profile_id == "readiness-toy-v1":
+        return "smoke", "0"
+    security = _command_value(command, "--security=")
+    if security == ["STD192"] or "encoding" in profile_id:
+        return "primary", "192"
+    if security == ["STD128"] or profile_id.startswith("paper-"):
+        return "primary", "128"
+    return "primary", ""
+
+
+def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
+                     plan: dict[str, Any], cid: str) -> None:
+    """Bind every shape/security field exposed by a family CSV header.
+
+    Shape is derived from the canonical matrix and the concrete argv, never
+    from a producer's row.  This is deliberately shared by all CSV families
+    so an artifact from an adjacent k/m/n/U cell cannot pass merely because
+    its method/count topology happens to match.
+    """
+    command = plan.get("command", [])
+    if not isinstance(command, list):
+        fail(f"malformed command for {cid}")
+    axes = cell.get("axes", {})
+    arg_to_axis = (("--k=", "k"), ("--m=", "m"),
+                   ("--set_size=", "n"), ("--n=", "n"),
+                   ("--universe=", "u"))
+    expected_axes: dict[str, int | float] = {}
+    for flag, axis in arg_to_axis:
+        value = _command_value_once(command, flag, cid)
+        if value is None:
+            continue
+        try:
+            expected_axes[axis] = int(value)
+        except ValueError:
+            fail(f"{cid} has invalid {flag} binding")
+    for axis, value in axes.items():
+        if axis in {"k", "m", "n", "u"} and axis not in expected_axes:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                expected_axes[axis] = value
+    # Matrix aliases are explicit in the schema; bind their exposed CSV names.
+    row_fields = {"k": ("k",), "m": ("m",), "n": ("set_size", "n"),
+                  "u": ("universe_size", "universe")}
+    for axis, fields in row_fields.items():
+        if axis not in expected_axes:
+            continue
+        value = expected_axes[axis]
+        for row in rows:
+            for field in fields:
+                if field in row:
+                    _require_value(row, field, value, cid)
+    seed = _command_int_once(command, "--seed=", cid)
+    if seed is not None:
+        for row in rows:
+            _require_value(row, "root_seed", seed, cid)
+    profile = _command_value_once(command, "--profile=", cid)
+    if profile is not None:
+        run_class, target_bits = _profile_security(profile, command)
+        for row in rows:
+            _require_value(row, "profile_id", profile, cid)
+            _require_value(row, "run_class", run_class, cid)
+            if target_bits:
+                _require_value(row, "target_security_bits", target_bits, cid)
+    security = _command_value_once(command, "--security=", cid)
+    if security is not None:
+        for row in rows:
+            _require_value(row, "security", security, cid)
+    if "dataset" in cell:
+        dataset = cell["dataset"]
+        for row in rows:
+            _require_value(row, "dataset", dataset, cid)
+    variant = cell.get("variant")
+    if variant is not None:
+        for row in rows:
+            _require_value(row, "variant", variant, cid)
+    if "comparison_eligible" in cell:
+        for row in rows:
+            _require_value(row, "comparison_eligible",
+                           bool(cell["comparison_eligible"]), cid)
+
+    # The two encoding-only families are intentionally excluded from the
+    # end-to-end comparison table.  Their rows still need an explicit,
+    # canonical security/cost taxonomy: a producer must not relabel an
+    # encoding diagnostic as a full protocol measurement.  Bind these fields
+    # from the matrix family rather than trusting a row's self-description.
+    encoding_only = cell.get("family") == "piccard_std192_encoding" or \
+        (cell.get("family") == "real_dataset" and
+         str(cell.get("axis_value")) == "std192_encoding")
+    if encoding_only:
+        taxonomy = {
+            "target_security_bits": "192",
+            "comparison_eligible": "false",
+            "comparison_scope": "encoding-only-diagnostic",
+            "cost_scope": "encoding-only",
+            "secure_division_included": "false",
+        }
+        for row in rows:
+            for field, expected in taxonomy.items():
+                _require_value(row, field, expected, cid)
+
+    # Estimator-j cells expose the target Jaccard as a row field.  It is a
+    # matrix axis, not a producer-chosen annotation, so compare it
+    # independently of the integer geometry binding above.
+    if "j" in axes:
+        expected_j = float(axes["j"])
+        for row in rows:
+            if "target_jaccard" in row:
+                actual_j = _float_value(row, "target_jaccard", cid)
+                if not math.isclose(actual_j, expected_j,
+                                    rel_tol=0.0, abs_tol=1e-12):
+                    fail(f"target_jaccard is not bound to canonical cell {cid}")
+    # The concrete seed/randomness/security policy is part of the evidence
+    # identity even for rows whose numerical shape is otherwise sparse.
+    hash_randomness = _command_value_once(command, "--hash_randomness=", cid)
+    if hash_randomness is not None:
+        for row in rows:
+            _require_value(row, "hash_randomness", hash_randomness, cid)
+
+
+def _threshold_outcome(decision: bool, truth: bool) -> str:
+    if decision and truth:
+        return "TP"
+    if not decision and not truth:
+        return "TN"
+    if decision:
+        return "FP"
+    return "FN"
+
+
+def _threshold_seed(root_seed: int, pair_id: str, trial_index: int) -> int:
+    domain = b"piccard-dblp-threshold-eval-v1\0"
+    encoded = pair_id.encode("utf-8")
+    payload = (domain + struct.pack(">Q", root_seed) +
+               struct.pack(">I", len(encoded)) + encoded +
+               struct.pack(">Q", trial_index))
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _threshold_tau(requested: float, k: int, m: int) -> int:
+    return max(1, min(k, math.ceil(k * (1.0 / m +
+                                        (1.0 - 1.0 / m) * requested))))
+
+
+def _threshold_boundary(tau: int, k: int, m: int) -> float:
+    return (tau / float(k) - 1.0 / float(m)) / (1.0 - 1.0 / float(m))
+
+
+def _check_real_threshold_science(root: Path, output: Path,
+                                  rows: list[dict[str, str]],
+                                  cell: dict[str, Any],
+                                  plan: dict[str, Any], mode: str,
+                                  cid: str) -> None:
+    """Recompute held-out threshold truth and outcomes independently.
+
+    The producer's workload/processed files are used only as an input source;
+    decisions and both truth bases are reconstructed here.  When the complete
+    processed dataset is present, the older standalone real-dataset verifier
+    is also invoked to recompute pair selection, split, trial seeds and
+    calibration choice.  Minimal schema KATs may omit those files, but still
+    have to provide every row-level scientific field and satisfy the same
+    formulas.
+    """
+    command = plan.get("command", [])
+    root_seed = _command_int_once(command, "--seed=", cid)
+    if root_seed is None:
+        fail(f"real threshold command has no root seed for {cid}")
+    k_expected = int(cell["axes"].get("k", 128))
+    m_expected = int(cell["axes"].get("m", 64))
+    trial_expected = (_command_int_once(command, "--threshold-trials=", cid) or
+                      int(cell["expected_rows"][0][
+                          "toy_measured_count" if mode == "toy"
+                          else "paper_measured_count"]))
+    if trial_expected <= 0:
+        fail(f"real threshold trial count is not positive for {cid}")
+    required = {
+        "schema_version", "dataset", "variant", "pair_id", "pair_kind",
+        "label", "record_a", "record_b", "k", "m", "hash_randomness",
+        "root_seed", "split", "rank_position", "threshold_trial_index",
+        "hash_seed", "match_count", "decision", "label_truth",
+        "label_outcome", "exact_j_truth", "exact_j_outcome",
+        "exact_jaccard_bucketed", "requested_j_threshold", "tau_count",
+        "realized_j_tau", "calibration_fpr", "calibration_fnr",
+        "calibration_balanced_error", "threshold_workload_sha256",
+    }
+    for row in rows:
+        for field in required:
+            _row_value(row, field, cid)
+        if row["schema_version"] != "piccard-real-threshold-v1" or \
+                row["dataset"] != "dblp_acm" or \
+                row["variant"] != "dblp_acm_u65536" or \
+                row["hash_randomness"] != "resampled" or \
+                row["split"] != "evaluation":
+            fail(f"real threshold dataset/schema binding mismatch for {cid}")
+        if _int_field(row, "k", cid) != k_expected or \
+                _int_field(row, "m", cid) != m_expected or \
+                _int_field(row, "root_seed", cid) != root_seed:
+            fail(f"real threshold parameter/seed binding mismatch for {cid}")
+        label = _int_field(row, "label", cid)
+        trial = _int_field(row, "threshold_trial_index", cid)
+        match_count = _int_field(row, "match_count", cid)
+        decision = _int_field(row, "decision", cid)
+        label_truth = _int_field(row, "label_truth", cid)
+        exact_truth = _int_field(row, "exact_j_truth", cid)
+        tau = _int_field(row, "tau_count", cid)
+        rank = _int_field(row, "rank_position", cid)
+        if label not in {0, 1} or trial not in range(trial_expected) or \
+                rank < 0 or match_count < 0 or match_count > k_expected or \
+                decision not in {0, 1} or label_truth not in {0, 1} or \
+                exact_truth not in {0, 1} or tau < 1 or tau > k_expected:
+            fail(f"real threshold integer domain mismatch for {cid}")
+        exact_j = _float_value(row, "exact_jaccard_bucketed", cid)
+        requested = _float_value(row, "requested_j_threshold", cid)
+        realized_tau = _float_value(row, "realized_j_tau", cid)
+        if not 0.0 <= exact_j <= 1.0 or not 0.0 <= requested <= 1.0:
+            fail(f"real threshold Jaccard domain mismatch for {cid}")
+        expected_tau = _threshold_tau(requested, k_expected, m_expected)
+        expected_realized = _threshold_boundary(expected_tau, k_expected, m_expected)
+        if tau != expected_tau or not math.isclose(realized_tau, expected_realized,
+                                                   rel_tol=0.0, abs_tol=1e-12):
+            fail(f"real threshold boundary recomputation mismatch for {cid}")
+        expected_decision = int(match_count >= tau)
+        expected_label_truth = label
+        expected_exact_truth = int(exact_j >= realized_tau)
+        if decision != expected_decision or label_truth != expected_label_truth or \
+                exact_truth != expected_exact_truth:
+            fail(f"real threshold truth/decision mismatch for {cid}")
+        if row["label_outcome"] != _threshold_outcome(
+                bool(decision), bool(label_truth)) or \
+                row["exact_j_outcome"] != _threshold_outcome(
+                    bool(decision), bool(exact_truth)):
+            fail(f"real threshold outcome mismatch for {cid}")
+        expected_seed = _threshold_seed(root_seed, row["pair_id"], trial)
+        if _int_field(row, "hash_seed", cid) != expected_seed:
+            fail(f"real threshold trial seed mismatch for {cid}")
+        for field in ("calibration_fpr", "calibration_fnr",
+                      "calibration_balanced_error"):
+            value = _float_value(row, field, cid)
+            if not 0.0 <= value <= 1.0:
+                fail(f"real threshold calibration field out of range for {cid}")
+
+    keys = {(row["pair_id"], _int_field(row, "threshold_trial_index", cid))
+            for row in rows}
+    if len(keys) != len(rows):
+        fail(f"real threshold has duplicate pair/trial keys for {cid}")
+    by_pair: dict[str, set[int]] = {}
+    for pair_id, trial in keys:
+        by_pair.setdefault(pair_id, set()).add(trial)
+    if not by_pair or any(values != set(range(trial_expected))
+                          for values in by_pair.values()):
+        fail(f"real threshold has incomplete pair/trial coverage for {cid}")
+
+    workload = _command_file(root, command, "--workload-rows-out=", cid)
+    workload_rows: dict[str, dict[str, str]] = {}
+    if workload is not None:
+        try:
+            text = workload.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            expected_header = ["pair_id", "label", "split", "rank_position",
+                               "record_a", "record_b", "exact_jaccard_bucketed"]
+            if not lines or lines[0].split("\t") != expected_header:
+                fail(f"real threshold workload header mismatch for {cid}")
+            reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+            for item in reader:
+                pair_id = str(item.get("pair_id", ""))
+                if not pair_id or pair_id in workload_rows:
+                    fail(f"real threshold workload pair identity is malformed for {cid}")
+                workload_rows[pair_id] = dict(item)
+        except (OSError, UnicodeDecodeError, csv.Error) as exc:
+            fail(f"cannot read real threshold workload for {cid}: {exc}")
+        for row in rows:
+            pair = workload_rows.get(row["pair_id"])
+            if pair is None or pair.get("split") != "evaluation" or \
+                    pair.get("record_a") != row["record_a"] or \
+                    pair.get("record_b") != row["record_b"] or \
+                    pair.get("pair_kind") not in {None, row["pair_kind"]}:
+                fail(f"real threshold row does not bind held-out workload for {cid}")
+            for field in ("label", "rank_position", "exact_jaccard_bucketed"):
+                if not math.isclose(float(row[field]), float(pair[field]),
+                                    rel_tol=0.0, abs_tol=1e-12):
+                    fail(f"real threshold workload field {field} mismatch for {cid}")
+        if {row["pair_id"] for row in rows} != set(workload_rows):
+            fail(f"real threshold output/workload pair set mismatch for {cid}")
+
+    workload_manifest = _command_file(root, command, "--workload-manifest-out=", cid)
+    if workload_manifest is not None:
+        workload_sha = sha256_file(workload_manifest)
+        if any(row["threshold_workload_sha256"] != workload_sha for row in rows):
+            fail(f"real threshold workload manifest digest mismatch for {cid}")
+    elif any(not row["threshold_workload_sha256"] for row in rows):
+        fail(f"real threshold workload digest is missing for {cid}")
+
+    dataset_manifest = _command_file(root, command, "--dataset-manifest=", cid)
+    if dataset_manifest is not None:
+        dataset_sha = sha256_file(dataset_manifest)
+        if any(row["dataset_manifest_sha256"] != dataset_sha for row in rows):
+            fail(f"real threshold dataset manifest digest mismatch for {cid}")
+        # When the full processed fixture and workload manifests are present,
+        # delegate to the independently maintained verifier that recomputes
+        # split selection, calibration choice and MinHash match counts.
+        if workload_manifest is not None and workload is not None:
+            try:
+                from verify_real_dataset_outputs import verify_threshold_artifacts
+                verify_threshold_artifacts(
+                    dataset_manifest, output / "threshold.csv", workload_manifest,
+                    workload, root_seed=root_seed, threshold_trials=trial_expected,
+                    max_pairs=_command_int_once(command, "--max-pairs=", cid) or 1000,
+                    k=k_expected, m=m_expected)
+            except RevisionContractError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - evidence is untrusted
+                fail(f"real threshold independent recomputation failed for {cid}: {exc}")
+
+
+def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
+                            cell: dict[str, Any], mode: str, cid: str) -> None:
+    """Parse the typed SJ16 calibration grammar and bind its full topology."""
+    values = _command_value(plan.get("command", []), "--output=")
+    if len(values) != 1:
+        fail(f"SJ16 calibration lacks one canonical --output for {cid}")
+    artifact = _output_path(root, output, values[0], "SJ16 calibration")
+    try:
+        lines = artifact.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"SJ16 calibration is not readable for {cid}: {exc}")
+    if not lines or lines[0] != "# SJ16 calibration summary":
+        fail(f"SJ16 calibration grammar header mismatch for {cid}")
+    metadata: dict[str, str] = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        # Dispersion records use key=value tokens too, but are parsed by the
+        # typed detail grammar below.  Treating them as metadata would make a
+        # valid repeated detail key look like duplicate metadata.
+        if line.startswith("k3072_"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if not key or key in metadata:
+            fail(f"SJ16 calibration has duplicate/malformed metadata for {cid}")
+        metadata[key] = value
+    expected_profile = "readiness-toy-v1" if mode == "toy" else "paper-v1"
+    expected_trials = 1 if mode == "toy" else 30
+    expected_sizes = [4096, 8192, 16384]
+    expected_keys = {
+        "overall_status": "PASS", "key_bits": "3072", "precompute_mode": "off",
+        "trials_per_size": str(expected_trials), "enc_iters": str(expected_trials),
+        "held_out": "32768", "residual_tau": "0.1", "fit_sizes": ",".join(
+            str(size) for size in expected_sizes),
+    }
+    # These fields identify the command/profile even though host/timestamp are
+    # intentionally machine-specific provenance.
+    for key, expected in expected_keys.items():
+        if metadata.get(key) != expected:
+            fail(f"SJ16 calibration {key} topology mismatch for {cid}")
+    command = plan.get("command", [])
+    key_arg = _command_value_once(command, "--key-bits=", cid)
+    if key_arg not in {None, "3072"}:
+        fail(f"SJ16 calibration key size is not canonical for {cid}")
+    profile_arg = _command_value_once(command, "--profile=", cid)
+    if profile_arg not in {None, expected_profile}:
+        fail(f"SJ16 calibration profile mismatch for {cid}")
+    for prefix, expected in (("--sizes=", "4096,8192,16384"),
+                             ("--held-out=", "32768"),
+                             ("--threads=", "2"),
+                             ("--warmup=", "1")):
+        value = _command_value_once(command, prefix, cid)
+        if value is not None and value != expected:
+            fail(f"SJ16 calibration {prefix} topology mismatch for {cid}")
+    query_trials = (_command_value_once(command, "--query-trials=", cid) or
+                    _command_value_once(command, "--trials=", cid))
+    enc_iters = _command_value_once(command, "--enc-iters=", cid)
+    if query_trials is not None and query_trials != str(expected_trials):
+        fail(f"SJ16 calibration query trial count mismatch for {cid}")
+    if enc_iters is not None and enc_iters != str(expected_trials):
+        fail(f"SJ16 calibration encryption iteration count mismatch for {cid}")
+    if metadata.get("threads_requested") not in {None, "2"} or \
+            metadata.get("threads_observed") not in {None, "2"}:
+        fail(f"SJ16 calibration thread topology mismatch for {cid}")
+
+    columns = [index for index, line in enumerate(lines)
+               if line.startswith("# columns: ")]
+    expected_columns = ["key_bits", "t_enc_median_ms", "t_enc_iqr_ms",
+                        "alpha_ms_per_m", "beta_ms", "r2", "held_measured_ms",
+                        "held_pred_ms", "held_residual", "gate"]
+    if columns != [next((index for index, line in enumerate(lines)
+                         if line.startswith("# columns: ")), -1)]:
+        # This branch is deliberately explicit to reject multiple declarations.
+        fail(f"SJ16 calibration must declare exactly one columns header for {cid}")
+    header_index = columns[0]
+    if lines[header_index] != "# columns: " + ",".join(expected_columns):
+        fail(f"SJ16 calibration columns header mismatch for {cid}")
+    data_rows: list[list[str]] = []
+    for line in lines[header_index + 1:]:
+        if not line or line.startswith("#") or "=" in line:
+            continue
+        fields = line.split(",")
+        if len(fields) == len(expected_columns):
+            data_rows.append(fields)
+    if len(data_rows) != 1:
+        fail(f"SJ16 calibration must contain exactly one declared K row for {cid}")
+    declared = dict(zip(expected_columns, data_rows[0]))
+    if declared["key_bits"] != "3072" or declared["gate"] != "PASS":
+        fail(f"SJ16 calibration declared K/gate mismatch for {cid}")
+    for field in expected_columns[1:-1]:
+        try:
+            if not math.isfinite(float(declared[field])):
+                raise ValueError
+        except ValueError:
+            fail(f"SJ16 calibration declared field {field} is not finite for {cid}")
+
+    # The detailed dispersion grammar must contain one encryption line, each
+    # fit size once, and the held-out size once.  Every sample list is tied to
+    # its mode count; this prevents a token-only fake from authorizing an
+    # extrapolation.
+    detail_re = re.compile(
+        r"^k3072_(?P<kind>t_enc|fit_m=(?P<fit>\d+)|heldout_m=(?P<held>\d+)) "
+        r"median=(?P<median>[^ ]+)"
+        r"(?: q1=(?P<q1>[^ ]+) q3=(?P<q3>[^ ]+) iqr=(?P<iqr>[^ ]+))? samples=(?P<samples>.*)$")
+    seen_details: set[str] = set()
+    for line in lines:
+        match = detail_re.match(line)
+        if match is None:
+            continue
+        kind = match.group("kind")
+        detail_key = ("t_enc" if kind == "t_enc" else
+                      f"fit_m={match.group('fit')}" if match.group("fit") else
+                      f"heldout_m={match.group('held')}")
+        if detail_key in seen_details:
+            fail(f"SJ16 calibration duplicate dispersion row for {cid}")
+        seen_details.add(detail_key)
+        if kind == "t_enc":
+            sample_count = expected_trials
+        else:
+            size = int(match.group("fit") or match.group("held"))
+            if match.group("fit") and size not in expected_sizes:
+                fail(f"SJ16 calibration has an unexpected fit size for {cid}")
+            if match.group("held") and size != 32768:
+                fail(f"SJ16 calibration held-out size mismatch for {cid}")
+            sample_count = expected_trials
+        numeric = [match.group(name) for name in ("median", "q1", "q3", "iqr")
+                   if match.group(name) is not None]
+        try:
+            if any(not math.isfinite(float(value)) for value in numeric):
+                raise ValueError
+            samples = [item for item in match.group("samples").split(",") if item]
+            if len(samples) != sample_count or any(not math.isfinite(float(item))
+                                                   for item in samples):
+                raise ValueError
+        except ValueError:
+            fail(f"SJ16 calibration dispersion/sample topology mismatch for {cid}")
+    required_details = {"t_enc", *(f"fit_m={size}" for size in expected_sizes),
+                        "heldout_m=32768"}
+    if seen_details != required_details:
+        fail(f"SJ16 calibration dispersion topology mismatch for {cid}")
+
+
 def _check_n_a_terminal(stderr: bytes, cell: dict[str, Any], *, row_id: str,
                         reason: str) -> None:
     rows = _terminal_records(stderr, cell["cell_id"])
@@ -1109,20 +1629,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
 
         # SJ16 writes a structured key=value artifact, not a CSV stream.
         if schema == "sj16-calibration-v1":
-            values = _command_value(plan.get("command", []), "--output=")
-            if len(values) != 1:
-                fail(f"SJ16 calibration lacks one canonical --output for {cid}")
-            artifact = _output_path(root, output, values[0], "SJ16 calibration")
-            text = artifact.read_text(encoding="utf-8")
-            required = ("overall_status=PASS", "key_bits=3072",
-                        "trials_per_size=1" if mode == "toy" else "trials_per_size=30",
-                        "held_out=32768", "held_measured_ms=", "gate")
-            if any(token not in text for token in required) or \
-                    "# columns: key_bits," not in text or "\n3072," not in text:
-                fail(f"SJ16 calibration identity/count artifact mismatch for {cid}")
-            if not any(line.startswith("3072,") and line.rstrip().endswith(",PASS")
-                       for line in text.splitlines()):
-                fail(f"SJ16 calibration gate is not PASS for {cid}")
+            _check_sj16_calibration(root, output, plan, cell, mode, cid)
             continue
 
         if schema == "noise-profile-v1":
@@ -1135,6 +1642,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         if row.get("terminal_status") != "NOT_APPLICABLE"]
             if axis == "accuracy_m":
                 rows = _csv_table(stdout, _SQRT_HEADER, f"sqrt accuracy {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
                 wanted = {"onehot": "OneHot", "sqrt": "Sqrt"}
                 if len(rows) != len(expected) or \
                         {row.get("encoding") for row in rows} != \
@@ -1148,6 +1656,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             elif axis == "timing_m":
                 rows = _csv_table(stdout, _SQRT_TIMING_HEADER,
                                   f"sqrt timing {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
                 wanted = {"onehot", "sqrt"}
                 applicable_methods = {str(item["method"]) for item in expected}
                 if len(rows) != len(expected) or \
@@ -1168,6 +1677,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                                     reason="sqrt-m-not-perfect-square")
             else:
                 rows = _csv_table(stdout, _CROSSOVER_HEADER, f"sqrt crossover {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
                 if len(rows) != 1:
                     fail(f"sqrt crossover/ciphertext requires one combined row for {cid}")
                 nonsquare = any(item.get("terminal_status") == "NOT_APPLICABLE"
@@ -1182,6 +1692,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         if schema == "threshold-csv-v1":
             if cell["family"] == "threshold_spec":
                 rows = _csv_table(stdout, _THRESHOLD_SPEC_HEADER, f"threshold spec {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
                 if len(rows) != 1 or rows[0].get("schema_version") != "piccard-threshold-spec-v2" or \
                         _int_field(rows[0], "k", cid) != int(cell["axes"]["k"]):
                     fail(f"threshold spec k/schema topology mismatch for {cid}")
@@ -1195,6 +1706,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         fail(f"threshold spec SKIPPED row fabricated live metadata for {cid}")
                 continue
             rows = _csv_table(stdout, _THRESHOLD_HEADER, f"threshold {cid}")
+            _bind_cell_shape(rows, cell, plan, cid)
             expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
                                  if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
             if cell["family"] == "threshold_agreement":
@@ -1212,6 +1724,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
 
         if schema == "threshold-fpfn-csv-v1":
             rows = _csv_table(stdout, _THRESHOLD_FPFN_HEADER, f"threshold FP/FN {cid}")
+            _bind_cell_shape(rows, cell, plan, cid)
             expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
                                  if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
             trials = [_int_field(row, "trial_index", cid) for row in rows]
@@ -1220,10 +1733,33 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         _int_field(row, "grid_index", cid) != int(cell["grid_index"])
                         for row in rows):
                 fail(f"threshold FP/FN point/trial topology mismatch for {cid}")
+            # Reuse the independently maintained plaintext verifier for the
+            # complete scientific contract (geometry, derived row seed,
+            # MinHash bucket match, inclusive decision, exact-J truth,
+            # outcome, binomial tail and Gaussian overlay).  This verifier is
+            # deliberately separate from the C++ producer and rejects NaN or
+            # forged probability fields as well as identity swaps.
+            try:
+                from verify_threshold_outputs import _validate_row as _validate_fpfn_row
+                root_seed = _command_int_once(plan.get("command", []), "--seed=", cid)
+                if root_seed is None:
+                    fail(f"threshold FP/FN command has no bound root seed for {cid}")
+                fpfn_mode = "toy" if mode == "toy" else "paper"
+                keys = []
+                for row in rows:
+                    keys.append(_validate_fpfn_row(row, fpfn_mode, root_seed))
+                if keys != [(int(cell["point_k"]), int(cell["grid_index"]), index)
+                            for index in range(expected_count)]:
+                    fail(f"threshold FP/FN row keys are not canonical for {cid}")
+            except RevisionContractError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - producer evidence is untrusted
+                fail(f"threshold FP/FN scientific recomputation failed for {cid}: {exc}")
             continue
 
         if schema == "review-encoding-csv-v1":
             rows = _csv_table(stdout, _REVIEW_ENCODING_HEADER, f"review encoding {cid}")
+            _bind_cell_shape(rows, cell, plan, cid)
             applicable = [row for row in cell["expected_rows"]
                           if row.get("terminal_status") != "NOT_APPLICABLE"]
             wanted = {str(row["method"]) for row in applicable}
@@ -1253,6 +1789,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 payload, _ = _canonical_payload(root, output, plan, schema)
                 rows = _csv_table(payload, _REAL_ENCODING_HEADER,
                                   f"real encoding {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
                 expected_trials = int(cell["expected_rows"][0][
                     "toy_measured_count" if mode == "toy" else "paper_measured_count"])
                 if len(rows) != 2 or \
@@ -1268,6 +1805,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                           else _REAL_TIMING_HEADER)
                 payload, _ = _canonical_payload(root, output, plan, schema)
                 rows = _csv_table(payload, header, f"real dataset {cid}")
+                _bind_cell_shape(rows, cell, plan, cid)
             if not rows or any(row.get("dataset") != expected_dataset or
                                row.get("variant") != variant or
                                _int_field(row, "k", cid) != int(cell["axes"]["k"]) or
@@ -1328,6 +1866,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             payload, _ = _canonical_payload(root, output, plan, schema)
             rows = _csv_table(payload, _REAL_THRESHOLD_HEADER,
                               f"real threshold {cid}")
+            _bind_cell_shape(rows, cell, plan, cid)
             trials = (_command_int(plan.get("command", []),
                                    "--threshold-trials=", cid) or
                       int(cell["expected_rows"][0][
@@ -1377,6 +1916,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                           for trial in range(trials)}
                 if keys != wanted:
                     fail(f"real threshold rows do not match held-out workload for {cid}")
+            _check_real_threshold_science(root, output, rows, cell, plan, mode, cid)
             continue
         header = _EXACT_HEADERS.get(schema)
         payload, source = _canonical_payload(root, output, plan, schema)
@@ -1388,6 +1928,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             except UnicodeDecodeError:
                 fail(f"{schema} artifact is not UTF-8 for {cid}")
             rows = list(csv.DictReader(io.StringIO(text)))
+        _bind_cell_shape(rows, cell, plan, cid)
         expected_rows = [row for row in cell["expected_rows"]
                          if row.get("terminal_status") != "NOT_APPLICABLE"]
         expected_counts = [int(row["toy_measured_count"] if mode == "toy"
@@ -1415,9 +1956,16 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         elif schema == "piccard-benchmark-csv-v1":
             if len(rows) != 2 or any(row.get("label") != cid for row in rows):
                 fail(f"Piccard cell identity/row topology mismatch for {cid}")
-            observed = [max(_int_field(row, "trials", cid),
-                            _int_field(row, "accuracy_trials", cid)) for row in rows]
-            if sorted(observed) != sorted(expected_counts):
+            expected_timing = int(expected_rows[0]["toy_measured_count"] if mode == "toy"
+                                  else expected_rows[0]["paper_measured_count"])
+            expected_accuracy = int(expected_rows[1]["toy_measured_count"] if mode == "toy"
+                                    else expected_rows[1]["paper_measured_count"])
+            observed = sorted((_int_field(row, "trials", cid),
+                               _int_field(row, "accuracy_trials", cid))
+                              for row in rows)
+            wanted = sorted(((expected_timing, 0),
+                             (expected_accuracy, expected_accuracy)))
+            if observed != wanted:
                 fail(f"Piccard measured-count binding mismatch for {cid}")
         elif schema == "estimator-diagnostic-csv-v1":
             if len(rows) != 1 or _int_field(rows[0], "trials", cid) != expected_counts[0]:

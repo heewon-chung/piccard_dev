@@ -65,6 +65,50 @@ class RevisionVerifierContractTest(unittest.TestCase):
             json.dumps(receipt) + "\n", encoding="utf-8")
         return [f"{command_prefix}{path}"]
 
+    @staticmethod
+    def csv_row(header: str, **overrides: str) -> str:
+        fields = header.rstrip("\n").split(",")
+        values = [""] * len(fields)
+        for name, value in overrides.items():
+            if name not in fields:
+                raise AssertionError(f"unknown CSV field: {name}")
+            values[fields.index(name)] = str(value)
+        return ",".join(values)
+
+    def write_stdout_rows(self, root: Path, cell: dict, header: str,
+                          rows: list[str]) -> None:
+        self.write_family_stdout(root, cell, header + "\n".join(rows) + "\n")
+
+    @staticmethod
+    def full_sj16_fixture(trials: int = 1) -> str:
+        lines = [
+            "# SJ16 calibration summary",
+            "overall_status=PASS",
+            "# ---- provenance ----",
+            "precompute_mode=off",
+            "# --------------------",
+            "key_bits=3072",
+            "threads_requested=2",
+            "threads_observed=2",
+            f"trials_per_size={trials}",
+            f"enc_iters={trials}",
+            "held_out=32768",
+            "residual_tau=0.1",
+            "fit_sizes=4096,8192,16384",
+            "# columns: key_bits,t_enc_median_ms,t_enc_iqr_ms,alpha_ms_per_m,beta_ms,r2,held_measured_ms,held_pred_ms,held_residual,gate",
+            "3072,1,0,0.001,1,1,33,33,0,PASS",
+            "# ---- per-size dispersion (median/q1/q3/iqr + raw samples) ----",
+            f"k3072_t_enc median=1 samples={','.join(['1'] * trials)}",
+        ]
+        for size in (4096, 8192, 16384):
+            lines.append(
+                f"k3072_fit_m={size} median=1 q1=1 q3=1 iqr=0 "
+                f"samples={','.join(['1'] * trials)}")
+        lines.append(
+            f"k3072_heldout_m=32768 median=33 q1=33 q3=33 iqr=0 "
+            f"samples={','.join(['33'] * trials)}")
+        return "\n".join(lines) + "\n"
+
     def matrix_cell(self, schema: str, *, family: str | None = None,
                     axis: str | None = None, axis_value: str | None = None) -> dict:
         document = json.loads(MATRIX.read_text())
@@ -308,7 +352,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
                                 axis="accuracy_m", axis_value="128")
         fields = self.SQRT_HEADER.split(",")
-        values = ["0"] * len(fields)
+        values = [""] * len(fields)
         values[fields.index("encoding")] = "OneHot"
         values[fields.index("k")] = "128"
         values[fields.index("m")] = "128"
@@ -350,7 +394,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
                                 axis="timing_m", axis_value="128")
         fields = _SQRT_TIMING_HEADER.rstrip("\n").split(",")
-        values = ["0"] * len(fields)
+        values = [""] * len(fields)
         values[fields.index("label")] = "revision_" + cell["cell_id"]
         values[fields.index("k")] = "128"
         values[fields.index("m")] = "128"
@@ -380,7 +424,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         fields = _REAL_ENCODING_HEADER.rstrip("\n").split(",")
         rows = []
         for method in ("piccard_encode", "piccard_sqrt_encode"):
-            values = ["0"] * len(fields)
+            values = [""] * len(fields)
             values[fields.index("dataset")] = "dblp_acm"
             values[fields.index("variant")] = "dblp_acm_u65536"
             values[fields.index("k")] = "128"
@@ -405,11 +449,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         from verify_revision_benchmarks import _check_family_artifacts
         cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
                                 axis="fit", axis_value="per_element")
-        text = ("overall_status=PASS\nkey_bits=3072\ntrials_per_size=1\n"
-                "held_out=32768\nheld_measured_ms=0\n"
-                "# columns: key_bits,t_enc_median_ms,t_enc_iqr_ms,alpha_ms_per_m,"
-                "beta_ms,r2,held_measured_ms,held_pred_ms,held_residual,gate\n"
-                "3072,0,0,0,0,0,0,0,0,PASS\n")
+        text = self.full_sj16_fixture()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             command = self.write_artifact(root, cell, "calibration.csv", text)
@@ -543,6 +583,232 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
                     "command": ["scripts/run_noise_profiles.sh",
                                 f"--results-root={payload}"]}})
+
+    def test_c1_review_wrong_axes_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _REVIEW_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1", family="bcg12_minhash",
+                                axis="control", axis_value="default")
+        rows = [self.csv_row(_REVIEW_HEADER, method=method, k=128, m=64,
+                             set_size=1000, universe_size=65536, trials=1)
+                for method in ("bcg12_mh_ec", "bcg12_mh_ff")]
+        rows[0] = self.csv_row(_REVIEW_HEADER, method="bcg12_mh_ec", k=999,
+                               m=64, set_size=1000, universe_size=65536,
+                               trials=1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _REVIEW_HEADER, rows)
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_std192_review_wrong_axes_taxonomy_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _REVIEW_ENCODING_HEADER, _check_family_artifacts,
+            RevisionContractError)
+        cell = self.matrix_cell("review-encoding-csv-v1",
+                                family="piccard_std192_encoding",
+                                axis="control", axis_value="default")
+        rows = [self.csv_row(_REVIEW_ENCODING_HEADER, method=method,
+                             target_security_bits=128, comparison_eligible="false",
+                             comparison_scope="encoding-only-diagnostic", k=128,
+                             m=64, timed_encoder_pairs=1,
+                             correctness_pair_calls=1, correctness_status="PASS")
+                for method in ("piccard_encode", "piccard_sqrt_encode")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _REVIEW_ENCODING_HEADER, rows)
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_estimator_wrong_shape_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _ESTIMATOR_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("estimator-diagnostic-csv-v1",
+                                family="estimator_accuracy", axis="j",
+                                axis_value="0.0")
+        row = self.csv_row(_ESTIMATOR_HEADER, estimator_model="sha256-random-ranking-poc-v1",
+                           k=128, m=64, set_size=1000, target_jaccard="0.9",
+                           trials=1, seed=7)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _ESTIMATOR_HEADER, [row])
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_sqrt_accuracy_wrong_shape_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _SQRT_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
+                                axis="accuracy_m", axis_value="16")
+        rows = [self.csv_row(_SQRT_HEADER, encoding="OneHot", k=128, m=32),
+                self.csv_row(_SQRT_HEADER, encoding="Sqrt", k=128, m=16)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _SQRT_HEADER, rows)
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_sqrt_crossover_wrong_shape_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _CROSSOVER_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
+                                axis="crossover_m", axis_value="16")
+        row = self.csv_row(_CROSSOVER_HEADER, k=128, m=64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _CROSSOVER_HEADER, [row])
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_threshold_fpfn_forged_science_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import verify_threshold_outputs as fpfn
+        from verify_revision_benchmarks import (
+            _THRESHOLD_FPFN_HEADER, _check_family_artifacts,
+            RevisionContractError)
+        cell = self.matrix_cell("threshold-fpfn-csv-v1",
+                                family="threshold_synthetic_fpfn",
+                                axis="point", axis_value="k128_j0")
+        point = fpfn._point(128, 0)
+        seed = fpfn.row_seed(7, 128, 0, 0)
+        match = fpfn._canonical_match_count(point, seed)
+        decision = int(match >= point["tau_count"])
+        truth = int(point["realized_j"] >= point["j_tau"])
+        probability = fpfn._binomial_survival(
+            128, point["tau_count"], point["realized_j"] +
+            (1.0 - point["realized_j"]) / 64.0)
+        row = self.csv_row(
+            _THRESHOLD_FPFN_HEADER, schema_version=fpfn.SCHEMA_VERSION,
+            profile="readiness-toy-v1", security="TOY",
+            estimator_model=fpfn.ESTIMATOR_MODEL, hash_randomness="resampled",
+            root_seed=7, k=128, m=64, set_size=1000,
+            tau_count=point["tau_count"], j_tau=point["j_tau"], grid_index=0,
+            target_j=point["target_j"], signed_delta=point["signed_delta"],
+            absolute_delta=point["absolute_delta"], alpha=point["alpha"],
+            realized_intersection=point["realized_intersection"],
+            realized_union=point["realized_union"], realized_j=point["realized_j"],
+            trial_index=0, row_seed=seed, match_count=match, decision=decision,
+            exact_j_truth=truth,
+            outcome=("TP" if truth and decision else
+                     "TN" if not truth and not decision else
+                     "FP" if decision else "FN"),
+            predicted_decision_probability=probability,
+            predicted_error_probability=(1.0 - probability if truth else probability),
+            gaussian_error_approx=fpfn.gaussian_error_approx(point["realized_j"], 128))
+        row = row.split(",")
+        fields = _THRESHOLD_FPFN_HEADER.rstrip("\n").split(",")
+        row[fields.index("predicted_decision_probability")] = "0.5"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _THRESHOLD_FPFN_HEADER,
+                                   [",".join(row)])
+            plan = {cell["cell_id"]: {"command": [
+                "--profile=readiness-toy-v1", "--security=TOY", "--mode=fpfn",
+                "--point-k=128", "--grid-index=0", "--m=64",
+                "--set_size=1000", "--trials=1", "--seed=7"]}}
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], plan)
+
+    def test_c1_piccard_double_count_per_row_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _SQRT_TIMING_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("piccard-benchmark-csv-v1", family="piccard_std128",
+                                axis="control", axis_value="default")
+        rows = [self.csv_row(_SQRT_TIMING_HEADER, label=cell["cell_id"],
+                             encoding="onehot", k=128, m=64, set_size=1000,
+                             trials=1, accuracy_trials=1),
+                self.csv_row(_SQRT_TIMING_HEADER, label=cell["cell_id"],
+                             encoding="onehot", k=128, m=64, set_size=1000,
+                             trials=1, accuracy_trials=1)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_stdout_rows(root, cell, _SQRT_TIMING_HEADER, rows)
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_c1_sj16_missing_fit_topology_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
+        cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
+                                axis="fit", axis_value="per_element")
+        text = self.full_sj16_fixture().replace(
+            "k3072_fit_m=8192 median=1 q1=1 q3=1 iqr=0 samples=1\n", "")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(root, cell, "calibration.csv", text)
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": command}})
+
+    def test_c1_real_std192_forged_taxonomy_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _REAL_ENCODING_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
+                                axis_value="std192_encoding",
+                                axis="dblp_acm_u65536_artifact")
+        rows = [self.csv_row(_REAL_ENCODING_HEADER, profile_id="paper-std192-encoding-v1",
+                             run_class="primary", target_security_bits=192,
+                             comparison_eligible="false",
+                             comparison_scope="full-protocol", dataset="dblp_acm",
+                             variant="dblp_acm_u65536", k=128, m=64, method=method,
+                             timed_encoder_pairs=1, correctness_pair_calls=1,
+                             correctness_status="PASS")
+                for method in ("piccard_encode", "piccard_sqrt_encode")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(
+                root, cell, "encoding.csv", _REAL_ENCODING_HEADER +
+                "\n".join(rows) + "\n", "--csv=")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": command}})
+
+    def test_c1_real_threshold_truth_forgery_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _REAL_THRESHOLD_HEADER, _check_family_artifacts,
+            _threshold_seed, _threshold_tau, _threshold_boundary,
+            RevisionContractError)
+        cell = self.matrix_cell("real-threshold-csv-v1",
+                                family="threshold_dblp_fpfn")
+        requested = 0.25
+        tau = _threshold_tau(requested, 128, 64)
+        realized = _threshold_boundary(tau, 128, 64)
+        row = self.csv_row(
+            _REAL_THRESHOLD_HEADER, schema_version="piccard-real-threshold-v1",
+            dataset="dblp_acm", variant="dblp_acm_u65536", pair_id="p0",
+            pair_kind="sampled_nonmatch", label=0, record_a="a", record_b="b",
+            k=128, m=64, hash_randomness="resampled", root_seed=7,
+            split="evaluation", rank_position=1, threshold_trial_index=0,
+            hash_seed=_threshold_seed(7, "p0", 0), match_count=0, decision=0,
+            label_truth=1, label_outcome="TN", exact_j_truth=1,
+            exact_j_outcome="FN", exact_jaccard_bucketed=0.5,
+            requested_j_threshold=requested, tau_count=tau,
+            realized_j_tau=realized, calibration_fpr=0.0,
+            calibration_fnr=0.0, calibration_balanced_error=0.0,
+            threshold_workload_sha256="a" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(
+                root, cell, "threshold.csv", _REAL_THRESHOLD_HEADER + row + "\n",
+                "--csv=")
+            command += ["--seed=7", "--threshold-trials=1"]
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": command}})
 
 
 if __name__ == "__main__":
