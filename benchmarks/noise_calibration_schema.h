@@ -18,6 +18,9 @@ struct EvidenceOptions {
     bool pre_threshold = false;
     bool coverage = false;
     bool smoke = false;
+    // Revision-only output taxonomy; legacy evidence keeps its historical
+    // all_match/no_match/random labels when this remains false.
+    bool revision_pattern_taxonomy = false;
     bool preflight_context = false;
     std::string profile_manifest;
     std::string profile;

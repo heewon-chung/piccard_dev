@@ -228,6 +228,12 @@ TEST(NoiseEvidenceParser, AcceptsCanonicalOneHotStd128Options) {
     EXPECT_EQ(options.seed, UINT64_C(20260729));
 }
 
+TEST(NoiseEvidenceParser, AcceptsRevisionPatternTaxonomySelector) {
+    auto args = RequiredEvidenceArgs();
+    args.push_back("--revision_pattern_taxonomy");
+    EXPECT_NO_THROW(nc::ParseEvidenceOptions(args));
+}
+
 TEST(NoiseEvidenceParser, AcceptsSqrtStd192AndSplitValueSyntax) {
     const nc::EvidenceOptions options = nc::ParseEvidenceOptions({
         "--pre_threshold",
@@ -620,6 +626,20 @@ TEST(NoiseCalibrationSchema, DetailRowsSortByTheCanonicalTuple) {
     EXPECT_EQ(sorted[2].consumer_k, 64u);
     EXPECT_EQ(sorted[3].consumer_m, 32u);
     EXPECT_EQ(sorted[4].rep_index, 2u);
+}
+
+TEST(NoiseCalibrationSchema, RevisionPatternsUseFrozenTaxonomyOrder) {
+    auto zero = SuccessfulDetail(128, 64, "zero", 0, 20.0, 170.0, 4000);
+    auto random = SuccessfulDetail(128, 64, "random", 0, 20.0, 170.0, 4000);
+    auto adversarial = SuccessfulDetail(
+        128, 64, "adversarial", 0, 20.0, 170.0, 4000);
+
+    const auto sorted = nc::CanonicalizeDetailRows(
+        {adversarial, zero, random});
+    ASSERT_EQ(sorted.size(), 3u);
+    EXPECT_EQ(sorted[0].pattern, "zero");
+    EXPECT_EQ(sorted[1].pattern, "random");
+    EXPECT_EQ(sorted[2].pattern, "adversarial");
 }
 
 TEST(NoiseCalibrationSchema, DetailHashIncludesHeaderAndCanonicalRows) {

@@ -139,6 +139,29 @@ static const char* PatternName(Pattern p) {
     return "?";
 }
 
+/**
+ * @brief Return the strict-evidence pattern order and output taxonomy.
+ *
+ * The revision taxonomy is a naming/order adapter only: each label retains
+ * the legacy synthetic input that produced it.  The default path deliberately
+ * preserves the historical order and labels byte-for-byte.
+ */
+static std::vector<std::pair<Pattern, std::string>> StrictEvidencePatterns(
+    bool revision_pattern_taxonomy) {
+    if (revision_pattern_taxonomy) {
+        return {
+            {Pattern::NoMatch, "zero"},
+            {Pattern::Random, "random"},
+            {Pattern::AllMatch, "adversarial"},
+        };
+    }
+    return {
+        {Pattern::AllMatch, "all_match"},
+        {Pattern::NoMatch, "no_match"},
+        {Pattern::Random, "random"},
+    };
+}
+
 /// Deterministic seed for one measurement cell. A single shared generator
 /// consumed in grid order makes a cell's signatures depend on which other cells
 /// ran before it, so `--circuit=onehot` and `--circuit=all` would disagree on
@@ -1304,13 +1327,11 @@ static int RunStrictEvidence(
                     "-s" + std::to_string(scaling_mod_size);
                 std::vector<nc::DetailRow> details;
                 for (const auto& consumer : options.consumer_points) {
-                    for (Pattern pattern :
-                         {Pattern::AllMatch,
-                          Pattern::NoMatch,
-                          Pattern::Random}) {
+                    for (const auto& pattern_spec : StrictEvidencePatterns(
+                             options.revision_pattern_taxonomy)) {
+                        const Pattern pattern = pattern_spec.first;
+                        const std::string& pattern_name = pattern_spec.second;
                         for (uint32_t rep = 0; rep < options.reps; ++rep) {
-                            const std::string pattern_name =
-                                PatternName(pattern);
                             const uint64_t rep_seed =
                                 nc::DeriveEvidenceSeed(
                                     options.seed,
@@ -1898,6 +1919,7 @@ static void PrintUsage() {
         << "  --transcript_stat_bits=N  Exactly 40, 64, or 128\n"
         << "  --max_queries=N        Inclusive evidence range 1..2^63\n"
         << "  --smoke                Permit fewer than five evidence repetitions\n"
+        << "  --revision_pattern_taxonomy  Use zero/random/adversarial labels\n"
         << "  --sweep                Run the calibration grid (default: single point)\n"
         << "  --circuit=C            onehot | sqrt | threshold | all (default: all)\n"
         << "  --security=S           TOY | STD128 (single-point mode; default STD128)\n"

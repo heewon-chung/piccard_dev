@@ -353,6 +353,7 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
     bool saw_margin = false;
     bool saw_reps = false;
     bool saw_seed = false;
+    bool saw_revision_pattern_taxonomy = false;
 
     for (size_t index = 0; index < args.size(); ++index) {
         const std::string& arg = args[index];
@@ -365,6 +366,14 @@ EvidenceOptions ParseEvidenceOptions(const std::vector<std::string>& args) {
         }
         if (arg == "--smoke") {
             options.smoke = true;
+            continue;
+        }
+        if (arg == "--revision_pattern_taxonomy") {
+            Require(
+                !saw_revision_pattern_taxonomy,
+                "duplicate --revision_pattern_taxonomy");
+            saw_revision_pattern_taxonomy = true;
+            options.revision_pattern_taxonomy = true;
             continue;
         }
         if (arg == "--preflight_context") {
@@ -849,23 +858,54 @@ std::string SerializeDetailCsvRow(const DetailRow& row) {
 }
 
 std::vector<DetailRow> CanonicalizeDetailRows(std::vector<DetailRow> rows) {
+    const bool revision_pattern_taxonomy =
+        std::all_of(
+            rows.begin(),
+            rows.end(),
+            [](const DetailRow& row) {
+                return row.pattern == "zero" ||
+                       row.pattern == "random" ||
+                       row.pattern == "adversarial";
+            }) &&
+        std::any_of(
+            rows.begin(),
+            rows.end(),
+            [](const DetailRow& row) { return row.pattern == "zero"; }) &&
+        std::any_of(
+            rows.begin(),
+            rows.end(),
+            [](const DetailRow& row) {
+                return row.pattern == "adversarial";
+            });
+    const auto pattern_key = [revision_pattern_taxonomy](
+                                  const std::string& pattern) {
+        if (!revision_pattern_taxonomy) {
+            return std::pair<int, std::string>{0, pattern};
+        }
+        const int rank = pattern == "zero"
+            ? 0
+            : pattern == "random"
+                ? 1
+                : 2;
+        return std::pair<int, std::string>{rank, {}};
+    };
     std::sort(
         rows.begin(),
         rows.end(),
-        [](const DetailRow& left, const DetailRow& right) {
-            return std::tie(
+        [&pattern_key](const DetailRow& left, const DetailRow& right) {
+            return std::make_tuple(
                        left.key_id,
                        left.candidate_id,
                        left.consumer_k,
                        left.consumer_m,
-                       left.pattern,
+                       pattern_key(left.pattern),
                        left.rep_index) <
-                   std::tie(
+                   std::make_tuple(
                        right.key_id,
                        right.candidate_id,
                        right.consumer_k,
                        right.consumer_m,
-                       right.pattern,
+                       pattern_key(right.pattern),
                        right.rep_index);
         });
     return rows;

@@ -28,6 +28,10 @@ value = lambda name, default="": next(
 mode = os.environ.get("FAKE_MODE", "success")
 log_path = os.environ.get("FAKE_SIGNAL_LOG")
 
+if "--print_source_commit" in args:
+    print(os.environ["FAKE_EMBEDDED_SOURCE"])
+    raise SystemExit(0)
+
 def log(text):
     if log_path:
         with open(log_path, "a") as out:
@@ -45,9 +49,15 @@ manifest = json.loads(manifest_path.read_text())
 if "--print_profile_manifest" in args:
     sys.stdout.write(manifest_path.read_text())
     raise SystemExit(0)
-if "--print_source_commit" in args:
-    print(os.environ["FAKE_EMBEDDED_SOURCE"])
-    raise SystemExit(0)
+if ("--pre_threshold" in args and
+        mode == "successor_contract" and
+        int(value("--reps")) < 5 and "--smoke" not in args):
+    print(
+        "Invalid pre-threshold evidence command: --reps must be at least 5 "
+        "for evidence (use --smoke to override)",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 key_id = value("--key_id")
 partition = next(p for p in manifest["partitions"] if p["key_id"] == key_id)
@@ -90,8 +100,12 @@ if mode == "replace_binary":
     replacement.write_bytes(benchmark_path.read_bytes() + b"\n# replaced\n")
     replacement.chmod(0o755)
     replacement.replace(benchmark_path)
-if mode in ("crash", "publisher_cleanup_path_swap",
+if mode in ("crash", "successor_stderr", "successor_stderr_flood",
+            "publisher_cleanup_path_swap",
             "raw_cleanup_path_swap"):
+    if mode == "successor_stderr_flood":
+        os.write(2, b"ERR-HEAD\n" + b"E" * 12_000 + b"\nERR-TAIL\n")
+        raise SystemExit(29)
     os.write(1, b"FAKE_BENCH_STDOUT crash\n")
     os.write(2, b"FAKE_BENCH_STDERR crash\n")
     raise SystemExit(23)
@@ -139,7 +153,11 @@ sms_values = [int(x) for x in value("--scaling_mod_grid").split(",")]
 max_delta = int(value("--max_depth_delta"))
 reps = int(value("--reps"))
 consumers = [tuple(map(int, x.split(":"))) for x in value("--consumer_points").split(",")]
-patterns = ("all_match", "no_match", "random")
+patterns = (
+    ("zero", "random", "adversarial")
+    if "--revision_pattern_taxonomy" in args
+    else ("all_match", "no_match", "random")
+)
 details_dir = pathlib.Path(value("--detail_dir"))
 aggregate_path = pathlib.Path(value("--aggregate_csv"))
 candidate_manifest_path = pathlib.Path(value("--candidate_manifest"))
@@ -2016,6 +2034,162 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             f"--results-root={result_root}",
         )
         self.assertEqual(retry.returncode, 0, retry.stderr)
+
+    def test_successor_toy_child_binds_smoke_selector_and_revision_patterns(self):
+        result_root = self.root / "successor-toy-contract"
+        result = self.run_runner(
+            "--revision-cell=paper-v1::flooding::profile=primary40",
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            f"--results-root={result_root}",
+            mode="successor_contract",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invocations = [
+            json.loads(line)
+            for line in self.invocation_log.read_text().splitlines()
+        ]
+        child = next(
+            args for args in invocations
+            if any(arg.startswith("--aggregate_csv=") for arg in args)
+        )
+        self.assertEqual(child.count("--smoke"), 1)
+        self.assertEqual(child.count("--reps=1"), 1)
+        self.assertEqual(child.count("--revision_pattern_taxonomy"), 1)
+        detail_path = next(result_root.rglob("details/*.csv"))
+        with detail_path.open(newline="") as stream:
+            patterns = [row["pattern"] for row in csv.DictReader(stream)]
+        self.assertEqual(
+            set(patterns), {"zero", "random", "adversarial"})
+        self.assertNotIn("all_match", patterns)
+        self.assertNotIn("no_match", patterns)
+
+    def test_public_successor_cli_rejects_legacy_smoke_override(self):
+        result_root = self.root / "successor-public-smoke"
+        result = self.run_runner(
+            "--revision-cell=paper-v1::flooding::profile=primary40",
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            "--smoke",
+            f"--results-root={result_root}",
+            dry_run=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rejects --smoke", result.stderr)
+        self.assertFalse(result_root.exists())
+
+    def test_successor_paper_dry_run_child_uses_five_reps_without_smoke(self):
+        result_root = self.root / "successor-paper-contract"
+        result = self.run_runner(
+            "--run-profile=paper-v1",
+            "--profile=primary40",
+            "--repetitions=5",
+            f"--results-root={result_root}",
+            dry_run=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = json.loads(
+            result.stdout.split("command=", 1)[1].splitlines()[0])
+        self.assertEqual(command.count("--reps=5"), 1)
+        self.assertNotIn("--smoke", command)
+        self.assertEqual(command.count("--revision_pattern_taxonomy"), 1)
+
+    def test_successor_manifest_replaces_only_source_sentinel_byte_exactly(self):
+        result_root = self.root / "successor-manifest-contract"
+        result = self.run_runner(
+            "--revision-cell=paper-v1::flooding::profile=primary40",
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            f"--results-root={result_root}",
+            mode="successor_manifest",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sentinel = b"runtime-source-commit"
+        self.assertEqual(MATRIX.read_bytes().count(sentinel), 1)
+        expected = MATRIX.read_bytes().replace(
+            sentinel, self.env["FAKE_EMBEDDED_SOURCE"].encode(), 1)
+        self.assertEqual(
+            (result_root / "resolved_noise_profiles.json").read_bytes(),
+            expected,
+        )
+
+    def test_successor_manifest_rejects_zero_or_multiple_source_sentinels(self):
+        sentinel = b"runtime-source-commit"
+        for mutation in ("zero", "multiple"):
+            with self.subTest(mutation=mutation):
+                copied_root = self.root / ("malformed-" + mutation)
+                copied_scripts = copied_root / "scripts"
+                copied_benchmarks = copied_root / "benchmarks"
+                copied_scripts.mkdir(parents=True)
+                copied_benchmarks.mkdir()
+                wrapper = copied_scripts / "run_noise_profiles.sh"
+                shutil.copy2(RUNNER, wrapper)
+                wrapper.chmod(0o755)
+                shutil.copy2(
+                    REPO / "scripts" / "revision_flooding_adapter.py",
+                    copied_scripts / "revision_flooding_adapter.py",
+                )
+                shutil.copy2(
+                    REPO / "benchmarks" / "revision_matrix.json",
+                    copied_benchmarks / "revision_matrix.json",
+                )
+                tracked = MATRIX.read_bytes()
+                if mutation == "zero":
+                    tracked = tracked.replace(sentinel, b"", 1)
+                else:
+                    tracked = tracked.replace(
+                        sentinel, sentinel + sentinel, 1)
+                (copied_scripts / "noise_profiles.json").write_bytes(tracked)
+                result = subprocess.run(
+                    [
+                        str(wrapper),
+                        "--run-profile=paper-v1",
+                        "--profile=primary40",
+                        "--repetitions=5",
+                        f"--results-root={self.root / ('output-' + mutation)}",
+                    ],
+                    cwd=copied_root,
+                    env={**self.env, "DRY_RUN": "1"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("exactly one source sentinel", result.stderr)
+
+    def test_successor_child_failure_preserves_bounded_stderr_diagnostic(self):
+        result_root = self.root / "successor-stderr-contract"
+        result = self.run_runner(
+            "--revision-cell=paper-v1::flooding::profile=primary40",
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            f"--results-root={result_root}",
+            mode="successor_stderr",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("successor flooding shard exited 23", result.stderr)
+        self.assertIn("FAKE_BENCH_STDERR crash", result.stderr)
+        self.assertLess(len(result.stderr), 8192)
+
+    def test_successor_child_failure_truncates_large_stderr_deterministically(self):
+        result_root = self.root / "successor-stderr-flood-contract"
+        result = self.run_runner(
+            "--revision-cell=paper-v1::flooding::profile=primary40",
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            f"--results-root={result_root}",
+            mode="successor_stderr_flood",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ERR-HEAD", result.stderr)
+        self.assertIn("ERR-TAIL", result.stderr)
+        self.assertIn("PICCARD_SUCCESSOR_DIAGNOSTIC_TRUNCATED", result.stderr)
+        self.assertLessEqual(len(result.stderr.encode()), 4096 + 128)
 
     def test_unknown_runner_argument_still_rejected(self):
         result_root = self.root / "phase5-unknown"

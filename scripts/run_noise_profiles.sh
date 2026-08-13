@@ -51,11 +51,27 @@ DIAGNOSTIC_LOG_NAMES = {
     "stderr": "benchmark.stderr.log",
 }
 MAX_DIAGNOSTIC_LOG_BYTES = 1_048_576
+MAX_SUCCESSOR_DIAGNOSTIC_BYTES = 4_096
 
 
 def fail(message, code=1):
     print(message, file=sys.stderr)
     raise SystemExit(code)
+
+
+def bounded_successor_diagnostic(stderr):
+    """Return child stderr in a deterministic, bounded failure message."""
+    if not stderr:
+        return ""
+    payload = str(stderr).strip().encode("utf-8", errors="replace")
+    if len(payload) <= MAX_SUCCESSOR_DIAGNOSTIC_BYTES:
+        return payload.decode("utf-8", errors="replace")
+    marker = b"\n[PICCARD_SUCCESSOR_DIAGNOSTIC_TRUNCATED]\n"
+    budget = MAX_SUCCESSOR_DIAGNOSTIC_BYTES - len(marker)
+    head = budget // 2
+    tail = budget - head
+    return (payload[:head] + marker + payload[-tail:]).decode(
+        "utf-8", errors="replace")
 
 
 def sha256_bytes(data):
@@ -2339,7 +2355,7 @@ def _successor_identity_arguments(partition, matrix, policy,
 
 def _successor_partition_command(
     bench, partition, matrix, policy, manifest_path, source_commit,
-    repetitions, output_dir, seed, threads,
+    repetitions, output_dir, seed, threads, smoke,
 ):
     """Return the one immutable bench_noise shard command for a partition."""
     command = [
@@ -2351,6 +2367,7 @@ def _successor_partition_command(
         f"--ring_candidates={partition['requested_ring_dim']}",
         "--timeout_seconds=120",
         f"--reps={repetitions}",
+        "--revision_pattern_taxonomy",
         f"--aggregate_csv={output_dir / 'aggregate.csv'}",
         f"--detail_dir={output_dir / 'details'}",
         f"--candidate_manifest={output_dir / 'candidates.json'}",
@@ -2363,15 +2380,32 @@ def _successor_partition_command(
         fail(f"--seed={seed} contradicts frozen successor seed {ROOT_SEED}")
     if threads != 2:
         fail(f"--threads={threads} contradicts frozen successor threads 2")
+    if smoke:
+        command.append("--smoke")
     return command
 
 
-def _resolved_successor_manifest(noise_matrix, source_commit):
-    resolved = json.loads(json.dumps(noise_matrix))
-    if resolved.get("source_commit") != "runtime-source-commit":
+def _resolved_successor_manifest(noise_matrix, source_commit,
+                                tracked_manifest_bytes):
+    """Replace exactly one source sentinel without reserializing JSON."""
+    if not isinstance(tracked_manifest_bytes, bytes):
+        fail("tracked noise matrix bytes are required")
+    sentinel = b"runtime-source-commit"
+    if tracked_manifest_bytes.count(sentinel) != 1:
+        fail("tracked noise matrix must contain exactly one source sentinel")
+    try:
+        tracked_matrix = json.loads(tracked_manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("tracked noise matrix is not valid UTF-8 JSON")
+    if tracked_matrix != noise_matrix:
+        fail("tracked noise matrix changed while resolving")
+    if noise_matrix.get("source_commit") != "runtime-source-commit":
         fail("tracked noise matrix must use runtime-source-commit policy")
-    resolved["source_commit"] = source_commit
-    return resolved
+    try:
+        replacement = source_commit.encode("ascii")
+    except UnicodeEncodeError:
+        fail("resolved noise matrix source commit is not ASCII")
+    return tracked_manifest_bytes.replace(sentinel, replacement, 1)
 
 
 def _write_successor_metadata(root, cell_id, run_profile, profile_id,
@@ -2482,7 +2516,9 @@ def _run_successor_flooding(script_dir, repo_root, options):
         _, grace_ms, _ = resolve_timing(bench)
     source_commit = _successor_source_commit(
         repo_root, bench, dry_run, grace_ms, environment)
-    resolved_noise = _resolved_successor_manifest(noise_matrix, source_commit)
+    tracked_manifest_path = script_dir / "noise_profiles.json"
+    resolved_noise = _resolved_successor_manifest(
+        noise_matrix, source_commit, tracked_manifest_path.read_bytes())
 
     policy_by_id = {
         policy["profile_id"]: policy
@@ -2503,7 +2539,8 @@ def _run_successor_flooding(script_dir, repo_root, options):
             command = _successor_partition_command(
                 bench, partition, noise_matrix, policy,
                 "{profile_manifest}", source_commit, repetitions,
-                placeholder, seed, threads)
+                placeholder, seed, threads,
+                run_profile == adapter.TOY_PROFILE)
             print(
                 "SHARD " + (options.get("revision_cell") or profile_id) +
                 " profile=" + profile_id +
@@ -2519,10 +2556,7 @@ def _run_successor_flooding(script_dir, repo_root, options):
     resolved_root = output_root
     resolved_root.mkdir(parents=True, exist_ok=False)
     manifest_path = resolved_root / "resolved_noise_profiles.json"
-    manifest_path.write_text(
-        json.dumps(resolved_noise, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    manifest_path.write_bytes(resolved_noise)
     invocation_count = 0
     for partition in selected_partitions:
         shard_root = resolved_root / "profiles" / profile_id / partition["key_id"]
@@ -2530,7 +2564,8 @@ def _run_successor_flooding(script_dir, repo_root, options):
         (shard_root / "details").mkdir()
         command = _successor_partition_command(
             bench, partition, noise_matrix, policy, manifest_path,
-            source_commit, repetitions, shard_root, seed, threads)
+            source_commit, repetitions, shard_root, seed, threads,
+            run_profile == adapter.TOY_PROFILE)
         environment["PICCARD_PROFILE_MANIFEST"] = str(manifest_path)
         try:
             verify_benchmark_binary(bench, sha256_file(bench))
@@ -2538,7 +2573,14 @@ def _run_successor_flooding(script_dir, repo_root, options):
             if result["timed_out"]:
                 fail("successor flooding shard timed out")
             if result["returncode"] != 0:
-                fail("successor flooding shard exited " + str(result["returncode"]))
+                diagnostic = bounded_successor_diagnostic(result["stderr"])
+                message = (
+                    "successor flooding shard exited " +
+                    str(result["returncode"])
+                )
+                if diagnostic:
+                    message += ": " + diagnostic
+                fail(message)
         except SupervisionError as error:
             fail("successor flooding shard failed: " + str(error))
         invocation_count += 1
