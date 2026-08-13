@@ -2255,10 +2255,12 @@ std::string RealDatasetVariant(const RevisionCell& cell) {
 void ValidateRealDatasetRow(const RevisionRow& row,
                             const std::string& artifact,
                             const std::string& variant,
-                            uint64_t paper_count) {
-    if (row.row_id != artifact || row.status != "MEASURED" ||
+                            uint64_t paper_count,
+                            bool diagnostic) {
+    const std::string expected_status = diagnostic ? "DIAGNOSTIC" : "MEASURED";
+    if (row.row_id != artifact || row.status != expected_status ||
         row.reason != "" || row.reason_code != "" ||
-        row.terminal_status != "MEASURED" || row.method != artifact ||
+        row.terminal_status != expected_status || row.method != artifact ||
         row.variant != variant || !row.timing_contract.empty() ||
         !row.raw_timing_contract.empty() || !row.phase.empty() ||
         !row.pattern.empty() || !row.fit_authority.empty() ||
@@ -2283,10 +2285,12 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
         variant == "enron_u1048576" ? "1048576" : "65536";
     const std::string artifact = cell.axis_value;
     if (artifact != "accuracy" && artifact != "summary" &&
-        artifact != "std128_timing") {
+        artifact != "std128_timing" && artifact != "std192_encoding") {
         RejectRealDataset(
-            "only accuracy, summary, and std128_timing artifacts are supported");
+            "only accuracy, summary, std128_timing, and std192_encoding "
+            "artifacts are supported");
     }
+    const bool encoding = artifact == "std192_encoding";
 
     const std::string expected_producer =
         artifact == "summary" ? "summarize_real_datasets.py"
@@ -2314,9 +2318,14 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
     if (cell.timeout_class != "standard") {
         RejectRealDataset("timeout class must be standard");
     }
-    if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
-        !cell.comparison_eligible) {
-        RejectRealDataset("real-dataset cells must be table eligible");
+    const std::string expected_eligibility =
+        encoding ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
+    const bool expected_table_eligible = !encoding;
+    const bool expected_comparison_eligible = !encoding;
+    if (cell.eligibility != expected_eligibility ||
+        cell.table_eligible != expected_table_eligible ||
+        cell.comparison_eligible != expected_comparison_eligible) {
+        RejectRealDataset("real-dataset eligibility does not match artifact");
     }
 
     const std::map<std::string, std::string> expected_axes = {
@@ -2334,11 +2343,16 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
         RejectRealDataset("real-dataset cell attributes do not match contract");
     }
 
-    const uint64_t paper_count = artifact == "std128_timing" ? 30 : 1;
-    const std::map<std::string, uint64_t> expected_paper_counts = {
+    const uint64_t paper_count =
+        artifact == "std128_timing" || encoding ? 30 : 1;
+    std::map<std::string, uint64_t> expected_paper_counts = {
         {artifact, paper_count}};
-    const std::map<std::string, uint64_t> expected_toy_counts = {
+    std::map<std::string, uint64_t> expected_toy_counts = {
         {artifact, 1}};
+    if (encoding) {
+        expected_paper_counts.emplace("correctness", 1);
+        expected_toy_counts.emplace("correctness", 1);
+    }
     if (cell.paper_count != paper_count || cell.toy_count != 1 ||
         cell.paper_trials != paper_count || cell.toy_trials != 1 ||
         cell.paper_counts != expected_paper_counts ||
@@ -2349,7 +2363,7 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
         RejectRealDataset("real-dataset cells require one expected row");
     }
     ValidateRealDatasetRow(cell.expected_rows.front(), artifact, variant,
-                            paper_count);
+                            paper_count, encoding);
 }
 
 void ValidateRealDatasetMode(RevisionRunMode mode) {
@@ -2372,6 +2386,7 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
     const std::string variant = cell.axes.at("variant");
     const bool accuracy = cell.axis_value == "accuracy";
     const bool timing = cell.axis_value == "std128_timing";
+    const bool encoding = cell.axis_value == "std192_encoding";
     const bool toy = mode == RevisionRunMode::Toy;
 
     RevisionInvocationPlan plan;
@@ -2397,6 +2412,24 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
                 (toy ? "readiness-toy-v1" : "paper-v1"),
             "--csv={output}/timing.csv",
             "--workload-manifest-out={output}/timing.manifest.tsv",
+        };
+    } else if (encoding) {
+        const std::string profile =
+            toy ? "readiness-toy-v1" : "paper-std192-encoding-v1";
+        plan.concrete_profile = profile;
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--mode=encoding",
+            "--dataset-manifest={variant_manifest}",
+            "--profile=" + profile,
+            "--methods=onehot,sqrt",
+            "--k=128",
+            "--m=64",
+            std::string("--encoding-iters=") + (toy ? "1" : "30"),
+            "--correctness-trials=1",
+            "--seed={seed}",
+            "--csv={output}/encoding.csv",
+            "--workload-manifest-out={output}/encoding.manifest.tsv",
         };
     } else if (accuracy) {
         plan.concrete_profile = cell.profile;

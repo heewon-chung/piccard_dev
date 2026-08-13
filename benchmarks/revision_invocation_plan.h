@@ -135,12 +135,12 @@ RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
                                                 RevisionRunMode mode);
 
 /**
- * @brief Plan one validated real-dataset accuracy or summary cell.
+ * @brief Plan one validated real-dataset artifact cell.
  *
- * The planner accepts the six accuracy/summary cells for the DBLP-ACM and
- * Enron variants.  It emits pure argv data for either
- * `bench_real_datasets` or `summarize_real_datasets.py`; no dataset, FHE
- * context, or producer process is touched while planning.
+ * The planner accepts the accuracy, summary, STD128 timing, and STD192
+ * encoding cells for the DBLP-ACM and Enron variants.  It emits pure argv
+ * data for either `bench_real_datasets` or `summarize_real_datasets.py`; no
+ * dataset, FHE context, or producer process is touched while planning.
  */
 RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
                                                    RevisionRunMode mode);
