@@ -59,6 +59,29 @@ std::string RoleForAxis(const std::string& axis) {
 
 }  // namespace
 
+std::vector<std::string> CanonicalizeSqrtRevisionPlannerArgv(
+    const std::vector<std::string>& argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(argv.size());
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--seed=", 0) != 0) {
+            canonical.push_back(arg);
+            continue;
+        }
+
+        const std::string value = arg.substr(std::string("--seed=").size());
+        if (value == "{seed}") {
+            canonical.push_back(arg);
+            continue;
+        }
+        // ParseUnsigned rejects empty, signed, non-decimal, zero, and
+        // non-canonical values before any producer setup can begin.
+        (void)ParseUnsigned(value, "--seed");
+        canonical.emplace_back("--seed={seed}");
+    }
+    return canonical;
+}
+
 SqrtRevisionRequest ParseSqrtRevisionArgs(
     const std::vector<std::string>& argv) {
     SqrtRevisionRequest request;
@@ -166,13 +189,18 @@ SqrtRevisionSelection SelectSqrtRevisionCell(
 SqrtRevisionSelection SelectSqrtRevisionCell(
     const RevisionMatrix& matrix, const std::vector<std::string>& argv,
     RevisionRunMode mode) {
-    return SelectSqrtRevisionCell(matrix, ParseSqrtRevisionArgs(argv), mode);
+    return SelectSqrtRevisionCell(
+        matrix, ParseSqrtRevisionArgs(
+                    CanonicalizeSqrtRevisionPlannerArgv(argv)),
+        mode);
 }
 
 SqrtRevisionExecutionPlan PlanSqrtRevisionExecution(
     const RevisionMatrix& matrix, const std::vector<std::string>& argv,
     RevisionRunMode mode) {
-    const SqrtRevisionRequest request = ParseSqrtRevisionArgs(argv);
+    const std::vector<std::string> canonical_argv =
+        CanonicalizeSqrtRevisionPlannerArgv(argv);
+    const SqrtRevisionRequest request = ParseSqrtRevisionArgs(canonical_argv);
     SqrtRevisionExecutionPlan execution;
     execution.selection = SelectSqrtRevisionCell(matrix, request, mode);
     execution.role = RoleForAxis(execution.selection.cell.axis);

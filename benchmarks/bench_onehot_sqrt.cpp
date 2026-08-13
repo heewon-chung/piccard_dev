@@ -824,6 +824,7 @@ static void PrintSqrtRevisionTerminalRow(
               << ",cell_id=" << execution.selection.cell.cell_id
               << ",row_id=" << row.row_id
               << ",status=" << row.status
+              << ",terminal_status=" << row.terminal_status
               << ",reason=" << row.reason
               << ",reason_code=" << row.reason_code
               << ",measured_count=" << row.measured_count << "\n";
@@ -857,10 +858,17 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     const auto [set_a, set_b] = MakeRandomSetsWithOverlap(
         execution.point.set_size, 0.5, revision_rng);
     const double j_true = ExactJaccard(set_a, set_b);
-    const auto onehot_row = RunMultiTrial(
+    auto onehot_row = RunMultiTrial(
         onehot, set_a, set_b, j_true,
         "revision_" + execution.selection.cell.cell_id, "onehot", 1,
         execution.onehot_runs);
+    onehot_row.param_set_size = execution.point.set_size;
+    onehot_row.hash_randomness = HashRandomnessName(config.hash_randomness);
+    onehot_row.hash_root_seed = config.seed;
+    onehot_row.hash_seed = config.hash_randomness == HashRandomness::Fixed
+        ? onehot_params.hash_seed : 0;
+    ApplyBenchmarkProfile(config, onehot_row,
+                          BenchmarkMeasurementKind::FheTiming);
     csv.WriteRow(onehot_row);
 
     if (!execution.sqrt_applicable) {
@@ -872,10 +880,17 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     sqrt_params.ValidateSqrt();
     SqrtPiccard sqrt_engine(sqrt_params);
     sqrt_engine.KeyGen();
-    const auto sqrt_row = RunMultiTrial(
+    auto sqrt_row = RunMultiTrial(
         sqrt_engine, set_a, set_b, j_true,
         "revision_" + execution.selection.cell.cell_id, "sqrt", 3,
         execution.sqrt_runs);
+    sqrt_row.param_set_size = execution.point.set_size;
+    sqrt_row.hash_randomness = HashRandomnessName(config.hash_randomness);
+    sqrt_row.hash_root_seed = config.seed;
+    sqrt_row.hash_seed = config.hash_randomness == HashRandomness::Fixed
+        ? sqrt_params.hash_seed : 0;
+    ApplyBenchmarkProfile(config, sqrt_row,
+                          BenchmarkMeasurementKind::FheTiming);
     csv.WriteRow(sqrt_row);
 }
 

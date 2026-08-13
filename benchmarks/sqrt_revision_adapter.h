@@ -59,6 +59,16 @@ struct SqrtRevisionExecutionPlan {
 SqrtRevisionRequest ParseSqrtRevisionArgs(
     const std::vector<std::string>& argv);
 
+/**
+ * @brief Normalize a concrete runtime seed to the planner's `{seed}` token.
+ *
+ * The campaign runner materializes the seed before spawning a producer.  The
+ * seed is validated here, but only this planner copy is rewritten; producer
+ * runtime configuration must continue to use its concrete seed value.
+ */
+std::vector<std::string> CanonicalizeSqrtRevisionPlannerArgv(
+    const std::vector<std::string>& argv);
+
 /** @brief Select one canonical sqrt-family cell and byte-match its plan. */
 SqrtRevisionSelection SelectSqrtRevisionCell(
     const RevisionMatrix& matrix,

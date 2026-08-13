@@ -117,6 +117,7 @@ static void PrintSqrtRevisionTerminalRow(
               << ",cell_id=" << execution.selection.cell.cell_id
               << ",row_id=" << row.row_id
               << ",status=" << row.status
+              << ",terminal_status=" << row.terminal_status
               << ",reason=" << row.reason
               << ",reason_code=" << row.reason_code
               << ",measured_count=" << row.measured_count << "\n";
@@ -363,6 +364,7 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     onehot_params.k = execution.point.k;
     onehot_params.m = execution.point.m;
     onehot_params.security = config.security_level;
+    onehot_params.hash_seed = config.seed;
     ApplyBenchmarkProfile(config, onehot_params);
     onehot_params.Validate();
     Piccard onehot(onehot_params);

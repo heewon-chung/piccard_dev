@@ -103,4 +103,68 @@ TEST(SqrtRevisionAdapter, RejectsGeometryRoleCountOrByteMismatches) {
                  std::invalid_argument);
 }
 
+TEST(SqrtRevisionAdapter,
+     CanonicalizesConcreteSeedOnlyForPlannerAndKeepsToyCounts) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Cells(matrix);
+    ASSERT_FALSE(cells.empty());
+
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        const auto canonical =
+            PlanSqrtRevisionCell(*cell, RevisionRunMode::Toy).argv;
+        auto runtime = canonical;
+        auto seed = std::find_if(
+            runtime.begin(), runtime.end(), [](const std::string& arg) {
+                return arg.rfind("--seed=", 0) == 0;
+            });
+        ASSERT_NE(seed, runtime.end());
+        *seed = "--seed=20260729";
+
+        const auto execution = PlanSqrtRevisionExecution(
+            matrix, runtime, RevisionRunMode::Toy);
+        EXPECT_EQ(execution.selection.plan.argv, canonical);
+        EXPECT_EQ(execution.onehot_runs, 1u);
+        EXPECT_EQ(execution.sqrt_runs,
+                  execution.sqrt_applicable ? 1u : 0u);
+    }
+}
+
+TEST(SqrtRevisionAdapter,
+     RejectsMissingDuplicateAndMalformedConcreteSeedBeforeSelection) {
+    const RevisionMatrix matrix = Load();
+    const auto cell = Cells(matrix).front();
+    const auto canonical =
+        PlanSqrtRevisionCell(*cell, RevisionRunMode::Toy).argv;
+
+    auto missing = canonical;
+    missing.erase(std::remove_if(
+        missing.begin(), missing.end(), [](const std::string& arg) {
+            return arg.rfind("--seed=", 0) == 0;
+        }), missing.end());
+    EXPECT_THROW(PlanSqrtRevisionExecution(matrix, missing,
+                                           RevisionRunMode::Toy),
+                 std::invalid_argument);
+
+    auto duplicate = canonical;
+    duplicate.push_back("--seed=20260729");
+    EXPECT_THROW(PlanSqrtRevisionExecution(matrix, duplicate,
+                                           RevisionRunMode::Toy),
+                 std::invalid_argument);
+
+    for (const std::string value : {"0", "0007", "abc", "{seed}extra"}) {
+        auto malformed = canonical;
+        auto seed = std::find_if(
+            malformed.begin(), malformed.end(), [](const std::string& arg) {
+                return arg.rfind("--seed=", 0) == 0;
+            });
+        ASSERT_NE(seed, malformed.end());
+        *seed = "--seed=" + value;
+        EXPECT_THROW(PlanSqrtRevisionExecution(matrix, malformed,
+                                               RevisionRunMode::Toy),
+                     std::invalid_argument)
+            << value;
+    }
+}
+
 }  // namespace

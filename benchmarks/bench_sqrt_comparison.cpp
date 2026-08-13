@@ -109,6 +109,7 @@ static void PrintSqrtRevisionTerminalRow(
               << ",cell_id=" << execution.selection.cell.cell_id
               << ",row_id=" << row.row_id
               << ",status=" << row.status
+              << ",terminal_status=" << row.terminal_status
               << ",reason=" << row.reason
               << ",reason_code=" << row.reason_code
               << ",measured_count=" << row.measured_count << "\n";
@@ -330,8 +331,10 @@ int main(int argc, char** argv) {
             params.k = execution.point.k;
             params.m = execution.point.m;
             params.security = config.sanitizer.security_level;
+            params.hash_seed = config.seed;
             ApplyBenchmarkProfile(config.sanitizer, params);
             params.flood_margin_bits = config.flood_margin_bits;
+            params.Validate();
             Piccard engine(params);
             engine.KeyGen();
             onehot_results.push_back(
@@ -352,8 +355,10 @@ int main(int argc, char** argv) {
             params.k = execution.point.k;
             params.m = execution.point.m;
             params.security = config.sanitizer.security_level;
+            params.hash_seed = config.seed;
             ApplyBenchmarkProfile(config.sanitizer, params);
             params.flood_margin_bits = config.flood_margin_bits;
+            params.ValidateSqrt();
             SqrtPiccard engine(params);
             engine.KeyGen();
             sqrt_results.push_back(
