@@ -157,5 +157,15 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode);
 
+/**
+ * @brief Dispatch one validated matrix cell to its family-specific planner.
+ *
+ * The dispatcher is pure: it never launches a producer or constructs an FHE
+ * context.  Family planners retain the matrix's RUN/NO_SPAWN status and
+ * project Paper, Toy, or DryRun row counts according to their contracts.
+ */
+RevisionInvocationPlan PlanRevisionCell(const RevisionCell& cell,
+                                        RevisionRunMode mode);
+
 }  // namespace benchmark
 }  // namespace piccard

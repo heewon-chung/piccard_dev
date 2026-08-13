@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -29,9 +31,25 @@ using piccard::benchmark::PlanSj16RevisionCell;
 using piccard::benchmark::PlanDynamicRevisionCell;
 using piccard::benchmark::PlanFloodingRevisionCell;
 using piccard::benchmark::PlanRealDatasetRevisionCell;
+using piccard::benchmark::PlanRevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
+}
+
+std::vector<std::string> ReadFixtureLines(const std::string& filename) {
+    const std::filesystem::path matrix_path(PICCARD_REVISION_MATRIX_PATH);
+    const std::filesystem::path fixture_path =
+        matrix_path.parent_path().parent_path() / "tests" / "fixtures" /
+        "revision_matrix" / filename;
+    std::ifstream input(fixture_path);
+    EXPECT_TRUE(input.is_open());
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty()) lines.push_back(line);
+    }
+    return lines;
 }
 
 std::vector<const RevisionCell*> PiccardCells(const RevisionMatrix& matrix) {
@@ -3627,5 +3645,144 @@ TEST(RevisionInvocationPlan,
     cell = source;
     cell.expected_rows.pop_back();
     EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan,
+     DispatchesEveryValidatedCellAcrossPaperAndDryRunWithoutSpawning) {
+    const RevisionMatrix matrix = Load();
+    ASSERT_EQ(matrix.cells.size(), 263u);
+
+    std::set<std::string> paper_ids;
+    std::set<std::string> dry_run_ids;
+    std::vector<std::string> previous_paper_argv;
+    std::vector<std::string> previous_dry_run_argv;
+    size_t run_count = 0;
+    size_t no_spawn_count = 0;
+
+    for (const RevisionCell& cell : matrix.cells) {
+        SCOPED_TRACE(cell.cell_id);
+        for (const RevisionRunMode mode : {RevisionRunMode::Paper,
+                                           RevisionRunMode::DryRun}) {
+            const RevisionInvocationPlan plan = PlanRevisionCell(cell, mode);
+            const bool dry_run = mode == RevisionRunMode::DryRun;
+            auto& plan_ids = dry_run ? dry_run_ids : paper_ids;
+            auto& previous_argv =
+                dry_run ? previous_dry_run_argv : previous_paper_argv;
+
+            ASSERT_TRUE(plan_ids.insert(plan.cell_id).second);
+            EXPECT_EQ(plan.cell_id, cell.cell_id);
+            EXPECT_EQ(plan.producer, cell.producer);
+            EXPECT_EQ(plan.invocation_status, cell.invocation_status);
+            ASSERT_EQ(plan.expected_rows.size(), cell.expected_rows.size());
+
+            for (size_t row_index = 0; row_index < plan.expected_rows.size();
+                 ++row_index) {
+                const RevisionRow& source_row =
+                    cell.expected_rows.at(row_index);
+                const RevisionRow& planned_row =
+                    plan.expected_rows.at(row_index);
+                EXPECT_EQ(planned_row.row_id, source_row.row_id);
+                if (cell.invocation_status == "RUN") {
+                    EXPECT_EQ(planned_row.measured_count,
+                              source_row.paper_measured_count);
+                } else {
+                    EXPECT_EQ(planned_row.status, "EXTRAPOLATED");
+                    EXPECT_EQ(planned_row.terminal_status, "EXTRAPOLATED");
+                    EXPECT_EQ(planned_row.measured_count, 0u);
+                }
+            }
+
+            if (cell.invocation_status == "RUN") {
+                if (!dry_run) ++run_count;
+                ASSERT_FALSE(plan.argv.empty());
+                EXPECT_EQ(plan.argv.front(),
+                          "--revision-cell=" + cell.cell_id);
+                EXPECT_EQ(std::count(plan.argv.begin(), plan.argv.end(),
+                                     "--revision-cell=" + cell.cell_id),
+                          1);
+                if (!previous_argv.empty()) {
+                    EXPECT_NE(plan.argv, previous_argv);
+                }
+                previous_argv = plan.argv;
+            } else {
+                if (!dry_run) ++no_spawn_count;
+                EXPECT_TRUE(plan.argv.empty());
+                EXPECT_TRUE(previous_argv.empty() ||
+                            previous_argv != plan.argv);
+            }
+        }
+    }
+
+    EXPECT_EQ(run_count, 260u);
+    EXPECT_EQ(no_spawn_count, 3u);
+    EXPECT_EQ(paper_ids.size(), 263u);
+    EXPECT_EQ(dry_run_ids.size(), 263u);
+}
+
+TEST(RevisionInvocationPlan,
+     DispatchesExactlyTheExecutableToyFixtureAndPreservesNoFheEncoding) {
+    const RevisionMatrix matrix = Load();
+    const std::vector<std::string> executable_ids =
+        ReadFixtureLines("executable_toy_cell_ids.txt");
+    ASSERT_EQ(executable_ids.size(), 104u);
+
+    std::set<std::string> plan_ids;
+    std::vector<std::string> previous_argv;
+    for (const std::string& cell_id : executable_ids) {
+        const auto cell_it = std::find_if(
+            matrix.cells.begin(), matrix.cells.end(),
+            [&](const RevisionCell& cell) { return cell.cell_id == cell_id; });
+        ASSERT_NE(cell_it, matrix.cells.end()) << cell_id;
+        const RevisionCell& cell = *cell_it;
+        ASSERT_EQ(cell.invocation_status, "RUN") << cell_id;
+
+        const RevisionInvocationPlan plan =
+            PlanRevisionCell(cell, RevisionRunMode::Toy);
+        SCOPED_TRACE(cell.cell_id);
+        ASSERT_TRUE(plan_ids.insert(plan.cell_id).second);
+        EXPECT_EQ(plan.cell_id, cell.cell_id);
+        EXPECT_EQ(plan.producer, cell.producer);
+        EXPECT_EQ(plan.invocation_status, "RUN");
+        ASSERT_FALSE(plan.argv.empty());
+        EXPECT_EQ(plan.argv.front(), "--revision-cell=" + cell.cell_id);
+        EXPECT_EQ(std::count(plan.argv.begin(), plan.argv.end(),
+                             "--revision-cell=" + cell.cell_id),
+                  1);
+        if (!previous_argv.empty()) EXPECT_NE(plan.argv, previous_argv);
+        previous_argv = plan.argv;
+
+        ASSERT_EQ(plan.expected_rows.size(), cell.expected_rows.size());
+        for (size_t row_index = 0; row_index < plan.expected_rows.size();
+             ++row_index) {
+            const RevisionRow& source_row = cell.expected_rows.at(row_index);
+            const RevisionRow& planned_row = plan.expected_rows.at(row_index);
+            EXPECT_EQ(planned_row.row_id, source_row.row_id);
+            EXPECT_LE(planned_row.measured_count, 1u);
+            EXPECT_EQ(planned_row.measured_count,
+                      source_row.toy_measured_count);
+            if (source_row.toy_measured_count == 0u) {
+                EXPECT_EQ(planned_row.measured_count, 0u);
+            }
+        }
+
+        if (cell.family == "real_dataset" &&
+            cell.axis_value == "std192_encoding") {
+            EXPECT_FALSE(HasArg(plan, "--security="));
+            EXPECT_FALSE(HasArg(plan, "--fhe"));
+            EXPECT_FALSE(HasArg(plan, "--context"));
+            EXPECT_FALSE(HasArg(plan, "--keygen"));
+            EXPECT_FALSE(HasArg(plan, "--key"));
+        }
+    }
+    EXPECT_EQ(plan_ids.size(), 104u);
+}
+
+TEST(RevisionInvocationPlan, RejectsUnknownFamilyBeforeAnyProducerPlanning) {
+    RevisionMatrix matrix = Load();
+    ASSERT_FALSE(matrix.cells.empty());
+    RevisionCell unknown = matrix.cells.front();
+    unknown.family = "unknown_revision_family";
+    EXPECT_THROW(PlanRevisionCell(unknown, RevisionRunMode::Paper),
                  std::invalid_argument);
 }

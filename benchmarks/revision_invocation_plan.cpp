@@ -2564,4 +2564,51 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
     return plan;
 }
 
+RevisionInvocationPlan PlanRevisionCell(const RevisionCell& cell,
+                                        RevisionRunMode mode) {
+    if (cell.family == "piccard_std128") {
+        return PlanPiccardRevisionCell(cell, mode);
+    }
+    if (cell.family == "fhe_ind") {
+        return PlanFheIndRevisionCell(cell, mode);
+    }
+    if (cell.family == "estimator_accuracy") {
+        return PlanEstimatorRevisionCell(cell, mode);
+    }
+    if (cell.family == "deletion_exact" || cell.family == "deletion_mc") {
+        return PlanDeletionRevisionCell(cell, mode);
+    }
+    if (cell.family == "sqrt_comparison") {
+        return PlanSqrtRevisionCell(cell, mode);
+    }
+    if (cell.family == "piccard_std192_encoding") {
+        return PlanStd192EncodingRevisionCell(cell, mode);
+    }
+    if (cell.family == "bcg12_minhash" || cell.family == "bcg12_exact") {
+        return PlanBcg12RevisionCell(cell, mode);
+    }
+    if (cell.family == "sj16") {
+        return PlanSj16RevisionCell(cell, mode);
+    }
+    if (cell.family == "dynamic_timing" ||
+        cell.family == "dynamic_accuracy" ||
+        cell.family == "dynamic_refresh") {
+        return PlanDynamicRevisionCell(cell, mode);
+    }
+    if (cell.family == "flooding") {
+        return PlanFloodingRevisionCell(cell, mode);
+    }
+    if (cell.family == "real_dataset") {
+        return PlanRealDatasetRevisionCell(cell, mode);
+    }
+    if (cell.family == "threshold_timing" || cell.family == "threshold_spec" ||
+        cell.family == "threshold_agreement" ||
+        cell.family == "threshold_synthetic_fpfn" ||
+        cell.family == "threshold_dblp_fpfn") {
+        return PlanThresholdRevisionCell(cell, mode);
+    }
+    throw std::invalid_argument(
+        "invalid revision invocation family: " + cell.family);
+}
+
 }  // namespace piccard::benchmark
