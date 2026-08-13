@@ -57,12 +57,13 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
                                               RevisionRunMode mode);
 
 /**
- * @brief Plan one supported synthetic threshold matrix cell.
+ * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and
  * `threshold_agreement` cells plus the eighty-four
- * `threshold_synthetic_fpfn` points are accepted.  The returned argv is pure
- * data; no threshold producer or FHE context is launched.
+ * `threshold_synthetic_fpfn` points and the single DBLP threshold control
+ * cell are accepted.  The returned argv is pure data; no threshold producer
+ * or FHE context is launched.
  */
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode);

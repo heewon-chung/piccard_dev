@@ -507,6 +507,82 @@ void ValidateThresholdSyntheticCell(const RevisionCell& cell) {
     }
 }
 
+void ValidateRealThresholdCell(const RevisionCell& cell) {
+    if (cell.family != "threshold_dblp_fpfn") {
+        RejectThreshold("family must be threshold_dblp_fpfn");
+    }
+    if (cell.producer != "bench_real_datasets") {
+        RejectThreshold("producer must be bench_real_datasets");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectThreshold("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "dblp_acm") {
+        RejectThreshold("dataset must be dblp_acm");
+    }
+    if (cell.expected_artifact_schema != "real-threshold-csv-v1") {
+        RejectThreshold("unexpected real threshold artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectThreshold("cell is not RUN");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectThreshold("unexpected real threshold timeout class");
+    }
+
+    if (cell.axis != "control" || cell.axis_value != "default" ||
+        cell.axes.size() != 5u ||
+        cell.cell_id !=
+            "paper-v1::threshold_dblp_fpfn::control=default") {
+        RejectThreshold("real threshold control identity mismatch");
+    }
+    RequireAxisValue(cell, "k", 128);
+    RequireAxisValue(cell, "m", 64);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+    const auto variant_axis = cell.axes.find("variant");
+    if (variant_axis == cell.axes.end() ||
+        variant_axis->second != "dblp_acm_u65536") {
+        RejectThreshold("real threshold variant axis mismatch");
+    }
+
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectThreshold("real threshold cell must be diagnostic-only");
+    }
+    if (cell.paper_count != 50 || cell.toy_count != 1 ||
+        cell.paper_trials != 50 || cell.toy_trials != 1 ||
+        cell.paper_counts != std::map<std::string, uint64_t>{{"held_out", 50}} ||
+        cell.toy_counts != std::map<std::string, uint64_t>{{"held_out", 1}}) {
+        RejectThreshold("real threshold paper/toy count contract mismatch");
+    }
+    const std::map<std::string, std::vector<std::string>> truth_bases = {
+        {"truth_bases", {"label", "exact_jaccard"}}};
+    const auto variant = cell.attributes.find("variant");
+    if (cell.attributes.size() != 1u || variant == cell.attributes.end() ||
+        variant->second != "dblp_acm_u65536" ||
+        cell.list_attributes != truth_bases ||
+        !cell.object_attributes.empty()) {
+        RejectThreshold("real threshold cell attributes mismatch");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectThreshold("real threshold cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    if (row.row_id != "dblp_held_out" || row.status != "DIAGNOSTIC" ||
+        row.terminal_status != "DIAGNOSTIC" || row.method != "dblp_held_out" ||
+        !row.reason.empty() || !row.reason_code.empty() ||
+        row.measured_count != 50 || row.paper_measured_count != 50 ||
+        row.toy_measured_count != 1 || !row.attributes.empty() ||
+        row.list_attributes != truth_bases || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        !row.pattern.empty() || !row.variant.empty() ||
+        !row.fit_authority.empty()) {
+        RejectThreshold("real threshold expected row contract mismatch");
+    }
+}
+
 std::string ThresholdProfileForMode(RevisionRunMode mode) {
     switch (mode) {
         case RevisionRunMode::Paper:
@@ -598,6 +674,38 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
 
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {
+    if (cell.family == "threshold_dblp_fpfn") {
+        ValidateRealThresholdCell(cell);
+
+        const bool toy = IsToyMode(mode);
+        const std::string profile = ThresholdProfileForMode(mode);
+
+        RevisionInvocationPlan plan;
+        plan.cell_id = cell.cell_id;
+        plan.producer = cell.producer;
+        plan.concrete_profile = profile;
+        plan.invocation_status = cell.invocation_status;
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--mode=threshold",
+            "--dataset-manifest={dblp_acm_u65536_manifest}",
+            "--k=128",
+            "--m=64",
+            std::string("--threshold-trials=") + (toy ? "1" : "50"),
+            "--seed={seed}",
+            "--hash_randomness=resampled",
+            "--csv={output}/threshold.csv",
+            "--workload-manifest-out={output}/threshold.manifest.tsv",
+            "--workload-rows-out={output}/threshold.rows.tsv",
+        };
+        plan.expected_rows = cell.expected_rows;
+        for (auto& row : plan.expected_rows) {
+            row.measured_count = toy ? row.toy_measured_count
+                                     : row.paper_measured_count;
+        }
+        return plan;
+    }
+
     if (cell.family == "threshold_synthetic_fpfn") {
         ValidateThresholdSyntheticCell(cell);
 
