@@ -856,6 +856,20 @@ if(BUILD_TESTS)
                 PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
             )
             add_test(NAME RawTimingArtifacts COMMAND test_raw_timing_artifacts)
+            add_executable(
+                test_benchmark_provenance
+                tests/unit/test_benchmark_provenance.cpp
+            )
+            target_link_libraries(
+                test_benchmark_provenance
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_benchmark_provenance
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME BenchmarkProvenance COMMAND test_benchmark_provenance)
             add_test(
                 NAME RawTimingProducerGroupA
                 COMMAND python3

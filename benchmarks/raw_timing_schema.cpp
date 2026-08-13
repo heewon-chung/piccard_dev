@@ -179,13 +179,6 @@ SampleKind ParseSampleKind(const std::string& value) {
     throw std::invalid_argument("unknown timing sample kind");
 }
 
-std::string MetadataKey(const std::string& producer,
-                       const std::string& profile,
-                       const std::string& cell,
-                       const std::string& phase) {
-    return producer + "\x1f" + profile + "\x1f" + cell + "\x1f" + phase;
-}
-
 std::vector<RawTimingSample> CanonicalSamples(const RawTimingArtifact& artifact) {
     auto samples = artifact.samples;
     std::sort(samples.begin(), samples.end(), [](const auto& left, const auto& right) {
@@ -489,12 +482,6 @@ std::string SerializeRawTimingArtifactV1(const RawTimingArtifact& artifact) {
             artifact.producer_id, artifact.profile_id, artifact.cell_id, phase,
             samples));
     }
-    if (!artifact.aggregates.empty()) {
-        RawTimingArtifact checked = artifact;
-        checked.aggregates = aggregates;
-        ValidateRawTimingArtifact(artifact);
-    }
-
     std::ostringstream output;
     AppendLine(output, {"schema_version", kPaperRawTimingSchemaVersion});
     AppendLine(output, {"artifact_type", "raw_timing_v1"});
