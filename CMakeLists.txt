@@ -1424,8 +1424,15 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         bench_piccard
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_revision_adapter
+        piccard_revision_matrix
     )
     target_include_directories(bench_piccard PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_piccard
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     add_executable(bench_comparison benchmarks/bench_comparison.cpp)
     target_link_libraries(

@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "piccard_revision_adapter.h"
 #include "raw_timing_schema.h"
 #include "protocol/piccard.h"
 
@@ -10,8 +11,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -32,6 +36,147 @@ struct RawTimingOptions {
     std::string profile_id;
     size_t measured_trials = 0;
 };
+
+struct PiccardSuccessorOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    std::string identity_output;
+};
+
+static PiccardSuccessorOptions ParsePiccardSuccessorOptions(
+    int argc, char** argv) {
+    PiccardSuccessorOptions options;
+    bool identity_seen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string arg(argv[index]);
+        if (arg.rfind("--revision-cell=", 0) == 0) {
+            options.enabled = true;
+            options.planner_argv.push_back(arg);
+        } else if (arg.rfind("--revision-identity-out=", 0) == 0) {
+            if (identity_seen) {
+                throw std::invalid_argument(
+                    "duplicate --revision-identity-out");
+            }
+            identity_seen = true;
+            options.identity_output = arg.substr(24);
+            if (options.identity_output.empty()) {
+                throw std::invalid_argument(
+                    "--revision-identity-out must not be empty");
+            }
+        } else {
+            options.planner_argv.push_back(arg);
+        }
+    }
+    if (!options.enabled) {
+        if (identity_seen) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    if (!identity_seen) {
+        throw std::invalid_argument(
+            "successor --revision-cell requires --revision-identity-out");
+    }
+    return options;
+}
+
+static std::vector<std::string> CanonicalizePiccardPlannerArgv(
+    const std::vector<std::string>& argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(argv.size());
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
+            canonical.push_back("--seed={seed}");
+        } else if (arg.rfind("--raw_timing_dir=", 0) == 0 &&
+                   arg != "--raw_timing_dir={output}") {
+            canonical.push_back("--raw_timing_dir={output}");
+        } else {
+            canonical.push_back(arg);
+        }
+    }
+    return canonical;
+}
+
+static RevisionRunMode RevisionModeForPiccardRequest(
+    const PiccardRevisionRequest& request) {
+    if (request.profile == "readiness-toy-v1") {
+        return RevisionRunMode::Toy;
+    }
+    if (request.profile == "paper-std128-t40-v1") {
+        return RevisionRunMode::Paper;
+    }
+    throw std::invalid_argument("unsupported Piccard successor profile");
+}
+
+static void ValidatePiccardSuccessorConfig(
+    const BenchmarkConfig& config,
+    const PiccardRevisionRequest& request,
+    const PiccardRevisionExecutionPlan& execution) {
+    if (config.profile.run_class == BenchmarkRunClass::Legacy ||
+        config.profile.id != request.profile || config.mode != request.mode ||
+        !config.evidence_point) {
+        throw std::invalid_argument(
+            "Piccard successor requires the exact evidence profile and mode");
+    }
+    const bool toy = request.profile == "readiness-toy-v1";
+    const SecurityLevel expected_security =
+        toy ? SecurityLevel::TOY : SecurityLevel::STD128;
+    if (config.security_level != expected_security ||
+        config.k != execution.point.k || config.m != execution.point.m ||
+        config.set_size != execution.point.set_size ||
+        config.universe_size != execution.point.universe_size ||
+        config.trials != request.trials ||
+        config.accuracy_trials != request.accuracy_trials) {
+        throw std::invalid_argument(
+            "Piccard successor flags do not match the selected matrix cell");
+    }
+    if (execution.selection.plan.expected_rows.size() != 2u ||
+        execution.selection.plan.expected_rows[0].measured_count !=
+            config.trials ||
+        execution.selection.plan.expected_rows[1].measured_count !=
+            config.accuracy_trials) {
+        throw std::invalid_argument(
+            "Piccard successor counts do not match the selected matrix rows");
+    }
+}
+
+static void WritePiccardRevisionIdentityAtomic(
+    const std::string& output_path,
+    const PiccardRevisionSelection& selection) {
+    namespace fs = std::filesystem;
+    const fs::path final_path(output_path);
+    const fs::path temporary_path = final_path.string() + ".tmp";
+    {
+        std::ofstream output(temporary_path,
+                             std::ios::out | std::ios::trunc);
+        if (!output.is_open()) {
+            throw std::runtime_error(
+                "failed to open Piccard revision identity temporary file: " +
+                temporary_path.string());
+        }
+        output << SerializePiccardRevisionIdentityHeader()
+               << SerializePiccardRevisionIdentityRow(selection);
+        if (!output.good()) {
+            output.close();
+            std::error_code remove_error;
+            fs::remove(temporary_path, remove_error);
+            throw std::runtime_error(
+                "failed to write Piccard revision identity: " + output_path);
+        }
+    }
+
+    std::error_code rename_error;
+    fs::rename(temporary_path, final_path, rename_error);
+    if (rename_error) {
+        std::error_code remove_error;
+        fs::remove(temporary_path, remove_error);
+        throw std::runtime_error(
+            "failed to publish Piccard revision identity: " +
+            rename_error.message());
+    }
+}
 
 static RawTimingOptions ParseRawTimingOptions(int argc, char** argv) {
     RawTimingOptions options;
@@ -1153,29 +1298,38 @@ static BenchmarkResult RunProfileAccuracyPoint(
     Piccard& engine,
     const BenchmarkConfig& config,
     const BenchmarkGridPoint& point,
-    const std::string& label) {
+    const std::string& label,
+    const BoundedOverlapSets* bounded_workload = nullptr,
+    bool canonical_label = false) {
     std::vector<std::pair<double, double>> estimates;
     estimates.reserve(config.accuracy_trials);
     const double intersection_fraction =
         IntersectionFractionForJaccard(point.target_jaccard);
     const uint64_t fixed_hash_seed = engine.GetParams().hash_seed;
     for (size_t trial = 0; trial < config.accuracy_trials; ++trial) {
-        std::mt19937_64 rng(
-            TrialSeed(config.seed, trial, point.target_jaccard));
         engine.SetHashSeed(
             config.hash_randomness == HashRandomness::Resampled
                 ? HashTrialSeed(config.seed, trial, point.target_jaccard)
                 : fixed_hash_seed);
-        auto [set_a, set_b] = MakeRandomSetsWithOverlap(
-            point.set_size, intersection_fraction, rng);
-        const double j_true = ExactJaccard(set_a, set_b);
-        const auto result = engine.Run(set_a, set_b);
-        estimates.emplace_back(result.jaccard_estimate, j_true);
+        if (bounded_workload != nullptr) {
+            const auto result = engine.Run(bounded_workload->set_a,
+                                           bounded_workload->set_b);
+            estimates.emplace_back(result.jaccard_estimate,
+                                   bounded_workload->realized_jaccard);
+        } else {
+            std::mt19937_64 rng(
+                TrialSeed(config.seed, trial, point.target_jaccard));
+            auto [set_a, set_b] = MakeRandomSetsWithOverlap(
+                point.set_size, intersection_fraction, rng);
+            const double j_true = ExactJaccard(set_a, set_b);
+            const auto result = engine.Run(set_a, set_b);
+            estimates.emplace_back(result.jaccard_estimate, j_true);
+        }
     }
 
     const auto stats = ComputeAccuracyStats(estimates);
     BenchmarkResult row;
-    row.label = label + "_accuracy";
+    row.label = canonical_label ? label : label + "_accuracy";
     row.param_k = point.k;
     row.param_m = point.m;
     row.param_set_size = point.set_size;
@@ -1204,19 +1358,28 @@ static BenchmarkResult RunProfileAccuracyPoint(
     return row;
 }
 
-static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
-                           const RawTimingOptions* raw_options = nullptr) {
-    const BenchmarkGridPoint supplied{
-        "evidence", config.k, config.m, config.set_size, 0,
-        config.target_jaccard};
+static void RunProfileGrid(
+    const BenchmarkConfig& config,
+    CSVWriter& csv,
+    const RawTimingOptions* raw_options = nullptr,
+    const PiccardRevisionExecutionPlan* revision_execution = nullptr) {
     const BenchmarkMode mode = ParseBenchmarkMode(config.mode);
-    const auto points = ResolveBenchmarkGrid(
-        config.profile, BenchmarkProducer::Piccard, mode,
-        config.evidence_point, supplied);
+    std::vector<BenchmarkGridPoint> points;
+    if (revision_execution != nullptr) {
+        points.push_back(revision_execution->point);
+    } else {
+        const BenchmarkGridPoint supplied{
+            "evidence", config.k, config.m, config.set_size, 0,
+            config.target_jaccard};
+        points = ResolveBenchmarkGrid(
+            config.profile, BenchmarkProducer::Piccard, mode,
+            config.evidence_point, supplied);
+    }
 
     std::vector<RawTimingArtifact> raw_artifacts;
     const size_t timing_trials = raw_options == nullptr
         ? config.trials : raw_options->measured_trials;
+    const bool successor = revision_execution != nullptr;
 
     for (const auto& point : points) {
         PiccardParams params;
@@ -1229,18 +1392,43 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
 
         Piccard engine(params);
         engine.KeyGen();
-        const std::string label = point.axis + "_k" +
-            std::to_string(point.k) + "_m" + std::to_string(point.m) +
-            "_n" + std::to_string(point.set_size);
+        const std::string label = successor
+            ? revision_execution->selection.cell.cell_id
+            : point.axis + "_k" + std::to_string(point.k) + "_m" +
+                  std::to_string(point.m) + "_n" +
+                  std::to_string(point.set_size);
+
+        std::optional<BoundedOverlapSets> bounded_workload;
+        if (successor) {
+            bounded_workload = MakeBoundedOverlapSets(
+                point.set_size, point.target_jaccard, point.universe_size);
+        }
 
         for (const auto kind : MeasurementKindsForMode(mode)) {
             if (kind == BenchmarkMeasurementKind::FheTiming) {
-                const double intersection_fraction =
-                    IntersectionFractionForJaccard(point.target_jaccard);
-                auto [set_a, set_b] = MakeSetsWithOverlap(
-                    point.set_size, intersection_fraction);
-                const double j_true = ExactJaccard(set_a, set_b);
-                const std::string timing_label = label + "_timing";
+                std::vector<uint64_t> legacy_set_a;
+                std::vector<uint64_t> legacy_set_b;
+                const std::vector<uint64_t>* set_a = nullptr;
+                const std::vector<uint64_t>* set_b = nullptr;
+                double j_true = 0.0;
+                if (successor) {
+                    set_a = &bounded_workload->set_a;
+                    set_b = &bounded_workload->set_b;
+                    j_true = bounded_workload->realized_jaccard;
+                } else {
+                    const double intersection_fraction =
+                        IntersectionFractionForJaccard(point.target_jaccard);
+                    auto generated = MakeSetsWithOverlap(
+                        point.set_size, intersection_fraction);
+                    legacy_set_a = std::move(generated.first);
+                    legacy_set_b = std::move(generated.second);
+                    set_a = &legacy_set_a;
+                    set_b = &legacy_set_b;
+                    j_true = ExactJaccard(*set_a, *set_b);
+                }
+                const std::string timing_label = successor
+                    ? label
+                    : label + "_timing";
                 RawTimingArtifact artifact;
                 RawTimingArtifact* artifact_ptr = nullptr;
                 if (raw_options != nullptr) {
@@ -1252,7 +1440,8 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
                     artifact_ptr = &artifact;
                 }
                 auto row = RunMultiTrial(
-                    engine, set_a, set_b, j_true, timing_label, timing_trials,
+                    engine, *set_a, *set_b, j_true, timing_label,
+                    timing_trials,
                     artifact_ptr,
                     raw_options == nullptr ? 0 : config.seed,
                     point.target_jaccard);
@@ -1266,7 +1455,8 @@ static void RunProfileGrid(const BenchmarkConfig& config, CSVWriter& csv,
                 }
             } else {
                 csv.WriteRow(RunProfileAccuracyPoint(
-                    engine, config, point, label));
+                    engine, config, point, label,
+                    successor ? &*bounded_workload : nullptr, successor));
             }
         }
     }
@@ -1287,18 +1477,44 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    const PiccardSuccessorOptions successor_options =
+        ParsePiccardSuccessorOptions(argc, argv);
     RawTimingOptions raw_options = ParseRawTimingOptions(argc, argv);
     auto config = BenchmarkConfig::ParseArgs(argc, argv);
-    RejectUnknownBenchmarkOptions(argc, argv, {"--raw_timing_dir="});
+    RejectUnknownBenchmarkOptions(
+        argc, argv, {"--raw_timing_dir=", "--revision-identity-out="});
     ResolveRawTimingOptions(raw_options, config);
     config.Print();
+
+    std::optional<PiccardRevisionExecutionPlan> revision_execution;
+    if (successor_options.enabled) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+        const RevisionMatrix matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        const std::vector<std::string> planner_argv =
+            CanonicalizePiccardPlannerArgv(successor_options.planner_argv);
+        const PiccardRevisionRequest request =
+            ParsePiccardRevisionArgs(planner_argv);
+        const RevisionRunMode mode = RevisionModeForPiccardRequest(request);
+        revision_execution = PlanPiccardRevisionExecution(
+            matrix, planner_argv, mode);
+        ValidatePiccardSuccessorConfig(config, request, *revision_execution);
+        WritePiccardRevisionIdentityAtomic(
+            successor_options.identity_output,
+            revision_execution->selection);
+#else
+        throw std::runtime_error(
+            "bench_piccard was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+    }
 
     CSVWriter csv;
     csv.WriteHeader();
 
     if (config.profile.run_class != BenchmarkRunClass::Legacy) {
         RunProfileGrid(config, csv,
-                       raw_options.enabled ? &raw_options : nullptr);
+                       raw_options.enabled ? &raw_options : nullptr,
+                       revision_execution ? &*revision_execution : nullptr);
         return 0;
     }
 
