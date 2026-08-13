@@ -19,6 +19,7 @@ using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::PlanPiccardRevisionCell;
 using piccard::benchmark::PlanFheIndRevisionCell;
 using piccard::benchmark::PlanEstimatorRevisionCell;
+using piccard::benchmark::PlanDeletionRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 
 RevisionMatrix Load() {
@@ -45,6 +46,16 @@ std::vector<const RevisionCell*> EstimatorCells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "estimator_accuracy") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> DeletionCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "deletion_exact" || cell.family == "deletion_mc") {
+            cells.push_back(&cell);
+        }
     }
     return cells;
 }
@@ -333,6 +344,165 @@ TEST(RevisionInvocationPlan,
     cell = source;
     cell.expected_rows.front().attributes["trials"] = "49";
     EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansBothDeletionCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DeletionCells(matrix);
+    ASSERT_EQ(cells.size(), 2u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanDeletionRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanDeletionRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanDeletionRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        const bool exact = cell->family == "deletion_exact";
+        const std::string selector = exact ? "exact" : "monte-carlo";
+        const std::string paper_trials = exact ? "0" : "1000";
+        const std::string toy_trials = exact ? "0" : "1";
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=paper-v1",
+            "--cell=" + selector,
+            "--k=128",
+            "--m=64",
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=" + paper_trials,
+            "--seed={seed}",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--cell=" + selector,
+            "--k=128",
+            "--m=64",
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=" + toy_trials,
+            "--seed={seed}",
+        };
+
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_deletion_survival");
+        EXPECT_EQ(toy.producer, "bench_deletion_survival");
+        EXPECT_EQ(paper.concrete_profile, "paper-v1");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+        const auto& paper_row = paper.expected_rows.front();
+        EXPECT_EQ(paper_row.row_id, exact ? "exact" : "monte_carlo");
+        EXPECT_EQ(paper_row.status, "DIAGNOSTIC");
+        EXPECT_EQ(paper_row.terminal_status, "DIAGNOSTIC");
+        EXPECT_EQ(paper_row.method, exact ? "exact" : "monte_carlo");
+        EXPECT_EQ(paper_row.measured_count, exact ? 0u : 1000u);
+        EXPECT_EQ(toy.expected_rows.front().measured_count,
+                  exact ? 0u : 1u);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
+                  exact ? 0u : 1000u);
+        EXPECT_FALSE(HasArg(paper, "--security="));
+        EXPECT_FALSE(HasArg(paper, "--raw"));
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidDeletionIdentityGeometryCountsAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DeletionCells(matrix);
+    ASSERT_EQ(cells.size(), 2u);
+    const RevisionCell exact = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "deletion_exact";
+        });
+
+    RevisionCell cell = exact;
+    cell.family = "estimator_accuracy";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.producer = "bench_estimator_bias";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.axis = "k";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.axis_value = "-1";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.axes["k"] = "64";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.paper_counts["measured"] = 1;
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.attributes["trials"] = "1";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.expected_rows.front().method = "monte_carlo";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.expected_rows.front().status = "MEASURED";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact;
+    cell.expected_rows.front().measured_count = 1;
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
 

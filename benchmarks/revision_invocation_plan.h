@@ -67,6 +67,16 @@ RevisionInvocationPlan PlanEstimatorRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode);
 
 /**
+ * @brief Plan exactly one validated deletion survival matrix cell.
+ *
+ * Exact deletion is a zero-trial diagnostic; Monte Carlo deletion uses 1000
+ * paper trials and one toy trial.  The returned argv is pure data and no
+ * deletion producer is launched.
+ */
+RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
+                                                RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and

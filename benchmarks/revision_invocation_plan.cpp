@@ -456,6 +456,98 @@ std::string EstimatorProfileForMode(RevisionRunMode mode) {
     RejectEstimator("unknown run mode");
 }
 
+[[noreturn]] void RejectDeletion(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid deletion revision invocation cell: " + reason);
+}
+
+void ValidateDeletionCell(const RevisionCell& cell) {
+    if (cell.family != "deletion_exact" && cell.family != "deletion_mc") {
+        RejectDeletion("family must be deletion_exact or deletion_mc");
+    }
+    if (cell.producer != "bench_deletion_survival") {
+        RejectDeletion("producer must be bench_deletion_survival");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectDeletion("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectDeletion("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "deletion-survival-csv-v1") {
+        RejectDeletion("unexpected deletion artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectDeletion("cell is not RUN");
+    }
+    if (cell.axis != "control" || cell.axis_value != "default" ||
+        cell.axes.size() != 4u ||
+        cell.cell_id != "paper-v1::" + cell.family + "::control=default") {
+        RejectDeletion("deletion control identity mismatch");
+    }
+    RequireAxisValue(cell, "k", 128);
+    RequireAxisValue(cell, "m", 64);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectDeletion("deletion cell must be diagnostic-only");
+    }
+
+    const bool exact = cell.family == "deletion_exact";
+    const uint64_t paper_trials = exact ? 0 : 1000;
+    const uint64_t toy_trials = exact ? 0 : 1;
+    const std::map<std::string, uint64_t> expected_paper_counts = {
+        {exact ? "measured" : "trials", paper_trials}};
+    const std::map<std::string, uint64_t> expected_toy_counts = {
+        {exact ? "measured" : "trials", toy_trials}};
+    if (cell.paper_count != paper_trials || cell.toy_count != toy_trials ||
+        cell.paper_trials != paper_trials || cell.toy_trials != toy_trials ||
+        cell.paper_counts != expected_paper_counts ||
+        cell.toy_counts != expected_toy_counts) {
+        RejectDeletion("paper/toy count contract mismatch");
+    }
+    const std::map<std::string, std::string> expected_attributes = {
+        {"trials", std::to_string(paper_trials)}};
+    if (cell.attributes != expected_attributes ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectDeletion("deletion cell attributes mismatch");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectDeletion("deletion cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    const std::string expected_row_id = exact ? "exact" : "monte_carlo";
+    const std::map<std::string, std::string> expected_row_attributes =
+        exact ? std::map<std::string, std::string>{}
+              : std::map<std::string, std::string>{{"trials", "1000"}};
+    if (row.row_id != expected_row_id || row.status != "DIAGNOSTIC" ||
+        row.terminal_status != "DIAGNOSTIC" || row.method != expected_row_id ||
+        !row.reason.empty() || !row.reason_code.empty() ||
+        row.measured_count != paper_trials ||
+        row.paper_measured_count != paper_trials ||
+        row.toy_measured_count != toy_trials ||
+        row.attributes != expected_row_attributes ||
+        !row.list_attributes.empty() || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        !row.pattern.empty() || !row.variant.empty() ||
+        !row.fit_authority.empty()) {
+        RejectDeletion("deletion expected row contract mismatch");
+    }
+}
+
+std::string DeletionProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectDeletion("unknown run mode");
+}
+
 [[noreturn]] void RejectThreshold(const std::string& reason) {
     throw std::invalid_argument(
         "invalid threshold FHE revision invocation cell: " + reason);
@@ -829,6 +921,40 @@ RevisionInvocationPlan PlanEstimatorRevisionCell(const RevisionCell& cell,
             (toy ? "1" : std::to_string(paper_trials)),
         j_cell ? "--jaccard-grid=" + cell.axis_value
                : "--jaccard-grid=0.5",
+        "--seed={seed}",
+    };
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
+                                                RevisionRunMode mode) {
+    ValidateDeletionCell(cell);
+
+    const bool exact = cell.family == "deletion_exact";
+    const bool toy = IsToyMode(mode);
+    const std::string profile = DeletionProfileForMode(mode);
+    const std::string trials =
+        exact ? "0" : (toy ? "1" : "1000");
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        std::string("--cell=") + (exact ? "exact" : "monte-carlo"),
+        "--k=128",
+        "--m=64",
+        "--set_size=1000",
+        "--universe=65536",
+        "--trials=" + trials,
         "--seed={seed}",
     };
     plan.expected_rows = cell.expected_rows;
