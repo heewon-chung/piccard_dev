@@ -2232,6 +2232,169 @@ RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
     return plan;
 }
 
+namespace {
+
+[[noreturn]] void RejectRealDataset(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid real-dataset revision invocation cell: " + reason);
+}
+
+std::string RealDatasetVariant(const RevisionCell& cell) {
+    const auto it = cell.axes.find("variant");
+    if (it == cell.axes.end()) {
+        RejectRealDataset("missing variant axis");
+    }
+    if (it->second != "dblp_acm_u65536" &&
+        it->second != "enron_u65536" &&
+        it->second != "enron_u1048576") {
+        RejectRealDataset("unsupported dataset variant");
+    }
+    return it->second;
+}
+
+void ValidateRealDatasetRow(const RevisionRow& row,
+                            const std::string& artifact,
+                            const std::string& variant) {
+    if (row.row_id != artifact || row.status != "MEASURED" ||
+        row.reason != "" || row.reason_code != "" ||
+        row.terminal_status != "MEASURED" || row.method != artifact ||
+        row.variant != variant || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        !row.pattern.empty() || !row.fit_authority.empty() ||
+        !row.truth_bases.empty() || !row.field_values.empty() ||
+        !row.attributes.empty() || !row.list_attributes.empty() ||
+        row.measured_count != 1 || row.paper_measured_count != 1 ||
+        row.toy_measured_count != 1) {
+        RejectRealDataset("real-dataset expected row contract mismatch");
+    }
+}
+
+void ValidateRealDatasetCell(const RevisionCell& cell) {
+    if (cell.family != "real_dataset") {
+        RejectRealDataset("family must be real_dataset");
+    }
+
+    const std::string variant = RealDatasetVariant(cell);
+    const bool dblp = variant == "dblp_acm_u65536";
+    const std::string expected_dataset = dblp ? "dblp_acm" : "enron";
+    const std::string expected_universe =
+        variant == "enron_u1048576" ? "1048576" : "65536";
+    const std::string artifact = cell.axis_value;
+    if (artifact != "accuracy" && artifact != "summary") {
+        RejectRealDataset("only accuracy and summary artifacts are supported");
+    }
+
+    const std::string expected_producer =
+        artifact == "accuracy" ? "bench_real_datasets"
+                                : "summarize_real_datasets.py";
+    if (cell.producer != expected_producer) {
+        RejectRealDataset("producer does not match artifact");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectRealDataset("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != expected_dataset) {
+        RejectRealDataset("dataset does not match variant");
+    }
+    if (cell.axis != variant + "_artifact" ||
+        cell.cell_id != "paper-v1::real_dataset::" + cell.axis + "=" +
+                            artifact) {
+        RejectRealDataset("cell ID or artifact axis does not bind variant");
+    }
+    if (cell.expected_artifact_schema != "real-dataset-csv-v1") {
+        RejectRealDataset("unexpected real-dataset artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectRealDataset("cell is not RUN");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectRealDataset("timeout class must be standard");
+    }
+    if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
+        !cell.comparison_eligible) {
+        RejectRealDataset("accuracy and summary cells must be table eligible");
+    }
+
+    const std::map<std::string, std::string> expected_axes = {
+        {"artifact", artifact}, {"k", "128"}, {"m", "64"},
+        {"n", "1000"}, {"u", expected_universe}, {"variant", variant}};
+    if (cell.axes != expected_axes) {
+        RejectRealDataset("real-dataset axes do not match variant contract");
+    }
+    const std::map<std::string, std::string> expected_attributes = {
+        {"artifact_kind", artifact},
+        {"threshold_forbidden", dblp ? "false" : "true"},
+        {"variant", variant}};
+    if (cell.attributes != expected_attributes ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectRealDataset("real-dataset cell attributes do not match contract");
+    }
+
+    const std::map<std::string, uint64_t> expected_counts = {{artifact, 1}};
+    if (cell.paper_count != 1 || cell.toy_count != 1 ||
+        cell.paper_trials != 1 || cell.toy_trials != 1 ||
+        cell.paper_counts != expected_counts ||
+        cell.toy_counts != expected_counts) {
+        RejectRealDataset("real-dataset paper/toy counts do not match contract");
+    }
+    if (cell.expected_rows.size() != 1u) {
+        RejectRealDataset("real-dataset cells require one expected row");
+    }
+    ValidateRealDatasetRow(cell.expected_rows.front(), artifact, variant);
+}
+
+void ValidateRealDatasetMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::Toy:
+        case RevisionRunMode::DryRun:
+            return;
+    }
+    RejectRealDataset("unknown run mode");
+}
+
+}  // namespace
+
+RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
+                                                   RevisionRunMode mode) {
+    ValidateRealDatasetCell(cell);
+    ValidateRealDatasetMode(mode);
+
+    const std::string variant = cell.axes.at("variant");
+    const bool accuracy = cell.axis_value == "accuracy";
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = cell.profile;
+    plan.invocation_status = cell.invocation_status;
+    if (accuracy) {
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--mode=accuracy",
+            "--dataset-manifest={variant_manifest}",
+            "--max-pairs={max_pairs}",
+            "--seed={seed}",
+            "--csv={output}/accuracy.csv",
+            "--workload-manifest-out={output}/accuracy.manifest.tsv",
+            "--workload-rows-out={output}/accuracy.rows.tsv",
+        };
+    } else {
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--accuracy-csv={output}/accuracy.csv",
+            "--output={output}/summary.csv",
+            "--variant=" + variant,
+        };
+    }
+
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = row.paper_measured_count;
+    }
+    return plan;
+}
+
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {
     if (cell.family == "threshold_dblp_fpfn") {
