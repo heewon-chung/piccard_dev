@@ -51,7 +51,10 @@ TUPLE_FIELDS = (
 )
 TUPLE_FIELDS_V2 = TUPLE_FIELDS + (
     "provenance_schema", "provenance_kind", "provisioned_ring_dim",
-    "log_q_over_t_bits", "ordered_rns_limb_bits", "required_capacity_bits",
+    "log_q_over_t_bits", "ordered_rns_limb_bits",
+    "transcript_stat_bits", "max_queries", "query_stat_bits",
+    "coefficient_stat_bits", "flood_margin_bits", "eval_noise_bits",
+    "flood_noise_bits", "required_capacity_bits",
     "flooding_assurance", "residual_capacity_definition",
     "residual_capacity_status", "residual_capacity_bits",
     "complete_provenance_sha256",
@@ -530,6 +533,66 @@ def _ratio(numerator: str, denominator: str) -> str:
     return format(numerator_value / denominator_value, ".17g")
 
 
+def _v2_text(value: Any) -> str:
+    """Render one complete-provenance value using the producer's spelling."""
+
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return format(value, ".17g")
+    return str(value)
+
+
+def _v2_provenance_value(complete: dict[str, Any], data: dict[str, str],
+                         field: str) -> str | None:
+    """Project a report field from the bound V2 provenance object.
+
+    The legacy CSV/calibration fields remain available for V1 compatibility,
+    but a V2 row's context identity is the complete provenance record.  Fields
+    such as the ordered-modulus digest are derived from that same record.
+    """
+
+    if field == "provenance_schema":
+        return complete["schema"]
+    if field == "provenance_kind":
+        return complete["kind"]
+    if field == "ordered_rns_moduli":
+        return json.dumps(complete["ordered_rns_moduli"],
+                          ensure_ascii=False, separators=(",", ":"))
+    if field == "ordered_rns_moduli_sha256":
+        return runner.ordered_rns_sha256(complete["ordered_rns_moduli"])
+    if field == "ordered_rns_limb_bits":
+        return json.dumps(complete["ordered_rns_limb_bits"],
+                          separators=(",", ":"))
+    if field == "residual_capacity_definition":
+        return complete["residual_capacity"]["definition"]
+    if field == "residual_capacity_status":
+        return complete["residual_capacity"]["status"]
+    if field == "residual_capacity_bits":
+        return _v2_text(complete["residual_capacity"].get("bits"))
+    if field == "complete_provenance_json":
+        return data["complete_provenance_json"]
+    if field == "complete_provenance_sha256":
+        return data["complete_provenance_sha256"]
+    if field in complete:
+        return _v2_text(complete[field])
+    return None
+
+
+def _validated_v2_provenance(data: dict[str, str]) -> dict[str, Any]:
+    try:
+        complete = json.loads(data["complete_provenance_json"])
+        runner.validate_v2_provenance_binding({
+            "provenance": complete,
+            "provenance_sha256": data["complete_provenance_sha256"],
+            "context_tuple_sha256": data["context_tuple_sha256"],
+        })
+    except (KeyError, json.JSONDecodeError) as exc:
+        fail("summary complete provenance is malformed")
+        raise AssertionError from exc
+    return complete
+
+
 def _row_for_csv(pair_id: str, security: str, entry: dict[str, Any],
                  binding: dict[str, str], ratios: dict[str, str]) -> dict[str, str]:
     fields = CSV_FIELDS_V2 if runner.ACTIVE_SCHEMA_VERSION == "v2" else CSV_FIELDS
@@ -552,32 +615,15 @@ def _row_for_csv(pair_id: str, security: str, entry: dict[str, Any],
             if key in data:
                 row[key] = data[key]
         if runner.ACTIVE_SCHEMA_VERSION == "v2":
-            try:
-                complete = json.loads(data["complete_provenance_json"])
-                runner.validate_v2_provenance_binding({
-                    "provenance": complete,
-                    "provenance_sha256": data["complete_provenance_sha256"],
-                    "context_tuple_sha256": data["context_tuple_sha256"],
-                })
-            except (KeyError, json.JSONDecodeError) as exc:
-                fail("summary complete provenance is malformed")
-                raise AssertionError from exc
-            row.update({
-                "provenance_schema": complete["schema"],
-                "provenance_kind": complete["kind"],
-                "provisioned_ring_dim": str(complete["provisioned_ring_dim"]),
-                "log_q_over_t_bits": str(complete["log_q_over_t_bits"]),
-                "ordered_rns_limb_bits": json.dumps(
-                    complete["ordered_rns_limb_bits"], separators=(",", ":")),
-                "required_capacity_bits": str(complete["required_capacity_bits"]),
-                "flooding_assurance": complete["flooding_assurance"],
-                "residual_capacity_definition": complete["residual_capacity"]["definition"],
-                "residual_capacity_status": complete["residual_capacity"]["status"],
-                "residual_capacity_bits": "" if complete["residual_capacity"].get("bits") is None
-                else str(complete["residual_capacity"]["bits"]),
-                "complete_provenance_json": data["complete_provenance_json"],
-                "complete_provenance_sha256": data["complete_provenance_sha256"],
-            })
+            complete = _validated_v2_provenance(data)
+            for field in (*TUPLE_FIELDS_V2, "complete_provenance_json"):
+                value = _v2_provenance_value(complete, data, field)
+                if value is not None:
+                    row[field] = value
+            # bfv_context_fingerprint is a CSV-only context field in the
+            # existing report schema, but it still comes from V2 provenance.
+            row["bfv_context_fingerprint"] = complete[
+                "bfv_context_fingerprint"]
         row["timing_ratio_std192_over_std128_online"] = ratios["online"]
         row["timing_ratio_std192_over_std128_full"] = ratios["full"]
         row["timing_ratio_label"] = ratios["label"]
@@ -669,6 +715,11 @@ def _md_value(value: str, changed: bool) -> str:
 def _report_field(entry: dict[str, Any], field: str) -> str:
     if entry["row"] is None:
         return ""
+    if runner.ACTIVE_SCHEMA_VERSION == "v2":
+        complete = _validated_v2_provenance(entry["row"])
+        value = _v2_provenance_value(complete, entry["row"], field)
+        if value is not None:
+            return value
     if field == "ordered_rns_moduli":
         calibration = entry["calibration"] or {}
         return json.dumps(calibration.get("ordered_rns_moduli", []),

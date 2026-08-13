@@ -6,11 +6,13 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -26,6 +28,19 @@ def load_runner():
     spec = importlib.util.spec_from_file_location("std_security_runner_for_summary", RUNNER)
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to import runner")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_summarizer():
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    spec = importlib.util.spec_from_file_location(
+        "std_security_summarizer_for_consumer_test", SUMMARIZER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to import summarizer")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -95,6 +110,176 @@ class SummarizeStdSecurityEvidenceTest(unittest.TestCase):
         run = self.run_runner(results)
         self.assertEqual(run.returncode, 0, run.stderr)
         return results
+
+    def test_v2_reports_project_exact_provenance_fields_from_complete_record(self):
+        summarizer = load_summarizer()
+        runner = summarizer.runner
+        runner.ACTIVE_SCHEMA_VERSION = "v2"
+        complete = {
+            "schema": "piccard-std-security-parameter-provenance-v2",
+            "kind": "piccard",
+            "circuit": "onehot",
+            "shape_id": "onehot-v1",
+            "security": "STD128",
+            "bfv_context_fingerprint": "v2-context-fingerprint",
+            "requested_ring_dim": 111,
+            "natural_ring_dim": 222,
+            "provisioned_ring_dim": 333,
+            "realized_ring_dim": 444,
+            "natural_depth": 2,
+            "provisioned_depth": 5,
+            "log_q_bits": 60.0,
+            "log_q_over_t_bits": 60.0 - math.log2(65537),
+            "plaintext_modulus": 65537,
+            "num_limbs": 2,
+            "scaling_mod_size": 41,
+            "ordered_rns_moduli": ["1000000007", "1000000009"],
+            "ordered_rns_limb_bits": [30, 30],
+            "openfhe_version": "v2-openfhe",
+            "transcript_stat_bits": 91,
+            "max_queries": 12345,
+            "query_stat_bits": 92,
+            "coefficient_stat_bits": 93,
+            "flood_margin_bits": 94,
+            "eval_noise_bits": 95,
+            "flood_noise_bits": 96,
+            "required_capacity_bits": 98,
+            "flooding_assurance":
+                "empirical-phase-statistical+ciphertext-computational",
+            "residual_capacity": {
+                "status": "not-exposed-by-openfhe",
+                "definition": "log2(q/t)-required_flood_budget_bits",
+                "bits": None,
+            },
+            "context_tuple_sha256": "a" * 64,
+            "status": "MEASURED",
+            "reason": "",
+            "legacy_encoding_note": "",
+        }
+        runner.validate_complete_provenance(complete)
+        provenance_json = runner.canonical_json(complete).decode("utf-8")
+        provenance_sha256 = runner.sha256_bytes(
+            runner.complete_provenance_canonical(complete))
+        v2_values = {
+            "requested_ring_dim": "111",
+            "natural_ring_dim": "222",
+            "provisioned_ring_dim": "333",
+            "realized_ring_dim": "444",
+            "natural_depth": "2",
+            "provisioned_depth": "5",
+            "scaling_mod_size": "41",
+            "num_limbs": "2",
+            "plaintext_modulus": "65537",
+            "ordered_rns_moduli": '["1000000007","1000000009"]',
+            "ordered_rns_limb_bits": "[30,30]",
+            "openfhe_version": "v2-openfhe",
+            "transcript_stat_bits": "91",
+            "max_queries": "12345",
+            "query_stat_bits": "92",
+            "coefficient_stat_bits": "93",
+            "flood_margin_bits": "94",
+            "eval_noise_bits": "95",
+            "flood_noise_bits": "96",
+            "required_capacity_bits": "98",
+            "flooding_assurance": complete["flooding_assurance"],
+            "residual_capacity_status": "not-exposed-by-openfhe",
+            "residual_capacity_definition":
+                "log2(q/t)-required_flood_budget_bits",
+            "residual_capacity_bits": "",
+            "provenance_schema": complete["schema"],
+            "provenance_kind": "piccard",
+            "log_q_bits": "60",
+            "context_tuple_sha256": "a" * 64,
+        }
+
+        data = {
+            "cell_id": "onehot-std128", "circuit": "onehot",
+            "shape_id": "onehot-v1", "security": "STD128",
+            "calibration_origin": "diagnostic-artifact",
+            "calibration_artifact_sha256": "calibration-hash",
+            "complete_provenance_json": provenance_json,
+            "complete_provenance_sha256": provenance_sha256,
+            "context_tuple_sha256": "a" * 64,
+            "status": "MEASURED", "reason": "",
+            "requested_ring_dim": "legacy-requested",
+            "natural_ring_dim": "legacy-natural",
+            "realized_ring_dim": "legacy-realized",
+            "natural_depth": "legacy-depth",
+            "provisioned_depth": "legacy-provisioned-depth",
+            "scaling_mod_size": "legacy-scaling",
+            "num_limbs": "legacy-limbs",
+            "plaintext_modulus": "legacy-plaintext",
+            "log_q_bits": "legacy-log-q",
+            "ordered_rns_moduli_sha256": "legacy-rns-digest",
+            "openfhe_version": "legacy-openfhe",
+            "sanitizer_profile": "legacy-sanitizer",
+            "transcript_stat_bits": "legacy-transcript",
+            "max_queries": "legacy-queries",
+            "query_stat_bits": "legacy-query-stat",
+            "coefficient_stat_bits": "legacy-coefficient-stat",
+            "flood_margin_bits": "legacy-margin",
+            "eval_noise_bits": "legacy-eval-noise",
+            "flood_noise_bits": "legacy-flood-noise",
+            "setup_context_ms": "1", "setup_keygen_ms": "1",
+            "phase_minhash_ms": "1", "phase_encode_ms": "1",
+            "phase_encrypt_ms": "1", "phase_evaluate_ms": "1",
+            "phase_flood_ms": "1", "phase_decrypt_ms": "1",
+            "online_e2e_ms": "6", "full_e2e_ms": "8",
+            "match_count": "10", "jaccard_estimate": "0.6",
+        }
+        calibration = {
+            "calibration_quality": "diagnostic-one-repetition",
+            "ordered_rns_moduli": ["legacy-modulus"],
+        }
+        entry = {
+            "cell": {"cell_id": "onehot-std128", "circuit": "onehot"},
+            "status": "MEASURED", "record": {"reason": ""},
+            "row": data, "calibration": calibration,
+        }
+        binding = {
+            "workload_manifest_sha256": "b" * 64, "circuit": "onehot",
+            "shape_id": "onehot-v1", "k": "16", "m": "16",
+            "set_size": "10", "universe": "64", "seed": "7",
+            "target_jaccard": "0.5", "realized_intersection": "7",
+            "realized_union": "13", "realized_jaccard": "0.53846153846153844",
+            "trials": "1",
+        }
+        ratios = {"online": "", "full": "", "label": ""}
+        csv_row = summarizer._row_for_csv(
+            "onehot", "STD128", entry, binding, ratios)
+        for field, expected in v2_values.items():
+            with self.subTest(csv_field=field):
+                self.assertEqual(csv_row[field], expected)
+        self.assertEqual(
+            csv_row["ordered_rns_moduli_sha256"],
+            runner.ordered_rns_sha256(complete["ordered_rns_moduli"]),
+        )
+        self.assertEqual(csv_row["bfv_context_fingerprint"],
+                         complete["bfv_context_fingerprint"])
+        self.assertEqual(csv_row["complete_provenance_json"], provenance_json)
+
+        pairs = {}
+        for circuit in ("onehot", "sqrt"):
+            entries = {}
+            for security in ("STD128", "STD192"):
+                cell_id = f"{circuit}-{security.lower()}"
+                entries[security] = {
+                    "cell": {"cell_id": cell_id, "circuit": circuit},
+                    "status": "MEASURED", "record": {"reason": ""},
+                    "row": data, "calibration": calibration,
+                }
+            pairs[circuit] = {"entries": entries, "binding": binding}
+        markdown = summarizer.render_markdown(
+            pathlib.Path("/tmp/manifest.json"),
+            {"manifest_sha256": "b" * 64}, pairs)
+        markdown_text = markdown.decode("utf-8")
+        for field, expected in v2_values.items():
+            markdown_expected = expected or "not measured"
+            with self.subTest(markdown_field=field):
+                self.assertIn(
+                    f"| `{field}` | {markdown_expected} | "
+                    f"{markdown_expected} | same |",
+                              markdown_text)
 
     def read_manifest(self, results: pathlib.Path):
         return json.loads((results / "manifest.json").read_text())

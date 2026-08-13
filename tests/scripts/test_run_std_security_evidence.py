@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import csv
+import copy
 import hashlib
 import json
 import os
@@ -54,6 +55,68 @@ class StdSecurityEvidenceRunnerTest(unittest.TestCase):
             ["python3", str(RUNNER), "--build-dir", str(self.build), *arguments],
             cwd=ROOT, env=merged, text=True, capture_output=True, check=False,
         )
+
+    def test_encoding_only_provenance_rejects_populated_fhe_metadata(self):
+        runner = load_runner()
+        base = {
+            "schema": "piccard-std-security-parameter-provenance-v2",
+            "kind": "encoding-only",
+            "circuit": "onehot",
+            "shape_id": "onehot-v1",
+            "security": "not-applicable",
+            "bfv_context_fingerprint": "not-applicable",
+            "requested_ring_dim": None,
+            "natural_ring_dim": None,
+            "provisioned_ring_dim": None,
+            "realized_ring_dim": None,
+            "natural_depth": None,
+            "provisioned_depth": None,
+            "log_q_bits": None,
+            "log_q_over_t_bits": None,
+            "plaintext_modulus": None,
+            "num_limbs": None,
+            "scaling_mod_size": None,
+            "ordered_rns_moduli": [],
+            "ordered_rns_limb_bits": [],
+            "openfhe_version": "not-applicable",
+            "transcript_stat_bits": None,
+            "max_queries": None,
+            "query_stat_bits": None,
+            "coefficient_stat_bits": None,
+            "flood_margin_bits": None,
+            "eval_noise_bits": None,
+            "flood_noise_bits": None,
+            "required_capacity_bits": None,
+            "flooding_assurance": "not-applicable",
+            "residual_capacity": {
+                "status": "not-applicable",
+                "definition": "not-applicable",
+                "bits": None,
+            },
+            "context_tuple_sha256": "",
+            "status": "MEASURED",
+            "reason": "",
+            "legacy_encoding_note": "encoding-only local encoder; no FHE context",
+        }
+        runner.validate_complete_provenance(base)
+        mutations = {
+            "requested_ring_dim": 4096,
+            "ordered_rns_moduli": ["1000000007"],
+            "ordered_rns_limb_bits": [30],
+            "transcript_stat_bits": 40,
+            "flood_margin_bits": 8,
+            "residual_capacity.definition":
+                "log2(q/t)-required_flood_budget_bits",
+        }
+        for field, value in mutations.items():
+            mutated = copy.deepcopy(base)
+            if field == "residual_capacity.definition":
+                mutated["residual_capacity"]["definition"] = value
+            else:
+                mutated[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_complete_provenance(mutated)
 
     def test_dry_run_freezes_four_core_cells_and_has_no_side_effect(self):
         result = self.run_runner("--dry-run", "--include-fhe-ind=off")

@@ -345,8 +345,24 @@ def validate_complete_provenance(provenance: Any) -> dict[str, Any]:
            provenance["bfv_context_fingerprint"] != "not-applicable" or \
            provenance["openfhe_version"] != "not-applicable" or \
            provenance["flooding_assurance"] != "not-applicable" or \
-           residual["status"] != "not-applicable":
+           residual["status"] != "not-applicable" or \
+           residual["definition"] != "not-applicable" or \
+           not isinstance(provenance.get("legacy_encoding_note"), str) or \
+           not provenance["legacy_encoding_note"]:
             raise RunnerError("encoding-only provenance is not N/A")
+        fhe_fields = (
+            "requested_ring_dim", "natural_ring_dim", "provisioned_ring_dim",
+            "realized_ring_dim", "natural_depth", "provisioned_depth",
+            "log_q_bits", "log_q_over_t_bits", "plaintext_modulus",
+            "num_limbs", "scaling_mod_size", "transcript_stat_bits",
+            "max_queries", "query_stat_bits", "coefficient_stat_bits",
+            "flood_margin_bits", "eval_noise_bits", "flood_noise_bits",
+            "required_capacity_bits",
+        )
+        if any(provenance.get(key) is not None for key in fhe_fields) or \
+           provenance.get("ordered_rns_moduli") or \
+           provenance.get("ordered_rns_limb_bits"):
+            raise RunnerError("encoding-only provenance contains FHE fields")
         return provenance
     if provenance["security"] not in ("TOY", "STD128", "STD192", "STD256"):
         raise RunnerError("complete provenance security is unknown")
