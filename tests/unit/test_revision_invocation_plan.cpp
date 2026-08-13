@@ -135,6 +135,18 @@ std::vector<const RevisionCell*> RealDatasetAccuracySummaryCells(
     return cells;
 }
 
+std::vector<const RevisionCell*> RealDatasetTimingCells(
+    const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "real_dataset" &&
+            cell.axis_value == "std128_timing") {
+            cells.push_back(&cell);
+        }
+    }
+    return cells;
+}
+
 std::vector<const RevisionCell*> ThresholdCells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
@@ -3026,4 +3038,254 @@ TEST(RevisionInvocationPlan,
     cell.expected_rows.front().variant = "enron_u65536";
     EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan,
+     ExhaustivelyPlansAllRealDatasetStd128TimingCellsAcrossModes) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = RealDatasetTimingCells(matrix);
+    ASSERT_EQ(cells.size(), 3u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        const std::string variant = cell->axes.at("variant");
+        const std::string universe = cell->axes.at("u");
+        ASSERT_TRUE(variant == "dblp_acm_u65536" ||
+                    variant == "enron_u65536" ||
+                    variant == "enron_u1048576");
+        ASSERT_TRUE(universe == "65536" || universe == "1048576");
+
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--mode=timing",
+            "--dataset-manifest={variant_manifest}",
+            "--profile=paper-std128-t40-v1",
+            "--security=STD128",
+            "--k=128",
+            "--m=64",
+            "--trials=30",
+            "--seed={seed}",
+            "--raw-timing-dir={output}/raw",
+            "--raw-timing-profile=paper-v1",
+            "--csv={output}/timing.csv",
+            "--workload-manifest-out={output}/timing.manifest.tsv",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--mode=timing",
+            "--dataset-manifest={variant_manifest}",
+            "--profile=readiness-toy-v1",
+            "--security=TOY",
+            "--k=128",
+            "--m=64",
+            "--trials=1",
+            "--seed={seed}",
+            "--raw-timing-dir={output}/raw",
+            "--raw-timing-profile=readiness-toy-v1",
+            "--csv={output}/timing.csv",
+            "--workload-manifest-out={output}/timing.manifest.tsv",
+        };
+
+        const RevisionInvocationPlan paper =
+            PlanRealDatasetRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanRealDatasetRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanRealDatasetRevisionCell(*cell, RevisionRunMode::DryRun);
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.producer, "bench_real_datasets");
+        EXPECT_EQ(toy.producer, "bench_real_datasets");
+        EXPECT_EQ(dry_run.producer, "bench_real_datasets");
+        EXPECT_EQ(paper.concrete_profile, "paper-std128-t40-v1");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-std128-t40-v1");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        EXPECT_EQ(toy.invocation_status, "RUN");
+        EXPECT_EQ(dry_run.invocation_status, "RUN");
+        EXPECT_FALSE(HasArg(paper, "--dry-run"));
+        EXPECT_FALSE(HasArg(toy, "--dry-run"));
+        EXPECT_FALSE(HasArg(paper, "--resume"));
+        EXPECT_FALSE(HasArg(paper, "--smoke"));
+        EXPECT_FALSE(HasArg(paper, "--finalize-dir"));
+
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+        EXPECT_EQ(paper.expected_rows.front().row_id, "std128_timing");
+        EXPECT_EQ(paper.expected_rows.front().status, "MEASURED");
+        EXPECT_EQ(paper.expected_rows.front().method, "std128_timing");
+        EXPECT_EQ(paper.expected_rows.front().variant, variant);
+        EXPECT_EQ(paper.expected_rows.front().measured_count, 30u);
+        EXPECT_EQ(paper.expected_rows.front().paper_measured_count, 30u);
+        EXPECT_EQ(paper.expected_rows.front().toy_measured_count, 1u);
+        EXPECT_EQ(toy.expected_rows.front().measured_count, 1u);
+        EXPECT_EQ(toy.expected_rows.front().paper_measured_count, 30u);
+        EXPECT_EQ(toy.expected_rows.front().toy_measured_count, 1u);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count, 30u);
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidRealDatasetStd128TimingIdentityAxesCountsAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = RealDatasetTimingCells(matrix);
+    ASSERT_EQ(cells.size(), 3u);
+    const RevisionCell source = *cells.front();
+
+    RevisionCell cell = source;
+    cell.family = "real_dataset_other";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.producer = "summarize_real_datasets.py";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.profile = "readiness-toy-v1";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axis = "control";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axis_value = "accuracy";
+    cell.cell_id = "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.cell_id =
+        "paper-v1::real_dataset::dblp_acm_u65536_artifact=std128_wrong";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["variant"] = "enron_u65536";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["u"] = "1048576";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["k"] = "256";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes.erase("m");
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.attributes["variant"] = "enron_u65536";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.attributes["artifact_kind"] = "accuracy";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.attributes["threshold_forbidden"] =
+        source.attributes.at("threshold_forbidden") == "true" ? "false"
+                                                                  : "true";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.paper_count = 29;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.paper_trials = 29;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.paper_counts["std128_timing"] = 29;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.toy_count = 2;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Toy),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.toy_trials = 2;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Toy),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.toy_counts["std128_timing"] = 2;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Toy),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().row_id = "accuracy";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().method = "accuracy";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().variant = "enron_u65536";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().status = "DIAGNOSTIC";
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().measured_count = 29;
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.pop_back();
+    EXPECT_THROW(PlanRealDatasetRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
 }

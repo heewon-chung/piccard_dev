@@ -2254,7 +2254,8 @@ std::string RealDatasetVariant(const RevisionCell& cell) {
 
 void ValidateRealDatasetRow(const RevisionRow& row,
                             const std::string& artifact,
-                            const std::string& variant) {
+                            const std::string& variant,
+                            uint64_t paper_count) {
     if (row.row_id != artifact || row.status != "MEASURED" ||
         row.reason != "" || row.reason_code != "" ||
         row.terminal_status != "MEASURED" || row.method != artifact ||
@@ -2263,7 +2264,8 @@ void ValidateRealDatasetRow(const RevisionRow& row,
         !row.pattern.empty() || !row.fit_authority.empty() ||
         !row.truth_bases.empty() || !row.field_values.empty() ||
         !row.attributes.empty() || !row.list_attributes.empty() ||
-        row.measured_count != 1 || row.paper_measured_count != 1 ||
+        row.measured_count != paper_count ||
+        row.paper_measured_count != paper_count ||
         row.toy_measured_count != 1) {
         RejectRealDataset("real-dataset expected row contract mismatch");
     }
@@ -2280,13 +2282,15 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
     const std::string expected_universe =
         variant == "enron_u1048576" ? "1048576" : "65536";
     const std::string artifact = cell.axis_value;
-    if (artifact != "accuracy" && artifact != "summary") {
-        RejectRealDataset("only accuracy and summary artifacts are supported");
+    if (artifact != "accuracy" && artifact != "summary" &&
+        artifact != "std128_timing") {
+        RejectRealDataset(
+            "only accuracy, summary, and std128_timing artifacts are supported");
     }
 
     const std::string expected_producer =
-        artifact == "accuracy" ? "bench_real_datasets"
-                                : "summarize_real_datasets.py";
+        artifact == "summary" ? "summarize_real_datasets.py"
+                               : "bench_real_datasets";
     if (cell.producer != expected_producer) {
         RejectRealDataset("producer does not match artifact");
     }
@@ -2312,7 +2316,7 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
     }
     if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
         !cell.comparison_eligible) {
-        RejectRealDataset("accuracy and summary cells must be table eligible");
+        RejectRealDataset("real-dataset cells must be table eligible");
     }
 
     const std::map<std::string, std::string> expected_axes = {
@@ -2330,17 +2334,22 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
         RejectRealDataset("real-dataset cell attributes do not match contract");
     }
 
-    const std::map<std::string, uint64_t> expected_counts = {{artifact, 1}};
-    if (cell.paper_count != 1 || cell.toy_count != 1 ||
-        cell.paper_trials != 1 || cell.toy_trials != 1 ||
-        cell.paper_counts != expected_counts ||
-        cell.toy_counts != expected_counts) {
+    const uint64_t paper_count = artifact == "std128_timing" ? 30 : 1;
+    const std::map<std::string, uint64_t> expected_paper_counts = {
+        {artifact, paper_count}};
+    const std::map<std::string, uint64_t> expected_toy_counts = {
+        {artifact, 1}};
+    if (cell.paper_count != paper_count || cell.toy_count != 1 ||
+        cell.paper_trials != paper_count || cell.toy_trials != 1 ||
+        cell.paper_counts != expected_paper_counts ||
+        cell.toy_counts != expected_toy_counts) {
         RejectRealDataset("real-dataset paper/toy counts do not match contract");
     }
     if (cell.expected_rows.size() != 1u) {
         RejectRealDataset("real-dataset cells require one expected row");
     }
-    ValidateRealDatasetRow(cell.expected_rows.front(), artifact, variant);
+    ValidateRealDatasetRow(cell.expected_rows.front(), artifact, variant,
+                            paper_count);
 }
 
 void ValidateRealDatasetMode(RevisionRunMode mode) {
@@ -2362,13 +2371,35 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
 
     const std::string variant = cell.axes.at("variant");
     const bool accuracy = cell.axis_value == "accuracy";
+    const bool timing = cell.axis_value == "std128_timing";
+    const bool toy = mode == RevisionRunMode::Toy;
 
     RevisionInvocationPlan plan;
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
-    plan.concrete_profile = cell.profile;
     plan.invocation_status = cell.invocation_status;
-    if (accuracy) {
+    if (timing) {
+        const std::string profile =
+            toy ? "readiness-toy-v1" : "paper-std128-t40-v1";
+        plan.concrete_profile = profile;
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--mode=timing",
+            "--dataset-manifest={variant_manifest}",
+            "--profile=" + profile,
+            std::string("--security=") + (toy ? "TOY" : "STD128"),
+            "--k=128",
+            "--m=64",
+            std::string("--trials=") + (toy ? "1" : "30"),
+            "--seed={seed}",
+            "--raw-timing-dir={output}/raw",
+            std::string("--raw-timing-profile=") +
+                (toy ? "readiness-toy-v1" : "paper-v1"),
+            "--csv={output}/timing.csv",
+            "--workload-manifest-out={output}/timing.manifest.tsv",
+        };
+    } else if (accuracy) {
+        plan.concrete_profile = cell.profile;
         plan.argv = {
             "--revision-cell=" + cell.cell_id,
             "--mode=accuracy",
@@ -2380,6 +2411,7 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
             "--workload-rows-out={output}/accuracy.rows.tsv",
         };
     } else {
+        plan.concrete_profile = cell.profile;
         plan.argv = {
             "--revision-cell=" + cell.cell_id,
             "--accuracy-csv={output}/accuracy.csv",
@@ -2390,7 +2422,8 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
 
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {
-        row.measured_count = row.paper_measured_count;
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
     }
     return plan;
 }
