@@ -2462,7 +2462,7 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
             "--workload-manifest-out={output}/encoding.manifest.tsv",
         };
     } else if (accuracy) {
-        plan.concrete_profile = cell.profile;
+        plan.concrete_profile = "not-applicable";
         plan.argv = {
             "--revision-cell=" + cell.cell_id,
             "--mode=accuracy",
@@ -2474,7 +2474,7 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
             "--workload-rows-out={output}/accuracy.rows.tsv",
         };
     } else {
-        plan.concrete_profile = cell.profile;
+        plan.concrete_profile = "not-applicable";
         plan.argv = {
             "--revision-cell=" + cell.cell_id,
             "--accuracy-csv={output}/accuracy.csv",

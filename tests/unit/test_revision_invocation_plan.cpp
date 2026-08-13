@@ -2866,9 +2866,15 @@ TEST(RevisionInvocationPlan,
                            : "summarize_real_datasets.py");
         EXPECT_EQ(toy.producer, paper.producer);
         EXPECT_EQ(dry_run.producer, paper.producer);
-        EXPECT_EQ(paper.concrete_profile, "paper-v1");
-        EXPECT_EQ(toy.concrete_profile, "paper-v1");
-        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+        EXPECT_EQ(paper.abstract_profile, "paper-v1");
+        EXPECT_EQ(toy.abstract_profile, "paper-v1");
+        EXPECT_EQ(dry_run.abstract_profile, "paper-v1");
+        EXPECT_EQ(paper.concrete_profile, "not-applicable");
+        EXPECT_EQ(toy.concrete_profile, "not-applicable");
+        EXPECT_EQ(dry_run.concrete_profile, "not-applicable");
+        EXPECT_FALSE(HasArg(paper, "--profile"));
+        EXPECT_FALSE(HasArg(toy, "--profile"));
+        EXPECT_FALSE(HasArg(dry_run, "--profile"));
         EXPECT_EQ(paper.invocation_status, "RUN");
         EXPECT_EQ(toy.invocation_status, "RUN");
         EXPECT_EQ(dry_run.invocation_status, "RUN");
