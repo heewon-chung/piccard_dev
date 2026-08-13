@@ -149,6 +149,13 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertEqual(command[0], str(wrapper))
             self.assertIn("--bench-noise=" + str(binary), command)
             self.assertIn("--revision-cell=" + cell["cell_id"], command)
+            payload = root / "cells" / "".join(
+                character if character.isalnum() else "_"
+                for character in cell["cell_id"]
+            ) / "payload"
+            self.assertIn("--results-root=" + str(payload), command)
+            self.assertFalse(payload.exists(),
+                             "the flooding wrapper must own-create its payload root")
             metadata = _binary_metadata(build, [cell])
             self.assertEqual(metadata["bench_noise"]["path"], str(binary.resolve()))
             self.assertNotEqual(command[0], str(binary))

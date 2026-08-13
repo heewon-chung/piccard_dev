@@ -39,7 +39,7 @@ from revision_benchmark_common import (  # noqa: E402
     expected_row_count,
     file_inventory,
     load_matrix,
-    materialize_argv,
+    materialize_cell_argv,
     phase_for_cell,
     producer_extra_args,
     select_cells,
@@ -155,12 +155,19 @@ def _materialized_command(
     seed: int, threads: int, variant_manifests: dict[str, Path],
     dblp_manifest: Path,
 ) -> tuple[list[str], list[str]]:
+    """Build one command while reserving cell output for lifecycle evidence.
+
+    In particular, flooding's wrapper receives ``cell_output/payload`` as its
+    ``--results-root``.  The cell directory itself is created for stdout,
+    stderr, and receipt files; the absent payload child is owned by the
+    wrapper.
+    """
     canonical = canonical_plan_argv(cell, mode)
     output = cell_output(root, cell["cell_id"])
     output.mkdir(parents=True, exist_ok=True)
-    argv = materialize_argv(canonical, root=root, output=output, seed=seed,
-                            threads=threads, variant_manifests=variant_manifests,
-                            dblp_manifest=dblp_manifest)
+    argv = materialize_cell_argv(
+        cell, mode, root=root, output=output, seed=seed, threads=threads,
+        variant_manifests=variant_manifests, dblp_manifest=dblp_manifest)
     argv.extend(producer_extra_args(cell, output))
     command = command_for_cell(cell, root=root, build_dir=build_dir)
     return canonical, command + argv

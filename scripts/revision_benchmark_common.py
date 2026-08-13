@@ -41,6 +41,7 @@ CELL_SCHEMA = "piccard-revision-cell-receipt-v1"
 EVENT_SCHEMA = "piccard-revision-event-v1"
 FLOODING_EXECUTABLE = "scripts/run_noise_profiles.sh"
 SUMMARY_EXECUTABLE = "summarize_real_datasets.py"
+FLOODING_PAYLOAD_DIR = "payload"
 
 
 class RevisionContractError(RuntimeError):
@@ -406,6 +407,32 @@ def materialize_argv(
             value = value[:begin] + str(cell_output(root, cell_id)) + value[end + 1:]
         result.append(value)
     return result
+
+
+def producer_output_dir(cell: dict[str, Any], output: Path) -> Path:
+    """Return the producer-owned artifact root for one cell.
+
+    Lifecycle evidence (stdout, stderr, and receipt) remains directly under
+    ``output``.  The flooding wrapper has a stricter contract: its
+    ``--results-root`` must be an absent child that the wrapper creates, so
+    only flooding artifacts live under ``output/payload``.
+    """
+    if str(cell.get("family", "")) == "flooding":
+        return output / FLOODING_PAYLOAD_DIR
+    return output
+
+
+def materialize_cell_argv(
+    cell: dict[str, Any], mode: str, *, root: Path, output: Path, seed: int,
+    threads: int, variant_manifests: dict[str, Path] | None = None,
+    dblp_manifest: Path | None = None,
+) -> list[str]:
+    """Materialize planner argv with the cell-specific producer root."""
+    return materialize_argv(
+        canonical_plan_argv(cell, mode), root=root,
+        output=producer_output_dir(cell, output), seed=seed, threads=threads,
+        variant_manifests=variant_manifests, dblp_manifest=dblp_manifest,
+    )
 
 
 def executable_for_cell(cell: dict[str, Any]) -> str:
