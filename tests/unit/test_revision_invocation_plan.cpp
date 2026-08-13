@@ -1077,10 +1077,18 @@ TEST(RevisionInvocationPlan, RejectsMissingAxesAndCountMismatches) {
 
 TEST(RevisionInvocationPlan, StructFieldsFollowDeclaredApiOrder) {
     RevisionInvocationPlan plan{
-        "cell", "bench_piccard", "paper-std128-t40-v1", "RUN", {}, {}};
+        "cell", "bench_piccard", "piccard_std128", "paper-v1",
+        "paper-std128-t40-v1", "standard", "piccard-benchmark-csv-v1",
+        "bench_piccard", {}, "RUN", {}, {}};
     EXPECT_EQ(plan.cell_id, "cell");
     EXPECT_EQ(plan.producer, "bench_piccard");
+    EXPECT_EQ(plan.family, "piccard_std128");
+    EXPECT_EQ(plan.abstract_profile, "paper-v1");
     EXPECT_EQ(plan.concrete_profile, "paper-std128-t40-v1");
+    EXPECT_EQ(plan.timeout_class, "standard");
+    EXPECT_EQ(plan.expected_artifact_schema, "piccard-benchmark-csv-v1");
+    EXPECT_EQ(plan.executable, "bench_piccard");
+    EXPECT_TRUE(plan.environment.empty());
     EXPECT_EQ(plan.invocation_status, "RUN");
     EXPECT_TRUE(plan.argv.empty());
     EXPECT_TRUE(plan.expected_rows.empty());
@@ -2582,8 +2590,7 @@ TEST(RevisionInvocationPlan,
             "--seed={seed}",
             "--threads={threads}",
         };
-        std::vector<std::string> expected_dry_run = expected_paper;
-        expected_dry_run.push_back("--dry-run");
+        const std::vector<std::string> expected_dry_run = expected_paper;
 
         const RevisionInvocationPlan paper =
             PlanFloodingRevisionCell(*cell, RevisionRunMode::Paper);
@@ -2603,7 +2610,7 @@ TEST(RevisionInvocationPlan,
         EXPECT_FALSE(HasArg(paper, "--smoke"));
         EXPECT_FALSE(HasArg(paper, "--finalize-dir"));
         EXPECT_FALSE(HasArg(paper, "--bench-noise"));
-        EXPECT_TRUE(HasArg(dry_run, "--dry-run"));
+        EXPECT_FALSE(HasArg(dry_run, "--dry-run"));
 
         ASSERT_EQ(paper.expected_rows.size(), 3u);
         ASSERT_EQ(dry_run.expected_rows.size(), 3u);
@@ -3655,6 +3662,7 @@ TEST(RevisionInvocationPlan,
 
     std::set<std::string> paper_ids;
     std::set<std::string> dry_run_ids;
+    std::map<std::string, std::vector<std::string>> paper_argv_by_id;
     std::vector<std::string> previous_paper_argv;
     std::vector<std::string> previous_dry_run_argv;
     size_t run_count = 0;
@@ -3673,6 +3681,22 @@ TEST(RevisionInvocationPlan,
             ASSERT_TRUE(plan_ids.insert(plan.cell_id).second);
             EXPECT_EQ(plan.cell_id, cell.cell_id);
             EXPECT_EQ(plan.producer, cell.producer);
+            EXPECT_EQ(plan.family, cell.family);
+            EXPECT_EQ(plan.abstract_profile, cell.profile);
+            EXPECT_EQ(plan.timeout_class, cell.timeout_class);
+            EXPECT_EQ(plan.expected_artifact_schema,
+                      cell.expected_artifact_schema);
+            const std::string expected_executable =
+                cell.family == "flooding"
+                    ? "scripts/run_noise_profiles.sh"
+                    : (cell.family == "real_dataset" &&
+                               cell.axis_value == "summary"
+                           ? "scripts/summarize_real_datasets.py"
+                           : cell.producer);
+            EXPECT_EQ(plan.executable, expected_executable);
+            EXPECT_EQ(plan.environment.at("OMP_DYNAMIC"), "FALSE");
+            EXPECT_EQ(plan.environment.at("OMP_NUM_THREADS"),
+                      cell.family == "sj16" ? "2" : "{threads}");
             EXPECT_EQ(plan.invocation_status, cell.invocation_status);
             ASSERT_EQ(plan.expected_rows.size(), cell.expected_rows.size());
 
@@ -3711,6 +3735,22 @@ TEST(RevisionInvocationPlan,
                 EXPECT_TRUE(previous_argv.empty() ||
                             previous_argv != plan.argv);
             }
+            if (dry_run) {
+                ASSERT_EQ(paper_argv_by_id.count(cell.cell_id), 1u);
+                EXPECT_EQ(plan.argv, paper_argv_by_id.at(cell.cell_id));
+                EXPECT_EQ(plan.environment.at("PICCARD_REVISION_DRY_RUN"),
+                          "1");
+                if (cell.family == "flooding") {
+                    EXPECT_EQ(plan.environment.at("DRY_RUN"), "1");
+                } else {
+                    EXPECT_EQ(plan.environment.count("DRY_RUN"), 0u);
+                }
+            } else {
+                paper_argv_by_id[cell.cell_id] = plan.argv;
+                EXPECT_EQ(plan.environment.count("PICCARD_REVISION_DRY_RUN"),
+                          0u);
+                EXPECT_EQ(plan.environment.count("DRY_RUN"), 0u);
+            }
         }
     }
 
@@ -3743,6 +3783,24 @@ TEST(RevisionInvocationPlan,
         ASSERT_TRUE(plan_ids.insert(plan.cell_id).second);
         EXPECT_EQ(plan.cell_id, cell.cell_id);
         EXPECT_EQ(plan.producer, cell.producer);
+        EXPECT_EQ(plan.family, cell.family);
+        EXPECT_EQ(plan.abstract_profile, cell.profile);
+        EXPECT_EQ(plan.timeout_class, cell.timeout_class);
+        EXPECT_EQ(plan.expected_artifact_schema,
+                  cell.expected_artifact_schema);
+        const std::string expected_executable =
+            cell.family == "flooding"
+                ? "scripts/run_noise_profiles.sh"
+                : (cell.family == "real_dataset" &&
+                           cell.axis_value == "summary"
+                       ? "scripts/summarize_real_datasets.py"
+                       : cell.producer);
+        EXPECT_EQ(plan.executable, expected_executable);
+        EXPECT_EQ(plan.environment.at("OMP_DYNAMIC"), "FALSE");
+        EXPECT_EQ(plan.environment.at("OMP_NUM_THREADS"),
+                  cell.family == "sj16" ? "2" : "{threads}");
+        EXPECT_EQ(plan.environment.count("PICCARD_REVISION_DRY_RUN"), 0u);
+        EXPECT_EQ(plan.environment.count("DRY_RUN"), 0u);
         EXPECT_EQ(plan.invocation_status, "RUN");
         ASSERT_FALSE(plan.argv.empty());
         EXPECT_EQ(plan.argv.front(), "--revision-cell=" + cell.cell_id);

@@ -11,6 +11,7 @@
 
 #include "revision_matrix.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,13 @@ enum class RevisionRunMode {
 struct RevisionInvocationPlan {
     std::string cell_id;
     std::string producer;
+    std::string family;
+    std::string abstract_profile;
     std::string concrete_profile;
+    std::string timeout_class;
+    std::string expected_artifact_schema;
+    std::string executable;
+    std::map<std::string, std::string> environment;
     std::string invocation_status;
     std::vector<std::string> argv;
     std::vector<RevisionRow> expected_rows;

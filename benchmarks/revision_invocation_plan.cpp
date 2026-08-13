@@ -16,6 +16,40 @@ constexpr const char* kMatrixProfile = "paper-v1";
 constexpr const char* kPaperProfile = "paper-std128-t40-v1";
 constexpr const char* kToyProfile = "readiness-toy-v1";
 
+std::string ExecutableForCell(const RevisionCell& cell) {
+    if (cell.family == "flooding") return "scripts/run_noise_profiles.sh";
+    if (cell.family == "real_dataset" && cell.axis_value == "summary") {
+        return "scripts/summarize_real_datasets.py";
+    }
+    return cell.producer;
+}
+
+RevisionInvocationPlan MakePlan(const RevisionCell& cell,
+                                RevisionRunMode mode,
+                                const std::string& concrete_profile) {
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.family = cell.family;
+    plan.abstract_profile = cell.profile;
+    plan.concrete_profile = concrete_profile;
+    plan.timeout_class = cell.timeout_class;
+    plan.expected_artifact_schema = cell.expected_artifact_schema;
+    plan.executable = ExecutableForCell(cell);
+    plan.environment = {
+        {"OMP_DYNAMIC", "FALSE"},
+        {"OMP_NUM_THREADS", cell.family == "sj16" ? "2" : "{threads}"},
+    };
+    if (mode == RevisionRunMode::DryRun) {
+        plan.environment.emplace("PICCARD_REVISION_DRY_RUN", "1");
+        if (cell.family == "flooding") {
+            plan.environment.emplace("DRY_RUN", "1");
+        }
+    }
+    plan.invocation_status = cell.invocation_status;
+    return plan;
+}
+
 [[noreturn]] void Reject(const std::string& reason) {
     throw std::invalid_argument("invalid Piccard revision invocation cell: " +
                                 reason);
@@ -1259,7 +1293,7 @@ RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
     const auto& n = cell.axes.at("n");
     const auto& u = cell.axes.at("u");
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1298,7 +1332,7 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
     const auto& n = cell.axes.at("n");
     const auto& u = cell.axes.at("u");
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1333,7 +1367,7 @@ RevisionInvocationPlan PlanEstimatorRevisionCell(const RevisionCell& cell,
     const bool j_cell = cell.axis == "j";
     const uint64_t paper_trials = j_cell ? 50 : 500;
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1370,7 +1404,7 @@ RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
     const std::string trials =
         exact ? "0" : (toy ? "1" : "1000");
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1403,7 +1437,7 @@ RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
     const std::string& axis = cell.axis;
     const uint64_t paper_trials = SqrtPaperTrials(axis);
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1437,7 +1471,7 @@ RevisionInvocationPlan PlanStd192EncodingRevisionCell(
     const bool toy = IsToyMode(mode);
     const std::string profile = Std192EncodingProfileForMode(mode);
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1473,7 +1507,7 @@ RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
     const bool minhash = cell.family == "bcg12_minhash";
     const std::string profile = Bcg12ProfileForMode(mode);
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -1512,7 +1546,7 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
     const bool extrapolated = !fit && IsSj16Extrapolated(cell);
     const std::string profile = Sj16ProfileForMode(mode);
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -2053,7 +2087,7 @@ RevisionInvocationPlan PlanDynamicRevisionCell(const RevisionCell& cell,
     const std::string kind = DynamicKind(cell);
     const uint64_t paper_trials = accuracy ? 50 : 30;
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -2204,7 +2238,7 @@ RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
         RejectFlooding("Toy planning supports only the primary40 profile");
     }
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, cell.profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
@@ -2220,10 +2254,6 @@ RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
         "--seed={seed}",
         "--threads={threads}",
     };
-    if (mode == RevisionRunMode::DryRun) {
-        plan.argv.push_back("--dry-run");
-    }
-
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {
         row.measured_count = toy ? row.toy_measured_count
@@ -2389,7 +2419,7 @@ RevisionInvocationPlan PlanRealDatasetRevisionCell(const RevisionCell& cell,
     const bool encoding = cell.axis_value == "std192_encoding";
     const bool toy = mode == RevisionRunMode::Toy;
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, cell.profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.invocation_status = cell.invocation_status;
@@ -2469,7 +2499,7 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
         const bool toy = IsToyMode(mode);
         const std::string profile = ThresholdProfileForMode(mode);
 
-        RevisionInvocationPlan plan;
+        RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
         plan.cell_id = cell.cell_id;
         plan.producer = cell.producer;
         plan.concrete_profile = profile;
@@ -2503,7 +2533,7 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
         const auto& point_k = cell.axes.at("k");
         const auto& grid_index = cell.axes.at("grid_index");
 
-        RevisionInvocationPlan plan;
+        RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
         plan.cell_id = cell.cell_id;
         plan.producer = cell.producer;
         plan.concrete_profile = profile;
@@ -2538,7 +2568,7 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
         toy ? "1" : (kind == "timing" ? "30" :
                      (kind == "spec" ? "0" : "50"));
 
-    RevisionInvocationPlan plan;
+    RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
