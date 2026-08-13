@@ -235,6 +235,18 @@ target_include_directories(
     PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
 )
 
+# Canonical Phase 9 paper/readiness matrix parser and fail-closed validator.
+# This target is deliberately independent of OpenFHE so matrix topology can be
+# checked without constructing a crypto context or executing a producer.
+add_library(
+    piccard_revision_matrix
+    benchmarks/revision_matrix.cpp
+)
+target_include_directories(
+    piccard_revision_matrix
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+
 # Typed Work-4-prefix CSV schema for real-dataset benchmark rows (Work 5
 # Phase 5.2). Pure string/typed-token serialization, no OpenFHE dependency.
 add_library(
@@ -939,6 +951,52 @@ if(BUILD_TESTS)
             add_test(NAME BenchmarkProfile COMMAND test_benchmark_profile)
 
             add_executable(
+                test_revision_matrix
+                tests/unit/test_revision_matrix.cpp
+            )
+            target_link_libraries(
+                test_revision_matrix
+                piccard_revision_matrix
+                test_main
+            )
+            target_include_directories(
+                test_revision_matrix
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_revision_matrix
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+                    PICCARD_REVISION_MATRIX_PAPER_GOLDEN="${CMAKE_SOURCE_DIR}/tests/fixtures/revision_matrix/paper_cell_ids.txt"
+                    PICCARD_REVISION_MATRIX_TOY_GOLDEN="${CMAKE_SOURCE_DIR}/tests/fixtures/revision_matrix/toy_cell_ids.txt"
+                    PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN="${CMAKE_SOURCE_DIR}/tests/fixtures/revision_matrix/executable_toy_cell_ids.txt"
+            )
+            add_test(NAME RevisionMatrix COMMAND test_revision_matrix)
+
+            add_executable(
+                test_revision_single_cell_adapters
+                tests/unit/test_revision_single_cell_adapters.cpp
+            )
+            target_link_libraries(
+                test_revision_single_cell_adapters
+                piccard_revision_matrix
+                test_main
+            )
+            target_include_directories(
+                test_revision_single_cell_adapters
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_revision_single_cell_adapters
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME RevisionSingleCellAdapters
+                COMMAND test_revision_single_cell_adapters
+            )
+
+            add_executable(
                 test_baseline_profile
                 tests/unit/test_baseline_profile.cpp
             )
@@ -1184,6 +1242,10 @@ if(BUILD_TESTS)
     add_test(NAME RealThresholdPipeline
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_real_threshold_pipeline
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RevisionMatrixPython
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_revision_matrix
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
