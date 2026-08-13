@@ -10,6 +10,8 @@ the no-paper/no-Enron-toy boundary.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import re
@@ -143,6 +145,9 @@ def _check_source_and_tools(manifest: dict[str, Any], root: Path, cells: list[di
     build_dir = Path(manifest.get("build_dir", ""))
     if manifest.get("tools") != tool_metadata(build_dir):
         fail("compiler/CMake/OpenFHE tool metadata changed")
+    expected_binaries = binary_metadata(build_dir, cells)
+    if manifest.get("binaries") != expected_binaries:
+        fail("producer binary registry/hash metadata changed")
     # Do not require a missing build in dry-run, but reject mutation of any
     # binary that was present when the run was recorded.
     for producer, metadata in manifest.get("binaries", {}).items():
@@ -440,6 +445,48 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 if completed.returncode != 0 or not actual.is_file() or \
                         actual.read_bytes() != recomputed.read_bytes():
                     fail(f"real summary artifact is not independently reproducible: {cid}")
+            continue
+
+        required_columns = {
+            "review-comparison-csv-v1": {"method", "measurement_status"},
+            "deletion-survival-csv-v1": {"model", "trials"},
+            "dynamic-benchmark-csv-v1": {"label", "trials"},
+            "estimator-diagnostic-csv-v1": {"estimator_model", "trials"},
+            "fhe-ind-csv-v1": {"cell_id", "method", "status"},
+            "noise-profile-v1": {"profile"},
+            "piccard-benchmark-csv-v1": {"label", "trials"},
+            "review-encoding-csv-v1": {"method", "measurement_status"},
+            "sqrt-comparison-csv-v1": {"encoding", "Total(ms)"},
+            "real-dataset-csv-v1": {"dataset", "variant"},
+            "real-threshold-csv-v1": {"schema_version", "dataset", "variant"},
+            "sj16-calibration-v1": {"key_bits", "heldout_actual_ms"},
+            "threshold-csv-v1": {"label", "trials"},
+            "threshold-fpfn-csv-v1": {"schema_version", "grid_index"},
+        }[schema]
+        candidates: list[bytes] = []
+        stdout_bytes = (output / "stdout.log").read_bytes()
+        if b"," in stdout_bytes:
+            candidates.append(stdout_bytes)
+        for item in receipt.get("artifact_inventory", []):
+            if str(item.get("path", "")).endswith(".csv"):
+                candidates.append((output / item["path"]).read_bytes())
+        valid_rows = 0
+        for payload in candidates:
+            try:
+                table = list(csv.reader(io.StringIO(payload.decode("utf-8"))))
+            except (UnicodeDecodeError, csv.Error):
+                continue
+            if len(table) < 2 or len(table[0]) != len(set(table[0])) or \
+                    not required_columns.issubset(set(table[0])):
+                continue
+            width = len(table[0])
+            if any(len(row) != width for row in table[1:]):
+                continue
+            valid_rows += len(table) - 1
+        applicable_rows = sum(row.get("terminal_status") != "NOT_APPLICABLE"
+                              for row in cell["expected_rows"])
+        if not candidates or valid_rows < applicable_rows:
+            fail(f"{schema} CSV structure/terminal row count mismatch for {cid}")
 
 
 def verify_root(root: Path, *, mode: str, write_receipt: bool = False,

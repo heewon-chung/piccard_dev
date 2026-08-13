@@ -143,6 +143,40 @@ class RevisionVerifierContractTest(unittest.TestCase):
             with self.assertRaises(RevisionContractError):
                 _check_family_artifacts(root, "toy", [cell], plans)
 
+    def test_family_verifier_rejects_token_only_stdout_without_csv(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
+        document = json.loads(MATRIX.read_text())
+        cell = next(item for item in document["cells"]
+                    if item["expected_artifact_schema"] ==
+                    "review-comparison-csv-v1")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            tokens = ",".join(row["method"] for row in cell["expected_rows"])
+            (output / "stdout.log").write_text(tokens + "\n")
+            (output / "stderr.log").write_text("")
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": []}) + "\n")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(
+                    root, "toy", [cell],
+                    {cell["cell_id"]: {"command": ["unused"]}})
+
+    def test_verifier_rejects_missing_binary_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_dry_root(temporary)
+            manifest = root / "run.json"
+            value = json.loads(manifest.read_text())
+            value["binaries"] = {}
+            manifest.write_text(json.dumps(value, sort_keys=True) + "\n")
+            check = subprocess.run(
+                [sys.executable, str(VERIFIER), str(root), "--mode=dry-run"],
+                cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(check.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
