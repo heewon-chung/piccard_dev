@@ -78,6 +78,7 @@
 
 using namespace piccard;
 namespace calibration_probe = piccard::std_evidence::calibration;
+using Pattern = piccard::benchmark::noise_calibration::EvidencePattern;
 
 // ============================================================================
 // Noise measurement
@@ -128,8 +129,6 @@ static CtxInfo Describe(const BFVContext& bfv) {
 // vectors are 0/1 either way, and key-switching noise does not depend on the
 // plaintext), but "expected" is not "measured": the sweep runs all three so a
 // worst case cannot hide behind a single lucky draw.
-enum class Pattern { AllMatch, NoMatch, Random };
-
 static const char* PatternName(Pattern p) {
     switch (p) {
         case Pattern::AllMatch: return "all_match";
@@ -137,29 +136,6 @@ static const char* PatternName(Pattern p) {
         case Pattern::Random:   return "random";
     }
     return "?";
-}
-
-/**
- * @brief Return the strict-evidence pattern order and output taxonomy.
- *
- * The revision taxonomy is a naming/order adapter only: each label retains
- * the legacy synthetic input that produced it.  The default path deliberately
- * preserves the historical order and labels byte-for-byte.
- */
-static std::vector<std::pair<Pattern, std::string>> StrictEvidencePatterns(
-    bool revision_pattern_taxonomy) {
-    if (revision_pattern_taxonomy) {
-        return {
-            {Pattern::NoMatch, "zero"},
-            {Pattern::Random, "random"},
-            {Pattern::AllMatch, "adversarial"},
-        };
-    }
-    return {
-        {Pattern::AllMatch, "all_match"},
-        {Pattern::NoMatch, "no_match"},
-        {Pattern::Random, "random"},
-    };
 }
 
 /// Deterministic seed for one measurement cell. A single shared generator
@@ -1327,10 +1303,10 @@ static int RunStrictEvidence(
                     "-s" + std::to_string(scaling_mod_size);
                 std::vector<nc::DetailRow> details;
                 for (const auto& consumer : options.consumer_points) {
-                    for (const auto& pattern_spec : StrictEvidencePatterns(
+                    for (const auto& pattern_spec : nc::StrictEvidencePatterns(
                              options.revision_pattern_taxonomy)) {
-                        const Pattern pattern = pattern_spec.first;
-                        const std::string& pattern_name = pattern_spec.second;
+                        const Pattern pattern = pattern_spec.input;
+                        const std::string& pattern_name = pattern_spec.label;
                         for (uint32_t rep = 0; rep < options.reps; ++rep) {
                             const uint64_t rep_seed =
                                 nc::DeriveEvidenceSeed(

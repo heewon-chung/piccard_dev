@@ -49,6 +49,28 @@ struct EvidenceOptions {
     std::vector<std::string> command;
 };
 
+/** @brief Synthetic input pattern used by strict noise evidence. */
+enum class EvidencePattern {
+    AllMatch,
+    NoMatch,
+    Random,
+};
+
+/** @brief One strict-evidence input pattern and its serialized taxonomy label. */
+struct EvidencePatternSpec {
+    EvidencePattern input = EvidencePattern::AllMatch;
+    std::string label;
+};
+
+/**
+ * @brief Returns the exact strict-evidence pattern mapping and order.
+ *
+ * The revision taxonomy only renames/reorders the legacy synthetic inputs;
+ * the default mapping remains the historical all_match/no_match/random path.
+ */
+std::vector<EvidencePatternSpec> StrictEvidencePatterns(
+    bool revision_pattern_taxonomy);
+
 /**
  * @brief One circuit/security pair covered by the pre-threshold runner.
  */

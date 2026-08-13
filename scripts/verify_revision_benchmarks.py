@@ -60,6 +60,8 @@ from revision_benchmark_common import (  # noqa: E402
 
 VERIFICATION_SCHEMA = "piccard-revision-verification-receipt-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+FLOODING_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_FLOODING_PATTERNS = ("zero", "random", "adversarial")
 
 # The versioned encoding workload adds a correctness record after the timing
 # records.  Keep its hash domain here rather than borrowing a producer-side
@@ -72,6 +74,22 @@ def _correctness_hash_seed(root_seed: int, index: int) -> int:
     payload = (_CORRECTNESS_HASH_DOMAIN + struct.pack(">Q", root_seed) +
                struct.pack(">I", index))
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _derive_flooding_rep_seed(
+        root_seed: int,
+        key_id: str,
+        candidate_id: str,
+        consumer_k: str,
+        consumer_m: str,
+        pattern: str,
+        rep_index: int) -> str:
+    """Recompute the strict-evidence seed without producer-side helpers."""
+    canonical = (
+        f"{root_seed}\n{key_id}\n{candidate_id}\n"
+        f"{consumer_k}:{consumer_m}\n{pattern}\n{rep_index}\n"
+    ).encode("ascii")
+    return str(int.from_bytes(hashlib.sha256(canonical).digest()[:8], "big"))
 
 
 def fail(message: str) -> "NoReturn":
@@ -1614,14 +1632,43 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             run_manifest.get("invocation_count") != 1:
         fail(f"noise run manifest identity/topology mismatch for {cell['cell_id']}")
 
-    resolved = load_json(safe_payload("resolved_noise_profiles.json",
-                                      "resolved noise profile matrix"),
-                         "resolved noise profile matrix")
+    resolved_path = safe_payload("resolved_noise_profiles.json",
+                                "resolved noise profile matrix")
+    resolved_bytes = resolved_path.read_bytes()
+    resolved = load_json(resolved_path, "resolved noise profile matrix")
     if not isinstance(resolved, dict) or not isinstance(resolved.get("profiles"), list):
         fail(f"resolved noise profile matrix is malformed for {cell['cell_id']}")
-    source_commit = str(resolved.get("source_commit", ""))
-    if source_commit in {"runtime-source-commit", ""} or len(source_commit) != 40:
+    source_commit_value = resolved.get("source_commit")
+    if not isinstance(source_commit_value, str) or \
+            FLOODING_SOURCE_COMMIT.fullmatch(source_commit_value) is None:
         fail(f"resolved noise profile source is not bound for {cell['cell_id']}")
+    source_commit = source_commit_value
+
+    tracked_manifest_path = ROOT / "scripts" / "noise_profiles.json"
+    if tracked_manifest_path.is_symlink() or not tracked_manifest_path.is_file():
+        fail(f"tracked noise profile matrix is missing for {cell['cell_id']}")
+    try:
+        tracked_manifest_bytes = tracked_manifest_path.read_bytes()
+    except OSError as exc:
+        fail(f"cannot read tracked noise profile matrix: {exc}")
+    sentinel = b"runtime-source-commit"
+    if tracked_manifest_bytes.count(sentinel) != 1:
+        fail(f"tracked noise profile matrix must contain one source sentinel for "
+             f"{cell['cell_id']}")
+    expected_resolved_bytes = tracked_manifest_bytes.replace(
+        sentinel, source_commit.encode("ascii"), 1)
+    if resolved_bytes != expected_resolved_bytes:
+        fail(f"resolved noise profile matrix is not the exact bound tracked bytes "
+             f"for {cell['cell_id']}")
+    try:
+        noise_matrix = json.loads(tracked_manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"tracked noise profile matrix is malformed: {exc}")
+    if not isinstance(noise_matrix, dict):
+        fail(f"tracked noise profile matrix is not an object for {cell['cell_id']}")
+    root_seed = noise_matrix.get("root_seed")
+    if type(root_seed) is not int or root_seed < 0:
+        fail(f"tracked noise profile root seed is invalid for {cell['cell_id']}")
 
     profiles_root = payload / "profiles" / profile
     profile_manifest_path = profiles_root / "profile_manifest.json"
@@ -1657,24 +1704,43 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             identity.get("status") != "READINESS_ONLY" or \
             identity.get("table_eligible") is not False:
         fail(f"noise shard revision identity mismatch for {cell['cell_id']}")
-    # Resolve the expected consumer set independently from the tracked noise
-    # matrix; manifests identify the artifact but cannot redefine its family.
-    try:
-        from revision_flooding_adapter import select_noise_partition
-        noise_matrix = json.loads((ROOT / "scripts" / "noise_profiles.json").read_text(
-            encoding="utf-8"))
-        partition = select_noise_partition(noise_matrix, profile)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        fail(f"cannot resolve canonical noise partition: {exc}")
-    expected_consumers = {(str(point["k"]), str(point["m"]))
-                          for point in partition["consumer_points"]}
-    identity_consumers = {
-        (str(point.get("k")), str(point.get("m")))
-        for point in identity.get("consumer_points", [])
-        if isinstance(point, dict)
-    }
+    # Resolve the expected consumer sequence independently from the tracked
+    # matrix; artifact manifests may not redefine this family topology.
+    partitions = noise_matrix.get("partitions")
+    if not isinstance(partitions, list):
+        fail(f"tracked noise profile partitions are malformed for {cell['cell_id']}")
+    matching_partitions = []
+    for candidate_partition in partitions:
+        if not isinstance(candidate_partition, dict) or \
+                candidate_partition.get("profile_id") != profile:
+            continue
+        points = candidate_partition.get("consumer_points")
+        if candidate_partition.get("circuit") == "onehot" and \
+                candidate_partition.get("shape_id") == "onehot-v1" and \
+                candidate_partition.get("security") == "STD128" and \
+                candidate_partition.get("requested_ring_dim") == 8192 and \
+                candidate_partition.get("natural_depth") == 1 and \
+                isinstance(points, list) and \
+                any(point == {"k": 128, "m": 64} for point in points):
+            matching_partitions.append(candidate_partition)
+    if len(matching_partitions) != 1:
+        fail(f"tracked noise profile must have one canonical partition for "
+             f"{cell['cell_id']}")
+    partition = matching_partitions[0]
+    partition_points = partition.get("consumer_points")
+    if not isinstance(partition_points, list) or not partition_points or \
+            any(type(point) is not dict or type(point.get("k")) is not int or
+                type(point.get("m")) is not int or point["k"] <= 0 or
+                point["m"] <= 0 for point in partition_points):
+        fail(f"canonical noise consumer sequence is malformed for {cell['cell_id']}")
+    expected_consumers = [(str(point["k"]), str(point["m"]))
+                          for point in partition_points]
+    if len(expected_consumers) != len(set(expected_consumers)):
+        fail(f"canonical noise consumer sequence has duplicates for {cell['cell_id']}")
+    identity_points = identity.get("consumer_points")
     if identity.get("consumer_set_sha256") != partition["consumer_set_sha256"] or \
-            identity_consumers != expected_consumers:
+            not isinstance(identity_points, list) or \
+            identity_points != partition_points:
         fail(f"noise shard consumer identity mismatch for {cell['cell_id']}")
 
     aggregate_path = shard / "aggregate.csv"
@@ -1701,6 +1767,7 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             row.get("consumer_set_sha256") != partition["consumer_set_sha256"] or
             row.get("pattern_count") != "3" or
             row.get("repetitions_per_pattern") != str(repetitions) or
+            row.get("seed") != str(root_seed) or
             row.get("source_commit") != source_commit
             for row in aggregate_rows):
         fail(f"noise aggregate identity/repetition mismatch for {cell['cell_id']}")
@@ -1759,15 +1826,20 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
         "eval_noise_bits,headroom_bits,max_queries,query_stat_bits,coefficient_stat_bits,"
         "flood_margin_bits,flood_noise_bits,decrypt_ok,saturated,ct_bytes,openfhe_version,"
         "source_commit,status_code,error_message\n")
-    observed: set[tuple[str, str, str, str]] = set()
+    expected_detail_tuples = [
+        (consumer_k, consumer_m, pattern, str(rep_index))
+        for consumer_k, consumer_m in expected_consumers
+        for pattern in _FLOODING_PATTERNS
+        for rep_index in range(repetitions)
+    ]
     for detail_path in detail_paths:
         rows = _csv_table(detail_path.read_bytes(), detail_header,
                           f"noise detail {cell['cell_id']}")
+        actual_detail_tuples: list[tuple[str, str, str, str]] = []
         for row in rows:
-            key = (row.get("consumer_k", ""), row.get("consumer_m", ""),
-                   row.get("pattern", ""), row.get("rep_index", ""))
             if (row.get("profile") != profile or row.get("key_id") != key_id or
-                    row.get("pattern") not in {"zero", "random", "adversarial"} or
+                    row.get("candidate_id") != detail_path.stem or
+                    row.get("pattern") not in _FLOODING_PATTERNS or
                     row.get("source_commit") != source_commit or
                     (row.get("consumer_k"), row.get("consumer_m"))
                     not in expected_consumers):
@@ -1776,16 +1848,32 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
                 rep_index = int(row["rep_index"])
             except (KeyError, ValueError):
                 fail(f"noise detail repetition index is invalid for {cell['cell_id']}")
-            if rep_index not in range(repetitions) or key in observed:
+            if rep_index not in range(repetitions) or \
+                    row.get("rep_index") != str(rep_index):
                 fail(f"noise detail repetition topology mismatch for {cell['cell_id']}")
-            observed.add(key)
+            expected_seed = _derive_flooding_rep_seed(
+                root_seed,
+                key_id,
+                detail_path.stem,
+                row["consumer_k"],
+                row["consumer_m"],
+                row["pattern"],
+                rep_index)
+            if row.get("rep_seed") != expected_seed:
+                fail(f"noise detail seed mismatch for {cell['cell_id']}")
+            actual_detail_tuples.append(
+                (row["consumer_k"], row["consumer_m"],
+                 row["pattern"], row["rep_index"]))
+        if actual_detail_tuples != expected_detail_tuples:
+            fail(f"noise detail rows are not in canonical flooding order for "
+                 f"{cell['cell_id']}")
         candidate = next(record for record in candidate_records
                          if record.get("candidate_id") == detail_path.stem)
         if candidate.get("detail_row_count") != len(rows) or \
                 candidate.get("detail_sha256") != sha256_file(detail_path):
             fail(f"noise candidate/detail binding mismatch for {cell['cell_id']}")
     expected_detail_count = len(expected_consumers) * 3 * repetitions
-    if len(observed) != expected_detail_count or any(
+    if any(
             int(row.get("detail_row_count", "-1")) != expected_detail_count
             for row in aggregate_rows):
         fail(f"noise detail row count mismatch for {cell['cell_id']}")

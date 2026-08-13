@@ -734,6 +734,22 @@ uint64_t DeriveEvidenceSeed(
     return std::stoull(digest.substr(0, 16), nullptr, 16);
 }
 
+std::vector<EvidencePatternSpec> StrictEvidencePatterns(
+    bool revision_pattern_taxonomy) {
+    if (revision_pattern_taxonomy) {
+        return {
+            {EvidencePattern::NoMatch, "zero"},
+            {EvidencePattern::Random, "random"},
+            {EvidencePattern::AllMatch, "adversarial"},
+        };
+    }
+    return {
+        {EvidencePattern::AllMatch, "all_match"},
+        {EvidencePattern::NoMatch, "no_match"},
+        {EvidencePattern::Random, "random"},
+    };
+}
+
 const std::string& AggregateCsvHeader() {
     static const std::string header =
         "profile,circuit,shape_id,security,consumer_count,"

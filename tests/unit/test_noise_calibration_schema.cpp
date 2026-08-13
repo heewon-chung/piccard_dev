@@ -234,6 +234,39 @@ TEST(NoiseEvidenceParser, AcceptsRevisionPatternTaxonomySelector) {
     EXPECT_NO_THROW(nc::ParseEvidenceOptions(args));
 }
 
+TEST(NoiseCalibrationSchema, StrictEvidencePatternMappingAndOrder) {
+    const auto revision = nc::StrictEvidencePatterns(true);
+    ASSERT_EQ(revision.size(), 3u);
+    EXPECT_EQ(revision[0].input, nc::EvidencePattern::NoMatch);
+    EXPECT_EQ(revision[0].label, "zero");
+    EXPECT_EQ(revision[1].input, nc::EvidencePattern::Random);
+    EXPECT_EQ(revision[1].label, "random");
+    EXPECT_EQ(revision[2].input, nc::EvidencePattern::AllMatch);
+    EXPECT_EQ(revision[2].label, "adversarial");
+
+    const auto legacy = nc::StrictEvidencePatterns(false);
+    ASSERT_EQ(legacy.size(), 3u);
+    EXPECT_EQ(legacy[0].input, nc::EvidencePattern::AllMatch);
+    EXPECT_EQ(legacy[0].label, "all_match");
+    EXPECT_EQ(legacy[1].input, nc::EvidencePattern::NoMatch);
+    EXPECT_EQ(legacy[1].label, "no_match");
+    EXPECT_EQ(legacy[2].input, nc::EvidencePattern::Random);
+    EXPECT_EQ(legacy[2].label, "random");
+}
+
+TEST(NoiseCalibrationSchema, StrictEvidenceSeedKnownAnswers) {
+    const std::string key_id =
+        "key-d4ea6156597c5c6c296c27fde912f37a307f112237e8a4786c705ae86bd92db7";
+    EXPECT_EQ(
+        nc::DeriveEvidenceSeed(
+            20260729, key_id, "N8192-d1-s40", 128, 64, "zero", 0),
+        UINT64_C(9883777269193876463));
+    EXPECT_EQ(
+        nc::DeriveEvidenceSeed(
+            20260729, key_id, "N8192-d1-s40", 128, 64, "all_match", 0),
+        UINT64_C(16482659461209908673));
+}
+
 TEST(NoiseEvidenceParser, AcceptsSqrtStd192AndSplitValueSyntax) {
     const nc::EvidenceOptions options = nc::ParseEvidenceOptions({
         "--pre_threshold",

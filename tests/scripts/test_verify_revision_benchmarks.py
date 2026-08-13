@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import csv
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -475,6 +476,21 @@ class RevisionVerifierContractTest(unittest.TestCase):
         matrix = json.loads((ROOT / "scripts" / "noise_profiles.json").read_text())
         partition = select_noise_partition(matrix, "primary40")
         key_id = partition["key_id"]
+        source_commit = "a" * 40
+        tracked_manifest = (ROOT / "scripts" / "noise_profiles.json").read_bytes()
+        self.assertEqual(tracked_manifest.count(b"runtime-source-commit"), 1)
+        resolved_manifest = tracked_manifest.replace(
+            b"runtime-source-commit", source_commit.encode("ascii"), 1)
+
+        def seed_for(consumer_k: int, consumer_m: int, pattern: str,
+                     rep_index: int = 0) -> str:
+            payload = (f"{matrix['root_seed']}\n{key_id}\nN8192-d1-s40\n"
+                       f"{consumer_k}:{consumer_m}\n{pattern}\n{rep_index}\n")
+            return str(int.from_bytes(
+                hashlib.sha256(payload.encode("ascii")).digest()[:8], "big"))
+
+        self.assertEqual(seed_for(128, 64, "zero"), "9883777269193876463")
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = cell_output(root, cell["cell_id"])
@@ -488,20 +504,19 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 "table_eligible": False, "repetitions_per_pattern": 1,
                 "patterns": ["zero", "random", "adversarial"], "invocation_count": 1}),
                 encoding="utf-8")
-            (payload / "resolved_noise_profiles.json").write_text(
-                json.dumps({"source_commit": "a" * 40, "profiles": []}), encoding="utf-8")
+            (payload / "resolved_noise_profiles.json").write_bytes(resolved_manifest)
             (payload / "profiles" / "primary40" / "profile_manifest.json").write_text(
                 json.dumps({"schema": "piccard-noise-revision-profile-v1",
                             "profile_id": "primary40", "key_count": 1,
                             "key_verdicts": {key_id: "SELECTED"},
-                            "source_commit": "a" * 40,
+                            "source_commit": source_commit,
                             "profile_verdict": "READINESS_ONLY",
                             "table_eligible": False}), encoding="utf-8")
             (shard / "revision_identity.json").write_text(json.dumps({
                 "schema": "piccard-noise-revision-shard-v1",
                 "cell_id": cell["cell_id"], "run_profile": "readiness-toy-v1",
                 "profile_id": "primary40", "key_id": key_id,
-                "source_commit": "a" * 40,
+                "source_commit": source_commit,
                 "consumer_points": partition["consumer_points"],
                 "consumer_set_sha256": partition["consumer_set_sha256"],
                 "repetitions_per_pattern": 1,
@@ -519,7 +534,8 @@ class RevisionVerifierContractTest(unittest.TestCase):
             aggregate = [""] * len(aggregate_header.rstrip("\n").split(","))
             af = aggregate_header.rstrip("\n").split(",")
             for name, value in (("profile", "primary40"),
-                                ("source_commit", "a" * 40),
+                                ("source_commit", source_commit),
+                                ("seed", str(matrix["root_seed"])),
                                 ("consumer_count", str(len(partition["consumer_points"]))),
                                 ("consumer_set_sha256", partition["consumer_set_sha256"]),
                                 ("pattern_count", "3"),
@@ -543,10 +559,11 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 for pattern in ("zero", "random", "adversarial"):
                     values = [""] * len(df)
                     for name, value in (("profile", "primary40"), ("key_id", key_id),
-                                        ("source_commit", "a" * 40),
+                                        ("source_commit", source_commit),
                                         ("candidate_id", "N8192-d1-s40"),
                                         ("consumer_k", k), ("consumer_m", m),
-                                        ("pattern", pattern), ("rep_index", "0")):
+                                        ("pattern", pattern), ("rep_index", "0"),
+                                        ("rep_seed", seed_for(int(k), int(m), pattern))):
                         values[df.index(name)] = value
                     detail_rows.append(",".join(values))
             (details / "N8192-d1-s40.csv").write_text(
@@ -561,7 +578,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 aggregate_header + ",".join(aggregate) + "\n", encoding="utf-8")
             (shard / "candidates.json").write_text(json.dumps({
                 "schema": "piccard-candidate-manifest", "version": 1,
-                "key_id": key_id, "source_commit": "a" * 40,
+                "key_id": key_id, "source_commit": source_commit,
                 "openfhe_version": partition["openfhe_version"],
                 "profile_id": "primary40", "circuit": partition["circuit"],
                 "shape_id": partition["shape_id"], "security": partition["security"],
@@ -583,11 +600,42 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
                 "command": ["scripts/run_noise_profiles.sh",
                             f"--results-root={payload}"]}})
+            from verify_revision_benchmarks import RevisionContractError
+            resolved_path = payload / "resolved_noise_profiles.json"
+            self.assertEqual(resolved_path.read_bytes(), resolved_manifest)
+            detail_path = details / "N8192-d1-s40.csv"
+            original_detail = detail_path.read_bytes()
+            check_plan = {cell["cell_id"]: {
+                "command": ["scripts/run_noise_profiles.sh",
+                            f"--results-root={payload}"]}}
+
+            resolved_path.write_bytes(json.dumps({
+                "source_commit": source_commit, "profiles": []}).encode("utf-8"))
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], check_plan)
+            resolved_path.write_bytes(resolved_manifest)
+
+            expected_seed = seed_for(16, 64, "zero").encode("ascii")
+            detail_path.write_bytes(original_detail.replace(expected_seed, b"1", 1))
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], check_plan)
+            detail_path.write_bytes(original_detail)
+            detail_path.write_bytes(original_detail.replace(expected_seed, b"", 1))
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], check_plan)
+            detail_path.write_bytes(original_detail)
+
+            detail_lines = original_detail.splitlines(keepends=True)
+            detail_lines[1], detail_lines[2] = detail_lines[2], detail_lines[1]
+            detail_path.write_bytes(b"".join(detail_lines))
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], check_plan)
+            detail_path.write_bytes(original_detail)
+
             identity_path = shard / "revision_identity.json"
             identity = json.loads(identity_path.read_text(encoding="utf-8"))
             identity["consumer_points"] = [{"k": 128, "m": 999}]
             identity_path.write_text(json.dumps(identity), encoding="utf-8")
-            from verify_revision_benchmarks import RevisionContractError
             with self.assertRaises(RevisionContractError):
                 _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
                     "command": ["scripts/run_noise_profiles.sh",
