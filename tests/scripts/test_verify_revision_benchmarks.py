@@ -197,6 +197,105 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True)
             self.assertNotEqual(check.returncode, 0)
 
+    def test_verifier_piccard_plan_requires_canonical_identity_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_dry_root(temporary)
+            path = root / "planned_argv.jsonl"
+            original = path.read_text()
+            records = [json.loads(line) for line in original.splitlines()]
+            target = next(record for record in records
+                          if record["producer"] == "bench_piccard")
+            cid = target["cell_id"]
+            from revision_benchmark_common import cell_output
+            identity = f"--revision-identity-out={cell_output(root.resolve(), cid) / 'identity.csv'}"
+            self.assertNotIn(identity, target["canonical_argv"])
+            self.assertEqual(target["command"].count(identity), 1)
+            self.assertEqual(target["argv"].count(identity), 1)
+
+            for label in ("missing", "duplicate", "rebound"):
+                with self.subTest(label=label):
+                    mutated_records = [json.loads(line)
+                                       for line in original.splitlines()]
+                    mutated = next(record for record in mutated_records
+                                   if record["cell_id"] == cid)
+                    if label == "missing":
+                        mutated["command"].remove(identity)
+                        mutated["argv"].remove(identity)
+                    elif label == "duplicate":
+                        mutated["command"].append(identity)
+                        mutated["argv"].append(identity)
+                    else:
+                        foreign = f"--revision-identity-out={root / 'foreign' / 'identity.csv'}"
+                        mutated["command"] = [foreign if item == identity else item
+                                              for item in mutated["command"]]
+                        mutated["argv"] = [foreign if item == identity else item
+                                            for item in mutated["argv"]]
+                    path.write_text("\n".join(
+                        json.dumps(record, sort_keys=True)
+                        for record in mutated_records) + "\n")
+                    check = subprocess.run(
+                        [sys.executable, str(VERIFIER), str(root), "--mode=dry-run"],
+                        cwd=ROOT, text=True, capture_output=True)
+                    self.assertNotEqual(check.returncode, 0, check.stderr)
+
+    def test_piccard_identity_sidecar_actual_shape_kat_and_mutations(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _SQRT_TIMING_HEADER, _check_family_artifacts,
+            RevisionContractError)
+
+        cell = self.matrix_cell("piccard-benchmark-csv-v1",
+                                family="piccard_std128",
+                                axis="control", axis_value="default")
+        cid = cell["cell_id"]
+        expected_identity = (
+            "schema,cell_id,universe_size\n"
+            f"piccard-revision-cell-v1,{cid},{cell['axes']['u']}\n"
+        ).encode("utf-8")
+        rows = [
+            self.csv_row(_SQRT_TIMING_HEADER, label=cid, k=128, m=64,
+                         set_size=1000, trials=1, accuracy_trials=0,
+                         profile_id="readiness-toy-v1", run_class="smoke",
+                         target_security_bits=0, comparison_eligible="false"),
+            self.csv_row(_SQRT_TIMING_HEADER, label=cid, k=128, m=64,
+                         set_size=1000, trials=1, accuracy_trials=1,
+                         profile_id="readiness-toy-v1", run_class="smoke",
+                         target_security_bits=0, comparison_eligible="false"),
+        ]
+
+        cases = (
+            ("positive", expected_identity, True),
+            ("missing", None, False),
+            ("wrong universe", expected_identity.replace(b",65536\n", b",16384\n"), False),
+            ("wrong cell", expected_identity.replace(cid.encode(), b"wrong-cell"), False),
+        )
+        for label, identity_payload, accepted in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = cell_output(root, cid)
+                output.mkdir(parents=True)
+                (output / "stdout.log").write_text(
+                    _SQRT_TIMING_HEADER + "\n".join(rows) + "\n",
+                    encoding="utf-8")
+                (output / "stderr.log").write_text("", encoding="utf-8")
+                if identity_payload is not None:
+                    (output / "identity.csv").write_bytes(identity_payload)
+                receipt = {"artifact_inventory": file_inventory(
+                    output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+                (output / "receipt.json").write_text(
+                    json.dumps(receipt) + "\n", encoding="utf-8")
+                plan = {cid: {"command": [
+                    f"--revision-cell={cid}",
+                    "--profile=readiness-toy-v1",
+                    f"--revision-identity-out={output / 'identity.csv'}",
+                ]}}
+                if accepted:
+                    _check_family_artifacts(root, "toy", [cell], plan)
+                else:
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(root, "toy", [cell], plan)
+
     def test_family_verifier_recomputes_and_rejects_forged_real_summary(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         import summarize_real_datasets as summarizer

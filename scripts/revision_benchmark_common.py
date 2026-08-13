@@ -774,6 +774,8 @@ def producer_extra_args(cell: dict[str, Any], output: Path) -> list[str]:
     if producer == "bench_fhe_ind":
         return [f"--output={output / 'fhe_ind.csv'}",
                 f"--revision-identity-out={output / 'identity.csv'}"]
+    if producer == "bench_piccard":
+        return [f"--revision-identity-out={output / 'identity.csv'}"]
     if producer == "bench_dynamic":
         return [f"--revision-identity-out={output / 'identity.csv'}"]
     return []

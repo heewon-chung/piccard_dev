@@ -285,6 +285,8 @@ def _check_plans(root: Path, mode: str, cells: list[dict[str, Any]], manifest: d
         if producer == "bench_fhe_ind":
             materialized += [f"--output={output_dir / 'fhe_ind.csv'}",
                              f"--revision-identity-out={output_dir / 'identity.csv'}"]
+        elif producer == "bench_piccard":
+            materialized += [f"--revision-identity-out={output_dir / 'identity.csv'}"]
         elif producer == "bench_dynamic":
             materialized += [f"--revision-identity-out={output_dir / 'identity.csv'}"]
         expected_command = command_for_producer(
@@ -718,6 +720,29 @@ def _reject_unrelated_csvs(output: Path, receipt: dict[str, Any], allowed: set[s
             # explicit selector and are not the primary family artifact.
             if path != "identity.csv":
                 fail(f"unrelated CSV artifact is not admissible: {path}")
+
+
+def _check_piccard_identity_sidecar(output: Path, cell: dict[str, Any],
+                                    receipt: dict[str, Any], cid: str) -> None:
+    """Require the Piccard producer's exact canonical identity sidecar."""
+    inventory = receipt.get("artifact_inventory")
+    if not isinstance(inventory, list) or "identity.csv" not in {
+            str(item.get("path", "")) for item in inventory
+            if isinstance(item, dict)}:
+        fail(f"Piccard artifact inventory lacks canonical identity for {cid}")
+    path = output / "identity.csv"
+    if path.is_symlink() or not path.is_file():
+        fail(f"Piccard identity sidecar is missing or unsafe for {cid}")
+    expected = (
+        "schema,cell_id,universe_size\n"
+        f"piccard-revision-cell-v1,{cid},{cell['axes']['u']}\n"
+    ).encode("utf-8")
+    try:
+        actual = path.read_bytes()
+    except OSError as exc:
+        fail(f"Piccard identity sidecar is unreadable for {cid}: {exc}")
+    if actual != expected:
+        fail(f"Piccard identity sidecar bytes mismatch for {cid}")
 
 
 def _terminal_records(stderr: bytes, cell_id: str) -> list[dict[str, str]]:
@@ -1939,6 +1964,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                             if str(item.get("path", "")).endswith(".csv")}
         elif is_summary:
             allowed_csvs = {"summary.csv"}
+        elif schema == "piccard-benchmark-csv-v1":
+            allowed_csvs = {"identity.csv"}
         elif schema not in {"review-comparison-csv-v1", "review-encoding-csv-v1",
                             "sqrt-comparison-csv-v1", "threshold-csv-v1",
                             "threshold-fpfn-csv-v1", "dynamic-benchmark-csv-v1",
@@ -1949,6 +1976,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 if len(values) == 1:
                     allowed_csvs.add(Path(values[0]).name)
         if schema != "noise-profile-v1":
+            if schema == "piccard-benchmark-csv-v1":
+                _check_piccard_identity_sidecar(output, cell, receipt, cid)
             _reject_unrelated_csvs(output, receipt, allowed_csvs)
         if is_summary:
             argv = plan.get("command", [])

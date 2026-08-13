@@ -314,6 +314,34 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertEqual(metadata["bench_noise"]["path"], str(binary.resolve()))
             self.assertNotEqual(command[0], str(binary))
 
+    def test_piccard_materialization_binds_canonical_identity_sidecar_once(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, load_matrix, select_cells
+        from run_revision_benchmarks import _materialized_command
+
+        document, _ = load_matrix(MATRIX)
+        cell = next(item for item in select_cells(document, "toy")
+                    if item["producer"] == "bench_piccard")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "results"
+            root.mkdir()
+            build = Path(temporary) / "build"
+            build.mkdir()
+            manifests = {
+                "dblp_acm_u65536": Path(temporary) / "dblp.manifest.tsv",
+            }
+            manifests["dblp_acm_u65536"].write_text("fixture\n", encoding="utf-8")
+            canonical, command = _materialized_command(
+                cell, "toy", root=root, build_dir=build, seed=7, threads=2,
+                variant_manifests=manifests,
+                dblp_manifest=manifests["dblp_acm_u65536"],
+            )
+            output = cell_output(root, cell["cell_id"])
+            identity = f"--revision-identity-out={output / 'identity.csv'}"
+            self.assertNotIn(identity, canonical)
+            self.assertEqual(command.count(identity), 1)
+            self.assertNotIn("--output=", " ".join(command))
+
     def test_real_summary_uses_python_summary_executable_mapping(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import executable_for_cell, load_matrix
