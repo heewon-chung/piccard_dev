@@ -548,6 +548,143 @@ std::string DeletionProfileForMode(RevisionRunMode mode) {
     RejectDeletion("unknown run mode");
 }
 
+[[noreturn]] void RejectSqrt(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid sqrt revision invocation cell: " + reason);
+}
+
+bool IsSqrtAxis(const std::string& axis) {
+    return axis == "timing_m" || axis == "accuracy_m" ||
+           axis == "ciphertext_m" || axis == "crossover_m";
+}
+
+std::string SqrtProducer(const std::string& axis) {
+    if (axis == "timing_m") return "bench_onehot_sqrt";
+    if (axis == "accuracy_m") return "bench_sqrt_comparison";
+    if (axis == "ciphertext_m" || axis == "crossover_m") {
+        return "bench_crossover";
+    }
+    RejectSqrt("unsupported sqrt selector axis");
+}
+
+std::string SqrtMode(const std::string& axis) {
+    if (axis == "timing_m") return "timing";
+    if (axis == "accuracy_m") return "accuracy";
+    if (axis == "ciphertext_m") return "ciphertext";
+    if (axis == "crossover_m") return "crossover";
+    RejectSqrt("unsupported sqrt selector axis");
+}
+
+uint64_t SqrtPaperTrials(const std::string& axis) {
+    if (axis == "timing_m" || axis == "crossover_m") return 30;
+    if (axis == "accuracy_m") return 50;
+    if (axis == "ciphertext_m") return 1;
+    RejectSqrt("unsupported sqrt selector axis");
+}
+
+bool IsPerfectSquareM(uint64_t m) {
+    return m == 16 || m == 64 || m == 256;
+}
+
+void ValidateSqrtCell(const RevisionCell& cell) {
+    if (cell.family != "sqrt_comparison") {
+        RejectSqrt("family must be sqrt_comparison");
+    }
+    if (!IsSqrtAxis(cell.axis)) RejectSqrt("invalid sqrt selector axis");
+    if (cell.producer != SqrtProducer(cell.axis)) {
+        RejectSqrt("producer does not match sqrt selector axis");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectSqrt("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectSqrt("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "sqrt-comparison-csv-v1") {
+        RejectSqrt("unexpected sqrt artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectSqrt("cell is not RUN");
+    }
+    if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
+        !cell.comparison_eligible) {
+        RejectSqrt("sqrt cell must be table/comparison eligible");
+    }
+    if (cell.axes.size() != 4u) RejectSqrt("sqrt cells require k,m,n,u axes");
+    const uint64_t m = Axis(cell, "m");
+    if (!IsOneOf(m, {16, 32, 64, 128, 256}) ||
+        cell.axis_value != std::to_string(m) ||
+        cell.cell_id != "paper-v1::sqrt_comparison::" + cell.axis + "=" +
+                            cell.axis_value) {
+        RejectSqrt("sqrt m selector identity mismatch");
+    }
+    RequireAxisValue(cell, "k", 128);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+
+    const uint64_t paper_trials = SqrtPaperTrials(cell.axis);
+    const bool square = IsPerfectSquareM(m);
+    const std::map<std::string, uint64_t> expected_paper_counts = {
+        {"onehot", paper_trials}, {"sqrt", square ? paper_trials : 0}};
+    const std::map<std::string, uint64_t> expected_toy_counts = {
+        {"onehot", 1}, {"sqrt", square ? 1 : 0}};
+    if (cell.paper_count != paper_trials || cell.toy_count != 1 ||
+        cell.paper_trials != paper_trials || cell.toy_trials != 1 ||
+        cell.paper_counts != expected_paper_counts ||
+        cell.toy_counts != expected_toy_counts) {
+        RejectSqrt("paper/toy count contract mismatch");
+    }
+    if (!cell.attributes.empty() || !cell.list_attributes.empty() ||
+        !cell.object_attributes.empty()) {
+        RejectSqrt("sqrt cell attributes must be empty");
+    }
+
+    if (cell.expected_rows.size() != 2u) {
+        RejectSqrt("sqrt cells require onehot and sqrt rows");
+    }
+    const RevisionRow& onehot = cell.expected_rows.at(0);
+    if (onehot.row_id != "onehot" || onehot.status != "MEASURED" ||
+        onehot.terminal_status != "MEASURED" || onehot.method != "onehot" ||
+        !onehot.reason.empty() || !onehot.reason_code.empty() ||
+        onehot.measured_count != paper_trials ||
+        onehot.paper_measured_count != paper_trials ||
+        onehot.toy_measured_count != 1 || !onehot.attributes.empty() ||
+        !onehot.list_attributes.empty() || !onehot.timing_contract.empty() ||
+        !onehot.raw_timing_contract.empty() || !onehot.phase.empty() ||
+        !onehot.pattern.empty() || !onehot.variant.empty() ||
+        !onehot.fit_authority.empty()) {
+        RejectSqrt("onehot row contract mismatch");
+    }
+
+    const RevisionRow& sqrt = cell.expected_rows.at(1);
+    const std::string sqrt_status = square ? "MEASURED" : "NOT_APPLICABLE";
+    const uint64_t sqrt_count = square ? paper_trials : 0;
+    if (sqrt.row_id != "sqrt" || sqrt.status != sqrt_status ||
+        sqrt.terminal_status != sqrt_status || sqrt.method != "sqrt" ||
+        sqrt.reason != (square ? "" : "sqrt-m-not-perfect-square") ||
+        sqrt.reason_code != (square ? "" : "sqrt-m-not-perfect-square") ||
+        sqrt.measured_count != sqrt_count ||
+        sqrt.paper_measured_count != sqrt_count ||
+        sqrt.toy_measured_count != (square ? 1u : 0u) ||
+        !sqrt.attributes.empty() || !sqrt.list_attributes.empty() ||
+        !sqrt.timing_contract.empty() || !sqrt.raw_timing_contract.empty() ||
+        !sqrt.phase.empty() || !sqrt.pattern.empty() ||
+        !sqrt.variant.empty() || !sqrt.fit_authority.empty()) {
+        RejectSqrt("sqrt row contract mismatch");
+    }
+}
+
+std::string SqrtProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-std128-t40-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectSqrt("unknown run mode");
+}
+
 [[noreturn]] void RejectThreshold(const std::string& reason) {
     throw std::invalid_argument(
         "invalid threshold FHE revision invocation cell: " + reason);
@@ -955,6 +1092,42 @@ RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
         "--set_size=1000",
         "--universe=65536",
         "--trials=" + trials,
+        "--seed={seed}",
+    };
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
+                                            RevisionRunMode mode) {
+    ValidateSqrtCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const std::string profile = SqrtProfileForMode(mode);
+    const std::string& axis = cell.axis;
+    const uint64_t paper_trials = SqrtPaperTrials(axis);
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        "--cell=" + axis,
+        "--mode=" + SqrtMode(axis),
+        std::string("--security=") + (toy ? "TOY" : "STD128"),
+        "--k=128",
+        "--m=" + cell.axes.at("m"),
+        "--set_size=1000",
+        "--universe=65536",
+        std::string("--trials=") +
+            (toy ? "1" : std::to_string(paper_trials)),
         "--seed={seed}",
     };
     plan.expected_rows = cell.expected_rows;

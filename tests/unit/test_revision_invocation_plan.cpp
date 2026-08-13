@@ -20,6 +20,7 @@ using piccard::benchmark::PlanPiccardRevisionCell;
 using piccard::benchmark::PlanFheIndRevisionCell;
 using piccard::benchmark::PlanEstimatorRevisionCell;
 using piccard::benchmark::PlanDeletionRevisionCell;
+using piccard::benchmark::PlanSqrtRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 
 RevisionMatrix Load() {
@@ -56,6 +57,14 @@ std::vector<const RevisionCell*> DeletionCells(const RevisionMatrix& matrix) {
         if (cell.family == "deletion_exact" || cell.family == "deletion_mc") {
             cells.push_back(&cell);
         }
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> SqrtCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "sqrt_comparison") cells.push_back(&cell);
     }
     return cells;
 }
@@ -503,6 +512,202 @@ TEST(RevisionInvocationPlan,
     cell = exact;
     cell.expected_rows.front().measured_count = 1;
     EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = SqrtCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanSqrtRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanSqrtRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanSqrtRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        const std::string axis = cell->axis;
+        const std::string mode = axis.substr(0, axis.size() - 2u);
+        const std::string producer =
+            axis == "timing_m"
+                ? "bench_onehot_sqrt"
+                : (axis == "accuracy_m" ? "bench_sqrt_comparison"
+                                         : "bench_crossover");
+        const uint64_t m = std::stoull(cell->axes.at("m"));
+        const bool square = m == 16 || m == 64 || m == 256;
+        const std::string paper_profile = "paper-std128-t40-v1";
+        const std::string paper_trials =
+            axis == "timing_m" ? "30"
+            : (axis == "accuracy_m" ? "50"
+                                     : (axis == "ciphertext_m" ? "1" : "30"));
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=" + paper_profile,
+            "--cell=" + axis,
+            "--mode=" + mode,
+            "--security=STD128",
+            "--k=128",
+            "--m=" + cell->axes.at("m"),
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=" + paper_trials,
+            "--seed={seed}",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--cell=" + axis,
+            "--mode=" + mode,
+            "--security=TOY",
+            "--k=128",
+            "--m=" + cell->axes.at("m"),
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=1",
+            "--seed={seed}",
+        };
+
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, producer);
+        EXPECT_EQ(toy.producer, producer);
+        EXPECT_EQ(paper.concrete_profile, paper_profile);
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, paper_profile);
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(paper.expected_rows.size(), 2u);
+        ASSERT_EQ(toy.expected_rows.size(), 2u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 2u);
+
+        const auto& paper_onehot = paper.expected_rows.at(0);
+        const auto& paper_sqrt = paper.expected_rows.at(1);
+        EXPECT_EQ(paper_onehot.row_id, "onehot");
+        EXPECT_EQ(paper_onehot.method, "onehot");
+        EXPECT_EQ(paper_onehot.status, "MEASURED");
+        EXPECT_EQ(paper_onehot.terminal_status, "MEASURED");
+        EXPECT_EQ(paper_onehot.measured_count, std::stoull(paper_trials));
+        EXPECT_EQ(paper_onehot.paper_measured_count,
+                  std::stoull(paper_trials));
+        EXPECT_EQ(paper_onehot.toy_measured_count, 1u);
+        EXPECT_EQ(paper_sqrt.row_id, "sqrt");
+        EXPECT_EQ(paper_sqrt.method, "sqrt");
+        EXPECT_EQ(paper_sqrt.status, square ? "MEASURED" : "NOT_APPLICABLE");
+        EXPECT_EQ(paper_sqrt.terminal_status,
+                  square ? "MEASURED" : "NOT_APPLICABLE");
+        EXPECT_EQ(paper_sqrt.reason,
+                  square ? "" : "sqrt-m-not-perfect-square");
+        EXPECT_EQ(paper_sqrt.reason_code,
+                  square ? "" : "sqrt-m-not-perfect-square");
+        EXPECT_EQ(paper_sqrt.measured_count,
+                  square ? std::stoull(paper_trials) : 0u);
+        EXPECT_EQ(paper_sqrt.paper_measured_count,
+                  square ? std::stoull(paper_trials) : 0u);
+        EXPECT_EQ(paper_sqrt.toy_measured_count, square ? 1u : 0u);
+        EXPECT_EQ(toy.expected_rows.at(0).measured_count, 1u);
+        EXPECT_EQ(toy.expected_rows.at(1).measured_count, square ? 1u : 0u);
+        EXPECT_EQ(dry_run.expected_rows.at(0).measured_count,
+                  paper.expected_rows.at(0).measured_count);
+        EXPECT_EQ(dry_run.expected_rows.at(1).status,
+                  paper.expected_rows.at(1).status);
+        EXPECT_EQ(dry_run.expected_rows.at(1).measured_count,
+                  paper.expected_rows.at(1).measured_count);
+        EXPECT_FALSE(HasArg(paper, "--raw"));
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidSqrtIdentityGeometryCountsAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = SqrtCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+    const RevisionCell timing = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->cell_id ==
+                   "paper-v1::sqrt_comparison::timing_m=16";
+        });
+
+    RevisionCell cell = timing;
+    cell.family = "estimator_accuracy";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.producer = "bench_crossover";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axis = "m";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axis_value = "17";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axes["m"] = "17";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axes["k"] = "64";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.paper_counts["onehot"] = 29;
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_rows.front().status = "NOT_APPLICABLE";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_rows.at(1).reason = "wrong";
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing;
+    cell.expected_rows.pop_back();
+    EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
 

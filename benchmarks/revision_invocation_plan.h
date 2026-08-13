@@ -77,6 +77,15 @@ RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
                                                 RevisionRunMode mode);
 
 /**
+ * @brief Plan exactly one validated `sqrt_comparison` matrix cell.
+ *
+ * The returned plan preserves explicit NOT_APPLICABLE sqrt rows for
+ * non-square m values; no producer is launched while planning.
+ */
+RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
+                                            RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and
