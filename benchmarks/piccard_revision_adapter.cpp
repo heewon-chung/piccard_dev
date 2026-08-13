@@ -1,6 +1,7 @@
 #include "piccard_revision_adapter.h"
 
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -193,6 +194,131 @@ PiccardRevisionSelection SelectPiccardRevisionCell(
     RevisionRunMode mode) {
     return SelectPiccardRevisionCell(matrix, ParsePiccardRevisionArgs(argv),
                                      mode);
+}
+
+BoundedOverlapSets MakeBoundedOverlapSets(
+    const uint64_t set_size,
+    const double target_jaccard,
+    const uint64_t universe) {
+    if (set_size == 0 || universe == 0) {
+        Reject("set size and universe must be positive");
+    }
+    if (!std::isfinite(target_jaccard) || target_jaccard < 0.0 ||
+        target_jaccard > 1.0) {
+        Reject("target Jaccard must be finite and in [0,1]");
+    }
+    if (set_size > static_cast<uint64_t>(
+                       std::numeric_limits<std::size_t>::max())) {
+        Reject("set size is too large for this host");
+    }
+    if (set_size > std::numeric_limits<uint64_t>::max() / 2u) {
+        Reject("set size overflows the union cardinality");
+    }
+
+    const long double requested_overlap =
+        (2.0L * static_cast<long double>(target_jaccard) *
+         static_cast<long double>(set_size)) /
+        (1.0L + static_cast<long double>(target_jaccard));
+    uint64_t intersection = static_cast<uint64_t>(
+        std::floor(requested_overlap));
+    if (intersection > set_size) intersection = set_size;
+    const uint64_t union_size = 2u * set_size - intersection;
+    if (union_size > universe) {
+        Reject("universe is insufficient for the requested set union");
+    }
+
+    const uint64_t unique_a = set_size - intersection;
+    // Place the canonical union at the beginning of the explicit universe.
+    // This keeps the output deterministic without consuming process-global
+    // randomness and makes the sorted/range invariant easy to audit.
+    const uint64_t start = 0;
+    const uint64_t unique_b_start = start + intersection + unique_a;
+
+    BoundedOverlapSets workload;
+    workload.set_a.reserve(static_cast<std::size_t>(set_size));
+    workload.set_b.reserve(static_cast<std::size_t>(set_size));
+    for (uint64_t index = 0; index < intersection; ++index) {
+        workload.set_a.push_back(start + index);
+        workload.set_b.push_back(start + index);
+    }
+    for (uint64_t index = 0; index < unique_a; ++index) {
+        workload.set_a.push_back(start + intersection + index);
+    }
+    for (uint64_t index = 0; index < unique_a; ++index) {
+        workload.set_b.push_back(unique_b_start + index);
+    }
+    workload.intersection_size = intersection;
+    workload.union_size = union_size;
+    workload.target_jaccard = target_jaccard;
+    workload.realized_jaccard = static_cast<double>(intersection) /
+                                static_cast<double>(union_size);
+    return workload;
+}
+
+std::string PiccardRevisionIdentityHeader() {
+    return "schema,cell_id,universe_size";
+}
+
+std::string SerializePiccardRevisionIdentity(
+    const PiccardRevisionIdentity& identity) {
+    if (identity.schema != "piccard-revision-cell-v1") {
+        throw std::invalid_argument("Piccard revision schema mismatch");
+    }
+    if (identity.cell_id.empty() || identity.cell_id.find_first_of(",\n\r") !=
+                                         std::string::npos) {
+        throw std::invalid_argument("Piccard revision cell ID is malformed");
+    }
+    if (identity.universe_size == 0) {
+        throw std::invalid_argument("Piccard revision universe must be positive");
+    }
+    return identity.schema + "," + identity.cell_id + "," +
+           std::to_string(identity.universe_size);
+}
+
+std::string SerializePiccardRevisionIdentityHeader() {
+    return PiccardRevisionIdentityHeader() + "\n";
+}
+
+std::string SerializePiccardRevisionIdentityRow(
+    const PiccardRevisionSelection& selection) {
+    return SerializePiccardRevisionIdentity(MakePiccardRevisionIdentity(
+               selection)) +
+           "\n";
+}
+
+PiccardRevisionExecutionPlan PlanPiccardRevisionExecution(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    const RevisionRunMode mode) {
+    const PiccardRevisionRequest request = ParsePiccardRevisionArgs(argv);
+    PiccardRevisionExecutionPlan execution;
+    execution.selection = SelectPiccardRevisionCell(matrix, request, mode);
+    execution.point = {
+        "revision", request.k, request.m,
+        static_cast<std::size_t>(request.set_size),
+        static_cast<uint32_t>(request.universe), 0.5};
+    execution.selected_point_count = 1;
+    execution.keygen_calls = 0;
+    execution.native_sweep = false;
+    return execution;
+}
+
+PiccardRevisionIdentity MakePiccardRevisionIdentity(
+    const PiccardRevisionSelection& selection) {
+    const auto it = selection.cell.axes.find("u");
+    if (it == selection.cell.axes.end()) {
+        throw std::invalid_argument(
+            "Piccard revision cell is missing universe axis");
+    }
+    uint64_t universe = 0;
+    const char* first = it->second.data();
+    const char* last = first + it->second.size();
+    const auto result = std::from_chars(first, last, universe);
+    if (result.ec != std::errc{} || result.ptr != last || universe == 0) {
+        throw std::invalid_argument(
+            "Piccard revision universe axis is malformed");
+    }
+    return {"piccard-revision-cell-v1", selection.cell.cell_id, universe};
 }
 
 }  // namespace piccard::benchmark

@@ -5,6 +5,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -19,6 +21,12 @@ using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::ParsePiccardRevisionArgs;
 using piccard::benchmark::PiccardRevisionRequest;
 using piccard::benchmark::PiccardRevisionSelection;
+using piccard::benchmark::BoundedOverlapSets;
+using piccard::benchmark::PlanPiccardRevisionExecution;
+using piccard::benchmark::PiccardRevisionExecutionPlan;
+using piccard::benchmark::MakeBoundedOverlapSets;
+using piccard::benchmark::SerializePiccardRevisionIdentityHeader;
+using piccard::benchmark::SerializePiccardRevisionIdentityRow;
 using piccard::benchmark::SelectPiccardRevisionCell;
 
 RevisionMatrix Load() {
@@ -159,6 +167,111 @@ TEST(PiccardRevisionAdapter, AdjacentPlansRemainSingleCellSelections) {
             EXPECT_NE(selection.cell.cell_id, cells[index + 1]->cell_id);
         }
     }
+}
+
+TEST(PiccardRevisionAdapter,
+     BoundedWorkloadIsDeterministicSortedUniqueAndUsesExplicitUniverse) {
+    const BoundedOverlapSets first = MakeBoundedOverlapSets(
+        100000, 0.5, 262144);
+    const BoundedOverlapSets repeat = MakeBoundedOverlapSets(
+        100000, 0.5, 262144);
+
+    ASSERT_EQ(first.set_a.size(), 100000u);
+    ASSERT_EQ(first.set_b.size(), 100000u);
+    EXPECT_EQ(first.set_a, repeat.set_a);
+    EXPECT_EQ(first.set_b, repeat.set_b);
+    EXPECT_EQ(first.intersection_size, 66666u);
+    EXPECT_EQ(first.union_size, 133334u);
+    const std::set<uint64_t> set_a(first.set_a.begin(), first.set_a.end());
+    const std::set<uint64_t> set_b(first.set_b.begin(), first.set_b.end());
+    std::set<uint64_t> intersection;
+    std::set<uint64_t> union_set;
+    std::set_intersection(set_a.begin(), set_a.end(), set_b.begin(),
+                          set_b.end(), std::inserter(intersection,
+                                                     intersection.begin()));
+    std::set_union(set_a.begin(), set_a.end(), set_b.begin(), set_b.end(),
+                   std::inserter(union_set, union_set.begin()));
+    EXPECT_EQ(intersection.size(), 66666u);
+    EXPECT_EQ(union_set.size(), 133334u);
+    EXPECT_DOUBLE_EQ(static_cast<double>(intersection.size()) /
+                         static_cast<double>(union_set.size()),
+                     66666.0 / 133334.0);
+    EXPECT_DOUBLE_EQ(first.realized_jaccard,
+                     static_cast<double>(first.intersection_size) /
+                         static_cast<double>(first.union_size));
+    EXPECT_EQ(first.target_jaccard, 0.5);
+
+    EXPECT_TRUE(std::is_sorted(first.set_a.begin(), first.set_a.end()));
+    EXPECT_TRUE(std::is_sorted(first.set_b.begin(), first.set_b.end()));
+    EXPECT_EQ(std::adjacent_find(first.set_a.begin(), first.set_a.end()),
+              first.set_a.end());
+    EXPECT_EQ(std::adjacent_find(first.set_b.begin(), first.set_b.end()),
+              first.set_b.end());
+    EXPECT_LT(first.set_a.back(), 262144u);
+    EXPECT_LT(first.set_b.back(), 262144u);
+
+    EXPECT_THROW(MakeBoundedOverlapSets(100000, 0.5, 133333),
+                 std::invalid_argument);
+    EXPECT_THROW(MakeBoundedOverlapSets(10, -0.1, 64),
+                 std::invalid_argument);
+    EXPECT_THROW(MakeBoundedOverlapSets(10, 1.1, 64),
+                 std::invalid_argument);
+}
+
+TEST(PiccardRevisionAdapter, BoundedWorkloadHonorsExactEndpointTargets) {
+    const auto disjoint = MakeBoundedOverlapSets(10, 0.0, 20);
+    EXPECT_EQ(disjoint.intersection_size, 0u);
+    EXPECT_EQ(disjoint.union_size, 20u);
+    EXPECT_DOUBLE_EQ(disjoint.realized_jaccard, 0.0);
+
+    const auto identical = MakeBoundedOverlapSets(10, 1.0, 10);
+    EXPECT_EQ(identical.intersection_size, 10u);
+    EXPECT_EQ(identical.union_size, 10u);
+    EXPECT_DOUBLE_EQ(identical.realized_jaccard, 1.0);
+    EXPECT_EQ(identical.set_a, identical.set_b);
+}
+
+TEST(PiccardRevisionAdapter,
+     ExecutionPlanSelectsOnePointForEveryCellWithoutKeyGeneration) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = PiccardCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+
+    for (const RevisionRunMode mode : {RevisionRunMode::Paper,
+                                       RevisionRunMode::Toy}) {
+        for (const RevisionCell* cell : cells) {
+            SCOPED_TRACE(cell->cell_id);
+            const RevisionInvocationPlan expected =
+                PlanPiccardRevisionCell(*cell, mode);
+            const PiccardRevisionExecutionPlan execution =
+                PlanPiccardRevisionExecution(matrix, expected.argv, mode);
+            EXPECT_EQ(execution.selection.cell.cell_id, cell->cell_id);
+            EXPECT_EQ(execution.point.k, std::stoul(cell->axes.at("k")));
+            EXPECT_EQ(execution.point.m, std::stoul(cell->axes.at("m")));
+            EXPECT_EQ(execution.point.set_size,
+                      std::stoull(cell->axes.at("n")));
+            EXPECT_EQ(execution.point.universe_size,
+                      std::stoul(cell->axes.at("u")));
+            EXPECT_EQ(execution.selected_point_count, 1u);
+            EXPECT_EQ(execution.keygen_calls, 0u);
+            EXPECT_FALSE(execution.native_sweep);
+        }
+    }
+}
+
+TEST(PiccardRevisionAdapter, VersionedIdentityPrefixesOnlySuccessorRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = PiccardCells(matrix);
+    ASSERT_FALSE(cells.empty());
+    const auto plan = PlanPiccardRevisionExecution(
+        matrix,
+        PlanPiccardRevisionCell(*cells.front(), RevisionRunMode::Paper).argv,
+        RevisionRunMode::Paper);
+    EXPECT_EQ(SerializePiccardRevisionIdentityHeader(),
+              "schema,cell_id,universe_size\n");
+    EXPECT_EQ(SerializePiccardRevisionIdentityRow(plan.selection),
+              "piccard-revision-cell-v1," + cells.front()->cell_id +
+                  ",65536\n");
 }
 
 }  // namespace

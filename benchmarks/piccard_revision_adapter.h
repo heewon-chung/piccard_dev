@@ -9,8 +9,10 @@
  * returns the one canonical matrix cell that the later runner may execute.
  */
 
+#include "benchmark_profile.h"
 #include "revision_invocation_plan.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -44,6 +46,32 @@ struct PiccardRevisionSelection {
     RevisionInvocationPlan plan;
 };
 
+/** @brief Deterministic bounded synthetic workload for one Piccard cell. */
+struct BoundedOverlapSets {
+    std::vector<uint64_t> set_a;
+    std::vector<uint64_t> set_b;
+    uint64_t intersection_size = 0;
+    uint64_t union_size = 0;
+    double target_jaccard = 0.0;
+    double realized_jaccard = 0.0;
+};
+
+/** @brief Versioned identity prepended to successor Piccard rows. */
+struct PiccardRevisionIdentity {
+    std::string schema = "piccard-revision-cell-v1";
+    std::string cell_id;
+    uint64_t universe_size = 0;
+};
+
+/** @brief Pure successor execution plan; it never constructs Piccard/KeyGen. */
+struct PiccardRevisionExecutionPlan {
+    PiccardRevisionSelection selection;
+    BenchmarkGridPoint point;
+    std::size_t selected_point_count = 0;
+    std::size_t keygen_calls = 0;
+    bool native_sweep = false;
+};
+
 /**
  * @brief Parse and strictly validate one planner-produced Piccard argv.
  *
@@ -70,6 +98,43 @@ PiccardRevisionSelection SelectPiccardRevisionCell(
     const RevisionMatrix& matrix,
     const std::vector<std::string>& argv,
     RevisionRunMode mode);
+
+/**
+ * @brief Generate sorted unique sets inside `[0, universe)`.
+ *
+ * The integer overlap is the canonical floor realization of the requested
+ * Jaccard target for two sets of size `set_size`; the returned realized value
+ * is always computed from the actual intersection and union. The construction
+ * is deterministic and does not consume process-global randomness.
+ */
+BoundedOverlapSets MakeBoundedOverlapSets(
+    uint64_t set_size,
+    double target_jaccard,
+    uint64_t universe);
+
+/** @brief Return the successor identity header prefix without a newline. */
+std::string PiccardRevisionIdentityHeader();
+
+/** @brief Serialize schema, canonical cell ID, and explicit universe. */
+std::string SerializePiccardRevisionIdentity(
+    const PiccardRevisionIdentity& identity);
+
+/** @brief Serialize the exact successor identity header, newline terminated. */
+std::string SerializePiccardRevisionIdentityHeader();
+
+/** @brief Serialize one selected successor identity row, newline terminated. */
+std::string SerializePiccardRevisionIdentityRow(
+    const PiccardRevisionSelection& selection);
+
+/** @brief Build one-point successor execution metadata without KeyGen. */
+PiccardRevisionExecutionPlan PlanPiccardRevisionExecution(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    RevisionRunMode mode);
+
+/** @brief Bind a selected cell's canonical identity for successor output. */
+PiccardRevisionIdentity MakePiccardRevisionIdentity(
+    const PiccardRevisionSelection& selection);
 
 }  // namespace benchmark
 }  // namespace piccard
