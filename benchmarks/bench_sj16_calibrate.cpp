@@ -676,6 +676,7 @@ int main(int argc, char** argv) {
     bool want_help = false;
     Config cfg;
     bool revision_successor = HasRevisionCell(argc, argv);
+    bool readiness_successor = false;
     std::vector<std::string> revision_arguments;
     if (revision_successor) {
 #ifdef PICCARD_REVISION_MATRIX_PATH
@@ -687,6 +688,7 @@ int main(int argc, char** argv) {
         const auto request = ParseCpuRevisionArgs(
             canonical_arguments, CpuRevisionProducer::Sj16Calibrate);
         const auto mode = RevisionRunModeForProfile(request.profile);
+        readiness_successor = mode == piccard::benchmark::RevisionRunMode::Toy;
         const auto execution = PlanCpuRevisionExecution(
             matrix, canonical_arguments, CpuRevisionProducer::Sj16Calibrate,
             mode);
@@ -967,9 +969,15 @@ int main(int argc, char** argv) {
                       << ": measured=" << held.median << " ms"
                       << "  predicted=" << pred << " ms"
                       << "  residual=" << residual * 100.0 << "%\n";
+            const char* reported_gate = readiness_successor
+                ? "READINESS_ONLY" : (pass ? "PASS" : "FAIL");
             std::cout << "  GATE (residual < " << kResidualTau * 100.0
-                      << "%): " << (pass ? "PASS" : "FAIL") << "\n";
-            if (!pass) {
+                      << "%): " << reported_gate << "\n";
+            if (readiness_successor) {
+                std::cout << "    => count-1 readiness executed the full "
+                             "calibration path; it does NOT authorize SJ16 "
+                             "extrapolation.\n";
+            } else if (!pass) {
                 std::cout << "    => extrapolation for K=" << K
                           << " is NOT authorized (design D3 must be revised).\n";
                 // A calibration that fails its own residual gate is NOT a
@@ -1083,6 +1091,9 @@ int main(int argc, char** argv) {
     out << std::fixed << std::setprecision(6);
     out << "# SJ16 calibration summary\n";
     out << "overall_status=" << (overall_pass ? "PASS" : "FAIL") << "\n";
+    out << "validation_scope="
+        << (readiness_successor ? "READINESS_ONLY" : "CALIBRATION_GATE")
+        << "\n";
     out << "# ---- provenance ----\n";
     out << "cmdline=" << cmdline << "\n";
     out << "timestamp=" << timestamp << "\n";
@@ -1106,6 +1117,10 @@ int main(int argc, char** argv) {
 #endif
     out << "trials_per_size=" << cfg.trials << "\n";
     out << "enc_iters=" << cfg.enc_iters << "\n";
+    out << "key_bits=";
+    for (size_t i = 0; i < cfg.key_bits.size(); ++i)
+        out << (i ? "," : "") << cfg.key_bits[i];
+    out << "\n";
     out << "held_out=" << cfg.held_out << "\n";
     out << "residual_tau=" << kResidualTau << "\n";
     out << "paper_ms_per_enc_k1024=" << kPaperMsPerEnc << "\n";
@@ -1137,7 +1152,8 @@ int main(int argc, char** argv) {
         out << r.key_bits << "," << r.t_enc_median << "," << r.t_enc_iqr << ","
             << r.fit.alpha << "," << r.fit.beta << "," << r.fit.r2 << ","
             << r.held_measured << "," << r.held_pred << "," << r.residual << ","
-            << (r.pass ? "PASS" : "FAIL") << "\n";
+            << (readiness_successor ? "READINESS_ONLY"
+                                    : (r.pass ? "PASS" : "FAIL")) << "\n";
     }
 
     // ---- Per-size dispersion (finding 3, D3 auditability) ------------------

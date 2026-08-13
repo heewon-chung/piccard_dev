@@ -85,6 +85,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         lines = [
             "# SJ16 calibration summary",
             "overall_status=PASS",
+            "validation_scope=READINESS_ONLY",
             "# ---- provenance ----",
             "precompute_mode=off",
             "# --------------------",
@@ -94,12 +95,12 @@ class RevisionVerifierContractTest(unittest.TestCase):
             f"trials_per_size={trials}",
             f"enc_iters={trials}",
             "held_out=32768",
-            "residual_tau=0.1",
+            "residual_tau=0.100000",
             "fit_sizes=4096,8192,16384",
             "# columns: key_bits,t_enc_median_ms,t_enc_iqr_ms,alpha_ms_per_m,beta_ms,r2,held_measured_ms,held_pred_ms,held_residual,gate",
-            "3072,1,0,0.001,1,1,33,33,0,PASS",
+            "3072,1,0,0.001,1,1,33,33,0,READINESS_ONLY",
             "# ---- per-size dispersion (median/q1/q3/iqr + raw samples) ----",
-            f"k3072_t_enc median=1 samples={','.join(['1'] * trials)}",
+            f"k3072_t_enc median=1 iqr=0 samples={','.join(['1'] * trials)}",
         ]
         for size in (4096, 8192, 16384):
             lines.append(

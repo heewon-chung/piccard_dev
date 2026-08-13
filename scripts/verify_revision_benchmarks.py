@@ -1807,8 +1807,10 @@ def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
     expected_sizes = [4096, 8192, 16384]
     expected_keys = {
         "overall_status": "PASS", "key_bits": "3072", "precompute_mode": "off",
+        "validation_scope": ("READINESS_ONLY" if mode == "toy"
+                             else "CALIBRATION_GATE"),
         "trials_per_size": str(expected_trials), "enc_iters": str(expected_trials),
-        "held_out": "32768", "residual_tau": "0.1", "fit_sizes": ",".join(
+        "held_out": "32768", "residual_tau": "0.100000", "fit_sizes": ",".join(
             str(size) for size in expected_sizes),
     }
     # These fields identify the command/profile even though host/timestamp are
@@ -1863,7 +1865,8 @@ def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
     if len(data_rows) != 1:
         fail(f"SJ16 calibration must contain exactly one declared K row for {cid}")
     declared = dict(zip(expected_columns, data_rows[0]))
-    if declared["key_bits"] != "3072" or declared["gate"] != "PASS":
+    expected_gate = "READINESS_ONLY" if mode == "toy" else "PASS"
+    if declared["key_bits"] != "3072" or declared["gate"] != expected_gate:
         fail(f"SJ16 calibration declared K/gate mismatch for {cid}")
     for field in expected_columns[1:-1]:
         try:
@@ -1871,6 +1874,9 @@ def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
                 raise ValueError
         except ValueError:
             fail(f"SJ16 calibration declared field {field} is not finite for {cid}")
+    residual = float(declared["held_residual"])
+    if residual < 0.0 or (mode == "paper" and not residual < 0.1):
+        fail(f"SJ16 calibration residual gate mismatch for {cid}")
 
     # The detailed dispersion grammar must contain one encryption line, each
     # fit size once, and the held-out size once.  Every sample list is tied to
@@ -1879,7 +1885,8 @@ def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
     detail_re = re.compile(
         r"^k3072_(?P<kind>t_enc|fit_m=(?P<fit>\d+)|heldout_m=(?P<held>\d+)) "
         r"median=(?P<median>[^ ]+)"
-        r"(?: q1=(?P<q1>[^ ]+) q3=(?P<q3>[^ ]+) iqr=(?P<iqr>[^ ]+))? samples=(?P<samples>.*)$")
+        r"(?: q1=(?P<q1>[^ ]+) q3=(?P<q3>[^ ]+))?"
+        r" iqr=(?P<iqr>[^ ]+) samples=(?P<samples>.*)$")
     seen_details: set[str] = set()
     for line in lines:
         match = detail_re.match(line)
