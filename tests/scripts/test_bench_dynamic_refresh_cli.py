@@ -220,6 +220,21 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
                         self.verify_revision_cell(root, output, cell, command)
                     producer_stdout.write_text(stdout_payload, encoding="utf-8")
 
+                    for column, value in (("hash_seed", "999999"),
+                                          ("hash_randomness", "resampled")):
+                        stdout_rows = list(csv.reader(io.StringIO(stdout_payload)))
+                        column_index = stdout_rows[0].index(column)
+                        for row in stdout_rows[1:]:
+                            row[column_index] = value
+                        mutated_stdout = io.StringIO(newline="")
+                        csv.writer(mutated_stdout, lineterminator="\n").writerows(
+                            stdout_rows)
+                        producer_stdout.write_text(mutated_stdout.getvalue(),
+                                                   encoding="utf-8")
+                        with self.assertRaises(Exception):
+                            self.verify_revision_cell(root, output, cell, command)
+                    producer_stdout.write_text(stdout_payload, encoding="utf-8")
+
                     identity = output / "identity.csv"
                     identity_payload = identity.read_text()
                     identity.write_text(identity_payload.replace(
@@ -252,6 +267,29 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
                             insert_index = next(index for index in measured
                                                 if "\tinsert\t" in raw_lines[index])
                             raw_lines[init_index] = raw_lines[insert_index]
+                            raw_path.write_text("\n".join(raw_lines) + "\n",
+                                                encoding="utf-8")
+                            with self.assertRaises(Exception):
+                                self.verify_revision_cell(root, output, cell, command)
+                            raw_path.write_text(raw_payload, encoding="utf-8")
+
+                            raw_lines = raw_payload.splitlines()
+                            measured = [index for index, line in enumerate(raw_lines)
+                                        if "\tmeasured\t" in line]
+                            raw_lines[measured[0]], raw_lines[measured[1]] = (
+                                raw_lines[measured[1]], raw_lines[measured[0]])
+                            raw_path.write_text("\n".join(raw_lines) + "\n",
+                                                encoding="utf-8")
+                            with self.assertRaises(Exception):
+                                self.verify_revision_cell(root, output, cell, command)
+                            raw_path.write_text(raw_payload, encoding="utf-8")
+
+                            raw_lines = raw_payload.splitlines()
+                            aggregate_rows = [
+                                index for index, line in enumerate(raw_lines)
+                                if line.startswith("aggregate\t")]
+                            raw_lines[aggregate_rows[0]], raw_lines[aggregate_rows[1]] = (
+                                raw_lines[aggregate_rows[1]], raw_lines[aggregate_rows[0]])
                             raw_path.write_text("\n".join(raw_lines) + "\n",
                                                 encoding="utf-8")
                             with self.assertRaises(Exception):
