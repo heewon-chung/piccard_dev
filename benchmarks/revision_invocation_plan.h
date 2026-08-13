@@ -57,6 +57,16 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
                                               RevisionRunMode mode);
 
 /**
+ * @brief Plan exactly one validated `estimator_accuracy` matrix cell.
+ *
+ * The j-axis points use 50 paper trials and the k-axis convergence points use
+ * 500 paper trials; both project to one toy trial.  The returned argv is pure
+ * data and no estimator producer is launched.
+ */
+RevisionInvocationPlan PlanEstimatorRevisionCell(const RevisionCell& cell,
+                                                 RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and

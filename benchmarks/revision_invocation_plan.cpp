@@ -325,6 +325,137 @@ std::string FheIndProfileForMode(RevisionRunMode mode) {
     RejectFheInd("unknown run mode");
 }
 
+[[noreturn]] void RejectEstimator(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid estimator revision invocation cell: " + reason);
+}
+
+bool IsEstimatorJValue(const std::string& value) {
+    for (const char* candidate : {"0.0", "0.1", "0.2", "0.3", "0.4",
+                                 "0.5", "0.6", "0.7", "0.8", "0.9",
+                                 "1.0"}) {
+        if (value == candidate) return true;
+    }
+    return false;
+}
+
+void ValidateEstimatorCell(const RevisionCell& cell) {
+    if (cell.family != "estimator_accuracy") {
+        RejectEstimator("family must be estimator_accuracy");
+    }
+    if (cell.producer != "bench_estimator_bias") {
+        RejectEstimator("producer must be bench_estimator_bias");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectEstimator("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectEstimator("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "estimator-diagnostic-csv-v1") {
+        RejectEstimator("unexpected estimator artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectEstimator("cell is not RUN");
+    }
+    if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
+        !cell.comparison_eligible) {
+        RejectEstimator("estimator cell must be table/comparison eligible");
+    }
+
+    const bool j_cell = cell.axis == "j";
+    const bool k_cell = cell.axis == "k";
+    if (!j_cell && !k_cell) RejectEstimator("selector axis must be j or k");
+
+    const size_t expected_axis_count = j_cell ? 5u : 4u;
+    if (cell.axes.size() != expected_axis_count) {
+        RejectEstimator("unexpected estimator axis topology");
+    }
+    const auto k_axis = cell.axes.find("k");
+    if (k_axis == cell.axes.end()) RejectEstimator("missing axis k");
+    const uint64_t k = Axis(cell, "k");
+    if (!IsOneOf(k, {16, 32, 64, 128, 256, 512})) {
+        RejectEstimator("invalid estimator k");
+    }
+    if (j_cell) {
+        const auto j_axis = cell.axes.find("j");
+        if (j_axis == cell.axes.end() || !IsEstimatorJValue(j_axis->second) ||
+            j_axis->second != cell.axis_value ||
+            cell.cell_id != "paper-v1::estimator_accuracy::j=" +
+                                cell.axis_value ||
+            k != 128) {
+            RejectEstimator("invalid estimator j selector");
+        }
+    } else {
+        if (cell.axis_value != std::to_string(k) ||
+            cell.cell_id != "paper-v1::estimator_accuracy::k=" +
+                                cell.axis_value) {
+            RejectEstimator("invalid estimator k selector");
+        }
+    }
+    RequireAxisValue(cell, "m", 64);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+
+    const uint64_t paper_trials = j_cell ? 50 : 500;
+    if (cell.paper_count != paper_trials || cell.toy_count != 1 ||
+        cell.paper_trials != paper_trials || cell.toy_trials != 1 ||
+        cell.paper_counts !=
+            std::map<std::string, uint64_t>{{"trials", paper_trials}} ||
+        cell.toy_counts != std::map<std::string, uint64_t>{{"trials", 1}}) {
+        RejectEstimator("paper/toy count contract mismatch");
+    }
+    if (j_cell) {
+        if (cell.attributes !=
+            std::map<std::string, std::string>{{"trials", "50"}} ||
+            !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+            RejectEstimator("j estimator cell attributes mismatch");
+        }
+    } else {
+        const std::map<std::string, std::string> attributes = {
+            {"trials", "500"}};
+        const std::map<std::string, std::map<std::string, std::string>> objects = {
+            {"toy_dispersion_sentinels", { {"median", "N/A"},
+                                             {"sd", "-1"} }}};
+        if (cell.attributes != attributes || !cell.list_attributes.empty() ||
+            cell.object_attributes != objects) {
+            RejectEstimator("k estimator cell attributes mismatch");
+        }
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectEstimator("estimator cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    const std::string expected_row_id =
+        j_cell ? "estimator" : "estimator_convergence";
+    const std::map<std::string, std::string> row_attributes = {
+        {"toy_trials", "1"}, {"trials", std::to_string(paper_trials)}};
+    if (row.row_id != expected_row_id || row.status != "MEASURED" ||
+        row.terminal_status != "MEASURED" || row.method != "estimator" ||
+        !row.reason.empty() || !row.reason_code.empty() ||
+        row.measured_count != paper_trials ||
+        row.paper_measured_count != paper_trials ||
+        row.toy_measured_count != 1 || row.attributes != row_attributes ||
+        !row.list_attributes.empty() || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        !row.pattern.empty() || !row.variant.empty() ||
+        !row.fit_authority.empty()) {
+        RejectEstimator("estimator expected row contract mismatch");
+    }
+}
+
+std::string EstimatorProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectEstimator("unknown run mode");
+}
+
 [[noreturn]] void RejectThreshold(const std::string& reason) {
     throw std::invalid_argument(
         "invalid threshold FHE revision invocation cell: " + reason);
@@ -664,6 +795,42 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
         "--seed={seed}",
     };
 
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanEstimatorRevisionCell(const RevisionCell& cell,
+                                                 RevisionRunMode mode) {
+    ValidateEstimatorCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const std::string profile = EstimatorProfileForMode(mode);
+    const bool j_cell = cell.axis == "j";
+    const uint64_t paper_trials = j_cell ? 50 : 500;
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        std::string("--cell=") + (j_cell ? "estimator-j" : "estimator-k"),
+        "--k=" + cell.axes.at("k"),
+        "--m=64",
+        "--set_size=1000",
+        "--universe=65536",
+        std::string("--trials=") +
+            (toy ? "1" : std::to_string(paper_trials)),
+        j_cell ? "--jaccard-grid=" + cell.axis_value
+               : "--jaccard-grid=0.5",
+        "--seed={seed}",
+    };
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {
         row.measured_count = toy ? row.toy_measured_count

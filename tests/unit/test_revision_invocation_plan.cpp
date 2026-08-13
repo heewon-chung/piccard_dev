@@ -18,6 +18,7 @@ using piccard::benchmark::RevisionMatrix;
 using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::PlanPiccardRevisionCell;
 using piccard::benchmark::PlanFheIndRevisionCell;
+using piccard::benchmark::PlanEstimatorRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 
 RevisionMatrix Load() {
@@ -36,6 +37,14 @@ std::vector<const RevisionCell*> FheIndCells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "fhe_ind") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> EstimatorCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "estimator_accuracy") cells.push_back(&cell);
     }
     return cells;
 }
@@ -159,6 +168,172 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyPiccardCells) {
     EXPECT_EQ(paper_argv.size(), cells.size());
     EXPECT_EQ(toy_argv.size(), cells.size());
     EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     ExhaustivelyPlansAllSeventeenEstimatorCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = EstimatorCells(matrix);
+    ASSERT_EQ(cells.size(), 17u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanEstimatorRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanEstimatorRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanEstimatorRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        const bool j_cell = cell->axis == "j";
+        const std::string profile = "paper-v1";
+        const std::string cell_selector =
+            j_cell ? "estimator-j" : "estimator-k";
+        const std::string paper_trials = j_cell ? "50" : "500";
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=paper-v1",
+            "--cell=" + cell_selector,
+            "--k=" + cell->axes.at("k"),
+            "--m=64",
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=" + paper_trials,
+            j_cell ? "--jaccard-grid=" + cell->axis_value
+                   : "--jaccard-grid=0.5",
+            "--seed={seed}",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--cell=" + cell_selector,
+            "--k=" + cell->axes.at("k"),
+            "--m=64",
+            "--set_size=1000",
+            "--universe=65536",
+            "--trials=1",
+            j_cell ? "--jaccard-grid=" + cell->axis_value
+                   : "--jaccard-grid=0.5",
+            "--seed={seed}",
+        };
+
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_estimator_bias");
+        EXPECT_EQ(toy.producer, "bench_estimator_bias");
+        EXPECT_EQ(paper.concrete_profile, profile);
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, profile);
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+        EXPECT_EQ(paper.expected_rows.front().status, "MEASURED");
+        EXPECT_EQ(paper.expected_rows.front().terminal_status, "MEASURED");
+        EXPECT_EQ(paper.expected_rows.front().method, "estimator");
+        EXPECT_EQ(paper.expected_rows.front().measured_count,
+                  paper.expected_rows.front().paper_measured_count);
+        EXPECT_EQ(toy.expected_rows.front().measured_count,
+                  toy.expected_rows.front().toy_measured_count);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
+                  dry_run.expected_rows.front().paper_measured_count);
+        EXPECT_FALSE(HasArg(paper, "--security="));
+        EXPECT_FALSE(HasArg(paper, "--raw"));
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidEstimatorIdentityGeometryCountsAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = EstimatorCells(matrix);
+    ASSERT_EQ(cells.size(), 17u);
+    const RevisionCell source = *cells.front();
+
+    RevisionCell cell = source;
+    cell.family = "piccard_std128";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axis = "m";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axis_value = "1.1";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["k"] = "64";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["m"] = "128";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.paper_counts["trials"] = 49;
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.attributes["trials"] = "500";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().status = "DIAGNOSTIC";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().attributes["trials"] = "49";
+    EXPECT_THROW(PlanEstimatorRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
 }
 
 TEST(RevisionInvocationPlan, RejectsNonPiccardOrNonRunCells) {
