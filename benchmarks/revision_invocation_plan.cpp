@@ -1826,6 +1826,269 @@ std::string Sj16ProfileForMode(RevisionRunMode mode) {
 
 }  // namespace
 
+namespace {
+
+[[noreturn]] void RejectDynamic(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid dynamic revision invocation cell: " + reason);
+}
+
+bool IsDynamicFamily(const std::string& family) {
+    return family == "dynamic_timing" || family == "dynamic_accuracy" ||
+           family == "dynamic_refresh";
+}
+
+bool IsDynamicRefresh(const RevisionCell& cell) {
+    return cell.family == "dynamic_refresh";
+}
+
+bool IsDynamicAccuracy(const RevisionCell& cell) {
+    return cell.family == "dynamic_accuracy";
+}
+
+std::string DynamicKind(const RevisionCell& cell) {
+    if (cell.family == "dynamic_timing") return "timing";
+    if (cell.family == "dynamic_accuracy") return "accuracy";
+    if (cell.family == "dynamic_refresh") return "refresh";
+    RejectDynamic("unsupported dynamic family");
+}
+
+void ValidateDynamicGeometry(const RevisionCell& cell) {
+    if (cell.cell_id != "paper-v1::" + cell.family + "::" + cell.axis +
+                            "=" + cell.axis_value) {
+        RejectDynamic("cell ID does not bind profile, family, axis, and value");
+    }
+    if (cell.axes.size() != 4u) {
+        RejectDynamic("dynamic cells require exactly k,m,n,u");
+    }
+
+    const uint64_t k = Axis(cell, "k");
+    const uint64_t m = Axis(cell, "m");
+    const uint64_t n = Axis(cell, "n");
+    if (IsDynamicRefresh(cell)) {
+        if (cell.axis != "control" || cell.axis_value != "default") {
+            RejectDynamic("refresh supports only the control selector");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+
+    if (cell.axis == "control") {
+        if (cell.axis_value != "default") {
+            RejectDynamic("control selector is not default");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+    if (cell.axis == "k") {
+        if (!IsOneOf(k, {16, 32, 64, 128, 256, 512}) ||
+            cell.axis_value != std::to_string(k)) {
+            RejectDynamic("invalid dynamic k selector");
+        }
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+    if (cell.axis == "m") {
+        if (!IsOneOf(m, {16, 32, 64, 128, 256}) ||
+            cell.axis_value != std::to_string(m)) {
+            RejectDynamic("invalid dynamic m selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+    if (cell.axis == "n") {
+        if (!IsOneOf(n, {100, 1000, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectDynamic("invalid dynamic n selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        return;
+    }
+    RejectDynamic("unsupported dynamic selector axis");
+}
+
+void ValidateDynamicRow(const RevisionRow& row, const std::string& row_id,
+                        const std::string& phase, const std::string& method,
+                        uint64_t paper_count) {
+    if (row.row_id != row_id || row.status != "MEASURED" ||
+        row.terminal_status != "MEASURED" || row.reason != "" ||
+        row.reason_code != "" || row.measured_count != paper_count ||
+        row.paper_measured_count != paper_count ||
+        row.toy_measured_count != 1 || row.phase != phase ||
+        row.method != method || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.pattern.empty() ||
+        !row.variant.empty() || !row.fit_authority.empty() ||
+        !row.truth_bases.empty() || !row.field_values.empty() ||
+        !row.list_attributes.empty()) {
+        RejectDynamic("dynamic expected row contract mismatch");
+    }
+}
+
+void ValidateDynamicCell(const RevisionCell& cell) {
+    if (!IsDynamicFamily(cell.family)) {
+        RejectDynamic("family must be dynamic_timing, dynamic_accuracy, or "
+                      "dynamic_refresh");
+    }
+    if (cell.producer != "bench_dynamic") {
+        RejectDynamic("producer must be bench_dynamic");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectDynamic("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectDynamic("dataset must be synthetic");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectDynamic("timeout class must be standard");
+    }
+    if (cell.expected_artifact_schema != "dynamic-benchmark-csv-v1") {
+        RejectDynamic("unexpected dynamic artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectDynamic("cell is not RUN");
+    }
+    if (cell.eligibility != "TABLE_ELIGIBLE" || !cell.table_eligible ||
+        !cell.comparison_eligible) {
+        RejectDynamic("dynamic cell must be table/comparison eligible");
+    }
+    ValidateDynamicGeometry(cell);
+
+    const bool refresh = IsDynamicRefresh(cell);
+    const bool accuracy = IsDynamicAccuracy(cell);
+    const uint64_t paper_trials = accuracy ? 50 : 30;
+    if (cell.paper_count != paper_trials || cell.toy_count != 1 ||
+        cell.paper_trials != paper_trials || cell.toy_trials != 1) {
+        RejectDynamic("paper/toy trial counts do not match dynamic contract");
+    }
+
+    if (refresh) {
+        if (cell.paper_counts !=
+                std::map<std::string, uint64_t>{{"refresh", 30}} ||
+            cell.toy_counts !=
+                std::map<std::string, uint64_t>{{"refresh", 1}}) {
+            RejectDynamic("refresh per-kind counts do not match contract");
+        }
+        if (cell.attributes !=
+                std::map<std::string, std::string>{{"updates", "1"}} ||
+            !cell.list_attributes.empty() ||
+            cell.object_attributes !=
+                std::map<std::string,
+                         std::map<std::string, std::string>>{
+                    {"refresh_axes",
+                     {{"k", "128"}, {"m", "64"}, {"n", "1000"}}}}) {
+            RejectDynamic("refresh cell attributes do not match contract");
+        }
+        if (cell.expected_rows.size() != 1u) {
+            RejectDynamic("refresh requires one expected row");
+        }
+        const RevisionRow& row = cell.expected_rows.front();
+        ValidateDynamicRow(row, "refresh", "", "refresh", 30);
+        if (row.attributes !=
+            std::map<std::string, std::string>{{"k", "128"},
+                                                {"m", "64"},
+                                                {"n", "1000"},
+                                                {"updates", "1"}}) {
+            RejectDynamic("refresh row attributes do not match contract");
+        }
+        return;
+    }
+
+    const std::map<std::string, uint64_t> expected_paper_counts = {
+        {"delete", paper_trials}, {"insert", paper_trials}};
+    const std::map<std::string, uint64_t> expected_toy_counts = {
+        {"delete", 1}, {"insert", 1}};
+    if (cell.paper_counts != expected_paper_counts ||
+        cell.toy_counts != expected_toy_counts) {
+        RejectDynamic("dynamic per-kind counts do not match contract");
+    }
+    if (cell.attributes !=
+            std::map<std::string, std::string>{{"updates", "1"}} ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectDynamic("dynamic cell attributes do not match contract");
+    }
+    if (cell.expected_rows.size() != 2u) {
+        RejectDynamic("dynamic timing/accuracy cells require two rows");
+    }
+    const std::string first_id = accuracy ? "insert_correctness" : "insert";
+    const std::string second_id = accuracy ? "delete_correctness" : "delete";
+    ValidateDynamicRow(cell.expected_rows.at(0), first_id, "insert", "",
+                      paper_trials);
+    ValidateDynamicRow(cell.expected_rows.at(1), second_id, "delete", "",
+                      paper_trials);
+    const std::map<std::string, std::string> row_attributes = {
+        {"updates", "1"}};
+    if (cell.expected_rows.at(0).attributes != row_attributes ||
+        cell.expected_rows.at(1).attributes != row_attributes) {
+        RejectDynamic("dynamic row attributes do not match contract");
+    }
+}
+
+std::string DynamicProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-std128-t40-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectDynamic("unknown run mode");
+}
+
+}  // namespace
+
+RevisionInvocationPlan PlanDynamicRevisionCell(const RevisionCell& cell,
+                                               RevisionRunMode mode) {
+    ValidateDynamicCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const bool accuracy = IsDynamicAccuracy(cell);
+    const bool raw_timing = !accuracy;
+    const std::string profile = DynamicProfileForMode(mode);
+    const std::string kind = DynamicKind(cell);
+    const uint64_t paper_trials = accuracy ? 50 : 30;
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        "--cell=" + kind,
+        "--mode=" + kind,
+        "--evidence_point",
+        std::string("--security=") + (toy ? "TOY" : "STD128"),
+        "--k=" + cell.axes.at("k"),
+        "--m=" + cell.axes.at("m"),
+        "--set_size=" + cell.axes.at("n"),
+        "--universe=" + cell.axes.at("u"),
+        std::string("--trials=") +
+            (toy ? "1" : std::to_string(paper_trials)),
+        "--updates=1",
+        "--seed={seed}",
+    };
+    if (raw_timing) {
+        plan.argv.push_back("--raw-timing-dir={output}/raw");
+        plan.argv.push_back(
+            std::string("--raw-timing-profile=") +
+            (toy ? "readiness-toy-v1" : "paper-v1"));
+    }
+
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {
     if (cell.family == "threshold_dblp_fpfn") {

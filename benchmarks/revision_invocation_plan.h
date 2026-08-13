@@ -114,6 +114,16 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
                                             RevisionRunMode mode);
 
 /**
+ * @brief Plan one validated dynamic timing, accuracy, or refresh cell.
+ *
+ * The planner emits pure argv data for `bench_dynamic`; it never launches a
+ * producer or creates an FHE context.  Paper and dry-run use the paper
+ * profile/counts while Toy projects expected row counts to one.
+ */
+RevisionInvocationPlan PlanDynamicRevisionCell(const RevisionCell& cell,
+                                               RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and

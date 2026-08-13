@@ -26,6 +26,7 @@ using piccard::benchmark::PlanStd192EncodingRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 using piccard::benchmark::PlanBcg12RevisionCell;
 using piccard::benchmark::PlanSj16RevisionCell;
+using piccard::benchmark::PlanDynamicRevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -96,6 +97,18 @@ std::vector<const RevisionCell*> Sj16Cells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "sj16") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> DynamicCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "dynamic_timing" ||
+            cell.family == "dynamic_accuracy" ||
+            cell.family == "dynamic_refresh") {
+            cells.push_back(&cell);
+        }
     }
     return cells;
 }
@@ -2176,5 +2189,306 @@ TEST(RevisionInvocationPlan,
     cell = precomputed;
     cell.expected_rows.front().method = "wrong";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllThirtyThreeDynamicCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DynamicCells(matrix);
+    ASSERT_EQ(cells.size(), 33u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        const bool timing = cell->family == "dynamic_timing";
+        const bool accuracy = cell->family == "dynamic_accuracy";
+        const bool refresh = cell->family == "dynamic_refresh";
+        ASSERT_TRUE(timing || accuracy || refresh);
+
+        const uint64_t paper_trials = accuracy ? 50u : 30u;
+        const std::string cell_name =
+            timing ? "timing" : (accuracy ? "accuracy" : "refresh");
+        const std::string raw_profile =
+            "paper-v1";
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=paper-std128-t40-v1",
+            "--cell=" + cell_name,
+            "--mode=" + cell_name,
+            "--evidence_point",
+            "--security=STD128",
+            "--k=" + cell->axes.at("k"),
+            "--m=" + cell->axes.at("m"),
+            "--set_size=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--trials=" + std::to_string(paper_trials),
+            "--updates=1",
+            "--seed={seed}",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--cell=" + cell_name,
+            "--mode=" + cell_name,
+            "--evidence_point",
+            "--security=TOY",
+            "--k=" + cell->axes.at("k"),
+            "--m=" + cell->axes.at("m"),
+            "--set_size=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--trials=1",
+            "--updates=1",
+            "--seed={seed}",
+        };
+        std::vector<std::string> expected_paper_with_raw = expected_paper;
+        std::vector<std::string> expected_toy_with_raw = expected_toy;
+        if (!accuracy) {
+            expected_paper_with_raw.push_back(
+                "--raw-timing-dir={output}/raw");
+            expected_paper_with_raw.push_back(
+                "--raw-timing-profile=" + raw_profile);
+            expected_toy_with_raw.push_back(
+                "--raw-timing-dir={output}/raw");
+            expected_toy_with_raw.push_back(
+                "--raw-timing-profile=readiness-toy-v1");
+        }
+
+        const RevisionInvocationPlan paper =
+            PlanDynamicRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanDynamicRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanDynamicRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        EXPECT_EQ(paper.argv,
+                  accuracy ? expected_paper : expected_paper_with_raw);
+        EXPECT_EQ(toy.argv,
+                  accuracy ? expected_toy : expected_toy_with_raw);
+        EXPECT_EQ(dry_run.argv,
+                  accuracy ? expected_paper : expected_paper_with_raw);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(toy.cell_id, cell->cell_id);
+        EXPECT_EQ(dry_run.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_dynamic");
+        EXPECT_EQ(toy.producer, "bench_dynamic");
+        EXPECT_EQ(dry_run.producer, "bench_dynamic");
+        EXPECT_EQ(paper.concrete_profile, "paper-std128-t40-v1");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-std128-t40-v1");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        EXPECT_EQ(toy.invocation_status, "RUN");
+        EXPECT_EQ(dry_run.invocation_status, "RUN");
+
+        ASSERT_EQ(paper.expected_rows.size(), refresh ? 1u : 2u);
+        ASSERT_EQ(toy.expected_rows.size(), refresh ? 1u : 2u);
+        ASSERT_EQ(dry_run.expected_rows.size(), refresh ? 1u : 2u);
+        const std::vector<std::string> expected_row_ids =
+            refresh ? std::vector<std::string>{"refresh"}
+                    : (accuracy
+                           ? std::vector<std::string>{"insert_correctness",
+                                                      "delete_correctness"}
+                           : std::vector<std::string>{"insert", "delete"});
+        for (size_t row_index = 0; row_index < expected_row_ids.size();
+             ++row_index) {
+            const RevisionRow& paper_row = paper.expected_rows.at(row_index);
+            const RevisionRow& toy_row = toy.expected_rows.at(row_index);
+            const RevisionRow& dry_row = dry_run.expected_rows.at(row_index);
+            EXPECT_EQ(paper_row.row_id, expected_row_ids.at(row_index));
+            EXPECT_EQ(toy_row.row_id, expected_row_ids.at(row_index));
+            EXPECT_EQ(dry_row.row_id, expected_row_ids.at(row_index));
+            EXPECT_EQ(paper_row.status, "MEASURED");
+            EXPECT_EQ(toy_row.status, "MEASURED");
+            EXPECT_EQ(dry_row.status, "MEASURED");
+            EXPECT_EQ(paper_row.terminal_status, "MEASURED");
+            EXPECT_EQ(toy_row.terminal_status, "MEASURED");
+            EXPECT_EQ(dry_row.terminal_status, "MEASURED");
+            EXPECT_TRUE(paper_row.reason.empty());
+            EXPECT_TRUE(paper_row.reason_code.empty());
+            EXPECT_TRUE(toy_row.reason.empty());
+            EXPECT_TRUE(toy_row.reason_code.empty());
+            EXPECT_EQ(paper_row.measured_count, paper_trials);
+            EXPECT_EQ(paper_row.paper_measured_count, paper_trials);
+            EXPECT_EQ(toy_row.measured_count, 1u);
+            EXPECT_EQ(toy_row.toy_measured_count, 1u);
+            EXPECT_EQ(dry_row.measured_count, paper_trials);
+            EXPECT_EQ(dry_row.paper_measured_count, paper_trials);
+            const std::map<std::string, std::string> expected_row_attributes =
+                refresh
+                    ? std::map<std::string, std::string>{{"k", "128"},
+                                                          {"m", "64"},
+                                                          {"n", "1000"},
+                                                          {"updates", "1"}}
+                    : std::map<std::string, std::string>{{"updates", "1"}};
+            EXPECT_EQ(paper_row.attributes, expected_row_attributes);
+            EXPECT_EQ(toy_row.attributes, expected_row_attributes);
+            EXPECT_EQ(paper_row.phase, refresh ? "" :
+                                                 (row_index == 0 ? "insert"
+                                                                  : "delete"));
+            if (refresh) {
+                EXPECT_EQ(paper_row.method, "refresh");
+            } else {
+                EXPECT_TRUE(paper_row.method.empty());
+            }
+        }
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidDynamicIdentityGeometryCountsEligibilityAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DynamicCells(matrix);
+    ASSERT_EQ(cells.size(), 33u);
+
+    const RevisionCell timing_control = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "dynamic_timing" &&
+                   cell->axis == "control";
+        });
+    const RevisionCell timing_n100000 = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "dynamic_timing" && cell->axis == "n" &&
+                   cell->axis_value == "100000";
+        });
+    const RevisionCell accuracy = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "dynamic_accuracy" &&
+                   cell->axis == "control";
+        });
+    const RevisionCell refresh = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "dynamic_refresh";
+        });
+
+    RevisionCell cell = timing_control;
+    cell.family = "sj16";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.profile = "readiness-toy-v1";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.eligibility = "DIAGNOSTIC_ONLY";
+    cell.table_eligible = false;
+    cell.comparison_eligible = false;
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.axis = "q";
+    cell.axis_value = "default";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.cell_id = "paper-v1::dynamic_timing::control=wrong";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.axes["k"] = "256";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.axes["m"] = "128";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_n100000;
+    cell.axes["u"] = "65536";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.paper_count = 29;
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = accuracy;
+    cell.paper_counts["insert"] = 49;
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.attributes["updates"] = "2";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.expected_rows.front().phase = "delete";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.expected_rows.front().attributes["updates"] = "2";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = timing_control;
+    cell.expected_rows.pop_back();
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = refresh;
+    cell.axis = "k";
+    cell.axis_value = "128";
+    cell.cell_id = "paper-v1::dynamic_refresh::k=128";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = refresh;
+    cell.axes["u"] = "262144";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = refresh;
+    cell.object_attributes["refresh_axes"]["n"] = "10000";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = refresh;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = refresh;
+    cell.expected_rows.front().attributes["k"] = "64";
+    EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
