@@ -1610,6 +1610,36 @@ def _check_terminal_ids(stderr: bytes, cell: dict[str, Any],
             fail(f"terminal N/A binding mismatch for {cell['cell_id']}")
 
 
+def _check_review_encoding_terminal_rows(stderr: bytes, cell: dict[str, Any],
+                                        mode: str) -> None:
+    """Bind every versioned encoding terminal row to the matrix contract."""
+    rows = _terminal_records(stderr, cell["cell_id"])
+    count_field = ("toy_measured_count" if mode == "toy"
+                   else "paper_measured_count")
+    expected: dict[str, dict[str, str]] = {}
+    for item in cell["expected_rows"]:
+        row_id = str(item["row_id"])
+        if row_id in expected:
+            fail(f"duplicate expected terminal row for {cell['cell_id']}")
+        expected[row_id] = {
+            "schema": "review-encoding-terminal-v1",
+            "status": str(item["status"]),
+            "terminal_status": str(item["terminal_status"]),
+            "reason": str(item.get("reason", "")),
+            "reason_code": str(item.get("reason_code", "")),
+            "measured_count": str(item[count_field]),
+        }
+    observed = [str(row.get("row_id", "")) for row in rows]
+    if len(observed) != len(set(observed)) or set(observed) != set(expected):
+        fail(f"terminal row taxonomy mismatch for {cell['cell_id']}")
+    for row in rows:
+        row_id = str(row.get("row_id", ""))
+        expected_row = expected[row_id]
+        for field, value in expected_row.items():
+            if row.get(field) != value:
+                fail(f"terminal row binding mismatch for {cell['cell_id']}")
+
+
 def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
                            plan: dict[str, Any], cell: dict[str, Any],
                            mode: str) -> None:
@@ -2155,11 +2185,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 fail(f"review encoding method/timed-pair topology mismatch for {cid}")
             if any(row.get("correctness_pair_calls") != "1" for row in rows):
                 fail(f"review encoding correctness-pair count mismatch for {cid}")
-            _check_terminal_ids(
-                stderr, cell,
-                {"piccard_sqrt_encode"}
-                if len(applicable) != len(cell["expected_rows"]) else set(),
-                reason="sqrt-m-not-perfect-square")
+            _check_review_encoding_terminal_rows(stderr, cell, mode)
             continue
 
         # All remaining schemas are stdout or explicitly bound single-file

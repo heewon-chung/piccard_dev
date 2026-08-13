@@ -2,6 +2,7 @@
 """No-setup boundary tests for the Phase-4 reviewer comparison CLI."""
 
 import csv
+import json
 import os
 import pathlib
 import subprocess
@@ -12,6 +13,7 @@ import unittest
 if len(sys.argv) != 2:
     raise SystemExit("usage: test_review_comparison_cli.py BENCH_BINARY")
 BENCH_BINARY = pathlib.Path(sys.argv.pop()).resolve()
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 CANONICAL_TOY_METHODS = (
     "piccard", "piccard_sqrt", "fhe_ind", "bcg12_mh_ec",
@@ -385,6 +387,49 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertIn("schema=review-encoding-terminal-v1", result.stderr)
             self.assertNotIn("{seed}", result.stdout + result.stderr)
             self.assertNotIn("{output}", result.stdout + result.stderr)
+
+    def test_revision_encoding_real_cell_passes_campaign_family_verifier(self):
+        """The real successor cell must satisfy the campaign's family path."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import (
+            cell_output, file_inventory, materialize_cell_argv)
+        from verify_revision_benchmarks import (
+            _REVIEW_ENCODING_HEADER, _check_family_artifacts)
+
+        matrix = json.loads((ROOT / "benchmarks" / "revision_matrix.json").read_text())
+        cell = next(item for item in matrix["cells"] if item["cell_id"] ==
+                    "paper-v1::piccard_std192_encoding::control=default")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "results"
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            recorded_argv = materialize_cell_argv(
+                cell, "toy", root=root, output=output, seed=20260729, threads=2)
+            command = [str(self.binary), *recorded_argv]
+            result = subprocess.run(
+                command, text=True, capture_output=True, check=False,
+                env={**os.environ, "OMP_NUM_THREADS": "2", "OMP_DYNAMIC": "FALSE"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines()[0],
+                             _REVIEW_ENCODING_HEADER.rstrip("\n"))
+            rows = list(csv.DictReader(result.stdout.splitlines()))
+            self.assertTrue(rows)
+            self.assertEqual({row["target_semantics"] for row in rows}, {"jaccard"})
+            self.assertEqual({row["root_seed"] for row in rows}, {"20260729"})
+            self.assertNotIn("{seed}", result.stdout + result.stderr)
+            self.assertNotIn("{output}", result.stdout + result.stderr)
+            (output / "stdout.log").write_text(result.stdout, encoding="utf-8")
+            (output / "stderr.log").write_text(result.stderr, encoding="utf-8")
+            inventory = file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})
+            self.assertEqual({item["path"] for item in inventory},
+                             {"workload.bin", "execution-trace.bin"})
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": inventory}) + "\n",
+                encoding="utf-8")
+            _check_family_artifacts(
+                root, "toy", [cell],
+                {cell["cell_id"]: {"command": command}})
 
     def test_revision_encoding_rejects_malformed_runtime_seed_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1043,7 +1043,7 @@ std::string VersionedEncodingCsvHeader() {
            "precomputation_mode,secure_division_included,measurement_kind,"
            "evidence_arm,workload_id,workload_manifest_sha256,"
            "execution_trace_sha256,root_seed,omp_threads,omp_dynamic,k,m,"
-           "set_size,universe_size,target_jaccard_numerator,"
+           "set_size,universe_size,target_semantics,target_jaccard_numerator,"
            "target_jaccard_denominator,target_jaccard,realized_intersection,"
            "realized_union,realized_jaccard,timing_trials,accuracy_trials,"
            "correctness_trials,trials,hash_randomness,hash_seed,"
@@ -1126,7 +1126,8 @@ std::string SerializeVersionedEncodingAggregate(
 #endif
         << "," << OptionalU64(row_policy.k) << ","
         << OptionalU64(row_policy.m) << "," << options.set_size << ","
-        << options.universe << "," << realized.exact_jaccard.numerator << ","
+        << options.universe << ",jaccard,"
+        << realized.exact_jaccard.numerator << ","
         << realized.exact_jaccard.denominator << ","
         << Format17(RationalDouble(workload.Spec().target_jaccard)) << ","
         << realized.exact_intersection << "," << realized.exact_union << ","

@@ -1259,13 +1259,13 @@ class RevisionVerifierContractTest(unittest.TestCase):
         (output / "stderr.log").write_text("", encoding="utf-8")
         (output / "receipt.json").write_text(
             json.dumps({"artifact_inventory": []}) + "\n", encoding="utf-8")
-        terminal = ""
-        if len(methods) == 1:
-            terminal = (
-                "revision_terminal,schema=review-encoding-terminal-v1,"
-                f"cell_id={cid},row_id=piccard_sqrt_encode,status=NOT_APPLICABLE,"
-                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
-                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n")
+        terminal = "".join(
+            "revision_terminal,schema=review-encoding-terminal-v1,"
+            f"cell_id={cid},row_id={item['row_id']},status={item['status']},"
+            f"terminal_status={item['terminal_status']},reason={item['reason']},"
+            f"reason_code={item['reason_code']},measured_count="
+            f"{item['toy_measured_count'] if mode == 'toy' else item['paper_measured_count']}\n"
+            for item in cell["expected_rows"])
         (output / "stderr.log").write_text(terminal, encoding="utf-8")
         receipt = json.loads((output / "receipt.json").read_text())
         receipt["artifact_inventory"] = file_inventory(
