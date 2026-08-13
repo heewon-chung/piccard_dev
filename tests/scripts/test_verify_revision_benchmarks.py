@@ -177,6 +177,48 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True)
             self.assertNotEqual(check.returncode, 0)
 
+    def test_family_verifier_rejects_wrong_fhe_ind_cell_identity(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
+        document = json.loads(MATRIX.read_text())
+        cell = next(item for item in document["cells"]
+                    if item["expected_artifact_schema"] == "fhe-ind-csv-v1")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            (output / "stdout.log").write_text(
+                "cell_id,method,status,trials\nWRONG-CELL,fhe_ind,DIAGNOSTIC,1\n")
+            (output / "stderr.log").write_text("")
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": []}) + "\n")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_rejects_duplicate_piccard_rows_and_wrong_trials(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
+        document = json.loads(MATRIX.read_text())
+        cell = next(item for item in document["cells"]
+                    if item["expected_artifact_schema"] ==
+                    "piccard-benchmark-csv-v1")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            row = f"{cell['cell_id']},999,0\n"
+            (output / "stdout.log").write_text(
+                "label,trials,accuracy_trials\n" + row + row)
+            (output / "stderr.log").write_text("")
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": []}) + "\n")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell],
+                                        {cell["cell_id"]: {"command": []}})
+
 
 if __name__ == "__main__":
     unittest.main()

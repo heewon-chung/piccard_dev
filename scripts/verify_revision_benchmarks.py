@@ -470,7 +470,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         for item in receipt.get("artifact_inventory", []):
             if str(item.get("path", "")).endswith(".csv"):
                 candidates.append((output / item["path"]).read_bytes())
-        valid_rows = 0
+        valid_tables: list[list[dict[str, str]]] = []
         for payload in candidates:
             try:
                 table = list(csv.reader(io.StringIO(payload.decode("utf-8"))))
@@ -482,11 +482,97 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             width = len(table[0])
             if any(len(row) != width for row in table[1:]):
                 continue
-            valid_rows += len(table) - 1
+            valid_tables.append([dict(zip(table[0], row)) for row in table[1:]])
         applicable_rows = sum(row.get("terminal_status") != "NOT_APPLICABLE"
                               for row in cell["expected_rows"])
-        if not candidates or valid_rows < applicable_rows:
+        if len(valid_tables) != 1:
             fail(f"{schema} CSV structure/terminal row count mismatch for {cid}")
+        rows = valid_tables[0]
+        expected_rows = [row for row in cell["expected_rows"]
+                         if row.get("terminal_status") != "NOT_APPLICABLE"]
+        expected_methods = [str(row.get("method", "")) for row in expected_rows]
+        expected_counts = [int(row["toy_measured_count"] if mode == "toy"
+                               else row["paper_measured_count"])
+                           for row in expected_rows]
+
+        def integers(column: str) -> list[int]:
+            try:
+                return [int(row[column]) for row in rows]
+            except (KeyError, ValueError):
+                fail(f"{schema} has an invalid {column} binding for {cid}")
+
+        if schema == "fhe-ind-csv-v1":
+            if len(rows) != 1 or rows[0]["cell_id"] != cid or \
+                    rows[0]["method"] != "fhe_ind" or integers("trials") != expected_counts:
+                fail(f"FHE-IND cell/trial taxonomy mismatch for {cid}")
+        elif schema == "review-comparison-csv-v1":
+            if len(rows) != len(expected_rows) or \
+                    sorted(row["method"] for row in rows) != sorted(expected_methods) or \
+                    sorted(integers("trials")) != sorted(expected_counts):
+                fail(f"review comparison row/trial taxonomy mismatch for {cid}")
+        elif schema == "review-encoding-csv-v1":
+            if len(rows) != len(expected_rows) or \
+                    sorted(row["method"] for row in rows) != sorted(expected_methods) or \
+                    sorted(integers("encoder_timed_calls")) != sorted(expected_counts):
+                fail(f"encoding row/call taxonomy mismatch for {cid}")
+        elif schema == "piccard-benchmark-csv-v1":
+            if len(rows) != 2 or any(row["label"] != cid for row in rows):
+                fail(f"Piccard cell identity/row topology mismatch for {cid}")
+            observed_counts = []
+            for row in rows:
+                trial = int(row.get("trials", "0"))
+                accuracy = int(row.get("accuracy_trials", "0"))
+                observed_counts.append(max(trial, accuracy))
+            if sorted(observed_counts) != sorted(expected_counts):
+                fail(f"Piccard measured-count binding mismatch for {cid}")
+        elif schema == "estimator-diagnostic-csv-v1":
+            if len(rows) != 1 or integers("trials") != expected_counts:
+                fail(f"estimator trial topology mismatch for {cid}")
+        elif schema == "dynamic-benchmark-csv-v1":
+            labels = sorted(row["label"] for row in rows)
+            expected_labels = sorted(
+                [cid + "::insert_correctness", cid + "::delete_correctness"]
+                if cell["family"] == "dynamic_accuracy" else [cid])
+            if labels != expected_labels or sorted(integers("trials")) != sorted(expected_counts):
+                fail(f"dynamic identity/trial topology mismatch for {cid}")
+        elif schema == "threshold-fpfn-csv-v1":
+            expected_total = expected_counts[0]
+            if len(rows) != expected_total or \
+                    len({row["trial_index"] for row in rows}) != expected_total or \
+                    any(int(row["k"]) != int(cell["point_k"]) or
+                        int(row["grid_index"]) != int(cell["grid_index"])
+                        for row in rows):
+                fail(f"threshold FP/FN point/trial topology mismatch for {cid}")
+        elif schema == "threshold-csv-v1":
+            if len(rows) != 1 or rows[0].get("label") != cid:
+                fail(f"threshold cell identity mismatch for {cid}")
+            if "trials" in rows[0] and integers("trials") != expected_counts:
+                fail(f"threshold trial count mismatch for {cid}")
+        elif schema == "sqrt-comparison-csv-v1":
+            if len(rows) != len(expected_rows):
+                fail(f"sqrt row topology mismatch for {cid}")
+            if "encoding" in rows[0] and \
+                    sorted(row["encoding"] for row in rows) != sorted(expected_methods):
+                fail(f"sqrt method taxonomy mismatch for {cid}")
+        elif schema == "deletion-survival-csv-v1":
+            if len(rows) != 3 or len({row["r"] for row in rows}) != 3 or \
+                    any(int(row["trials"]) != expected_counts[0] for row in rows):
+                fail(f"deletion diagnostic topology mismatch for {cid}")
+        elif schema == "sj16-calibration-v1":
+            if len(rows) != 1 or rows[0]["key_bits"] != "3072":
+                fail(f"SJ16 calibration topology mismatch for {cid}")
+        elif schema == "real-dataset-csv-v1":
+            variant = str(cell["variant"])
+            if not rows or any(row["variant"] != variant for row in rows):
+                fail(f"real-data variant binding mismatch for {cid}")
+        elif schema == "real-threshold-csv-v1":
+            if not rows or any(row["dataset"] != "dblp_acm" or
+                               row["variant"] != "dblp_acm_u65536" for row in rows):
+                fail(f"real-threshold dataset binding mismatch for {cid}")
+        elif schema == "noise-profile-v1":
+            if not rows or any(row["profile"] != str(cell["axis_value"])
+                               for row in rows):
+                fail(f"noise profile binding mismatch for {cid}")
 
 
 def verify_root(root: Path, *, mode: str, write_receipt: bool = False,
