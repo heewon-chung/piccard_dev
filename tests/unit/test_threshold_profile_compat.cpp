@@ -9,6 +9,7 @@
 using piccard::PiccardParams;
 using piccard::SecurityLevel;
 using piccard::benchmark::ThresholdCSVHeader;
+using piccard::benchmark::ThresholdSpecCSVHeader;
 
 TEST(ThresholdProfileCompat, ToyGoldenRemainsPrivateCoefficientLevel) {
     PiccardParams params;
@@ -61,6 +62,18 @@ TEST(ThresholdProfileCompat, HeaderBytesRemainLegacyCompatible) {
               std::string::npos);
     EXPECT_EQ(ThresholdCSVHeader().find("sanitizer_assurance"),
               std::string::npos);
+}
+
+TEST(ThresholdProfileCompat, SpecUsesSeparateVersionedSuccessorHeader) {
+    const std::string successor = ThresholdSpecCSVHeader();
+    EXPECT_NE(successor, ThresholdCSVHeader());
+    EXPECT_NE(successor.find("schema_version"), std::string::npos);
+    EXPECT_NE(successor.find("requested_ring_dim"), std::string::npos);
+    EXPECT_NE(successor.find("ordered_rns_moduli"), std::string::npos);
+    EXPECT_NE(successor.find("ordered_rns_limb_bits"), std::string::npos);
+    EXPECT_NE(successor.find("flooding_assurance"), std::string::npos);
+    EXPECT_NE(successor.find("query_stat_bits"), std::string::npos);
+    EXPECT_NE(successor.find("residual_capacity_status"), std::string::npos);
 }
 
 TEST(ThresholdProfileCompat, Std128MissingCalibrationFailsClosed) {

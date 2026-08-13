@@ -1,4 +1,5 @@
 #include "benchmark_utils.h"
+#include "benchmark_provenance.h"
 #include "raw_timing_schema.h"
 #include "threshold_csv_schema.h"
 #include "threshold_fpfn_schema.h"
@@ -1599,10 +1600,10 @@ static void BenchSpecDump(const BenchmarkConfig& config) {
     std::vector<uint32_t> k_values = QuickSweep<uint32_t>(
         {16, 32, 64, 128, 256, 512}, config.security_level);
 
-    std::cout << "k,tau,degree,ps_baby_s,ps_num_chunks,baby_depth,giant_mults,"
-              << "natural_mult_depth,mult_depth,scaling_mod_size,ring_dim,"
-              << "plaintext_mod,log2_q,eval_noise_bits,flood_noise_bits,"
-              << "ct_bytes,poly_build_ms,status,note\n";
+    // The historical timing/accuracy writer remains separate.  Spec mode
+    // has an additive successor contract so the old ring/depth aliases cannot
+    // hide the complete live context provenance.
+    std::cout << ThresholdSpecCSVHeader();
 
     for (uint32_t k : k_values) {
         uint32_t tau = static_cast<uint32_t>(0.6 * k);
@@ -1625,40 +1626,135 @@ static void BenchSpecDump(const BenchmarkConfig& config) {
                                                config.security_level,
                                                params, error);
         if (!engine) {
-            std::cout << k << "," << tau << "," << k << "," << s << ","
-                      << num_chunks << "," << baby_depth << "," << giant_mults
-                      << "," << params.natural_mult_depth << ",-1,-1,-1,-1,-1,"
-                      << "-1,-1,-1,-1,SKIPPED," << SanitizeNote(error) << "\n";
+            ThresholdSpecRow row;
+            row.k = k;
+            row.tau = tau;
+            row.degree = k;
+            row.ps_baby_s = s;
+            row.ps_num_chunks = num_chunks;
+            row.baby_depth = baby_depth;
+            row.giant_mults = giant_mults;
+            row.natural_mult_depth = params.natural_mult_depth;
+            row.status = "SKIPPED";
+            row.note = SanitizeNote(error);
+            // The serializer emits N/A for every context-dependent field in
+            // this branch; no context or residual value is invented.
+            WriteThresholdSpecRow(std::cout, row);
             std::cerr << "  k=" << k << " SKIPPED: " << error << "\n";
             continue;
         }
 
         const auto& P = engine->GetParams();
+        const auto& bfv = engine->GetBFVContext();
+        const auto provenance = MakePiccardBenchmarkProvenance(bfv);
         Timer timer;
         timer.Start();
         auto poly = BuildThresholdPoly(tau, k, P.plaintext_mod);
         double poly_ms = timer.ElapsedMs();
-
-        auto log2_q = engine->GetBFVContext().GetCryptoContext()
-                          ->GetCryptoParameters()->GetElementParams()
-                          ->GetModulus().GetMSB();
 
         std::vector<uint64_t> probe(100);
         for (uint64_t i = 0; i < 100; i++) probe[i] = i;
         auto ct = engine->Encrypt(probe);
         size_t ct_bytes = CiphertextSizer::GetSerializedSize(ct);
 
-        std::cout << k << "," << tau << "," << (poly.size() - 1) << "," << s
-                  << "," << num_chunks << "," << baby_depth << ","
-                  << giant_mults << "," << P.natural_mult_depth << ","
-                  << P.mult_depth << "," << P.scaling_mod_size << ","
-                  << P.ring_dim << "," << P.plaintext_mod << "," << log2_q
-                  << "," << P.eval_noise_bits << "," << P.FloodNoiseBits()
-                  << "," << ct_bytes << "," << std::fixed
-                  << std::setprecision(1) << poly_ms << ",ok,\n";
+        const auto required_u32 = [](const std::optional<uint32_t>& value,
+                                     const char* field) {
+            if (!value.has_value() || *value == 0)
+                throw std::runtime_error(
+                    std::string("threshold provenance missing ") + field);
+            return *value;
+        };
+        const auto required_u64 = [](const std::optional<uint64_t>& value,
+                                     const char* field) {
+            if (!value.has_value() || *value == 0)
+                throw std::runtime_error(
+                    std::string("threshold provenance missing ") + field);
+            return *value;
+        };
+        const auto required_double = [](const std::optional<double>& value,
+                                        const char* field) {
+            if (!value.has_value() || !std::isfinite(*value) || *value <= 0.0)
+                throw std::runtime_error(
+                    std::string("threshold provenance missing ") + field);
+            return *value;
+        };
+        if (provenance.flooding_assurance !=
+                kThresholdFloodingAssuranceLegacyCoefficientLevel ||
+            !provenance.query_stat_bits.has_value() ||
+            *provenance.query_stat_bits != 0) {
+            throw std::runtime_error(
+                "threshold provenance is not legacy coefficient-level/query-zero");
+        }
+
+        ThresholdSpecRow row;
+        row.k = k;
+        row.tau = tau;
+        row.degree = static_cast<uint32_t>(poly.size() - 1);
+        row.ps_baby_s = s;
+        row.ps_num_chunks = num_chunks;
+        row.baby_depth = baby_depth;
+        row.giant_mults = giant_mults;
+        row.natural_mult_depth = P.natural_mult_depth;
+        row.mult_depth = P.mult_depth;
+        row.scaling_mod_size = P.scaling_mod_size;
+        row.ring_dim = P.ring_dim;
+        row.plaintext_mod = P.plaintext_mod;
+        row.log2_q = required_double(provenance.log_q_bits, "log_q_bits");
+        row.eval_noise_bits = static_cast<int64_t>(required_u32(
+            provenance.eval_noise_bits, "eval_noise_bits"));
+        row.flood_noise_bits = static_cast<int64_t>(required_u32(
+            provenance.flood_noise_bits, "flood_noise_bits"));
+        row.ct_bytes = static_cast<int64_t>(ct_bytes);
+        row.poly_build_ms = poly_ms;
+        row.status = "ok";
+
+        // Consume the common provenance constructor rather than rebuilding a
+        // partial tuple from the legacy PiccardParams aliases.
+        row.requested_ring_dim = required_u32(
+            provenance.requested_ring_dim, "requested_ring_dim");
+        row.natural_ring_dim = required_u32(
+            provenance.natural_ring_dim, "natural_ring_dim");
+        row.provisioned_ring_dim = required_u32(
+            provenance.provisioned_ring_dim, "provisioned_ring_dim");
+        row.realized_ring_dim = required_u32(
+            provenance.realized_ring_dim, "realized_ring_dim");
+        row.natural_depth = required_u32(provenance.natural_depth,
+                                         "natural_depth");
+        row.provisioned_depth = required_u32(provenance.provisioned_depth,
+                                             "provisioned_depth");
+        row.log_q_bits = row.log2_q;
+        row.log2_q_over_t_bits = required_double(
+            provenance.log2_q_over_t_bits, "log2_q_over_t_bits");
+        row.plaintext_modulus = required_u64(
+            provenance.plaintext_modulus, "plaintext_modulus");
+        row.num_limbs = required_u32(provenance.num_limbs, "num_limbs");
+        row.realized_scaling_mod_size = required_u32(
+            provenance.realized_scaling_mod_size, "realized_scaling_mod_size");
+        row.ordered_rns_moduli = provenance.ordered_rns_moduli;
+        row.ordered_rns_limb_bits = provenance.ordered_rns_limb_bits;
+        row.openfhe_version = provenance.openfhe_version;
+        row.flooding_assurance = provenance.flooding_assurance;
+        row.transcript_stat_bits = required_u32(
+            provenance.transcript_stat_bits, "transcript_stat_bits");
+        row.max_queries = required_u64(provenance.max_queries, "max_queries");
+        row.query_stat_bits = *provenance.query_stat_bits;
+        if (row.query_stat_bits != 0)
+            throw std::runtime_error(
+                "threshold spec query_stat_bits must remain zero");
+        row.coefficient_stat_bits = required_u32(
+            provenance.coefficient_stat_bits, "coefficient_stat_bits");
+        row.flood_margin_bits = required_u32(provenance.flood_margin_bits,
+                                             "flood_margin_bits");
+        row.required_capacity_bits = bfv.RequiredFloodBudgetBits();
+        row.residual_capacity_definition =
+            provenance.residual_capacity_definition;
+        row.residual_capacity_bits = provenance.residual_capacity_bits;
+        row.residual_capacity_status = provenance.residual_capacity_status;
+
+        WriteThresholdSpecRow(std::cout, row);
         std::cerr << "  k=" << k << " depth=" << P.natural_mult_depth << "->"
                   << P.mult_depth << " N=" << P.ring_dim
-                  << " log2q=" << log2_q << "\n";
+                  << " log2q=" << row.log_q_bits << "\n";
     }
 }
 

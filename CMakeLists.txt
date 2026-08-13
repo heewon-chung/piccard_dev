@@ -1027,6 +1027,24 @@ if(BUILD_TESTS)
             NAME StdSecurityEvidenceSchema
             COMMAND test_std_security_evidence_schema
         )
+
+        # Pure successor-schema contract: no OpenFHE context is constructed.
+        add_executable(
+            test_threshold_spec_provenance_contract
+            tests/unit/test_threshold_spec_provenance_contract.cpp
+        )
+        target_include_directories(
+            test_threshold_spec_provenance_contract
+            PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+        )
+        target_link_libraries(
+            test_threshold_spec_provenance_contract
+            test_main
+        )
+        add_test(
+            NAME ThresholdSpecProvenance
+            COMMAND test_threshold_spec_provenance_contract
+        )
     else()
         message(STATUS "GTest not found, skipping tests")
     endif()
@@ -1129,6 +1147,10 @@ if(BUILD_TESTS)
     add_test(NAME SummarizeStdSecurityEvidence
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_summarize_std_security_evidence
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME ThresholdSpecProducerContract
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_phase8_threshold_provenance
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME VerifyReviewComparison
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
