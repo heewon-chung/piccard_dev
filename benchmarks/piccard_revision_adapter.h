@@ -132,6 +132,28 @@ PiccardRevisionExecutionPlan PlanPiccardRevisionExecution(
     const std::vector<std::string>& argv,
     RevisionRunMode mode);
 
+/** @brief Pure one-cell execution records used by successor-path tests. */
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    RevisionRunMode mode);
+
+/** @brief Argument-order convenience overload for planner-produced argv. */
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const std::vector<std::string>& argv,
+    const RevisionMatrix& matrix,
+    RevisionRunMode mode);
+
+/** @brief Infer Paper/Toy mode from the planner-bound profile when omitted. */
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const std::vector<std::string>& argv,
+    const RevisionMatrix& matrix);
+
+/** @brief Matrix-first convenience overload with inferred Paper/Toy mode. */
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv);
+
 /** @brief Bind a selected cell's canonical identity for successor output. */
 PiccardRevisionIdentity MakePiccardRevisionIdentity(
     const PiccardRevisionSelection& selection);

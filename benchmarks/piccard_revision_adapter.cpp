@@ -303,6 +303,36 @@ PiccardRevisionExecutionPlan PlanPiccardRevisionExecution(
     return execution;
 }
 
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv,
+    const RevisionRunMode mode) {
+    return {PlanPiccardRevisionExecution(matrix, argv, mode)};
+}
+
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const std::vector<std::string>& argv,
+    const RevisionMatrix& matrix,
+    const RevisionRunMode mode) {
+    return PlanPiccardExecutionSpy(matrix, argv, mode);
+}
+
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const std::vector<std::string>& argv,
+    const RevisionMatrix& matrix) {
+    const PiccardRevisionRequest request = ParsePiccardRevisionArgs(argv);
+    const RevisionRunMode mode =
+        request.profile == "readiness-toy-v1" ? RevisionRunMode::Toy
+                                               : RevisionRunMode::Paper;
+    return PlanPiccardExecutionSpy(matrix, argv, mode);
+}
+
+std::vector<PiccardRevisionExecutionPlan> PlanPiccardExecutionSpy(
+    const RevisionMatrix& matrix,
+    const std::vector<std::string>& argv) {
+    return PlanPiccardExecutionSpy(argv, matrix);
+}
+
 PiccardRevisionIdentity MakePiccardRevisionIdentity(
     const PiccardRevisionSelection& selection) {
     const auto it = selection.cell.axes.find("u");

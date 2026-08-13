@@ -23,6 +23,7 @@ using piccard::benchmark::PiccardRevisionRequest;
 using piccard::benchmark::PiccardRevisionSelection;
 using piccard::benchmark::BoundedOverlapSets;
 using piccard::benchmark::PlanPiccardRevisionExecution;
+using piccard::benchmark::PlanPiccardExecutionSpy;
 using piccard::benchmark::PiccardRevisionExecutionPlan;
 using piccard::benchmark::MakeBoundedOverlapSets;
 using piccard::benchmark::SerializePiccardRevisionIdentityHeader;
@@ -243,9 +244,17 @@ TEST(PiccardRevisionAdapter,
             SCOPED_TRACE(cell->cell_id);
             const RevisionInvocationPlan expected =
                 PlanPiccardRevisionCell(*cell, mode);
-            const PiccardRevisionExecutionPlan execution =
-                PlanPiccardRevisionExecution(matrix, expected.argv, mode);
+            const auto executions =
+                PlanPiccardExecutionSpy(expected.argv, matrix, mode);
+            ASSERT_EQ(executions.size(), 1u);
+            const PiccardRevisionExecutionPlan& execution = executions.front();
+            const auto inferred_executions =
+                PlanPiccardExecutionSpy(expected.argv, matrix);
+            ASSERT_EQ(inferred_executions.size(), 1u);
+            EXPECT_EQ(inferred_executions.front().selection.cell.cell_id,
+                      cell->cell_id);
             EXPECT_EQ(execution.selection.cell.cell_id, cell->cell_id);
+            EXPECT_EQ(execution.selection.axes, cell->axes);
             EXPECT_EQ(execution.point.k, std::stoul(cell->axes.at("k")));
             EXPECT_EQ(execution.point.m, std::stoul(cell->axes.at("m")));
             EXPECT_EQ(execution.point.set_size,
@@ -255,6 +264,13 @@ TEST(PiccardRevisionAdapter,
             EXPECT_EQ(execution.selected_point_count, 1u);
             EXPECT_EQ(execution.keygen_calls, 0u);
             EXPECT_FALSE(execution.native_sweep);
+            ASSERT_EQ(execution.selection.plan.expected_rows.size(), 2u);
+            const uint64_t expected_count =
+                mode == RevisionRunMode::Toy ? 1u : 30u;
+            EXPECT_EQ(execution.selection.plan.expected_rows[0].measured_count,
+                      expected_count);
+            EXPECT_EQ(execution.selection.plan.expected_rows[1].measured_count,
+                      mode == RevisionRunMode::Toy ? 1u : 50u);
         }
     }
 }

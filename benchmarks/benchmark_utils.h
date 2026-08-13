@@ -254,6 +254,7 @@ struct BenchmarkConfig {
     uint32_t k;                    // Number of MinHash functions
     uint32_t m;                    // One-hot bucket size
     size_t set_size;               // Size of each party's set
+    uint64_t universe_size;         // Explicit element universe (0 if absent)
     size_t trials;                 // Number of trials to run
     std::string mode;              // "accuracy", "timing", or "combined"
     SecurityLevel security_level;
@@ -271,6 +272,7 @@ struct BenchmarkConfig {
         : k(128),
           m(64),
           set_size(1000),
+          universe_size(0),
           trials(10),
           mode("timing"),
           security_level(SecurityLevel::STD128),
@@ -300,6 +302,7 @@ struct BenchmarkConfig {
         bool saw_overlap = false;
         bool saw_evidence_point = false;
         bool saw_target_jaccard = false;
+        bool saw_universe = false;
 
         auto parse_uint64 = [](const std::string& value,
                                const char* flag) -> uint64_t {
@@ -328,6 +331,19 @@ struct BenchmarkConfig {
                 config.m = static_cast<uint32_t>(std::stoul(arg.substr(4)));
             } else if (arg.find("--set_size=") == 0) {
                 config.set_size = std::stoull(arg.substr(11));
+            } else if (arg.find("--universe=") == 0) {
+                if (saw_universe) {
+                    throw std::invalid_argument("Duplicate --universe");
+                }
+                saw_universe = true;
+                const std::string value = arg.substr(11);
+                const uint64_t parsed = parse_uint64(value, "--universe");
+                if (parsed == 0 || std::to_string(parsed) != value) {
+                    throw std::invalid_argument(
+                        "Invalid --universe: " + value +
+                        " (expected a canonical positive uint64)");
+                }
+                config.universe_size = parsed;
             } else if (arg.find("--trials=") == 0) {
                 config.trials = std::stoull(arg.substr(9));
             } else if (arg.find("--mode=") == 0) {
@@ -545,7 +561,8 @@ inline bool IsBaseBenchmarkOption(const std::string& arg) {
     }
     const char* prefixes[] = {
         "--k=", "--m=", "--set_size=", "--trials=", "--mode=",
-        "--security=", "--seed=", "--overlap=", "--accuracy_trials=",
+        "--universe=", "--revision-cell=", "--security=", "--seed=",
+        "--overlap=", "--accuracy_trials=",
         "--hash_randomness=", "--transcript_stat_bits=", "--max_queries=",
         "--profile=", "--target-jaccard=",
     };

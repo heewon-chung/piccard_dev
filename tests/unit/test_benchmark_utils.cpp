@@ -162,6 +162,46 @@ TEST(BenchmarkUtils, LegacyInvocationStillParses) {
     EXPECT_EQ(cfg.hash_randomness, HashRandomness::Resampled);
 }
 
+TEST(BenchmarkUtils, UniverseDefaultsToZeroAndParsesCanonicalValue) {
+    const char* legacy_argv[] = {"bench", "--seed=7"};
+    const auto legacy =
+        BenchmarkConfig::ParseArgs(2, const_cast<char**>(legacy_argv));
+    EXPECT_EQ(legacy.universe_size, 0u);
+
+    const char* successor_argv[] = {"bench", "--seed=7",
+                                    "--universe=65536",
+                                    "--revision-cell=cell"};
+    const auto successor = BenchmarkConfig::ParseArgs(
+        4, const_cast<char**>(successor_argv));
+    EXPECT_EQ(successor.universe_size, 65536u);
+    EXPECT_NO_THROW(RejectUnknownBenchmarkOptions(
+        4, const_cast<char**>(successor_argv)));
+}
+
+TEST(BenchmarkUtils, UniverseRejectsDuplicateRangeAndNoncanonicalValues) {
+    const std::vector<std::vector<const char*>> invalid_args = {
+        {"bench", "--universe=0"},
+        {"bench", "--universe=-1"},
+        {"bench", "--universe=+1"},
+        {"bench", "--universe=065536"},
+        {"bench", "--universe=1junk"},
+        {"bench", "--universe=18446744073709551616"},
+        {"bench", "--universe=65536", "--universe=65536"},
+    };
+
+    for (const auto& args : invalid_args) {
+        std::vector<char*> argv;
+        argv.reserve(args.size());
+        for (const char* arg : args) {
+            argv.push_back(const_cast<char*>(arg));
+        }
+        EXPECT_THROW(
+            BenchmarkConfig::ParseArgs(static_cast<int>(argv.size()),
+                                       argv.data()),
+            std::invalid_argument);
+    }
+}
+
 TEST(BenchmarkUtils, SanitizerFlagsDefaultToDiagnosticProfile) {
     const char* argv[] = {"bench", "--seed=7"};
     const auto cfg =
