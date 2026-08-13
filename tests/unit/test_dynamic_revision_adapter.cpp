@@ -37,6 +37,139 @@ std::vector<std::string> ReplaceArg(std::vector<std::string> argv,
 }
 
 TEST(DynamicRevisionAdapter,
+     SuccessorCliSeamCanonicalizesRuntimeValuesAndRetainsConcreteBindings) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DynamicCells(matrix);
+    ASSERT_EQ(cells.size(), 33u);
+
+    for (const RevisionRunMode mode : {RevisionRunMode::Toy,
+                                       RevisionRunMode::Paper}) {
+        for (const RevisionCell* cell : cells) {
+            const auto canonical = PlanDynamicRevisionCell(*cell, mode).argv;
+            auto runtime = canonical;
+            for (auto& argument : runtime) {
+                if (argument == "--seed={seed}") {
+                    argument = "--seed=20260729";
+                } else if (argument == "--raw-timing-dir={output}/raw") {
+                    argument = "--raw-timing-dir=/tmp/piccard-dynamic-raw";
+                }
+            }
+            runtime.push_back(
+                "--revision-identity-out=/tmp/piccard-dynamic-identity.csv");
+
+            const auto options = ParseDynamicRevisionCliOptions(runtime);
+            EXPECT_TRUE(options.enabled);
+            EXPECT_EQ(options.planner_argv, canonical);
+            EXPECT_EQ(options.runtime_seed, 20260729u);
+            EXPECT_EQ(options.identity_output,
+                      "/tmp/piccard-dynamic-identity.csv");
+            if (cell->family == "dynamic_accuracy") {
+                EXPECT_TRUE(options.raw_timing_dir.empty());
+            } else {
+                EXPECT_EQ(options.raw_timing_dir,
+                          "/tmp/piccard-dynamic-raw");
+            }
+        }
+    }
+}
+
+TEST(DynamicRevisionAdapter,
+     SuccessorCliSeamRejectsMalformedOrMissingRuntimeBindingsBeforePlanning) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = DynamicCells(matrix);
+    ASSERT_FALSE(cells.empty());
+    const auto timing = std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "dynamic_timing";
+        });
+    ASSERT_NE(timing, cells.end());
+    const auto canonical = PlanDynamicRevisionCell(
+        **timing, RevisionRunMode::Toy).argv;
+
+    auto runtime = canonical;
+    for (auto& argument : runtime) {
+        if (argument == "--seed={seed}") argument = "--seed=7";
+        if (argument == "--raw-timing-dir={output}/raw") {
+            argument = "--raw-timing-dir=/tmp/piccard-dynamic-raw";
+        }
+    }
+    runtime.push_back("--revision-identity-out=/tmp/piccard-dynamic-identity.csv");
+
+    auto missing_seed = runtime;
+    missing_seed.erase(std::remove_if(
+        missing_seed.begin(), missing_seed.end(), [](const std::string& arg) {
+            return arg.rfind("--seed=", 0) == 0;
+        }), missing_seed.end());
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(missing_seed),
+                 std::invalid_argument);
+
+    auto duplicate_seed = runtime;
+    duplicate_seed.push_back("--seed=8");
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(duplicate_seed),
+                 std::invalid_argument);
+
+    for (const std::string value : {"0", "0007", "abc", "{seed}extra"}) {
+        auto malformed = runtime;
+        auto seed = std::find_if(
+            malformed.begin(), malformed.end(), [](const std::string& arg) {
+                return arg.rfind("--seed=", 0) == 0;
+            });
+        ASSERT_NE(seed, malformed.end());
+        *seed = "--seed=" + value;
+        EXPECT_THROW(ParseDynamicRevisionCliOptions(malformed),
+                     std::invalid_argument);
+    }
+
+    auto missing_raw = runtime;
+    missing_raw.erase(std::remove_if(
+        missing_raw.begin(), missing_raw.end(), [](const std::string& arg) {
+            return arg.rfind("--raw-timing-dir=", 0) == 0;
+        }), missing_raw.end());
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(missing_raw),
+                 std::invalid_argument);
+
+    auto malformed_raw = runtime;
+    auto raw = std::find_if(
+        malformed_raw.begin(), malformed_raw.end(), [](const std::string& arg) {
+            return arg.rfind("--raw-timing-dir=", 0) == 0;
+        });
+    ASSERT_NE(raw, malformed_raw.end());
+    *raw = "--raw-timing-dir={output}/raw";
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(malformed_raw),
+                 std::invalid_argument);
+
+    auto duplicate_raw = runtime;
+    duplicate_raw.push_back("--raw-timing-dir=/tmp/other-raw");
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(duplicate_raw),
+                 std::invalid_argument);
+
+    auto missing_identity = runtime;
+    missing_identity.erase(std::remove_if(
+        missing_identity.begin(), missing_identity.end(), [](const std::string& arg) {
+            return arg.rfind("--revision-identity-out=", 0) == 0;
+        }), missing_identity.end());
+    EXPECT_THROW(ParseDynamicRevisionCliOptions(missing_identity),
+                 std::invalid_argument);
+}
+
+TEST(DynamicRevisionAdapter, LegacyArgumentsRemainOutsideRuntimeSeam) {
+    const auto options = ParseDynamicRevisionCliOptions({
+        "--seed=0007", "--raw-timing-dir=relative/raw"});
+    EXPECT_FALSE(options.enabled);
+    EXPECT_TRUE(options.planner_argv.empty());
+    EXPECT_THROW(ParseDynamicRevisionCliOptions({
+                     "--revision-identity-out="}),
+                 std::invalid_argument);
+    EXPECT_THROW(ParseDynamicRevisionCliOptions({
+                     "--revision-identity-out=/tmp/legacy-identity.csv",
+                     "--revision-identity-out=/tmp/legacy-identity-2.csv"}),
+                 std::invalid_argument);
+    EXPECT_THROW(ParseDynamicRevisionCliOptions({
+                     "--revision-identity-out=/tmp/legacy-identity.csv"}),
+                 std::invalid_argument);
+}
+
+TEST(DynamicRevisionAdapter,
      ParsesAndSelectsEveryDynamicCellForPaperToyAndDryRun) {
     const RevisionMatrix matrix = Load();
     const auto cells = DynamicCells(matrix);

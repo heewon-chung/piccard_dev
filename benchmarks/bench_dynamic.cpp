@@ -93,54 +93,6 @@ struct RawTimingOptions {
     bool saw_cell = false;
 };
 
-// Revision-cell arguments are parsed separately from the legacy benchmark
-// options.  The planner owns the canonical argv; this shim only removes the
-// optional output path before the pure adapter validates the remaining argv.
-struct DynamicSuccessorOptions {
-    bool enabled = false;
-    std::vector<std::string> planner_argv;
-    std::string identity_output;
-};
-
-static DynamicSuccessorOptions ParseDynamicSuccessorOptions(
-    int argc, char** argv) {
-    DynamicSuccessorOptions options;
-    bool identity_seen = false;
-    for (int index = 1; index < argc; ++index) {
-        const std::string arg(argv[index]);
-        if (arg.rfind("--revision-cell=", 0) == 0) {
-            options.enabled = true;
-            options.planner_argv.push_back(arg);
-        } else if (arg.rfind("--revision-identity-out=", 0) == 0) {
-            if (identity_seen) {
-                throw std::invalid_argument(
-                    "duplicate --revision-identity-out");
-            }
-            identity_seen = true;
-            options.identity_output = arg.substr(24);
-            if (options.identity_output.empty()) {
-                throw std::invalid_argument(
-                    "--revision-identity-out must not be empty");
-            }
-        } else {
-            options.planner_argv.push_back(arg);
-        }
-    }
-    if (!options.enabled) {
-        if (identity_seen) {
-            throw std::invalid_argument(
-                "--revision-identity-out requires --revision-cell");
-        }
-        options.planner_argv.clear();
-        return options;
-    }
-    if (!identity_seen) {
-        throw std::invalid_argument(
-            "successor --revision-cell requires --revision-identity-out");
-    }
-    return options;
-}
-
 static std::vector<std::string> NormalizeDynamicConfigArgv(
     int argc, char** argv, bool successor) {
     std::vector<std::string> normalized;
@@ -196,6 +148,18 @@ static void WriteDynamicRevisionIdentityAtomic(
         throw std::runtime_error(
             "failed to publish dynamic revision identity: " +
             rename_error.message());
+    }
+}
+
+static void EnsureDynamicRawTimingDirectory(const std::string& output_path) {
+    if (output_path.empty()) return;
+    namespace fs = std::filesystem;
+    std::error_code error;
+    fs::create_directories(fs::path(output_path), error);
+    if (error || !fs::is_directory(fs::path(output_path))) {
+        throw std::invalid_argument(
+            "dynamic successor raw timing directory is unavailable: " +
+            output_path);
     }
 }
 
@@ -1470,8 +1434,13 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const DynamicSuccessorOptions successor_options =
-        ParseDynamicSuccessorOptions(argc, argv);
+    std::vector<std::string> runtime_args;
+    runtime_args.reserve(static_cast<size_t>(argc > 1 ? argc - 1 : 0));
+    for (int index = 1; index < argc; ++index) {
+        runtime_args.emplace_back(argv[index]);
+    }
+    const DynamicRevisionCliOptions successor_options =
+        ParseDynamicRevisionCliOptions(runtime_args);
     // The frozen Work #5 dynamic argv historically spells this one evidence
     // field with an underscore.  Normalize it locally rather than widening
     // the shared benchmark CLI contract; the canonical adapter still owns
@@ -1485,6 +1454,20 @@ int main(int argc, char** argv) {
     }
     auto config = BenchmarkConfig::ParseArgs(argc, normalized_argv.data());
     RawTimingOptions raw_timing = ParseRawTimingOptions(argc, argv);
+    if (successor_options.enabled) {
+        if (config.seed != successor_options.runtime_seed) {
+            throw std::invalid_argument(
+                "dynamic successor runtime seed was not retained");
+        }
+        if (!successor_options.raw_timing_dir.empty()) {
+            if (raw_timing.output_directory !=
+                successor_options.raw_timing_dir) {
+                throw std::invalid_argument(
+                    "dynamic successor raw timing path was not retained");
+            }
+            raw_timing.output_directory = successor_options.raw_timing_dir;
+        }
+    }
     ResolveRawTimingOptions(raw_timing, config);
 
     // Parse dynamic-only flags before rejecting unknown benchmark options.
@@ -1542,6 +1525,7 @@ int main(int argc, char** argv) {
             saw_refresh_updates = true;
             refresh_updates = revision_request->updates;
         }
+        EnsureDynamicRawTimingDirectory(successor_options.raw_timing_dir);
 #else
         throw std::runtime_error(
             "bench_dynamic was built without PICCARD_REVISION_MATRIX_PATH");

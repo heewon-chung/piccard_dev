@@ -3,9 +3,11 @@
 
 import csv
 import io
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -43,6 +45,65 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
 
     def run_cli(self, command):
         return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def revision_command(self, family, output, *, seed="20260729",
+                         identity=True, raw=True):
+        matrix = json.loads(
+            (ROOT / "benchmarks" / "revision_matrix.json").read_text())
+        cell = next(item for item in matrix["cells"]
+                    if item["family"] == family and
+                    item["cell_id"].endswith("control=default"))
+        cid = cell["cell_id"]
+        kind = ("accuracy" if family == "dynamic_accuracy" else
+                ("refresh" if family == "dynamic_refresh" else "timing"))
+        command = [
+            BENCH_DYNAMIC,
+            f"--revision-cell={cid}",
+            "--profile=readiness-toy-v1",
+            f"--cell={kind}", f"--mode={kind}",
+            "--evidence_point", "--security=TOY", "--k=128", "--m=64",
+            "--set_size=1000", "--universe=65536", "--trials=1",
+            "--updates=1", f"--seed={seed}",
+        ]
+        if identity:
+            command.append(f"--revision-identity-out={output / 'identity.csv'}")
+        if family != "dynamic_accuracy" and raw:
+            command += [f"--raw-timing-dir={output / 'raw'}",
+                        "--raw-timing-profile=readiness-toy-v1"]
+        return cell, command
+
+    def run_revision_cell(self, family, root):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        cell = next(item for item in json.loads(
+            (ROOT / "benchmarks" / "revision_matrix.json").read_text())["cells"]
+                    if item["family"] == family and
+                    item["cell_id"].endswith("control=default"))
+        output = cell_output(root, cell["cell_id"])
+        output.mkdir(parents=True)
+        cell, command = self.revision_command(family, output)
+        result = self.run_cli(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output.joinpath("producer.stdout").write_text(
+            result.stdout, encoding="utf-8")
+        output.joinpath("producer.stderr").write_text(
+            result.stderr, encoding="utf-8")
+        return cell, command, output
+
+    def verify_revision_cell(self, root, output, cell, command):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import file_inventory
+        from verify_revision_benchmarks import _check_family_artifacts
+        (output / "stdout.log").write_text(
+            output.joinpath("producer.stdout").read_text(), encoding="utf-8")
+        (output / "stderr.log").write_text(
+            output.joinpath("producer.stderr").read_text(), encoding="utf-8")
+        receipt = {"artifact_inventory": file_inventory(
+            output, exclude={"stdout.log", "stderr.log", "receipt.json",
+                             "producer.stdout", "producer.stderr"})}
+        (output / "receipt.json").write_text(json.dumps(receipt) + "\n")
+        _check_family_artifacts(
+            root, "toy", [cell], {cell["cell_id"]: {"command": command}})
 
     def assert_rejected_before_refresh(self, command):
         result = self.run_cli(command)
@@ -137,6 +198,70 @@ class BenchDynamicRefreshCliTest(unittest.TestCase):
         self.assert_rejected_before_refresh([
             BENCH_DYNAMIC, "--refresh_updates=1", "--k=16", "--seed=7"
         ])
+
+    def test_revision_accuracy_timing_refresh_cross_executable_verifier_boundary(self):
+        with tempfile.TemporaryDirectory(prefix="piccard-dynamic-revision-") as temporary:
+            root = Path(temporary)
+            for family in ("dynamic_accuracy", "dynamic_timing", "dynamic_refresh"):
+                with self.subTest(family=family):
+                    cell, command, output = self.run_revision_cell(family, root)
+                    self.verify_revision_cell(root, output, cell, command)
+
+                    identity = output / "identity.csv"
+                    identity_payload = identity.read_text()
+                    identity.write_text(identity_payload.replace(
+                        "65536", "32768"), encoding="utf-8")
+                    with self.assertRaises(Exception):
+                        self.verify_revision_cell(root, output, cell, command)
+                    identity.write_text(identity_payload, encoding="utf-8")
+
+                    if family != "dynamic_accuracy":
+                        raw_path = next((output / "raw").glob("*.tsv"))
+                        raw_lines = raw_path.read_text(encoding="utf-8").splitlines()
+                        sample_index = next(index for index, line in enumerate(raw_lines)
+                                            if line.startswith("sample\t"))
+                        fields = raw_lines[sample_index].split("\t")
+                        fields[7] = "0"
+                        raw_lines[sample_index] = "\t".join(fields)
+                        raw_path.write_text("\n".join(raw_lines) + "\n",
+                                            encoding="utf-8")
+                        with self.assertRaises(Exception):
+                            self.verify_revision_cell(root, output, cell, command)
+
+    def test_revision_runtime_bindings_fail_before_benchmark_setup(self):
+        for family in ("dynamic_accuracy", "dynamic_timing", "dynamic_refresh"):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / "cell"
+                output.mkdir()
+                _, valid = self.revision_command(family, output)
+                cases = {
+                    "missing_seed": [arg for arg in valid
+                                     if not arg.startswith("--seed=")],
+                    "duplicate_seed": valid + ["--seed=8"],
+                    "malformed_seed": ["--seed=0007" if arg == "--seed=20260729"
+                                        else arg for arg in valid],
+                    "missing_identity": [arg for arg in valid
+                                          if not arg.startswith("--revision-identity-out=")],
+                }
+                if family != "dynamic_accuracy":
+                    cases.update({
+                        "missing_raw_path": [arg for arg in valid
+                                              if not arg.startswith("--raw-timing-dir=")],
+                        "duplicate_raw_path": valid +
+                        [f"--raw-timing-dir={output / 'other-raw'}"],
+                        "placeholder_raw_path": [
+                            "--raw-timing-dir={output}/raw" if arg.startswith("--raw-timing-dir=")
+                            else arg for arg in valid],
+                    })
+                for name, command in cases.items():
+                    with self.subTest(case=name):
+                        result = self.run_cli(command)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(result.stdout, "")
+                        self.assertNotIn("Benchmark Configuration:", result.stderr)
+                        self.assertFalse((output / "identity.csv").exists())
+                        self.assertFalse((output / "raw").exists())
 
 
 if __name__ == "__main__":

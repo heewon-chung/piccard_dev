@@ -765,6 +765,223 @@ def _check_piccard_identity_sidecar(output: Path, cell: dict[str, Any],
         fail(f"Piccard identity sidecar bytes mismatch for {cid}")
 
 
+def _dynamic_identity_binding(output: Path, plan: dict[str, Any],
+                              receipt: dict[str, Any], cell: dict[str, Any],
+                              cid: str) -> None:
+    """Bind a dynamic successor's identity sidecar to its concrete command."""
+    command = plan.get("command", [])
+    identity_values = _command_value(command, "--revision-identity-out=")
+    if len(identity_values) != 1:
+        fail(f"dynamic successor identity binding count mismatch for {cid}")
+    expected_path = output / "identity.csv"
+    if Path(identity_values[0]).resolve(strict=False) != expected_path.resolve():
+        fail(f"dynamic successor identity path mismatch for {cid}")
+    inventory = receipt.get("artifact_inventory")
+    if not isinstance(inventory, list) or "identity.csv" not in {
+            str(item.get("path", "")) for item in inventory
+            if isinstance(item, dict)}:
+        fail(f"dynamic artifact inventory lacks identity for {cid}")
+    path = output / "identity.csv"
+    if path.is_symlink() or not path.is_file():
+        fail(f"dynamic identity sidecar is missing or unsafe for {cid}")
+    expected = (
+        "schema,cell_id,universe_size\n"
+        f"dynamic-revision-cell-v1,{cid},{cell['axes']['u']}\n"
+    ).encode("utf-8")
+    try:
+        actual = path.read_bytes()
+    except OSError as exc:
+        fail(f"dynamic identity sidecar is unreadable for {cid}: {exc}")
+    if actual != expected:
+        fail(f"dynamic identity sidecar bytes mismatch for {cid}")
+
+
+def _dynamic_command_values(command: list[str], cid: str,
+                            *prefixes: str) -> list[str]:
+    values: list[str] = []
+    for prefix in prefixes:
+        values.extend(_command_value(command, prefix))
+    if len(values) > 1:
+        fail(f"{cid} has duplicate dynamic timing path bindings")
+    return values
+
+
+def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
+                                plan: dict[str, Any], receipt: dict[str, Any],
+                                mode: str, cid: str) -> None:
+    """Validate dynamic raw timing path, metadata, samples and topology."""
+    command = plan.get("command", [])
+    family = str(cell["family"])
+    raw_dirs = _dynamic_command_values(command, cid, "--raw-timing-dir=",
+                                       "--raw_timing_dir=")
+    if family == "dynamic_accuracy":
+        if raw_dirs or _command_value(command, "--raw-timing-profile=") or \
+                _command_value(command, "--raw_timing_profile="):
+            fail(f"dynamic accuracy cell has raw timing bindings for {cid}")
+        return
+    if len(raw_dirs) != 1:
+        fail(f"dynamic timing cell lacks one raw timing directory for {cid}")
+    raw_dir = Path(raw_dirs[0]).resolve(strict=False)
+    expected_dir = (output / "raw").resolve()
+    if raw_dir != expected_dir:
+        fail(f"dynamic raw timing directory mismatch for {cid}")
+    profiles = _dynamic_command_values(command, cid,
+                                       "--raw-timing-profile=",
+                                       "--raw_timing_profile=")
+    if len(profiles) != 1:
+        fail(f"dynamic raw timing profile binding mismatch for {cid}")
+    expected_profile = ("readiness-toy-v1" if mode == "toy" else "paper-v1")
+    expected_producer = ("dynamic_refresh" if family == "dynamic_refresh"
+                         else "bench_dynamic")
+    if profiles[0] != expected_profile:
+        fail(f"dynamic raw timing profile mismatch for {cid}")
+
+    items = receipt.get("artifact_inventory")
+    if not isinstance(items, list):
+        fail(f"dynamic raw timing inventory is malformed for {cid}")
+    paths = [str(item.get("path", "")) for item in items
+             if isinstance(item, dict)]
+    raw_paths = [path for path in paths if path.startswith("raw/")]
+    if len(raw_paths) != 1 or not raw_paths[0].endswith(".tsv"):
+        fail(f"dynamic raw timing artifact inventory mismatch for {cid}")
+    raw_path = output / raw_paths[0]
+    if raw_path.is_symlink() or not raw_path.is_file() or \
+            raw_path.parent.resolve() != expected_dir:
+        fail(f"dynamic raw timing artifact path is unsafe for {cid}")
+
+    safe = lambda value: re.sub(r"[^A-Za-z0-9_.-]", "_", value) or "artifact"
+    expected_name = (f"{expected_producer}__{safe(cid)}__"
+                     f"{safe(expected_profile)}.tsv")
+    if raw_path.name != expected_name:
+        fail(f"dynamic raw timing artifact filename mismatch for {cid}")
+    try:
+        raw = raw_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"dynamic raw timing artifact is unreadable for {cid}: {exc}")
+    if not raw or "\r" in raw or not raw.endswith("\n"):
+        fail(f"dynamic raw timing artifact framing mismatch for {cid}")
+    lines = raw[:-1].split("\n")
+    metadata = {
+        "schema_version": "piccard-paper-raw-timing-v1",
+        "artifact_type": "raw_timing_v1",
+        "producer_id": expected_producer,
+        "profile_id": expected_profile,
+        "cell_id": cid,
+    }
+    index = 0
+    for key, expected in metadata.items():
+        if index >= len(lines) or lines[index] != f"{key}\t{expected}":
+            fail(f"dynamic raw timing metadata mismatch for {cid}")
+        index += 1
+    if index >= len(lines) or not lines[index].startswith("warmup_policy\t"):
+        fail(f"dynamic raw timing warmup metadata missing for {cid}")
+    warmup_policy = lines[index].split("\t", 1)[1]
+    index += 1
+    expected_warmup = "none" if family == "dynamic_refresh" else "discard_one"
+    if warmup_policy != expected_warmup:
+        fail(f"dynamic raw timing warmup policy mismatch for {cid}")
+    expected_count = int(cell["expected_rows"][0][
+        "toy_measured_count" if mode == "toy" else "paper_measured_count"])
+    if index >= len(lines) or lines[index] != f"expected_measured\t{expected_count}":
+        fail(f"dynamic raw timing measured-count metadata mismatch for {cid}")
+    index += 1
+    if index + 1 >= len(lines) or lines[index] != "samples" or \
+            lines[index + 1] != (
+                "sample\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                "sample_kind\ttrial_index\tseed\traw_ms"):
+        fail(f"dynamic raw timing sample header mismatch for {cid}")
+    index += 2
+    samples: list[dict[str, str]] = []
+    while index < len(lines) and lines[index] != "aggregates":
+        fields = lines[index].split("\t")
+        if len(fields) != 9 or fields[0] != "sample":
+            fail(f"dynamic raw timing sample row shape mismatch for {cid}")
+        samples.append({
+            "producer": fields[1], "profile": fields[2], "cell": fields[3],
+            "phase": fields[4], "kind": fields[5], "trial": fields[6],
+            "seed": fields[7], "value": fields[8],
+        })
+        index += 1
+    if index + 1 >= len(lines) or lines[index] != "aggregates" or \
+            lines[index + 1] != (
+                "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                "ci95_low_ms\tci95_high_ms\tformat_version"):
+        fail(f"dynamic raw timing aggregate header mismatch for {cid}")
+    index += 2
+    aggregates: list[dict[str, str]] = []
+    while index < len(lines):
+        fields = lines[index].split("\t")
+        if len(fields) != 12 or fields[0] != "aggregate":
+            fail(f"dynamic raw timing aggregate row shape mismatch for {cid}")
+        aggregates.append({
+            "producer": fields[1], "profile": fields[2], "cell": fields[3],
+            "phase": fields[4], "count": fields[5], "format": fields[11],
+        })
+        index += 1
+
+    if family == "dynamic_refresh":
+        phases = {"refresh_update", "refresh_signature", "refresh_encode",
+                  "refresh_encrypt", "refresh_serialize", "cloud_replace",
+                  "total"}
+    else:
+        phases = {"init", "insert", "delete", "signature", "encode",
+                  "encrypt", "compute", "flood", "decrypt", "total"}
+    if {sample["phase"] for sample in samples} != phases or \
+            {aggregate["phase"] for aggregate in aggregates} != phases:
+        fail(f"dynamic raw timing phase topology mismatch for {cid}")
+    expected_samples_per_phase = expected_count + (1 if expected_warmup == "discard_one" else 0)
+    if len(samples) != len(phases) * expected_samples_per_phase or \
+            len(aggregates) != len(phases):
+        fail(f"dynamic raw timing row count mismatch for {cid}")
+    seed_values = _command_value(command, "--seed=")
+    if len(seed_values) != 1:
+        fail(f"dynamic successor seed binding count mismatch for {cid}")
+    try:
+        root_seed = int(seed_values[0])
+    except ValueError:
+        fail(f"dynamic successor seed binding is malformed for {cid}")
+    for sample in samples:
+        if sample["producer"] != expected_producer or \
+                sample["profile"] != expected_profile or sample["cell"] != cid:
+            fail(f"dynamic raw timing sample identity mismatch for {cid}")
+        try:
+            trial = int(sample["trial"])
+            seed = int(sample["seed"])
+            value = float(sample["value"])
+        except ValueError:
+            fail(f"dynamic raw timing numeric field mismatch for {cid}")
+        if trial < 0 or seed < 0 or not math.isfinite(value) or value < 0.0:
+            fail(f"dynamic raw timing numeric domain mismatch for {cid}")
+        if sample["kind"] == "discarded_warmup":
+            if expected_warmup != "discard_one" or trial != 0:
+                fail(f"dynamic raw timing warmup topology mismatch for {cid}")
+            if seed != root_seed:
+                fail(f"dynamic raw timing warmup seed mismatch for {cid}")
+        elif sample["kind"] == "measured":
+            if trial not in range(expected_count):
+                fail(f"dynamic raw timing trial topology mismatch for {cid}")
+            expected_seed = root_seed + trial * 10007 + 500
+            if seed != expected_seed:
+                fail(f"dynamic raw timing trial seed mismatch for {cid}")
+        else:
+            fail(f"dynamic raw timing sample kind mismatch for {cid}")
+    for aggregate in aggregates:
+        if aggregate["producer"] != expected_producer or \
+                aggregate["profile"] != expected_profile or \
+                aggregate["cell"] != cid or \
+                aggregate["count"] != str(expected_count) or \
+                aggregate["format"] != "17-digit":
+            fail(f"dynamic raw timing aggregate identity mismatch for {cid}")
+
+
+def _check_dynamic_sidecars(output: Path, cell: dict[str, Any],
+                            receipt: dict[str, Any], plan: dict[str, Any],
+                            mode: str, cid: str) -> None:
+    _dynamic_identity_binding(output, plan, receipt, cell, cid)
+    _dynamic_raw_timing_sidecar(output, cell, plan, receipt, mode, cid)
+
+
 def _terminal_records(stderr: bytes, cell_id: str) -> list[dict[str, str]]:
     records = []
     for line in stderr.decode("utf-8", errors="strict").splitlines():
@@ -1999,6 +2216,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         stdout = (output / "stdout.log").read_bytes()
         stderr = (output / "stderr.log").read_bytes()
         plan = plans[cid]
+        if str(cell.get("family", "")).startswith("dynamic_"):
+            _check_dynamic_sidecars(output, cell, receipt, plan, mode, cid)
         # The real summary is independently regenerated from its canonical
         # accuracy input.  It is the only summary producer without a fixed
         # C++ CSV header.

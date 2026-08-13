@@ -62,6 +62,23 @@ struct DynamicRevisionExecutionPlan {
     bool native_sweep = false;
 };
 
+/** @brief Runtime successor arguments and their canonical planner projection. */
+struct DynamicRevisionCliOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    std::string identity_output;
+    uint64_t runtime_seed = 0;
+    std::string raw_timing_dir;
+};
+
+/** @brief Parse executable-boundary successor arguments before FHE setup. */
+DynamicRevisionCliOptions ParseDynamicRevisionCliOptions(
+    const std::vector<std::string>& argv);
+
+/** @brief Replace concrete runtime seed/path values with planner placeholders. */
+std::vector<std::string> CanonicalizeDynamicRevisionPlannerArgv(
+    const std::vector<std::string>& argv);
+
 /** @brief Parse one planner-produced dynamic argv without side effects. */
 DynamicRevisionRequest ParseDynamicRevisionArgs(
     const std::vector<std::string>& argv);

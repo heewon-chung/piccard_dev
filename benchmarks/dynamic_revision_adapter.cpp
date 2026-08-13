@@ -1,6 +1,7 @@
 #include "dynamic_revision_adapter.h"
 
 #include <charconv>
+#include <filesystem>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -68,6 +69,29 @@ void RequireSeen(const std::set<std::string>& seen, const char* name) {
     if (seen.find(name) == seen.end()) Reject(std::string("missing ") + name);
 }
 
+void RejectRuntime(const std::string& reason) {
+    throw std::invalid_argument("invalid dynamic successor runtime argv: " +
+                                reason);
+}
+
+void RequireConcretePath(const std::string& value, const char* field) {
+    if (value.empty()) {
+        RejectRuntime(std::string(field) + " must not be empty");
+    }
+    if (value.find('{') != std::string::npos ||
+        value.find('}') != std::string::npos) {
+        RejectRuntime(std::string(field) + " must be a concrete path");
+    }
+    const std::filesystem::path path(value);
+    if (!path.is_absolute() || path == path.root_path()) {
+        RejectRuntime(std::string(field) + " must be an absolute non-root path");
+    }
+}
+
+std::string RuntimeValue(const std::string& argument, const char* prefix) {
+    return argument.substr(std::char_traits<char>::length(prefix));
+}
+
 void RequireProfileContract(const DynamicRevisionRequest& request) {
     if (request.profile != "paper-std128-t40-v1" &&
         request.profile != "readiness-toy-v1") {
@@ -109,6 +133,167 @@ void RequireProfileContract(const DynamicRevisionRequest& request) {
 }
 
 }  // namespace
+
+std::vector<std::string> CanonicalizeDynamicRevisionPlannerArgv(
+    const std::vector<std::string>& argv) {
+    std::vector<std::string> canonical;
+    canonical.reserve(argv.size());
+    for (const std::string& argument : argv) {
+        if (argument.rfind("--seed=", 0) == 0) {
+            const std::string value = RuntimeValue(argument, "--seed=");
+            if (value == "{seed}") {
+                canonical.push_back(argument);
+            } else {
+                (void)ParseUnsigned(value, "--seed");
+                canonical.emplace_back("--seed={seed}");
+            }
+            continue;
+        }
+
+        const bool hyphen_path = argument.rfind("--raw-timing-dir=", 0) == 0;
+        const bool underscore_path =
+            argument.rfind("--raw_timing_dir=", 0) == 0;
+        if (hyphen_path || underscore_path) {
+            const char* prefix = hyphen_path ? "--raw-timing-dir="
+                                              : "--raw_timing_dir=";
+            const std::string value = RuntimeValue(argument, prefix);
+            if (value == "{output}/raw") {
+                canonical.emplace_back("--raw-timing-dir={output}/raw");
+            } else {
+                RequireConcretePath(value, "--raw-timing-dir");
+                canonical.emplace_back("--raw-timing-dir={output}/raw");
+            }
+            continue;
+        }
+        canonical.push_back(argument);
+    }
+    return canonical;
+}
+
+DynamicRevisionCliOptions ParseDynamicRevisionCliOptions(
+    const std::vector<std::string>& argv) {
+    DynamicRevisionCliOptions options;
+    bool identity_seen = false;
+    bool seed_seen = false;
+    bool raw_timing_seen = false;
+    std::string cell;
+
+    // Legacy invocations retain their historical permissive handling.  Only
+    // a revision-cell invocation enters the strict runtime-materialization
+    // boundary below; this keeps ordinary --seed/--raw-timing-dir runs
+    // byte-for-byte compatible with the pre-successor CLI.
+    bool successor_requested = false;
+    size_t legacy_identity_count = 0;
+    std::string legacy_identity_value;
+    for (const std::string& argument : argv) {
+        if (argument.rfind("--revision-cell=", 0) == 0) {
+            successor_requested = true;
+        }
+        if (argument.rfind("--revision-identity-out=", 0) == 0) {
+            ++legacy_identity_count;
+            if (legacy_identity_count == 1) {
+                legacy_identity_value =
+                    RuntimeValue(argument, "--revision-identity-out=");
+            }
+        }
+    }
+    if (!successor_requested) {
+        if (legacy_identity_count > 1) {
+            throw std::invalid_argument(
+                "duplicate --revision-identity-out");
+        }
+        if (legacy_identity_count == 1 && legacy_identity_value.empty()) {
+            throw std::invalid_argument(
+                "--revision-identity-out must not be empty");
+        }
+        if (legacy_identity_count == 1) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    identity_seen = false;
+
+    for (const std::string& argument : argv) {
+        if (argument.rfind("--revision-cell=", 0) == 0) {
+            options.enabled = true;
+            options.planner_argv.push_back(argument);
+            continue;
+        }
+        if (argument.rfind("--revision-identity-out=", 0) == 0) {
+            if (identity_seen) {
+                RejectRuntime("duplicate --revision-identity-out");
+            }
+            identity_seen = true;
+            options.identity_output =
+                RuntimeValue(argument, "--revision-identity-out=");
+            RequireConcretePath(options.identity_output,
+                                "--revision-identity-out");
+            continue;
+        }
+
+        if (argument.rfind("--seed=", 0) == 0) {
+            if (seed_seen) RejectRuntime("duplicate --seed");
+            seed_seen = true;
+            const std::string value = RuntimeValue(argument, "--seed=");
+            if (value == "{seed}") {
+                RejectRuntime("--seed must be a concrete runtime value");
+            }
+            options.runtime_seed = ParseUnsigned(value, "--seed");
+            options.planner_argv.push_back(argument);
+            continue;
+        }
+
+        const bool hyphen_path = argument.rfind("--raw-timing-dir=", 0) == 0;
+        const bool underscore_path =
+            argument.rfind("--raw_timing_dir=", 0) == 0;
+        if (hyphen_path || underscore_path) {
+            if (raw_timing_seen) {
+                RejectRuntime("duplicate --raw-timing-dir");
+            }
+            raw_timing_seen = true;
+            const char* prefix = hyphen_path ? "--raw-timing-dir="
+                                              : "--raw_timing_dir=";
+            options.raw_timing_dir = RuntimeValue(argument, prefix);
+            if (options.raw_timing_dir == "{output}/raw") {
+                RejectRuntime("--raw-timing-dir must be a concrete path");
+            }
+            RequireConcretePath(options.raw_timing_dir, "--raw-timing-dir");
+            options.planner_argv.push_back(argument);
+            continue;
+        }
+
+        if (argument.rfind("--cell=", 0) == 0) {
+            cell = RuntimeValue(argument, "--cell=");
+        }
+        options.planner_argv.push_back(argument);
+    }
+
+    if (!options.enabled) {
+        if (identity_seen) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    if (!identity_seen) {
+        throw std::invalid_argument(
+            "successor --revision-cell requires --revision-identity-out");
+    }
+    if (!seed_seen) RejectRuntime("missing --seed");
+    if ((cell == "timing" || cell == "refresh") && !raw_timing_seen) {
+        RejectRuntime("missing --raw-timing-dir");
+    }
+    if (cell == "accuracy" && raw_timing_seen) {
+        RejectRuntime("accuracy successor must not request raw timing");
+    }
+
+    options.planner_argv =
+        CanonicalizeDynamicRevisionPlannerArgv(options.planner_argv);
+    return options;
+}
 
 DynamicRevisionRequest ParseDynamicRevisionArgs(
     const std::vector<std::string>& argv) {
