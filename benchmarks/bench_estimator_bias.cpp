@@ -1,4 +1,6 @@
 #include "estimator_diagnostic.h"
+#include "cpu_revision_adapter.h"
+#include "revision_matrix.h"
 
 #include <charconv>
 #include <cstdint>
@@ -6,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -15,6 +18,98 @@ using piccard::benchmark::RunDiagnosticPoint;
 using piccard::benchmark::SerializeDiagnosticHeader;
 using piccard::benchmark::SerializeDiagnosticRow;
 using piccard::benchmark::ValidateDiagnosticConfig;
+
+uint64_t ParseUint64Option(const std::string& text,
+                           const std::string& option_name);
+
+bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> CollectArguments(int argc, char** argv) {
+    std::vector<std::string> arguments;
+    arguments.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0u);
+    for (int index = 1; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return arguments;
+}
+
+std::vector<std::string> CanonicalizeArguments(
+    const std::vector<std::string>& arguments) {
+    std::vector<std::string> canonical;
+    canonical.reserve(arguments.size());
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) == 0 &&
+            argument != "--seed={seed}") {
+            canonical.emplace_back("--seed={seed}");
+        } else {
+            canonical.push_back(argument);
+        }
+    }
+    return canonical;
+}
+
+uint64_t ConcreteSeed(const std::vector<std::string>& arguments) {
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) != 0) continue;
+        const std::string value = argument.substr(7);
+        if (value == "{seed}") return 0;
+        return ParseUint64Option(value, "--seed");
+    }
+    throw std::invalid_argument("missing --seed");
+}
+
+int RunRevisionCell(int argc, char** argv) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+    const auto matrix = piccard::benchmark::LoadAndValidateRevisionMatrix(
+        PICCARD_REVISION_MATRIX_PATH);
+    const auto arguments = CollectArguments(argc, argv);
+    const uint64_t concrete_seed = ConcreteSeed(arguments);
+    const auto canonical_arguments = CanonicalizeArguments(arguments);
+    const auto request = piccard::benchmark::ParseCpuRevisionArgs(
+        canonical_arguments,
+        piccard::benchmark::CpuRevisionProducer::EstimatorBias);
+    const auto mode = piccard::benchmark::RevisionRunModeForProfile(
+        request.profile);
+    const auto execution = piccard::benchmark::PlanCpuRevisionExecution(
+        matrix, canonical_arguments,
+        piccard::benchmark::CpuRevisionProducer::EstimatorBias, mode);
+    if (execution.selected_cell_count != 1u ||
+        execution.producer_invocation_count != 1u || execution.native_sweep) {
+        throw std::logic_error("estimator revision plan is not one-cell");
+    }
+
+    DiagnosticConfig config;
+    config.k = static_cast<uint32_t>(request.k);
+    config.m = static_cast<uint32_t>(request.m);
+    config.set_size = request.set_size;
+    config.trials = request.trials;
+    config.root_seed = concrete_seed;
+    config.jaccard_grid = ParseJaccardGrid(request.jaccard_grid);
+    ValidateDiagnosticConfig(config);
+
+    std::cout << SerializeDiagnosticHeader();
+    for (size_t grid_index = 0; grid_index < config.jaccard_grid.size();
+         ++grid_index) {
+        const auto row = RunDiagnosticPoint(
+            config, config.jaccard_grid[grid_index],
+            static_cast<uint32_t>(grid_index));
+        std::cout << SerializeDiagnosticRow(row);
+    }
+    return 0;
+#else
+    (void)argc;
+    (void)argv;
+    throw std::runtime_error(
+        "bench_estimator_bias was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+}
 
 uint64_t ParseUint64Option(const std::string& text,
                            const std::string& option_name) {
@@ -96,6 +191,7 @@ DiagnosticConfig ParseArguments(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
+        if (HasRevisionCell(argc, argv)) return RunRevisionCell(argc, argv);
         const DiagnosticConfig config = ParseArguments(argc, argv);
         std::cout << SerializeDiagnosticHeader();
         for (size_t grid_index = 0;

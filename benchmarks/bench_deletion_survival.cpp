@@ -1,6 +1,8 @@
 #include "analysis/deletion_monte_carlo.h"
 
 #include "analysis/deletion_survival.h"
+#include "cpu_revision_adapter.h"
+#include "revision_matrix.h"
 
 #include <charconv>
 #include <iomanip>
@@ -20,6 +22,49 @@ uint64_t ParseUint64(const std::string& value, const char* name) {
         throw std::invalid_argument(std::string("invalid ") + name);
     }
     return parsed;
+}
+
+bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> CollectArguments(int argc, char** argv) {
+    std::vector<std::string> arguments;
+    arguments.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0u);
+    for (int index = 1; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return arguments;
+}
+
+std::vector<std::string> CanonicalizeArguments(
+    const std::vector<std::string>& arguments) {
+    std::vector<std::string> canonical;
+    canonical.reserve(arguments.size());
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) == 0 &&
+            argument != "--seed={seed}") {
+            canonical.emplace_back("--seed={seed}");
+        } else {
+            canonical.push_back(argument);
+        }
+    }
+    return canonical;
+}
+
+uint64_t ConcreteSeed(const std::vector<std::string>& arguments) {
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) != 0) continue;
+        const std::string value = argument.substr(7);
+        if (value == "{seed}") return 0;
+        return ParseUint64(value, "seed");
+    }
+    throw std::invalid_argument("missing --seed");
 }
 
 long double ParseProbability(const std::string& value) {
@@ -87,10 +132,78 @@ std::unordered_map<std::string, std::string> ParseOptions(int argc, char** argv)
     return options;
 }
 
+int RunRevisionCell(int argc, char** argv) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+    const auto matrix = piccard::benchmark::LoadAndValidateRevisionMatrix(
+        PICCARD_REVISION_MATRIX_PATH);
+    const auto arguments = CollectArguments(argc, argv);
+    const uint64_t concrete_seed = ConcreteSeed(arguments);
+    const auto canonical_arguments = CanonicalizeArguments(arguments);
+    const auto request = piccard::benchmark::ParseCpuRevisionArgs(
+        canonical_arguments,
+        piccard::benchmark::CpuRevisionProducer::DeletionSurvival);
+    const auto mode = piccard::benchmark::RevisionRunModeForProfile(
+        request.profile);
+    const auto execution = piccard::benchmark::PlanCpuRevisionExecution(
+        matrix, canonical_arguments,
+        piccard::benchmark::CpuRevisionProducer::DeletionSurvival, mode);
+    if (execution.selected_cell_count != 1u ||
+        execution.producer_invocation_count != 1u || execution.native_sweep) {
+        throw std::logic_error("deletion revision plan is not one-cell");
+    }
+
+    const piccard::DeletionSurvivalConfig config{
+        request.set_size, static_cast<uint32_t>(request.m),
+        static_cast<uint32_t>(request.k)};
+    constexpr long double kRequiredSurvival = 0.99L;
+    constexpr const char* kRequiredSurvivalText = "0.99";
+    const std::vector<uint64_t> r_values = {1, 4, 8};
+    const auto exact = piccard::AnalyzeDeletionSurvival(
+        config, kRequiredSurvival);
+
+    const bool monte_carlo = request.cell == "monte-carlo";
+    piccard::DeletionMonteCarloResult simulation{
+        0, concrete_seed, {}, 0.0L, 0.0L};
+    if (monte_carlo) {
+        simulation = piccard::SimulateDeletionSurvival(
+            config, request.trials, concrete_seed);
+    }
+
+    std::cout << std::setprecision(17)
+              << "model,n,d,k,required_survival,r,exact_survival,"
+                 "union_bound_survival,mc_survival,mc_standard_error,"
+                 "maximum_safe_deletions,exact_expected_first_failure,"
+                 "exact_expected_safe_deletions,mc_mean_first_failure,"
+                 "mc_mean_safe_deletions,trials,seed\n";
+    for (uint64_t r : r_values) {
+        std::cout << "ideal-independent-random-ranking-v1,"
+                  << request.set_size << ',' << request.m << ',' << request.k
+                  << ',' << kRequiredSurvivalText << ',' << r
+                  << ',' << piccard::ExactDeletionSurvival(config, r) << ','
+                  << piccard::UnionBoundDeletionSurvival(config, r) << ','
+                  << simulation.SurvivalAt(r) << ','
+                  << simulation.StandardErrorAt(r) << ','
+                  << exact.maximum_safe_deletions << ','
+                  << exact.expected_first_failure_time << ','
+                  << exact.expected_safe_deletions << ','
+                  << simulation.mean_first_failure_time << ','
+                  << simulation.mean_safe_deletions << ',' << simulation.trials
+                  << ',' << concrete_seed << '\n';
+    }
+    return 0;
+#else
+    (void)argc;
+    (void)argv;
+    throw std::runtime_error(
+        "bench_deletion_survival was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
+        if (HasRevisionCell(argc, argv)) return RunRevisionCell(argc, argv);
         const auto options = ParseOptions(argc, argv);
         const uint64_t n = ParseUint64(options.at("n"), "n");
         const uint64_t d = ParseUint64(options.at("d"), "d");

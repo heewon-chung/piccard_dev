@@ -49,10 +49,13 @@
 
 #include "baselines/sj16.h"
 #include "benchmark_utils.h"  // Timer, MakeRandomSetsWithOverlap, ComputeDispersion
+#include "cpu_revision_adapter.h"
 #include "raw_timing_schema.h"
+#include "revision_matrix.h"
 
 using piccard::baselines::SJ16;
 using piccard::benchmark::MakeRandomSetsWithOverlap;
+using piccard::benchmark::CpuRevisionProducer;
 using piccard::benchmark::ComputeTimingAggregateV1;
 using piccard::benchmark::ExpectedTimingTrials;
 using piccard::benchmark::ExpectedWarmupPolicy;
@@ -63,6 +66,10 @@ using piccard::benchmark::WarmupPolicy;
 using piccard::benchmark::WriteRawTimingArtifactsV1;
 using piccard::benchmark::kPaperTimingProfileVersion;
 using piccard::benchmark::kReadinessTimingProfileVersion;
+using piccard::benchmark::LoadAndValidateRevisionMatrix;
+using piccard::benchmark::ParseCpuRevisionArgs;
+using piccard::benchmark::PlanCpuRevisionExecution;
+using piccard::benchmark::RevisionRunModeForProfile;
 
 namespace {
 
@@ -78,6 +85,8 @@ struct Config {
     size_t enc_iters = 1000;
     std::string raw_timing_out;
     std::string raw_profile;
+    std::string result_output;
+    uint64_t root_seed = 0;
 };
 
 std::vector<std::string> Split(const std::string& s, char delim) {
@@ -88,6 +97,68 @@ std::vector<std::string> Split(const std::string& s, char delim) {
         if (!item.empty()) out.push_back(item);
     }
     return out;
+}
+
+bool HasRevisionCell(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]).rfind("--revision-cell=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> CollectArguments(int argc, char** argv) {
+    std::vector<std::string> arguments;
+    arguments.reserve(argc > 1 ? static_cast<size_t>(argc - 1) : 0u);
+    for (int index = 1; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return arguments;
+}
+
+std::vector<std::string> CanonicalizeRevisionArguments(
+    const std::vector<std::string>& arguments) {
+    std::vector<std::string> canonical;
+    canonical.reserve(arguments.size());
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) == 0 &&
+            argument != "--seed={seed}") {
+            canonical.emplace_back("--seed={seed}");
+        } else if (argument.rfind("--output=", 0) == 0 &&
+                   argument != "--output={output}/calibration.csv") {
+            canonical.emplace_back("--output={output}/calibration.csv");
+        } else {
+            canonical.push_back(argument);
+        }
+    }
+    return canonical;
+}
+
+uint64_t ConcreteSeed(const std::vector<std::string>& arguments) {
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--seed=", 0) != 0) continue;
+        const std::string value = argument.substr(7);
+        if (value == "{seed}") return 0;
+        uint64_t seed = 0;
+        const auto result = std::from_chars(
+            value.data(), value.data() + value.size(), seed);
+        if (result.ec != std::errc() || result.ptr != value.data() + value.size()) {
+            throw std::invalid_argument("--seed requires an unsigned integer");
+        }
+        return seed;
+    }
+    throw std::invalid_argument("missing --seed");
+}
+
+std::string ConcreteOutput(const std::vector<std::string>& arguments) {
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--output=", 0) != 0) continue;
+        const std::string value = argument.substr(9);
+        if (value == "{output}/calibration.csv") return {};
+        return value;
+    }
+    return {};
 }
 
 void PrintUsage() {
@@ -604,7 +675,39 @@ RawTimingArtifact MakeSj16RawTimingArtifact(
 int main(int argc, char** argv) {
     bool want_help = false;
     Config cfg;
-    if (!ParseArgs(argc, argv, cfg, want_help)) {
+    bool revision_successor = HasRevisionCell(argc, argv);
+    std::vector<std::string> revision_arguments;
+    if (revision_successor) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+        revision_arguments = CollectArguments(argc, argv);
+        const auto canonical_arguments =
+            CanonicalizeRevisionArguments(revision_arguments);
+        const auto matrix = LoadAndValidateRevisionMatrix(
+            PICCARD_REVISION_MATRIX_PATH);
+        const auto request = ParseCpuRevisionArgs(
+            canonical_arguments, CpuRevisionProducer::Sj16Calibrate);
+        const auto mode = RevisionRunModeForProfile(request.profile);
+        const auto execution = PlanCpuRevisionExecution(
+            matrix, canonical_arguments, CpuRevisionProducer::Sj16Calibrate,
+            mode);
+        if (execution.selected_cell_count != 1u ||
+            execution.producer_invocation_count != 1u ||
+            execution.native_sweep) {
+            throw std::logic_error("SJ16 revision plan is not one-cell");
+        }
+        cfg.key_bits = {static_cast<unsigned>(request.key_bits)};
+        cfg.sizes = request.sizes;
+        cfg.held_out = request.held_out;
+        cfg.trials = static_cast<size_t>(request.query_trials);
+        cfg.enc_iters = static_cast<size_t>(request.enc_iters);
+        cfg.threads = static_cast<int>(request.threads);
+        cfg.root_seed = ConcreteSeed(revision_arguments);
+        cfg.result_output = ConcreteOutput(revision_arguments);
+#else
+        throw std::runtime_error(
+            "bench_sj16_calibrate was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
+    } else if (!ParseArgs(argc, argv, cfg, want_help)) {
         return 1;  // invalid CLI input: fail fast before any measurement
     }
     if (want_help) {
@@ -734,7 +837,7 @@ int main(int argc, char** argv) {
     int scaling_P = observed_team;
     bool scaling_sublinear = false;
 #ifdef _OPENMP
-    if (scaling_P > 1) {
+    if (!revision_successor && scaling_P > 1) {
         unsigned Ksc = cfg.key_bits.front();
         std::cout << "\n[D4 scaling check] size m=" << scaling_m
                   << " at K=" << Ksc << ": threads=1 vs threads=" << scaling_P
@@ -746,7 +849,8 @@ int main(int argc, char** argv) {
             // Warmup once at each thread count (discarded).
             {
                 auto [wx, wy] = MakeSetsForUniverse(
-                    scaling_m, 0x5CA1E5EEDULL ^ 0x9E3779B97F4A7C15ULL);
+                    scaling_m, 0x5CA1E5EEDULL ^ 0x9E3779B97F4A7C15ULL ^
+                                   cfg.root_seed);
                 omp_set_num_threads(1);
                 (void)ssc.RunProtocol(wx, wy);
                 omp_set_num_threads(cfg.threads);
@@ -760,7 +864,8 @@ int main(int argc, char** argv) {
             sP.reserve(cfg.trials);
             for (size_t t = 0; t < cfg.trials; ++t) {
                 auto [x, y] =
-                    MakeSetsForUniverse(scaling_m, 0x5CA1E5EEDULL + t * 1009ULL);
+                    MakeSetsForUniverse(scaling_m, 0x5CA1E5EEDULL +
+                                                   t * 1009ULL + cfg.root_seed);
                 omp_set_num_threads(1);
                 s1.push_back(ssc.RunProtocol(x, y).cost.total_ms);
                 omp_set_num_threads(cfg.threads);
@@ -806,7 +911,7 @@ int main(int argc, char** argv) {
             std::vector<double> enc_samples;
             RawTimingSeries raw_encryption;
             const uint64_t encryption_seed =
-                0xE11C0DE5EEDULL ^ static_cast<uint64_t>(K);
+                0xE11C0DE5EEDULL ^ static_cast<uint64_t>(K) ^ cfg.root_seed;
             MedIqr enc = MeasureEncMs(
                 s, cfg.enc_iters, enc_samples,
                 write_raw_timing ? &raw_encryption : nullptr, encryption_seed);
@@ -818,7 +923,8 @@ int main(int argc, char** argv) {
             // together in ONE trial-major interleaved schedule (finding 5); the
             // fit vs held-out split happens only here in analysis. The held-out
             // size is the last entry of the combined list.
-            uint64_t base_seed = 0xC0FFEEULL ^ (static_cast<uint64_t>(K) << 8);
+            uint64_t base_seed = 0xC0FFEEULL ^
+                                 (static_cast<uint64_t>(K) << 8) ^ cfg.root_seed;
             std::vector<uint32_t> all_sizes = cfg.sizes;
             all_sizes.push_back(cfg.held_out);
             std::map<uint32_t, RawTimingSeries> raw_queries;
@@ -923,9 +1029,18 @@ int main(int argc, char** argv) {
 
     // ---- Machine-readable summary ------------------------------------------
     std::error_code ec;
-    std::filesystem::create_directories("results", ec);
+    const std::filesystem::path requested_output = cfg.result_output.empty()
+        ? std::filesystem::path()
+        : std::filesystem::path(cfg.result_output);
+    if (!requested_output.empty() && requested_output.has_parent_path()) {
+        std::filesystem::create_directories(requested_output.parent_path(), ec);
+    } else {
+        std::filesystem::create_directories("results", ec);
+    }
     std::string host = HostName();
-    std::string path = "results/sj16_calibration_" + host + ".txt";
+    std::string path = requested_output.empty()
+                           ? "results/sj16_calibration_" + host + ".txt"
+                           : requested_output.string();
     std::ofstream out(path);
     if (!out) {
         std::cerr << "\nERROR: could not open " << path << " for writing.\n";
