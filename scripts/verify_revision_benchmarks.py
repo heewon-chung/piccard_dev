@@ -866,7 +866,6 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             identity.get("run_profile") != expected_profile or \
             identity.get("profile_id") != profile or \
             identity.get("key_id") != key_id or \
-            identity.get("source_commit") != source_commit or \
             identity.get("repetitions_per_pattern") != repetitions or \
             identity.get("patterns") != ["zero", "random", "adversarial"] or \
             identity.get("status") != "READINESS_ONLY" or \
@@ -883,6 +882,14 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
         fail(f"cannot resolve canonical noise partition: {exc}")
     expected_consumers = {(str(point["k"]), str(point["m"]))
                           for point in partition["consumer_points"]}
+    identity_consumers = {
+        (str(point.get("k")), str(point.get("m")))
+        for point in identity.get("consumer_points", [])
+        if isinstance(point, dict)
+    }
+    if identity.get("consumer_set_sha256") != partition["consumer_set_sha256"] or \
+            identity_consumers != expected_consumers:
+        fail(f"noise shard consumer identity mismatch for {cell['cell_id']}")
 
     aggregate_path = shard / "aggregate.csv"
     details_dir = shard / "details"
@@ -915,6 +922,29 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
                           if path.is_file() and not path.is_symlink())
     if not detail_paths:
         fail(f"noise detail CSVs are missing for {cell['cell_id']}")
+    candidates = load_json(candidates_path, "noise candidate manifest")
+    required_candidate_fields = {
+        "schema", "version", "key_id", "source_commit", "openfhe_version",
+        "profile_id", "circuit", "shape_id", "security", "requested_ring_dim",
+        "natural_depth", "consumer_points", "consumer_set_sha256", "command",
+        "candidate_count", "candidates",
+    }
+    if set(candidates) != required_candidate_fields or \
+            candidates.get("schema") != "piccard-candidate-manifest" or \
+            candidates.get("version") != 1 or \
+            candidates.get("key_id") != key_id or \
+            candidates.get("profile_id") != profile or \
+            candidates.get("source_commit") != source_commit or \
+            not isinstance(candidates.get("candidates"), list) or \
+            candidates.get("candidate_count") != len(candidates["candidates"]):
+        fail(f"noise candidate manifest identity/schema mismatch for {cell['cell_id']}")
+    candidate_records = candidates["candidates"]
+    candidate_ids = [str(record.get("candidate_id", ""))
+                     for record in candidate_records if isinstance(record, dict)]
+    if len(candidate_ids) != len(candidate_records) or \
+            not candidate_ids or len(candidate_ids) != len(set(candidate_ids)) or \
+            {path.stem for path in detail_paths} != set(candidate_ids):
+        fail(f"noise candidate/detail topology mismatch for {cell['cell_id']}")
     detail_header = (
         "profile,key_id,candidate_id,circuit,shape_id,security,consumer_k,consumer_m,"
         "pattern,rep_index,rep_seed,requested_ring_dim,natural_ring_dim,"
@@ -943,6 +973,11 @@ def _check_noise_artifacts(root: Path, output: Path, receipt: dict[str, Any],
             if rep_index not in range(repetitions) or key in observed:
                 fail(f"noise detail repetition topology mismatch for {cell['cell_id']}")
             observed.add(key)
+        candidate = next(record for record in candidate_records
+                         if record.get("candidate_id") == detail_path.stem)
+        if candidate.get("detail_row_count") != len(rows) or \
+                candidate.get("detail_sha256") != sha256_file(detail_path):
+            fail(f"noise candidate/detail binding mismatch for {cell['cell_id']}")
     expected_detail_count = len(expected_consumers) * 3 * repetitions
     if len(observed) != expected_detail_count or any(
             int(row.get("detail_row_count", "-1")) != expected_detail_count

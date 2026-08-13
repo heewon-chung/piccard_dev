@@ -52,7 +52,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
 
     def write_artifact(self, root: Path, cell: dict, name: str,
                        payload: str, command_prefix: str = "--output=") -> list[str]:
-        from revision_benchmark_common import cell_output, file_inventory
+        from revision_benchmark_common import cell_output, file_inventory, sha256_file
         output = cell_output(root, cell["cell_id"])
         output.mkdir(parents=True, exist_ok=True)
         (output / "stdout.log").write_text("", encoding="utf-8")
@@ -155,7 +155,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
     def test_family_verifier_recomputes_and_rejects_forged_real_summary(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         import summarize_real_datasets as summarizer
-        from revision_benchmark_common import cell_output, file_inventory
+        from revision_benchmark_common import cell_output, file_inventory, sha256_file
         from verify_revision_benchmarks import _check_family_artifacts, RevisionContractError
         document = json.loads(MATRIX.read_text())
         cell = next(item for item in document["cells"]
@@ -418,7 +418,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
 
     def test_family_verifier_accepts_nested_noise_shard_contract(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
-        from revision_benchmark_common import cell_output, file_inventory
+        from revision_benchmark_common import cell_output, file_inventory, sha256_file
         from revision_flooding_adapter import select_noise_partition
         from verify_revision_benchmarks import _check_family_artifacts
         cell = self.matrix_cell("noise-profile-v1", family="flooding",
@@ -453,10 +453,11 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 "cell_id": cell["cell_id"], "run_profile": "readiness-toy-v1",
                 "profile_id": "primary40", "key_id": key_id,
                 "source_commit": "a" * 40,
+                "consumer_points": partition["consumer_points"],
+                "consumer_set_sha256": partition["consumer_set_sha256"],
                 "repetitions_per_pattern": 1,
                 "patterns": ["zero", "random", "adversarial"],
                 "status": "READINESS_ONLY", "table_eligible": False}), encoding="utf-8")
-            (shard / "candidates.json").write_text("{}", encoding="utf-8")
             aggregate_header = (
                 "profile,circuit,shape_id,security,consumer_count,consumer_set_sha256,"
                 "worst_consumer_k,worst_consumer_m,pattern_count,repetitions_per_pattern,"
@@ -501,6 +502,22 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     detail_rows.append(",".join(values))
             (details / "N8192-d1-s40.csv").write_text(
                 detail_header + "\n".join(detail_rows) + "\n", encoding="utf-8")
+            (shard / "candidates.json").write_text(json.dumps({
+                "schema": "piccard-candidate-manifest", "version": 1,
+                "key_id": key_id, "source_commit": "a" * 40,
+                "openfhe_version": partition["openfhe_version"],
+                "profile_id": "primary40", "circuit": partition["circuit"],
+                "shape_id": partition["shape_id"], "security": partition["security"],
+                "requested_ring_dim": partition["requested_ring_dim"],
+                "natural_depth": partition["natural_depth"],
+                "consumer_points": partition["consumer_points"],
+                "consumer_set_sha256": partition["consumer_set_sha256"],
+                "command": [], "candidate_count": 1,
+                "candidates": [{"candidate_id": "N8192-d1-s40",
+                                "status_code": "OK",
+                                "detail_sha256": sha256_file(details / "N8192-d1-s40.csv"),
+                                "detail_row_count": len(detail_rows)}]},
+                sort_keys=True), encoding="utf-8")
             (output / "stdout.log").write_text("", encoding="utf-8")
             (output / "stderr.log").write_text("", encoding="utf-8")
             receipt = {"artifact_inventory": file_inventory(
@@ -509,6 +526,15 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
                 "command": ["scripts/run_noise_profiles.sh",
                             f"--results-root={payload}"]}})
+            identity_path = shard / "revision_identity.json"
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            identity["consumer_points"] = [{"k": 128, "m": 999}]
+            identity_path.write_text(json.dumps(identity), encoding="utf-8")
+            from verify_revision_benchmarks import RevisionContractError
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], {cell["cell_id"]: {
+                    "command": ["scripts/run_noise_profiles.sh",
+                                f"--results-root={payload}"]}})
 
 
 if __name__ == "__main__":
