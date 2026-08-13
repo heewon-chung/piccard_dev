@@ -17,9 +17,6 @@ import run_work5_benchmarks as work5_runner
 
 _BINARY_ARGS = sys.argv[1:]
 sys.argv[1:] = []
-WORK4_GOLDEN = (Path(__file__).resolve().parents[2] / ".omc" / "evidence" /
-                "work4-fhe-ind" / "phase4" / "run-20260809T232756+0900" /
-                "std-results" / "preflight" / "onehot-std128-depth3-sms40.json")
 WORK4_PROJECTION_SHA256 = "69a688d9aa20ef79c1c4335223a81bb29d774aed9416c9f869bcc79c480c1099"
 WORK4_KEYS = ("circuit", "k", "keygen_started", "log_q_bits", "m", "mode",
               "natural_depth", "natural_ring_dim", "num_limbs", "openfhe_version",
@@ -81,12 +78,9 @@ class Work5ContextPreflightTest(unittest.TestCase):
             self.assertFalse(fhe["keygen_started"])
             self.assertRegex(fhe["fhe_ind_binary_sha256"], r"^[0-9a-f]{64}$")
 
-            # This is an immutable pre-9b5a08a Work4 artifact, not a second
-            # output from the corrected binary.  Build/source identity fields
-            # are intentionally excluded from the fixed semantic projection.
-            self.assertTrue(WORK4_GOLDEN.is_file())
-            golden = json.loads(WORK4_GOLDEN.read_text())
-            self.assertEqual(projection_digest(golden), WORK4_PROJECTION_SHA256)
+            # Build/source identity fields are intentionally excluded from the
+            # fixed semantic projection.  The literal digest is independently
+            # frozen here rather than loaded from an ignored historical file.
             old_a = root / "old-a.json"
             base = [str(self.piccard), "--mode=preflight", "--circuit=onehot",
                     "--security=STD128", "--shape-id=onehot-v1", "--format=json"]

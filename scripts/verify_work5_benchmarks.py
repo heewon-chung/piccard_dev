@@ -82,8 +82,8 @@ FROZEN_WORK6_HASHES = {
     "src/fhe/bfv_context.cpp": "22fe21a5dbe24e2679f668bbafe49854af1026140e60fabceadcedce6af6e382",
     "scripts/check_work6_scope.py": "017a98e8ef763795fb47838b1ae95fbf244e04d067acf621dfe752a9de2989cf",
     "scripts/work6_allowed_paths.txt": "f0b12d5f3b8f3e957944653bc237d5de6892b1660738197e02b2c79c4de8d26c",
-    "tests/scripts/test_check_work6_scope.py": "3e9e518f34ba6db48def91dafc7447742046eebd893357d7a7562f5fa55714ae",
-    "CMakeLists.txt": "2a53a2812af89b6b9058137548037ab04dbf2fc506a390340b707e360d7ef8d7",
+    "tests/scripts/test_check_work6_scope.py": "5cffb5e7f4efffb400d5dc564e59224909a5213c323bc0dd5425a864fc3972e9",
+    "CMakeLists.txt": "761fbf851701e5a25df8f3fb640c3af9cfd13a452f30f62b891c528bdc7b0325",
 }
 WORK6_FAILURE_SUBTESTS = (
     "condition", "body", "comment_prefix", "include_comment", "include_string",

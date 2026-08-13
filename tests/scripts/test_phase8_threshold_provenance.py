@@ -31,7 +31,8 @@ class ThresholdProvenanceContractTests(unittest.TestCase):
         cls.schema = SCHEMA.read_text(encoding="utf-8")
         cls.spec = function_body(
             cls.benchmark,
-            "static void BenchSpecDump(const BenchmarkConfig& config)",
+            "static void BenchSpecDump(const BenchmarkConfig& config,\n"
+            "                          std::optional<uint32_t> selected_k = std::nullopt)",
             "// Main",
         )
 

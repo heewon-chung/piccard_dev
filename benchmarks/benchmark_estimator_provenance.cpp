@@ -13,15 +13,15 @@ namespace {
 
 // Keep crossover's optional-arm serialization independent from the
 // benchmark-provenance translation unit.  The latter's formatter is private
-// to that TU, while this serializer needs the same finite, round-trippable
-// spelling for applicable sqrt measurements and speedups.
-std::string FormatDouble(double value) {
+// to that TU, while this serializer needs the same finite, legacy fixed-decimal
+// spelling for applicable measurements and speedups.
+std::string FormatLegacyDouble(double value, int decimals) {
     if (!std::isfinite(value)) {
         throw std::invalid_argument(
             "crossover floating value must be finite");
     }
     std::ostringstream output;
-    output << std::setprecision(17) << value;
+    output << std::fixed << std::setprecision(decimals) << value;
     return output.str();
 }
 
@@ -751,11 +751,11 @@ std::string SerializeCrossoverRow(
         << r.onehot_ring_dim << ","
         << (r.sqrt_applicable ? std::to_string(r.sqrt_ring_dim) : "N/A") << ","
         << std::fixed << std::setprecision(3)
-        << r.onehot_total_ms << ","
-        << (r.sqrt_applicable ? FormatDouble(r.sqrt_total_ms) : "N/A") << ","
+        << FormatLegacyDouble(r.onehot_total_ms, 3) << ","
+        << (r.sqrt_applicable ? FormatLegacyDouble(r.sqrt_total_ms, 3) : "N/A") << ","
         << (r.sqrt_applicable ? (r.sqrt_faster ? "1" : "0") : "N/A") << ","
-        << std::setprecision(4)
-        << (r.sqrt_applicable ? FormatDouble(r.speedup_ratio) : "N/A") << ","
+        << (r.sqrt_applicable ? FormatLegacyDouble(r.speedup_ratio, 4) : "N/A") << ","
+        << std::fixed << std::setprecision(4)
         << SanitizerModelName(*r.sanitizer.model) << ","
         << SanitizerAssuranceName(*r.sanitizer.model) << ",";
     WriteOptional(out, r.sanitizer.transcript_stat_bits);

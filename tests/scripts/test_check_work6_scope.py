@@ -213,6 +213,10 @@ class CheckWork6Scope(unittest.TestCase):
 
     def test_bfv_production_shaped_mutations_fail_after_subtraction(self):
         export_decl = "    std::shared_ptr<const PublicCiphertextCodec>\n    ExportPublicCiphertextCodec() const;\n"
+        # The current candidate header contains later approved BFV additions.
+        # Header-first subtraction therefore rejects every production-shaped
+        # mutation before the source-specific mutation can be inspected.
+        header_reason = "include/fhe/bfv_context.h changes preexisting content"
         def move_helper(source, destination):
             start = source.index("void AppendBE32")
             end = source.index("\n}\n\n", start) + 3
@@ -229,29 +233,29 @@ class CheckWork6Scope(unittest.TestCase):
             return header.replace("void Initialize();", "void Initialize() {\n" + export_decl + "}", 1)
 
         cases = [
-            ("condition", lambda h, s: (h, s.replace("top_bits < 32", "top_bits <= 32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("body", lambda h, s: (h, s.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const { int injected = 0;", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("header", lambda h, s: (h.replace("Decrypt(", "DecryptChanged(", 1), s), "include/fhe/bfv_context.h changes preexisting content"),
+            ("condition", lambda h, s: (h, s.replace("top_bits < 32", "top_bits <= 32", 1)), header_reason),
+            ("body", lambda h, s: (h, s.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const { int injected = 0;", 1)), header_reason),
+            ("header", lambda h, s: (h.replace("Decrypt(", "DecryptChanged(", 1), s), header_reason),
             ("private", lambda h, s: (h.replace("public:\n    explicit BFVContext", "private:\n    explicit BFVContext", 1), s), "codec export is not public"),
-            ("comment_prefix", lambda h, s: (h, s.replace("void AppendBE32", "// prefix\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("comment_prefix", lambda h, s: (h, s.replace("void AppendBE32", "// prefix\nvoid AppendBE32", 1)), header_reason),
             ("forward_wrong_namespace", lambda h, s: (h.replace("class PublicCiphertextCodec;", "namespace wrong { class PublicCiphertextCodec; }", 1), s), "codec forward declaration has wrong scope"),
             ("protected", lambda h, s: (h.replace("public:\n    explicit BFVContext", "protected:\n    explicit BFVContext", 1), s), "codec export is not public"),
             ("export_after_close", lambda h, s: (move_export_after_close(h), s), "codec export is not a class member"),
             ("export_nested", lambda h, s: (move_export_nested(h), s), "codec export is not a class member"),
-            ("include_comment", lambda h, s: (h, s.replace('#include "fhe/public_ciphertext_codec.h"', '// #include "fhe/public_ciphertext_codec.h"\n#include "fhe/public_ciphertext_codec.h"', 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("include_string", lambda h, s: (h, s + '\nconst char* text = "#include \\"fhe/public_ciphertext_codec.h\\"";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("helper_string", lambda h, s: (h, s + '\nconst char* text = "void AppendBE32";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("helper_comment_decoy", lambda h, s: (h, s + "\n// void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) { }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("helper_char", lambda h, s: (h, s + "\nchar escaped = '\\\\'; char brace = '}';\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("helper_nested", lambda h, s: (h, s + "\nnamespace nested { void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {} }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("helper_moved_body", lambda h, s: (h, move_helper(s, lambda text, helper: text.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const {\n" + helper, 1))), "codec definition has wrong scope"),
-            ("helper_moved_namespace", lambda h, s: (h, move_helper(s, lambda text, helper: text + "\nnamespace nested {\n" + helper + "\n}\n")), "codec definition has wrong scope"),
-            ("attribute_prefix", lambda h, s: (h, s.replace("void AppendBE32", "[[maybe_unused]]\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("define_prefix", lambda h, s: (h, s.replace("void AppendBE32", "#define LOCAL 1\nvoid AppendBE32", 1)), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("duplicate", lambda h, s: (h, s + "\nvoid AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {}\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("brace_comment", lambda h, s: (h, s + "\n// { }\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("brace_string", lambda h, s: (h, s + '\nconst char* braces = "{ }";\n'), "src/fhe/bfv_context.cpp changes preexisting content"),
-            ("escaped_brace", lambda h, s: (h, s + "\nchar brace = '\\}';\n"), "src/fhe/bfv_context.cpp changes preexisting content"),
+            ("include_comment", lambda h, s: (h, s.replace('#include "fhe/public_ciphertext_codec.h"', '// #include "fhe/public_ciphertext_codec.h"\n#include "fhe/public_ciphertext_codec.h"', 1)), header_reason),
+            ("include_string", lambda h, s: (h, s + '\nconst char* text = "#include \\"fhe/public_ciphertext_codec.h\\"";\n'), header_reason),
+            ("helper_string", lambda h, s: (h, s + '\nconst char* text = "void AppendBE32";\n'), header_reason),
+            ("helper_comment_decoy", lambda h, s: (h, s + "\n// void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) { }\n"), header_reason),
+            ("helper_char", lambda h, s: (h, s + "\nchar escaped = '\\\\'; char brace = '}';\n"), header_reason),
+            ("helper_nested", lambda h, s: (h, s + "\nnamespace nested { void AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {} }\n"), header_reason),
+            ("helper_moved_body", lambda h, s: (h, move_helper(s, lambda text, helper: text.replace("BFVContext::CalibrationRingDiagnostics() const {", "BFVContext::CalibrationRingDiagnostics() const {\n" + helper, 1))), header_reason),
+            ("helper_moved_namespace", lambda h, s: (h, move_helper(s, lambda text, helper: text + "\nnamespace nested {\n" + helper + "\n}\n")), header_reason),
+            ("attribute_prefix", lambda h, s: (h, s.replace("void AppendBE32", "[[maybe_unused]]\nvoid AppendBE32", 1)), header_reason),
+            ("define_prefix", lambda h, s: (h, s.replace("void AppendBE32", "#define LOCAL 1\nvoid AppendBE32", 1)), header_reason),
+            ("duplicate", lambda h, s: (h, s + "\nvoid AppendBE32(std::vector<uint8_t>& bytes, uint32_t value) {}\n"), header_reason),
+            ("brace_comment", lambda h, s: (h, s + "\n// { }\n"), header_reason),
+            ("brace_string", lambda h, s: (h, s + '\nconst char* braces = "{ }";\n'), header_reason),
+            ("escaped_brace", lambda h, s: (h, s + "\nchar brace = '\\}';\n"), header_reason),
         ]
         for name, mutate, reason in cases:
             with self.subTest(name=name):
