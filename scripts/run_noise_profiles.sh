@@ -141,6 +141,10 @@ def parse_cli(arguments):
         "seed": None,
         "max_queries": None,
         "margin": None,
+        "revision_cell": None,
+        "run_profile": None,
+        "repetitions": None,
+        "threads": None,
     }
     names = {
         "--results-root": "results_root",
@@ -151,8 +155,14 @@ def parse_cli(arguments):
         "--seed": "seed",
         "--max-queries": "max_queries",
         "--margin": "margin",
+        "--revision-cell": "revision_cell",
+        "--run-profile": "run_profile",
+        "--repetitions": "repetitions",
+        "--threads": "threads",
     }
-    integer_options = {"reps", "seed", "max_queries", "margin"}
+    integer_options = {
+        "reps", "seed", "max_queries", "margin", "repetitions", "threads"
+    }
     index = 0
     while index < len(arguments):
         argument = arguments[index]
@@ -209,11 +219,63 @@ def parse_cli(arguments):
             or result["seed"] is not None
             or result["max_queries"] is not None
             or result["margin"] is not None
+            or result["revision_cell"] is not None
+            or result["run_profile"] is not None
+            or result["repetitions"] is not None
+            or result["threads"] is not None
         ):
             fail(
                 "--finalize-dir requires only one --results-root and "
                 "cannot be mixed with execution options")
         return result
+    if result["run_profile"] is not None and result["run_profile"] not in {
+        "paper-v1", "readiness-toy-v1"
+    }:
+        fail("--run-profile must be paper-v1|readiness-toy-v1")
+    if result["revision_cell"] is not None:
+        if result["run_profile"] is None:
+            fail("--revision-cell requires --run-profile")
+        if result["profile"] not in {
+            "primary40", "sensitivity64", "feasibility128"
+        }:
+            fail("revision-cell path requires --profile=primary40|sensitivity64|feasibility128")
+        if result["smoke"] or result["resume"]:
+            fail("revision-cell path rejects --smoke and --resume")
+        if result["reps"] is not None:
+            fail("revision-cell path uses --repetitions, not --reps")
+        expected_repetitions = (
+            5 if result["run_profile"] == "paper-v1" else 1
+        )
+        if result["repetitions"] is not None and result["repetitions"] != expected_repetitions:
+            fail(
+                f"--repetitions={result['repetitions']} contradicts "
+                f"{result['run_profile']} value {expected_repetitions}")
+        if result["run_profile"] == "readiness-toy-v1" and result["profile"] != "primary40":
+            fail("readiness-toy-v1 supports primary40 only")
+        if result["results_root"] is None:
+            fail("revision-cell path requires --results-root")
+        return result
+    if result["run_profile"] is not None:
+        if result["profile"] is None:
+            result["profile"] = "primary40"
+        if result["run_profile"] == "readiness-toy-v1" and result["profile"] != "primary40":
+            fail("readiness-toy-v1 selects primary40 only")
+        if result["smoke"] or result["resume"]:
+            fail("successor --run-profile rejects --smoke and --resume")
+        if result["reps"] is not None:
+            fail("successor --run-profile uses --repetitions, not --reps")
+        expected_repetitions = (
+            5 if result["run_profile"] == "paper-v1" else 1
+        )
+        if result["repetitions"] is not None and result["repetitions"] != expected_repetitions:
+            fail(
+                f"--repetitions={result['repetitions']} contradicts "
+                f"{result['run_profile']} value {expected_repetitions}")
+        if result["results_root"] is None:
+            fail("successor --run-profile requires --results-root")
+        return result
+    if result["repetitions"] is not None or result["threads"] is not None:
+        fail("--repetitions/--threads require --run-profile")
     if result["profile"] not in {
         "primary40", "sensitivity64", "feasibility128"
     }:
@@ -2183,6 +2245,338 @@ def finalize_results(script_dir, repo_root, options):
     print("FINALIZED " + str(final_dir))
 
 
+def _load_flooding_adapter(script_dir):
+    """Load the pure successor planner without importing it at shell start."""
+    import importlib.util
+
+    module_path = script_dir / "revision_flooding_adapter.py"
+    spec = importlib.util.spec_from_file_location(
+        "piccard_revision_flooding_adapter", module_path)
+    if spec is None or spec.loader is None:
+        fail("flooding revision planner is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _read_successor_matrices(script_dir, adapter, cell_id=None):
+    revision_path = script_dir.parent / "benchmarks" / "revision_matrix.json"
+    revision_matrix = json.loads(revision_path.read_text(encoding="utf-8"))
+    noise_path = script_dir / "noise_profiles.json"
+    noise_matrix = json.loads(noise_path.read_text(encoding="utf-8"))
+    if cell_id is None:
+        return revision_matrix, noise_matrix, None
+    cell = adapter.select_cell(revision_matrix, cell_id)
+    return revision_matrix, noise_matrix, cell
+
+
+def _successor_output_root(repo_root, options):
+    root_argument = options.get("results_root")
+    if root_argument is None:
+        fail("successor flooding path requires --results-root")
+    root = Path(root_argument)
+    if not root.is_absolute():
+        fail("--results-root must be absolute")
+    resolved = root.resolve(strict=False)
+    try:
+        resolved.relative_to(repo_root)
+        fail("--results-root must be outside the Git worktree")
+    except ValueError:
+        pass
+    if resolved.exists() or resolved.is_symlink():
+        fail("successor results root must not already exist")
+    return resolved
+
+
+def _successor_source_commit(repo_root, bench, dry_run, grace_ms, environment):
+    """Bind toy artifacts to the binary source; dry-run never spawns."""
+    if dry_run:
+        return "runtime-source-commit"
+    if not bench.is_file() or not os.access(bench, os.X_OK):
+        fail("benchmark path must be an executable file")
+    result = supervise(
+        [str(bench), "--print_source_commit"],
+        120000,
+        grace_ms,
+        environment,
+    )
+    if (
+        result["timed_out"] or result["returncode"] != 0 or
+        result["stdout"] is None
+    ):
+        fail("benchmark source-commit probe failed")
+    source_commit = result["stdout"].strip()
+    if (
+        len(source_commit) != 40 or
+        any(ch not in "0123456789abcdef" for ch in source_commit)
+    ):
+        fail("benchmark embedded source commit is invalid")
+    return source_commit
+
+
+def _successor_identity_arguments(partition, matrix, policy,
+                                  manifest_path, source_commit):
+    return [
+        "--pre_threshold",
+        f"--profile_manifest={manifest_path}",
+        f"--profile={partition['profile_id']}",
+        f"--key_id={partition['key_id']}",
+        f"--circuit={partition['circuit']}",
+        f"--shape_id={partition['shape_id']}",
+        f"--security={partition['security']}",
+        f"--requested_ring_dim={partition['requested_ring_dim']}",
+        f"--natural_depth={partition['natural_depth']}",
+        f"--consumer_points={consumer_argument(partition)}",
+        f"--consumer_set_sha256={partition['consumer_set_sha256']}",
+        f"--openfhe_version={matrix['openfhe_version']}",
+        f"--source_commit={source_commit}",
+        f"--transcript_stat_bits={policy['transcript_stat_bits']}",
+        f"--max_queries={policy['max_queries']}",
+        f"--margin={policy['flood_margin_bits']}",
+        f"--seed={ROOT_SEED}",
+    ]
+
+
+def _successor_partition_command(
+    bench, partition, matrix, policy, manifest_path, source_commit,
+    repetitions, output_dir, seed, threads,
+):
+    """Return the one immutable bench_noise shard command for a partition."""
+    command = [
+        str(bench),
+        *_successor_identity_arguments(
+            partition, matrix, policy, manifest_path, source_commit),
+        "--scaling_mod_grid=40",
+        "--max_depth_delta=0",
+        f"--ring_candidates={partition['requested_ring_dim']}",
+        "--timeout_seconds=120",
+        f"--reps={repetitions}",
+        f"--aggregate_csv={output_dir / 'aggregate.csv'}",
+        f"--detail_dir={output_dir / 'details'}",
+        f"--candidate_manifest={output_dir / 'candidates.json'}",
+    ]
+    # The producer's seed is part of the command identity.  The runner's
+    # frozen policy uses one deterministic root seed; accepting a matching
+    # explicit confirmation is useful for the generic orchestrator while
+    # never allowing it to alter the matrix-derived value.
+    if seed != ROOT_SEED:
+        fail(f"--seed={seed} contradicts frozen successor seed {ROOT_SEED}")
+    if threads != 2:
+        fail(f"--threads={threads} contradicts frozen successor threads 2")
+    return command
+
+
+def _resolved_successor_manifest(noise_matrix, source_commit):
+    resolved = json.loads(json.dumps(noise_matrix))
+    if resolved.get("source_commit") != "runtime-source-commit":
+        fail("tracked noise matrix must use runtime-source-commit policy")
+    resolved["source_commit"] = source_commit
+    return resolved
+
+
+def _write_successor_metadata(root, cell_id, run_profile, profile_id,
+                              source_commit, noise_matrix, partition,
+                              command, repetitions, status):
+    """Write a small, immutable readiness envelope around one shard."""
+    profiles_root = root / "profiles" / profile_id
+    shard_root = profiles_root / partition["key_id"]
+    (profiles_root / "profile_manifest.json").write_text(
+        json.dumps({
+            "schema": "piccard-noise-revision-profile-v1",
+            "version": 1,
+            "profile_id": profile_id,
+            "key_count": 1,
+            "key_verdicts": {partition["key_id"]: "SELECTED"},
+            "profile_verdict": status,
+            "source_commit": source_commit,
+            "openfhe_version": noise_matrix["openfhe_version"],
+            "smoke_only": True,
+            "table_eligible": False,
+        }, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (shard_root / "revision_identity.json").write_text(
+        json.dumps({
+            "schema": "piccard-noise-revision-shard-v1",
+            "version": 1,
+            "cell_id": cell_id,
+            "run_profile": run_profile,
+            "profile_id": profile_id,
+            "key_id": partition["key_id"],
+            "circuit": partition["circuit"],
+            "shape_id": partition["shape_id"],
+            "security": partition["security"],
+            "consumer_points": partition["consumer_points"],
+            "consumer_set_sha256": partition["consumer_set_sha256"],
+            "repetitions_per_pattern": repetitions,
+            "patterns": ["zero", "random", "adversarial"],
+            "timing_contract": "NOT_APPLICABLE",
+            "status": status,
+            "table_eligible": False,
+            "command": command,
+        }, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return shard_root
+
+
+def _run_successor_flooding(script_dir, repo_root, options):
+    """Run or dry-plan the versioned flooding successor path.
+
+    A revision-cell invocation executes at most one direct bench_noise
+    command.  An explicit profile-only successor invocation is retained for
+    the readiness contract and may cover the complete primary40 topology;
+    the no-fan-out rule applies only when ``--revision-cell`` is present.
+    """
+    adapter = _load_flooding_adapter(script_dir)
+    revision_matrix, noise_matrix, cell = _read_successor_matrices(
+        script_dir, adapter, options.get("revision_cell"))
+    run_profile = options["run_profile"]
+    # Paper-v1 is always planning-only in this revision task.  DRY_RUN=1 is
+    # also an explicit no-spawn request for the toy profile, which is useful
+    # for the readiness orchestrator and its invocation spy.
+    dry_run = (
+        run_profile == adapter.PAPER_PROFILE or
+        os.environ.get("DRY_RUN") == "1"
+    )
+    output_root = _successor_output_root(repo_root, options)
+    profile_id = options.get("profile") or "primary40"
+    if cell is not None:
+        if cell["axis_value"] != profile_id:
+            fail("--profile does not match --revision-cell profile")
+        selected_partitions = [
+            adapter.select_noise_partition(noise_matrix, profile_id)
+        ]
+    else:
+        if profile_id not in {
+            "primary40", "sensitivity64", "feasibility128"
+        }:
+            fail("successor --run-profile selects a known noise profile")
+        if run_profile == adapter.TOY_PROFILE and profile_id != "primary40":
+            fail("readiness-toy-v1 selects primary40 only")
+        selected_partitions = [
+            partition for partition in noise_matrix["partitions"]
+            if partition.get("profile_id") == profile_id
+        ]
+        if not selected_partitions:
+            fail("primary40 successor profile has no partitions")
+
+    # Only a toy run may spawn.  Paper-v1 is a deterministic planning mode,
+    # even if the caller forgot to set DRY_RUN=1; this is the phase-9 safety
+    # boundary and prevents an accidental paper campaign.
+    bench_argument = options.get("bench_noise")
+    bench = Path(bench_argument or (repo_root / "build" / "bench_noise"))
+    if not dry_run and (not bench.is_file() or not os.access(bench, os.X_OK)):
+        fail("benchmark path must be an executable file")
+    if dry_run and bench_argument is not None and bench.exists() and (
+        not bench.is_file() or not os.access(bench, os.X_OK)
+    ):
+        fail("benchmark path must be an executable file")
+    bench = bench.resolve(strict=False)
+
+    environment = os.environ.copy()
+    environment["OMP_DYNAMIC"] = "FALSE"
+    environment["OMP_NUM_THREADS"] = str(options.get("threads") or 2)
+    grace_ms = 30000
+    if bench.is_file() and os.access(bench, os.X_OK):
+        _, grace_ms, _ = resolve_timing(bench)
+    source_commit = _successor_source_commit(
+        repo_root, bench, dry_run, grace_ms, environment)
+    resolved_noise = _resolved_successor_manifest(noise_matrix, source_commit)
+
+    policy_by_id = {
+        policy["profile_id"]: policy
+        for policy in noise_matrix["profiles"]
+    }
+    policy = policy_by_id[profile_id]
+    repetitions = 5 if run_profile == adapter.PAPER_PROFILE else 1
+    if options.get("repetitions") is not None and options["repetitions"] != repetitions:
+        fail(
+            f"--repetitions={options['repetitions']} contradicts "
+            f"{run_profile} value {repetitions}")
+    seed = options.get("seed") if options.get("seed") is not None else ROOT_SEED
+    threads = options.get("threads") if options.get("threads") is not None else 2
+
+    if dry_run:
+        for partition in selected_partitions:
+            placeholder = output_root / "profiles" / profile_id / partition["key_id"]
+            command = _successor_partition_command(
+                bench, partition, noise_matrix, policy,
+                "{profile_manifest}", source_commit, repetitions,
+                placeholder, seed, threads)
+            print(
+                "SHARD " + (options.get("revision_cell") or profile_id) +
+                " profile=" + profile_id +
+                " repetitions=" + str(repetitions) +
+                " status=" + (
+                    "READINESS_ONLY" if run_profile == adapter.TOY_PROFILE
+                    else "DRY_RUN_ONLY"
+                ) + " command=" +
+                json.dumps(command, separators=(",", ":"))
+            )
+        return
+
+    resolved_root = output_root
+    resolved_root.mkdir(parents=True, exist_ok=False)
+    manifest_path = resolved_root / "resolved_noise_profiles.json"
+    manifest_path.write_text(
+        json.dumps(resolved_noise, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    invocation_count = 0
+    for partition in selected_partitions:
+        shard_root = resolved_root / "profiles" / profile_id / partition["key_id"]
+        shard_root.mkdir(parents=True, exist_ok=False)
+        (shard_root / "details").mkdir()
+        command = _successor_partition_command(
+            bench, partition, noise_matrix, policy, manifest_path,
+            source_commit, repetitions, shard_root, seed, threads)
+        environment["PICCARD_PROFILE_MANIFEST"] = str(manifest_path)
+        try:
+            verify_benchmark_binary(bench, sha256_file(bench))
+            result = supervise(command, 120000, grace_ms, environment)
+            if result["timed_out"]:
+                fail("successor flooding shard timed out")
+            if result["returncode"] != 0:
+                fail("successor flooding shard exited " + str(result["returncode"]))
+        except SupervisionError as error:
+            fail("successor flooding shard failed: " + str(error))
+        invocation_count += 1
+        _write_successor_metadata(
+            resolved_root,
+            options.get("revision_cell") or
+            "paper-v1::flooding::profile=" + profile_id,
+            run_profile,
+            profile_id,
+            source_commit,
+            noise_matrix,
+            partition,
+            command,
+            repetitions,
+            "READINESS_ONLY",
+        )
+    run_manifest = {
+        "schema": "piccard-noise-revision-run-v1",
+        "version": 1,
+        "cell_id": options.get("revision_cell"),
+        "run_profile": run_profile,
+        "profile_id": profile_id,
+        "status": "READINESS_ONLY",
+        "table_eligible": False,
+        "timing_contract": "NOT_APPLICABLE",
+        "repetitions_per_pattern": repetitions,
+        "patterns": ["zero", "random", "adversarial"],
+        "invocation_count": invocation_count,
+        "source_commit": source_commit,
+        "openfhe_version": noise_matrix["openfhe_version"],
+    }
+    (resolved_root / "run_manifest.json").write_text(
+        json.dumps(run_manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    print("READY " + str(resolved_root) + " invocations=" + str(invocation_count))
+
+
 script_dir = Path(sys.argv[1]).resolve()
 repo_root = script_dir.parent
 options = parse_cli(sys.argv[2:])
@@ -2191,6 +2585,12 @@ if options["finalize_dir"] is not None:
         finalize_results(script_dir, repo_root, options)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         fail("finalization failed: " + str(error), 2)
+    raise SystemExit(0)
+if options.get("revision_cell") is not None or options.get("run_profile") is not None:
+    try:
+        _run_successor_flooding(script_dir, script_dir.parent, options)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        fail("successor flooding run failed: " + str(error), 2)
     raise SystemExit(0)
 matrix_path = script_dir / "noise_profiles.json"
 matrix_bytes = matrix_path.read_bytes()
