@@ -220,6 +220,7 @@ add_library(
     benchmarks/baseline_profile.cpp
     benchmarks/benchmark_profile.cpp
     benchmarks/benchmark_estimator_provenance.cpp
+    benchmarks/raw_timing_schema.cpp
 )
 if(OpenFHE_FOUND)
     target_sources(
@@ -840,6 +841,21 @@ if(BUILD_TESTS)
             )
             target_include_directories(test_benchmark_utils PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
             add_test(NAME BenchmarkUtils COMMAND test_benchmark_utils)
+
+            add_executable(
+                test_raw_timing_artifacts
+                tests/unit/test_raw_timing_artifacts.cpp
+            )
+            target_link_libraries(
+                test_raw_timing_artifacts
+                piccard_benchmark_serializers
+                test_main
+            )
+            target_include_directories(
+                test_raw_timing_artifacts
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            add_test(NAME RawTimingArtifacts COMMAND test_raw_timing_artifacts)
 
             add_executable(
                 test_estimator_provenance_serializers
