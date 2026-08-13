@@ -48,6 +48,8 @@ from revision_benchmark_common import (  # noqa: E402
     write_json,
     script_hashes,
     binary_metadata,
+    dry_run_source_metadata,
+    dry_run_tool_metadata,
     materialize_cell_argv,
     command_for_producer,
     producer_output_dir,
@@ -139,15 +141,20 @@ def _check_run_manifest(root: Path, mode: str) -> dict[str, Any]:
     return manifest
 
 
-def _check_source_and_tools(manifest: dict[str, Any], root: Path, cells: list[dict[str, Any]]) -> None:
+def _check_source_and_tools(manifest: dict[str, Any], root: Path,
+                            cells: list[dict[str, Any]], mode: str) -> None:
     source = manifest.get("source")
-    if not isinstance(source, dict) or source != source_metadata(ROOT):
+    expected_source = (dry_run_source_metadata(ROOT) if mode == "dry-run"
+                       else source_metadata(ROOT))
+    if not isinstance(source, dict) or source != expected_source:
         fail("source commit/dirty metadata changed")
     scripts = manifest.get("scripts")
     if scripts != script_hashes():
         fail("runner/verifier/script hash metadata changed")
     build_dir = Path(manifest.get("build_dir", ""))
-    if manifest.get("tools") != tool_metadata(build_dir):
+    expected_tools = (dry_run_tool_metadata(build_dir) if mode == "dry-run"
+                      else tool_metadata(build_dir))
+    if manifest.get("tools") != expected_tools:
         fail("compiler/CMake/OpenFHE tool metadata changed")
     expected_binaries = binary_metadata(build_dir, cells)
     if manifest.get("binaries") != expected_binaries:
@@ -769,15 +776,13 @@ def _float_value(row: dict[str, str], field: str, cid: str) -> float:
 
 
 def _require_value(row: dict[str, str], field: str, expected: Any, cid: str,
-                   *, optional: bool = True) -> None:
+                   *, optional: bool = False) -> None:
     """Bind a row field to an independently derived value.
 
-    The small direct unit fixtures used by the readiness tests intentionally
-    leave unrelated provenance columns empty.  Real producer rows are not
-    allowed to do that: when a field is present in a non-empty artifact it is
-    checked, and fields marked ``optional=False`` are mandatory.  This keeps
-    the verifier useful for focused schema KATs while making every available
-    identity/security field load-bearing for actual output.
+    Canonical identity and security fields are mandatory whenever the exact
+    producer schema exposes them.  Tests must construct an actual-shape row;
+    a blank value cannot be used to erase an adjacent cell's conflicting
+    identity.
     """
     actual = row.get(field)
     if actual is None:
@@ -820,6 +825,55 @@ def _profile_security(profile_id: str, command: list[str]) -> tuple[str, str]:
     return "primary", ""
 
 
+def _review_taxonomy(method: str, target_bits: int,
+                     matrix_eligible: bool) -> dict[str, str]:
+    """Independent taxonomy for the non-Piccard comparison producers."""
+    matched = target_bits == 128
+    if method.startswith("bcg12_"):
+        exact = method.startswith("bcg12_exact_")
+        finite_field = method.endswith("_ff")
+        return {
+            "cryptographic_profile": "FF-3072/256" if finite_field else "P-256",
+            "nominal_security_bits": "128",
+            "security_match": str(matched).lower(),
+            "comparison_eligible": str(matched and matrix_eligible).lower(),
+            "comparison_scope": ("matched-cardinality-component" if exact
+                                 else "matched-estimator-component"),
+            "primitive": "bcg12-ff" if finite_field else "bcg12-ec",
+            "protocol_model": ("bcg12-exact-cardinality" if exact
+                               else "bcg12-cardinality-on-minhash"),
+            "output_semantics": ("harness-reconstructed-exact-jaccard" if exact
+                                 else "minhash-collision-jaccard-estimate"),
+            "assurance_scope": "implemented-baseline-parameter-map",
+            "security_basis": ("finite-field-dh-3072-subgroup-256-parameter-map"
+                               if finite_field else "nist-p256-parameter-map"),
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "crs-and-keys-only",
+            "secure_division_included": "false",
+        }
+    if method in {"sj16", "sj16_precomputed"}:
+        precomputed = method == "sj16_precomputed"
+        return {
+            "cryptographic_profile": "Paillier-3072",
+            "nominal_security_bits": "128",
+            "security_match": str(matched).lower(),
+            "comparison_eligible": str(matched and matrix_eligible and
+                                       not precomputed).lower(),
+            "comparison_scope": "component-lower-bound",
+            "primitive": "paillier-3072",
+            "protocol_model": "sj16-intersection-shares",
+            "output_semantics": "harness-reconstructed-jaccard-with-plaintext-union",
+            "assurance_scope": "intersection-shares-lower-bound",
+            "security_basis": "rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+            "cost_scope": ("online-query-with-precomputed-randomizers" if precomputed
+                           else "full-query-excluding-one-time-setup"),
+            "precomputation_mode": ("randomizers-precomputed" if precomputed
+                                    else "randomizer-generation-included"),
+            "secure_division_included": "false",
+        }
+    return {}
+
+
 def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
                      plan: dict[str, Any], cid: str) -> None:
     """Bind every shape/security field exposed by a family CSV header.
@@ -849,6 +903,11 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         if axis in {"k", "m", "n", "u"} and axis not in expected_axes:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 expected_axes[axis] = value
+    # Exact-cardinality and SJ16 rows intentionally serialize k/m as N/A;
+    # those algorithms do not consume MinHash geometry.
+    if cell.get("family") in {"bcg12_exact", "sj16"}:
+        expected_axes.pop("k", None)
+        expected_axes.pop("m", None)
     # Matrix aliases are explicit in the schema; bind their exposed CSV names.
     row_fields = {"k": ("k",), "m": ("m",), "n": ("set_size", "n"),
                   "u": ("universe_size", "universe")}
@@ -867,8 +926,12 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
     profile = _command_value_once(command, "--profile=", cid)
     if profile is not None:
         run_class, target_bits = _profile_security(profile, command)
+        row_profile = profile
+        if (cell.get("expected_artifact_schema") ==
+                "review-comparison-csv-v1" and profile == "paper-v1"):
+            row_profile = "std128-t40-primary"
         for row in rows:
-            _require_value(row, "profile_id", profile, cid)
+            _require_value(row, "profile_id", row_profile, cid)
             _require_value(row, "run_class", run_class, cid)
             if target_bits:
                 _require_value(row, "target_security_bits", target_bits, cid)
@@ -885,9 +948,32 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         for row in rows:
             _require_value(row, "variant", variant, cid)
     if "comparison_eligible" in cell:
+        expected_eligible = bool(cell["comparison_eligible"])
+        if profile == "readiness-toy-v1":
+            expected_eligible = False
         for row in rows:
             _require_value(row, "comparison_eligible",
-                           bool(cell["comparison_eligible"]), cid)
+                           expected_eligible, cid)
+
+    if cell.get("expected_artifact_schema") == "review-comparison-csv-v1":
+        target_bits = int(_profile_security(profile, command)[1] or 128) \
+            if profile is not None else 128
+        universe = expected_axes.get("u")
+        suite = _command_value_once(command, "--suite=", cid)
+        for row in rows:
+            _require_value(row, "suite", suite or cell["family"], cid)
+            if universe is not None:
+                _require_value(row, "scenario", f"review-{universe}", cid)
+            method = _row_value(row, "method", cid)
+            taxonomy = _review_taxonomy(
+                method, target_bits, bool(cell.get("comparison_eligible", False)))
+            if not taxonomy:
+                fail(f"unknown review taxonomy method for {cid}: {method}")
+            for field, expected in taxonomy.items():
+                _require_value(row, field, expected, cid)
+            for field in ("workload_id", "workload_manifest_sha256",
+                          "execution_trace_sha256"):
+                _row_value(row, field, cid)
 
     # The two encoding-only families are intentionally excluded from the
     # end-to-end comparison table.  Their rows still need an explicit,
@@ -898,16 +984,45 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         (cell.get("family") == "real_dataset" and
          str(cell.get("axis_value")) == "std192_encoding")
     if encoding_only:
+        encoding_target = (_profile_security(profile, command)[1]
+                           if profile is not None else "192")
         taxonomy = {
-            "target_security_bits": "192",
+            "target_security_bits": encoding_target,
+            "cryptographic_profile": "local-encoding-only",
+            "nominal_security_bits": "",
+            "security_match": "false",
             "comparison_eligible": "false",
             "comparison_scope": "encoding-only-diagnostic",
             "cost_scope": "encoding-only",
             "secure_division_included": "false",
+            "signature_derivation_timed": "false",
         }
+        review_encoding = cell.get("family") == "piccard_std192_encoding"
+        suite = _command_value_once(command, "--suite=", cid)
         for row in rows:
             for field, expected in taxonomy.items():
-                _require_value(row, field, expected, cid)
+                if field in row:
+                    _require_value(row, field, expected, cid,
+                                   optional=(field == "nominal_security_bits"))
+            if review_encoding:
+                _require_value(row, "suite", suite or "encoding", cid)
+                if "u" in expected_axes:
+                    _require_value(row, "scenario",
+                                   f"review-{expected_axes['u']}", cid)
+                method = _row_value(row, "method", cid)
+                _require_value(row, "primitive",
+                               "onehot-encoding" if method == "piccard_encode"
+                               else "sqrt-encoding", cid)
+                _require_value(row, "protocol_model",
+                               "piccard-local-encoding" if method == "piccard_encode"
+                               else "piccard-sqrt-local-encoding", cid)
+                for field, expected in {
+                    "output_semantics": "encoded-feature-vector",
+                    "assurance_scope": "deterministic-encoder-correctness",
+                    "security_basis": "local-encoding-no-cryptographic-security-claim",
+                    "precomputation_mode": "not-applicable",
+                }.items():
+                    _require_value(row, field, expected, cid)
 
     # Estimator-j cells expose the target Jaccard as a row field.  It is a
     # matrix axis, not a producer-chosen annotation, so compare it
@@ -2005,7 +2120,7 @@ def verify_root(root: Path, *, mode: str, write_receipt: bool = False,
     expected_measured = sum(expected_row_count(cell, effective_mode) for cell in cells)
     if manifest.get("toy_measured_count") != expected_measured:
         fail("run measured-count summary does not match canonical cell rows")
-    _check_source_and_tools(manifest, root, cells)
+    _check_source_and_tools(manifest, root, cells, effective_mode)
     _check_phases(root, manifest, stage=lifecycle_stage)
     plans = _check_plans(root, effective_mode, cells, manifest)
     _check_events(root, effective_mode, plans)

@@ -356,6 +356,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         values[fields.index("encoding")] = "OneHot"
         values[fields.index("k")] = "128"
         values[fields.index("m")] = "128"
+        values[fields.index("comparison_eligible")] = "true"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.write_family_stdout(root, cell,
@@ -398,6 +399,8 @@ class RevisionVerifierContractTest(unittest.TestCase):
         values[fields.index("label")] = "revision_" + cell["cell_id"]
         values[fields.index("k")] = "128"
         values[fields.index("m")] = "128"
+        values[fields.index("set_size")] = "1000"
+        values[fields.index("comparison_eligible")] = "true"
         values[fields.index("encoding")] = "onehot"
         values[fields.index("trials")] = "1"
         with tempfile.TemporaryDirectory() as temporary:
@@ -429,9 +432,15 @@ class RevisionVerifierContractTest(unittest.TestCase):
             values[fields.index("variant")] = "dblp_acm_u65536"
             values[fields.index("k")] = "128"
             values[fields.index("m")] = "64"
+            values[fields.index("target_security_bits")] = "192"
+            values[fields.index("comparison_eligible")] = "false"
+            values[fields.index("comparison_scope")] = "encoding-only-diagnostic"
+            values[fields.index("cost_scope")] = "encoding-only"
+            values[fields.index("secure_division_included")] = "false"
             values[fields.index("method")] = method
             values[fields.index("timed_encoder_pairs")] = "1"
             values[fields.index("correctness_pair_calls")] = "1"
+            values[fields.index("signature_derivation_timed")] = "false"
             values[fields.index("correctness_status")] = "PASS"
             rows.append(",".join(values))
         with tempfile.TemporaryDirectory() as temporary:
@@ -809,6 +818,95 @@ class RevisionVerifierContractTest(unittest.TestCase):
             with self.assertRaises(RevisionContractError):
                 _check_family_artifacts(root, "toy", [cell],
                                         {cell["cell_id"]: {"command": command}})
+
+    def test_r5_blank_canonical_axes_are_rejected_across_schema_families(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _bind_cell_shape, RevisionContractError
+        cases = (
+            ("review-comparison-csv-v1", "bcg12_minhash"),
+            ("deletion-survival-csv-v1", "deletion_mc"),
+            ("dynamic-benchmark-csv-v1", "dynamic_timing"),
+            ("estimator-diagnostic-csv-v1", "estimator_accuracy"),
+            ("fhe-ind-csv-v1", "fhe_ind"),
+            ("piccard-benchmark-csv-v1", "piccard_std128"),
+            ("sqrt-comparison-csv-v1", "sqrt_comparison"),
+            ("threshold-csv-v1", "threshold_timing"),
+        )
+        for schema, family in cases:
+            with self.subTest(schema=schema, family=family):
+                cell = self.matrix_cell(schema, family=family)
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([{"k": ""}], cell,
+                                     {"command": []}, cell["cell_id"])
+
+    def test_r5_review_security_taxonomy_forgery_is_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _bind_cell_shape, RevisionContractError
+        cell = self.matrix_cell("review-comparison-csv-v1",
+                                family="bcg12_minhash",
+                                axis="control", axis_value="default")
+        row = {
+            "k": "128", "m": "64", "set_size": "1000",
+            "universe_size": "65536", "comparison_eligible": "true",
+            "suite": "bcg12_minhash", "scenario": "review-65536",
+            "method": "bcg12_mh_ec", "cryptographic_profile": "FORGED-FHE",
+            "nominal_security_bits": "128", "security_match": "true",
+            "comparison_scope": "matched-estimator-component",
+            "primitive": "bcg12-ec",
+            "protocol_model": "bcg12-cardinality-on-minhash",
+            "output_semantics": "minhash-collision-jaccard-estimate",
+            "assurance_scope": "implemented-baseline-parameter-map",
+            "security_basis": "nist-p256-parameter-map",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "crs-and-keys-only",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+        }
+        with self.assertRaises(RevisionContractError):
+            _bind_cell_shape([row], cell, {"command": []}, cell["cell_id"])
+
+    def test_r5_review_security_taxonomy_actual_shape_is_accepted(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _bind_cell_shape
+        cell = self.matrix_cell("review-comparison-csv-v1",
+                                family="bcg12_minhash",
+                                axis="control", axis_value="default")
+        row = {
+            "k": "128", "m": "64", "set_size": "1000",
+            "universe_size": "65536", "comparison_eligible": "true",
+            "suite": "bcg12_minhash", "scenario": "review-65536",
+            "method": "bcg12_mh_ec", "cryptographic_profile": "P-256",
+            "nominal_security_bits": "128", "security_match": "true",
+            "comparison_scope": "matched-estimator-component",
+            "primitive": "bcg12-ec",
+            "protocol_model": "bcg12-cardinality-on-minhash",
+            "output_semantics": "minhash-collision-jaccard-estimate",
+            "assurance_scope": "implemented-baseline-parameter-map",
+            "security_basis": "nist-p256-parameter-map",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "crs-and-keys-only",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+        }
+        _bind_cell_shape([row], cell, {"command": []}, cell["cell_id"])
+
+    def test_r5_encoding_signature_timing_forgery_is_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _bind_cell_shape, RevisionContractError
+        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
+                                axis_value="std192_encoding")
+        row = {
+            "k": "128", "m": "64", "dataset": "dblp_acm",
+            "variant": "dblp_acm_u65536", "target_security_bits": "192",
+            "comparison_eligible": "false",
+            "comparison_scope": "encoding-only-diagnostic",
+            "cost_scope": "encoding-only", "secure_division_included": "false",
+            "signature_derivation_timed": "true",
+        }
+        with self.assertRaises(RevisionContractError):
+            _bind_cell_shape([row], cell, {"command": []}, cell["cell_id"])
 
 
 if __name__ == "__main__":
