@@ -831,6 +831,146 @@ std::string Std192EncodingProfileForMode(RevisionRunMode mode) {
     RejectStd192Encoding("unknown run mode");
 }
 
+[[noreturn]] void RejectBcg12(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid BCG12 revision invocation cell: " + reason);
+}
+
+bool IsBcg12Family(const std::string& family) {
+    return family == "bcg12_minhash" || family == "bcg12_exact";
+}
+
+void ValidateBcg12Geometry(const RevisionCell& cell) {
+    if (!IsBcg12Family(cell.family)) {
+        RejectBcg12("family must be bcg12_minhash or bcg12_exact");
+    }
+    if (cell.cell_id != "paper-v1::" + cell.family + "::" + cell.axis +
+                            "=" + cell.axis_value) {
+        RejectBcg12("cell ID does not bind profile, family, axis, and value");
+    }
+    if (cell.axes.size() != 4u) {
+        RejectBcg12("BCG12 cells require exactly k,m,n,u");
+    }
+
+    const uint64_t k = Axis(cell, "k");
+    const uint64_t n = Axis(cell, "n");
+    if (Axis(cell, "m") != 64u) {
+        RejectBcg12("BCG12 m geometry must be 64");
+    }
+
+    if (cell.axis == "control") {
+        if (cell.axis_value != "default") {
+            RejectBcg12("control selector is not default");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+
+    if (cell.axis == "k") {
+        if (cell.family != "bcg12_minhash" ||
+            !IsOneOf(k, {16, 32, 64, 128, 256, 512}) ||
+            cell.axis_value != std::to_string(k)) {
+            RejectBcg12("invalid BCG12 MinHash k selector");
+        }
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+
+    if (cell.axis == "n") {
+        if (!IsOneOf(n, {100, 1000, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectBcg12("invalid BCG12 n selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        return;
+    }
+
+    RejectBcg12(cell.family == "bcg12_exact"
+                    ? "exact BCG12 supports only control and n selectors"
+                    : "unsupported BCG12 MinHash selector axis");
+}
+
+void ValidateBcg12Cell(const RevisionCell& cell) {
+    if (!IsBcg12Family(cell.family)) {
+        RejectBcg12("family must be bcg12_minhash or bcg12_exact");
+    }
+    if (cell.producer != "bench_review_comparison") {
+        RejectBcg12("producer must be bench_review_comparison");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectBcg12("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectBcg12("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "review-comparison-csv-v1") {
+        RejectBcg12("unexpected BCG12 artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectBcg12("cell is not RUN");
+    }
+
+    const bool minhash = cell.family == "bcg12_minhash";
+    if (cell.eligibility != (minhash ? "TABLE_ELIGIBLE" : "DIAGNOSTIC_ONLY") ||
+        cell.table_eligible != minhash ||
+        cell.comparison_eligible != minhash) {
+        RejectBcg12("eligibility contract mismatch");
+    }
+    ValidateBcg12Geometry(cell);
+
+    if (cell.paper_count != 30 || cell.toy_count != 1 ||
+        cell.paper_trials != 30 || cell.toy_trials != 1 ||
+        cell.paper_counts != std::map<std::string, uint64_t>{{"timing", 30}} ||
+        cell.toy_counts != std::map<std::string, uint64_t>{{"timing", 1}}) {
+        RejectBcg12("paper/toy count contract mismatch");
+    }
+    if (!cell.attributes.empty() || !cell.list_attributes.empty() ||
+        !cell.object_attributes.empty()) {
+        RejectBcg12("BCG12 cell attributes must be empty");
+    }
+
+    if (cell.expected_rows.size() != 2u) {
+        RejectBcg12("BCG12 cells require two expected rows");
+    }
+    const std::string expected_status = minhash ? "MEASURED" : "DIAGNOSTIC";
+    const std::string first_method =
+        minhash ? "bcg12_mh_ec" : "bcg12_exact_ec";
+    const std::string second_method =
+        minhash ? "bcg12_mh_ff" : "bcg12_exact_ff";
+    const auto validate_row = [&](const RevisionRow& row,
+                                  const std::string& method) {
+        if (row.row_id != method || row.status != expected_status ||
+            row.terminal_status != expected_status || row.method != method ||
+            !row.reason.empty() || !row.reason_code.empty() ||
+            row.measured_count != 30 || row.paper_measured_count != 30 ||
+            row.toy_measured_count != 1 || !row.timing_contract.empty() ||
+            !row.raw_timing_contract.empty() || !row.phase.empty() ||
+            !row.pattern.empty() || !row.variant.empty() ||
+            !row.fit_authority.empty() || !row.truth_bases.empty() ||
+            !row.field_values.empty() || !row.attributes.empty() ||
+            !row.list_attributes.empty()) {
+            RejectBcg12("BCG12 expected row contract mismatch");
+        }
+    };
+    validate_row(cell.expected_rows.at(0), first_method);
+    validate_row(cell.expected_rows.at(1), second_method);
+}
+
+std::string Bcg12ProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectBcg12("unknown run mode");
+}
+
 [[noreturn]] void RejectThreshold(const std::string& reason) {
     throw std::invalid_argument(
         "invalid threshold FHE revision invocation cell: " + reason);
@@ -1310,6 +1450,42 @@ RevisionInvocationPlan PlanStd192EncodingRevisionCell(
         "--correctness-trials=1",
         "--seed={seed}",
         "--output={output}/encoding.csv",
+    };
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
+                                             RevisionRunMode mode) {
+    ValidateBcg12Cell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const bool minhash = cell.family == "bcg12_minhash";
+    const std::string profile = Bcg12ProfileForMode(mode);
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        std::string("--suite=") + (minhash ? "bcg12-minhash" : "bcg12-exact"),
+        std::string("--methods=") +
+            (minhash ? "bcg12_mh_ec,bcg12_mh_ff"
+                     : "bcg12_exact_ec,bcg12_exact_ff"),
+        "--k=" + cell.axes.at("k"),
+        "--m=64",
+        "--n=" + cell.axes.at("n"),
+        "--universe=" + cell.axes.at("u"),
+        std::string("--trials=") + (toy ? "1" : "30"),
+        "--seed={seed}",
+        "--output={output}/comparison.csv",
     };
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {

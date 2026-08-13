@@ -95,6 +95,16 @@ RevisionInvocationPlan PlanStd192EncodingRevisionCell(
     const RevisionCell& cell, RevisionRunMode mode);
 
 /**
+ * @brief Plan one validated BCG12 MinHash or exact comparison cell.
+ *
+ * MinHash accepts the control, k, and n axes; exact comparison accepts only
+ * the control and n axes.  The returned argv is pure data and does not launch
+ * the review-comparison producer.
+ */
+RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
+                                             RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and

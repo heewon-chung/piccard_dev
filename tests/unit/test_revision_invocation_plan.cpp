@@ -23,6 +23,7 @@ using piccard::benchmark::PlanDeletionRevisionCell;
 using piccard::benchmark::PlanSqrtRevisionCell;
 using piccard::benchmark::PlanStd192EncodingRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
+using piccard::benchmark::PlanBcg12RevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -75,6 +76,16 @@ std::vector<const RevisionCell*> Std192EncodingCells(
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "piccard_std192_encoding") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> Bcg12Cells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "bcg12_minhash" || cell.family == "bcg12_exact") {
+            cells.push_back(&cell);
+        }
     }
     return cells;
 }
@@ -1595,5 +1606,229 @@ TEST(RevisionInvocationPlan, RejectsInvalidThresholdFamilyGeometryCountsAndRows)
     cell = timing;
     cell.expected_rows.front().attributes["k"] = "32";
     EXPECT_THROW(PlanThresholdRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Bcg12Cells(matrix);
+    ASSERT_EQ(cells.size(), 16u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const bool minhash = cell->family == "bcg12_minhash";
+        const std::string suite = minhash ? "bcg12-minhash" : "bcg12-exact";
+        const std::string methods =
+            minhash ? "bcg12_mh_ec,bcg12_mh_ff"
+                    : "bcg12_exact_ec,bcg12_exact_ff";
+        const std::string row_status = minhash ? "MEASURED" : "DIAGNOSTIC";
+
+        const RevisionInvocationPlan paper =
+            PlanBcg12RevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanBcg12RevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanBcg12RevisionCell(*cell, RevisionRunMode::DryRun);
+
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=paper-v1",
+            "--suite=" + suite,
+            "--methods=" + methods,
+            "--k=" + cell->axes.at("k"),
+            "--m=64",
+            "--n=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--trials=30",
+            "--seed={seed}",
+            "--output={output}/comparison.csv",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--suite=" + suite,
+            "--methods=" + methods,
+            "--k=" + cell->axes.at("k"),
+            "--m=64",
+            "--n=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--trials=1",
+            "--seed={seed}",
+            "--output={output}/comparison.csv",
+        };
+
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(toy.cell_id, cell->cell_id);
+        EXPECT_EQ(dry_run.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_review_comparison");
+        EXPECT_EQ(toy.producer, "bench_review_comparison");
+        EXPECT_EQ(dry_run.producer, "bench_review_comparison");
+        EXPECT_EQ(paper.concrete_profile, "paper-v1");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        EXPECT_EQ(toy.invocation_status, "RUN");
+        EXPECT_EQ(dry_run.invocation_status, "RUN");
+        ASSERT_EQ(paper.expected_rows.size(), 2u);
+        ASSERT_EQ(toy.expected_rows.size(), 2u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 2u);
+        for (size_t row_index = 0; row_index < 2u; ++row_index) {
+            EXPECT_EQ(paper.expected_rows.at(row_index).status, row_status);
+            EXPECT_EQ(toy.expected_rows.at(row_index).status, row_status);
+            EXPECT_EQ(dry_run.expected_rows.at(row_index).status, row_status);
+            EXPECT_EQ(paper.expected_rows.at(row_index).measured_count,
+                      paper.expected_rows.at(row_index).paper_measured_count);
+            EXPECT_EQ(toy.expected_rows.at(row_index).measured_count,
+                      toy.expected_rows.at(row_index).toy_measured_count);
+            EXPECT_EQ(dry_run.expected_rows.at(row_index).measured_count,
+                      dry_run.expected_rows.at(row_index).paper_measured_count);
+            EXPECT_EQ(paper.expected_rows.at(row_index).paper_measured_count,
+                      30u);
+            EXPECT_EQ(toy.expected_rows.at(row_index).toy_measured_count, 1u);
+        }
+        EXPECT_EQ(paper.expected_rows.at(0).method,
+                  minhash ? "bcg12_mh_ec" : "bcg12_exact_ec");
+        EXPECT_EQ(paper.expected_rows.at(1).method,
+                  minhash ? "bcg12_mh_ff" : "bcg12_exact_ff");
+        EXPECT_FALSE(HasArg(paper, "--security="));
+        EXPECT_FALSE(HasArg(paper, "--raw"));
+        EXPECT_FALSE(HasArg(paper, "--fhe"));
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidBcg12IdentityGeometryCountsEligibilityAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Bcg12Cells(matrix);
+    ASSERT_EQ(cells.size(), 16u);
+
+    const RevisionCell minhash_control = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "bcg12_minhash" &&
+                   cell->axis == "control";
+        });
+    const RevisionCell minhash_n100000 = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "bcg12_minhash" &&
+                   cell->axis_value == "100000";
+        });
+    const RevisionCell exact_control = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->family == "bcg12_exact" && cell->axis == "control";
+        });
+
+    RevisionCell cell = minhash_control;
+    cell.family = "piccard_std128";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.profile = "readiness-toy-v1";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.eligibility = "DIAGNOSTIC_ONLY";
+    cell.table_eligible = false;
+    cell.comparison_eligible = false;
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.axis = "u";
+    cell.axis_value = "65536";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.cell_id = "paper-v1::bcg12_minhash::k=128";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.axes["m"] = "128";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.axis = "k";
+    cell.axis_value = "999";
+    cell.cell_id = "paper-v1::bcg12_minhash::k=999";
+    cell.axes["k"] = "999";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_n100000;
+    cell.axes["u"] = "65536";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.axes["u"] = "262144";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = exact_control;
+    cell.axis = "k";
+    cell.axis_value = "128";
+    cell.cell_id = "paper-v1::bcg12_exact::k=128";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.paper_counts["timing"] = 29;
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.expected_rows.back().status = "DIAGNOSTIC";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = minhash_control;
+    cell.attributes["unexpected"] = "true";
+    EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
