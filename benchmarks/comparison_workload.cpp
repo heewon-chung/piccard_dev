@@ -178,6 +178,47 @@ const FrozenSuite* FindWork5Suite(const std::string& suite) {
     return nullptr;
 }
 
+struct RevisionSuitePolicy {
+    const char* suite;
+    const char* family;
+    const char* paper_profile;
+    const char* toy_profile;
+    uint32_t paper_timing;
+    uint32_t toy_timing;
+    bool correctness;
+};
+
+// The revision producer has a concrete namespace of its own.  In particular,
+// these IDs must not be folded into Work5Suites: changing a legacy suite's
+// accepted profile or wire topology would change its historical bytes.
+const std::array<RevisionSuitePolicy, 4>& RevisionSuites() {
+    static const std::array<RevisionSuitePolicy, 4> suites = {{
+        {kRevisionBcg12MinhashSuite, "bcg12_minhash",
+         "std128-t40-primary", "readiness-toy-v1", 30, 1, false},
+        {kRevisionBcg12ExactSuite, "bcg12_exact",
+         "std128-t40-primary", "readiness-toy-v1", 30, 1, false},
+        {kRevisionSj16Suite, "sj16", "std128-t40-primary",
+         "readiness-toy-v1", 30, 1, false},
+        {kRevisionStd192EncodingSuite, "piccard_std192_encoding",
+         "paper-std192-encoding-v1", "readiness-toy-v1", 30, 1, true},
+    }};
+    return suites;
+}
+
+const RevisionSuitePolicy* FindRevisionSuite(const std::string& suite) {
+    for (const auto& revision : RevisionSuites()) {
+        if (suite == revision.suite) return &revision;
+    }
+    return nullptr;
+}
+
+bool IsPerfectSquare(uint64_t value) {
+    if (value == 0) return false;
+    uint64_t root = 1;
+    while (root <= value / root && root * root < value) ++root;
+    return root * root == value;
+}
+
 bool IsEncodingMethodName(const std::string& method) {
     return method == "piccard_encode" || method == "piccard_sqrt_encode";
 }
@@ -189,7 +230,45 @@ bool AllEncodingMethods(const std::vector<std::string>& methods) {
 
 bool HasCorrectnessField(const std::string& suite) {
     return suite == "paper-std192-encoding-v1" ||
-           suite == "readiness-toy-v1";
+           suite == "readiness-toy-v1" ||
+           (FindRevisionSuite(suite) != nullptr &&
+            FindRevisionSuite(suite)->correctness);
+}
+
+void ValidateRevisionSuite(const WorkloadSpec& spec,
+                           const RevisionSuitePolicy& revision) {
+    const bool paper = spec.profile_id == revision.paper_profile;
+    const bool toy = spec.profile_id == revision.toy_profile;
+    if (!paper && !toy) {
+        throw std::invalid_argument(
+            "revision suite profile does not match its versioned policy");
+    }
+
+    const uint32_t expected_timing =
+        toy ? revision.toy_timing : revision.paper_timing;
+    const uint32_t expected_correctness = revision.correctness ? 1u : 0u;
+    std::vector<std::string> expected_methods;
+    if (revision.family == std::string("bcg12_minhash")) {
+        expected_methods = {"bcg12_mh_ec", "bcg12_mh_ff"};
+    } else if (revision.family == std::string("bcg12_exact")) {
+        expected_methods = {"bcg12_exact_ec", "bcg12_exact_ff"};
+    } else if (revision.family == std::string("sj16")) {
+        expected_methods = {"sj16"};
+    } else if (revision.family == std::string("piccard_std192_encoding")) {
+        expected_methods = {"piccard_encode"};
+        if (IsPerfectSquare(spec.m)) {
+            expected_methods.push_back("piccard_sqrt_encode");
+        }
+    } else {
+        throw std::invalid_argument("unknown revision suite family");
+    }
+
+    if (spec.methods != expected_methods || spec.timing_trials != expected_timing ||
+        spec.accuracy_trials != 0 ||
+        spec.correctness_trials != expected_correctness) {
+        throw std::invalid_argument(
+            "revision suite profile, ordered methods, or trial counts do not match the versioned policy");
+    }
 }
 
 void ValidateSuite(const WorkloadSpec& spec) {
@@ -198,7 +277,10 @@ void ValidateSuite(const WorkloadSpec& spec) {
     uint32_t timing = 0;
     uint32_t accuracy = 0;
     uint32_t correctness = 0;
-    if (spec.suite == "primary-review") {
+    if (const RevisionSuitePolicy* revision = FindRevisionSuite(spec.suite)) {
+        ValidateRevisionSuite(spec, *revision);
+        return;
+    } else if (spec.suite == "primary-review") {
         expected = &PrimaryMethods();
         profile = "std128-t40-primary";
         timing = 30;

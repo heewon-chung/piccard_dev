@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,31 @@ enum class TrialKind : uint8_t {
 
 /** @brief Family-qualified row kind required by reviewer comparison suites. */
 std::string ReviewMeasurementKind(const std::string& method, TrialKind kind);
+
+/**
+ * @brief Return the versioned concrete suite ID for one revision family.
+ *
+ * These IDs are reserved for the revision producer boundary.  Legacy Work 5
+ * suite IDs intentionally remain independent so their serialized workload
+ * bytes and accepted CLI behavior cannot drift.
+ */
+inline constexpr const char kRevisionBcg12MinhashSuite[] =
+    "revision-bcg12-minhash-v1";
+inline constexpr const char kRevisionBcg12ExactSuite[] =
+    "revision-bcg12-exact-v1";
+inline constexpr const char kRevisionSj16Suite[] = "revision-sj16-v1";
+inline constexpr const char kRevisionStd192EncodingSuite[] =
+    "revision-std192-encoding-v1";
+
+inline std::string RevisionSuiteForFamily(const std::string& family) {
+    if (family == "bcg12_minhash") return kRevisionBcg12MinhashSuite;
+    if (family == "bcg12_exact") return kRevisionBcg12ExactSuite;
+    if (family == "sj16") return kRevisionSj16Suite;
+    if (family == "piccard_std192_encoding") {
+        return kRevisionStd192EncodingSuite;
+    }
+    throw std::invalid_argument("unknown revision suite family: " + family);
+}
 
 /** @brief Method-conditioned applicability for one emitted CSV aggregate row. */
 struct ReviewMethodRowPolicy {

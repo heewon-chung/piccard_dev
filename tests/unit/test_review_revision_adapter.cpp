@@ -1,5 +1,6 @@
 #include "review_revision_adapter.h"
 
+#include "comparison_workload.h"
 #include "revision_invocation_plan.h"
 
 #include <gtest/gtest.h>
@@ -93,13 +94,39 @@ TEST(ReviewRevisionAdapter, MapsAbstractPaperToConcreteProducerProfiles) {
         EXPECT_EQ(paper.concrete_security,
                   cell->family == "piccard_std192_encoding"
                       ? "STD192" : "STD128");
-        EXPECT_EQ(paper.concrete_suite, cell->family);
+        EXPECT_EQ(paper.concrete_suite,
+                  RevisionSuiteForFamily(cell->family));
 
         const auto toy = PlanReviewRevisionExecution(
             matrix, PlanRevisionCell(*cell, RevisionRunMode::Toy).argv,
             RevisionRunMode::Toy);
         EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
         EXPECT_EQ(toy.concrete_security, "TOY");
+    }
+}
+
+TEST(ReviewRevisionAdapter,
+     ConcreteArgsUseVersionedFamilySuiteAndKeepLegacyPlannerBytes) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = OwnedCells(matrix);
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        const auto plan = PlanRevisionCell(*cell, RevisionRunMode::Toy);
+        const auto execution = PlanReviewRevisionExecution(
+            matrix, plan.argv, RevisionRunMode::Toy);
+        const auto args = MakeConcreteReviewArgs(execution);
+
+        const auto suite = std::find_if(
+            args.begin(), args.end(), [](const std::string& arg) {
+                return arg.rfind("--suite=", 0) == 0;
+            });
+        ASSERT_NE(suite, args.end());
+        EXPECT_EQ(*suite, "--suite=" + RevisionSuiteForFamily(cell->family));
+        EXPECT_NE(execution.concrete_suite, cell->family);
+
+        // The abstract invocation remains the canonical matrix contract;
+        // only the concrete producer namespace is versioned at this seam.
+        EXPECT_EQ(plan.argv, PlanRevisionCell(*cell, RevisionRunMode::Toy).argv);
     }
 }
 

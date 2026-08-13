@@ -572,6 +572,92 @@ TEST(ComparisonWorkload, ReadinessEncodingWorkloadHasPairCorrectnessRecord) {
 }
 
 TEST(ComparisonWorkload,
+     VersionedRevisionSuitesBindFamilyProfileMethodsAndTrialTopology) {
+    struct RevisionCase {
+        const char* suite;
+        const char* paper_profile;
+        const char* toy_profile;
+        std::vector<std::string> paper_methods;
+        std::vector<std::string> toy_methods;
+        bool correctness;
+    };
+    const RevisionCase cases[] = {
+        {"revision-bcg12-minhash-v1", "std128-t40-primary",
+         "readiness-toy-v1", {"bcg12_mh_ec", "bcg12_mh_ff"},
+         {"bcg12_mh_ec", "bcg12_mh_ff"}, false},
+        {"revision-bcg12-exact-v1", "std128-t40-primary",
+         "readiness-toy-v1", {"bcg12_exact_ec", "bcg12_exact_ff"},
+         {"bcg12_exact_ec", "bcg12_exact_ff"}, false},
+        {"revision-sj16-v1", "std128-t40-primary", "readiness-toy-v1",
+         {"sj16"}, {"sj16"}, false},
+        {"revision-std192-encoding-v1", "paper-std192-encoding-v1",
+         "readiness-toy-v1", {"piccard_encode", "piccard_sqrt_encode"},
+         {"piccard_encode"}, true},
+    };
+
+    for (const auto& revision : cases) {
+        SCOPED_TRACE(revision.suite);
+        for (const bool toy : {false, true}) {
+            WorkloadSpec spec;
+            spec.suite = revision.suite;
+            spec.profile_id = toy ? revision.toy_profile : revision.paper_profile;
+            spec.root_seed = 7;
+            spec.k = 16;
+            spec.m = toy && revision.correctness ? 32 : 16;
+            spec.set_size = 10;
+            spec.universe = 64;
+            spec.target_jaccard = ParseExactDecimal("0.5");
+            spec.methods = toy ? revision.toy_methods : revision.paper_methods;
+            spec.timing_trials = toy ? 1 : 30;
+            spec.accuracy_trials = 0;
+            spec.correctness_trials = revision.correctness ? 1 : 0;
+
+            const auto workload = ComparisonWorkload::Generate(spec);
+            EXPECT_EQ(workload.Spec().suite, revision.suite);
+            EXPECT_EQ(workload.Spec().profile_id, spec.profile_id);
+            EXPECT_EQ(workload.Spec().methods, spec.methods);
+            EXPECT_EQ(workload.Records().size(),
+                      1u + spec.timing_trials + spec.correctness_trials);
+            EXPECT_EQ(ComparisonWorkload::ParseAndVerify(workload.Bytes()).Bytes(),
+                      workload.Bytes());
+        }
+    }
+}
+
+TEST(ComparisonWorkload,
+     VersionedRevisionSuiteRejectsProfileMethodAndCountSubstitution) {
+    WorkloadSpec spec;
+    spec.suite = "revision-bcg12-minhash-v1";
+    spec.profile_id = "std128-t40-primary";
+    spec.root_seed = 7;
+    spec.k = 16;
+    spec.m = 16;
+    spec.set_size = 10;
+    spec.universe = 64;
+    spec.target_jaccard = ParseExactDecimal("0.5");
+    spec.methods = {"bcg12_mh_ec", "bcg12_mh_ff"};
+    spec.timing_trials = 30;
+
+    EXPECT_NO_THROW(ComparisonWorkload::Generate(spec));
+
+    auto mutated = spec;
+    mutated.profile_id = "paper-std192-encoding-v1";
+    EXPECT_THROW(ComparisonWorkload::Generate(mutated), std::invalid_argument);
+
+    mutated = spec;
+    mutated.methods = {"bcg12_mh_ec"};
+    EXPECT_THROW(ComparisonWorkload::Generate(mutated), std::invalid_argument);
+
+    mutated = spec;
+    mutated.timing_trials = 1;
+    EXPECT_THROW(ComparisonWorkload::Generate(mutated), std::invalid_argument);
+
+    mutated = spec;
+    mutated.correctness_trials = 1;
+    EXPECT_THROW(ComparisonWorkload::Generate(mutated), std::invalid_argument);
+}
+
+TEST(ComparisonWorkload,
      Work5TrialPayloadUsesProductionApiAndIndependentOracle) {
     const auto reference = ComparisonWorkload::Generate(Work5PayloadReferenceSpec());
     EXPECT_EQ(IndependentWork5TrialPayloadSha256(reference),

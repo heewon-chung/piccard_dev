@@ -1,5 +1,7 @@
 #include "review_revision_adapter.h"
 
+#include "comparison_workload.h"
+
 #include <algorithm>
 #include <charconv>
 #include <limits>
@@ -215,7 +217,10 @@ ReviewRevisionExecutionPlan PlanReviewRevisionExecution(
     execution.concrete_profile = toy
         ? "readiness-toy-v1"
         : (encoding ? "paper-std192-encoding-v1" : "std128-t40-primary");
-    execution.concrete_suite = cell.family;
+    // Revision families use a versioned concrete suite namespace.  The
+    // abstract matrix family remains in the planner argv, while this name is
+    // the identity persisted by the concrete workload manifest and CSV.
+    execution.concrete_suite = RevisionSuiteForFamily(cell.family);
     execution.concrete_security = toy ? "TOY" : (encoding ? "STD192" : "STD128");
     execution.terminal_artifact_schema =
         encoding ? kReviewEncodingTerminalSchemaV1 : "";

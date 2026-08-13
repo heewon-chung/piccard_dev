@@ -70,6 +70,7 @@ using piccard::benchmark::ResolveBaselineCapability;
 using piccard::benchmark::ReviewMeasurementKind;
 using piccard::benchmark::ReviewNumericCell;
 using piccard::benchmark::ResolveReviewMethodRowPolicy;
+using piccard::benchmark::RevisionSuiteForFamily;
 using piccard::benchmark::ExpectedTimingTrials;
 using piccard::benchmark::ExpectedWarmupPolicy;
 using piccard::benchmark::RawTimingArtifact;
@@ -1225,8 +1226,16 @@ std::string SerializeAggregate(const Options& options,
         decrypt_stats = Summarize(std::move(decrypt));
     }
     const auto& realized = workload.Records().front();
-    const bool eligible = profile.comparison_eligible &&
-                          cap.comparison_eligible;
+    bool eligible = profile.comparison_eligible && cap.comparison_eligible;
+    // The revision matrix intentionally keeps BCG12 exact-cardinality as a
+    // diagnostic context row, even though the legacy matched-security
+    // capability map marks the generic baseline table-eligible.  Scope this
+    // reconciliation to the versioned revision suite; legacy Work 5 and
+    // primary-review serialization retains its historical semantics.
+    if (!options.revision_cell.empty() &&
+        options.suite == RevisionSuiteForFamily("bcg12_exact")) {
+        eligible = false;
+    }
     const std::string arm = aggregate.kind == TrialKind::Timing
         ? "timing" : "accuracy";
     const auto row_policy = ResolveReviewMethodRowPolicy(
