@@ -105,6 +105,15 @@ RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
                                              RevisionRunMode mode);
 
 /**
+ * @brief Plan one validated SJ16 comparison or calibration cell.
+ *
+ * The planner preserves explicit NO_SPAWN extrapolation cells as metadata-only
+ * plans with empty argv.  It never launches an SJ16 or calibration producer.
+ */
+RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
+                                            RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and

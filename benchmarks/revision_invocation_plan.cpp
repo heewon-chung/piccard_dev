@@ -1242,6 +1242,12 @@ std::string ThresholdProfileForMode(RevisionRunMode mode) {
 
 }  // namespace
 
+namespace {
+bool IsSj16Extrapolated(const RevisionCell& cell);
+void ValidateSj16Cell(const RevisionCell& cell);
+std::string Sj16ProfileForMode(RevisionRunMode mode);
+}  // namespace
+
 RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
                                                RevisionRunMode mode) {
     ValidateCell(cell);
@@ -1494,6 +1500,331 @@ RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
     }
     return plan;
 }
+
+RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
+                                            RevisionRunMode mode) {
+    ValidateSj16Cell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const bool fit = cell.axis == "fit";
+    const bool per_element = fit && cell.axis_value == "per_element";
+    const bool precomputed = fit && cell.axis_value == "precomputed";
+    const bool extrapolated = !fit && IsSj16Extrapolated(cell);
+    const std::string profile = Sj16ProfileForMode(mode);
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+
+    if (extrapolated) return plan;
+
+    if (per_element) {
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--profile=" + profile,
+            "--cell=fit-per-element",
+            "--key-bits=3072",
+            "--sizes=4096,8192,16384",
+            "--held-out=32768",
+            "--threads=2",
+            "--precomputed=false",
+            std::string("--query-trials=") + (toy ? "1" : "30"),
+            std::string("--enc-iters=") + (toy ? "1" : "30"),
+            "--warmup=1",
+            "--seed={seed}",
+            "--output={output}/calibration.csv",
+        };
+        return plan;
+    }
+
+    if (precomputed) {
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--profile=" + profile,
+            "--cell=sj16-fit-precomputed",
+            "--method=sj16_precomputed",
+            "--k=128",
+            "--m=64",
+            "--n=1000",
+            "--universe=65536",
+            "--key-bits=3072",
+            "--threads=2",
+            std::string("--trials=") + (toy ? "1" : "30"),
+            "--warmup=1",
+            "--seed={seed}",
+            "--output={output}/comparison.csv",
+        };
+        return plan;
+    }
+
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        "--suite=sj16",
+        "--method=sj16",
+        "--k=128",
+        "--m=64",
+        "--n=" + cell.axes.at("n"),
+        "--universe=" + cell.axes.at("u"),
+        "--key-bits=3072",
+        "--threads=2",
+        std::string("--trials=") + (toy ? "1" : "30"),
+        "--seed={seed}",
+        "--output={output}/comparison.csv",
+    };
+    return plan;
+}
+
+namespace {
+
+[[noreturn]] void RejectSj16(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid SJ16 revision invocation cell: " + reason);
+}
+
+bool IsSj16Extrapolated(const RevisionCell& cell) {
+    if (cell.axis == "n" && cell.axis_value == "100000") return true;
+    const auto it = cell.axes.find("u");
+    return it != cell.axes.end() &&
+           (it->second == "262144" || it->second == "1048576");
+}
+
+void ValidateSj16Geometry(const RevisionCell& cell) {
+    if (cell.cell_id != "paper-v1::sj16::" + cell.axis + "=" +
+                            cell.axis_value) {
+        RejectSj16("cell ID does not bind profile, family, axis, and value");
+    }
+    if (cell.axes.size() != 4u) {
+        RejectSj16("SJ16 cells require exactly k,m,n,u");
+    }
+    RequireAxisValue(cell, "k", 128);
+    RequireAxisValue(cell, "m", 64);
+    const uint64_t n = Axis(cell, "n");
+    const uint64_t u = Axis(cell, "u");
+
+    if (cell.axis == "control") {
+        if (cell.axis_value != "default") {
+            RejectSj16("control selector is not default");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+    if (cell.axis == "n") {
+        if (!IsOneOf(n, {100, 1000, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectSj16("invalid SJ16 n selector");
+        }
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        return;
+    }
+    if (cell.axis == "u") {
+        if (!IsOneOf(u, {16384, 65536, 262144, 1048576}) ||
+            cell.axis_value != std::to_string(u)) {
+            RejectSj16("invalid SJ16 u selector");
+        }
+        RequireAxisValue(cell, "n", 1000);
+        return;
+    }
+    if (cell.axis == "fit") {
+        if (cell.axis_value != "per_element" &&
+            cell.axis_value != "precomputed") {
+            RejectSj16("invalid SJ16 fit selector");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+    RejectSj16("unsupported SJ16 selector axis");
+}
+
+void ValidateSj16RowBase(const RevisionRow& row, const std::string& row_id,
+                         const std::string& status, const std::string& method,
+                         const std::string& reason, uint64_t paper_count,
+                         uint64_t toy_count) {
+    if (row.row_id != row_id) RejectSj16("SJ16 row ID mismatch");
+    if (row.status != status || row.terminal_status != status) {
+        RejectSj16("SJ16 row status mismatch");
+    }
+    if (row.method != method) RejectSj16("SJ16 row method mismatch");
+    if (row.reason != reason || row.reason_code != reason) {
+        RejectSj16("SJ16 row reason mismatch");
+    }
+    if (row.measured_count != paper_count ||
+        row.paper_measured_count != paper_count ||
+        row.toy_measured_count != toy_count) {
+        RejectSj16("SJ16 row count mismatch");
+    }
+    if (!row.timing_contract.empty() || !row.raw_timing_contract.empty() ||
+        !row.phase.empty() || !row.pattern.empty() || !row.variant.empty() ||
+        !row.field_values.empty()) {
+        RejectSj16("SJ16 row optional field mismatch");
+    }
+}
+
+void ValidateSj16Cell(const RevisionCell& cell) {
+    if (cell.family != "sj16") RejectSj16("family must be sj16");
+    if (cell.profile != "paper-v1") {
+        RejectSj16("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectSj16("dataset must be synthetic");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectSj16("timeout class must be standard");
+    }
+    ValidateSj16Geometry(cell);
+
+    const bool fit = cell.axis == "fit";
+    const bool per_element = fit && cell.axis_value == "per_element";
+    const bool precomputed = fit && cell.axis_value == "precomputed";
+    const bool extrapolated = !fit && IsSj16Extrapolated(cell);
+
+    const std::string expected_producer =
+        per_element ? "bench_sj16_calibrate" : "bench_review_comparison";
+    if (cell.producer != expected_producer) {
+        RejectSj16("producer does not match SJ16 cell branch");
+    }
+    const std::string expected_schema =
+        per_element ? "sj16-calibration-v1" : "review-comparison-csv-v1";
+    if (cell.expected_artifact_schema != expected_schema) {
+        RejectSj16("unexpected SJ16 artifact schema");
+    }
+
+    const std::string expected_eligibility =
+        (fit || extrapolated) ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
+    const bool eligible = !fit && !extrapolated;
+    const std::string expected_status = extrapolated ? "NO_SPAWN" : "RUN";
+    if (cell.eligibility != expected_eligibility ||
+        cell.table_eligible != eligible ||
+        cell.comparison_eligible != eligible ||
+        cell.invocation_status != expected_status) {
+        RejectSj16("SJ16 eligibility/status contract mismatch");
+    }
+
+    const std::map<std::string, std::string> regular_attributes = {
+        {"key_bits", "3072"}, {"threads", "2"}};
+    const std::map<std::string, std::string> per_element_attributes = {
+        {"fit_authority", "true"}, {"held_out", "32768"},
+        {"key_bits", "3072"}, {"precomputed", "false"},
+        {"threads", "2"}};
+    const std::map<std::string, std::string> precomputed_attributes = {
+        {"fit_authority", "false"}, {"k", "128"}, {"key_bits", "3072"},
+        {"m", "64"}, {"n", "1000"}, {"precomputed", "true"},
+        {"threads", "2"}, {"u", "65536"}};
+    const std::map<std::string, std::vector<std::string>> per_element_sizes = {
+        {"sizes", {"4096", "8192", "16384"}}};
+
+    if (per_element) {
+        if (cell.attributes != per_element_attributes ||
+            cell.list_attributes != per_element_sizes ||
+            !cell.object_attributes.empty()) {
+            RejectSj16("SJ16 per-element cell metadata mismatch");
+        }
+    } else if (precomputed) {
+        if (cell.attributes != precomputed_attributes ||
+            !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+            RejectSj16("SJ16 precomputed cell metadata mismatch");
+        }
+    } else if (cell.attributes != regular_attributes ||
+               !cell.list_attributes.empty() ||
+               !cell.object_attributes.empty()) {
+        RejectSj16("SJ16 comparison cell metadata mismatch");
+    }
+
+    uint64_t paper_count = 30;
+    uint64_t toy_count = 1;
+    std::map<std::string, uint64_t> paper_counts;
+    std::map<std::string, uint64_t> toy_counts;
+    if (per_element) {
+        paper_counts = {{"enc_iters", 30}, {"query_trials", 30}};
+        toy_counts = {{"enc_iters", 1}, {"query_trials", 1}};
+    } else if (extrapolated && cell.axis != "n") {
+        paper_count = 0;
+        toy_count = 0;
+        paper_counts = {{"timing", 0}};
+        toy_counts = {{"timing", 0}};
+    } else if (extrapolated) {
+        paper_counts = {{"timing", 30}};
+        toy_counts = {{"timing", 1}};
+    } else {
+        paper_counts = {{"timing", 30}};
+        toy_counts = {{"timing", 1}};
+    }
+    if (cell.paper_count != paper_count || cell.toy_count != toy_count ||
+        cell.paper_trials != paper_count || cell.toy_trials != toy_count ||
+        cell.paper_counts != paper_counts || cell.toy_counts != toy_counts) {
+        RejectSj16("SJ16 paper/toy count contract mismatch");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectSj16("SJ16 cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    if (per_element) {
+        ValidateSj16RowBase(row, "sj16_fit_per_element", "DIAGNOSTIC",
+                             "bench_sj16_calibrate", "", 30, 1);
+        const std::map<std::string, std::string> row_attributes = {
+            {"held_out", "32768"}, {"key_bits", "3072"},
+            {"precomputed", "false"}, {"threads", "2"},
+            {"warmup_calls", "1"}};
+        if (row.attributes != row_attributes ||
+            row.list_attributes != per_element_sizes ||
+            !row.fit_authority.empty()) {
+            RejectSj16("SJ16 per-element row metadata mismatch");
+        }
+        return;
+    }
+    if (precomputed) {
+        ValidateSj16RowBase(row, "sj16_fit_precomputed", "DIAGNOSTIC",
+                             "bench_review_comparison", "", 30, 1);
+        const std::map<std::string, std::string> row_attributes = {
+            {"k", "128"}, {"key_bits", "3072"}, {"m", "64"},
+            {"n", "1000"}, {"precomputed", "true"}, {"threads", "2"},
+            {"u", "65536"}, {"warmup_calls", "1"}};
+        if (row.attributes != row_attributes ||
+            !row.list_attributes.empty() || !row.fit_authority.empty()) {
+            RejectSj16("SJ16 precomputed row metadata mismatch");
+        }
+        return;
+    }
+
+    if (extrapolated) {
+        ValidateSj16RowBase(row, "sj16", "EXTRAPOLATED", "sj16",
+                             "sj16-paillier3072-calibration-bound-v1",
+                             0, 0);
+        if (row.fit_authority != "per_element" ||
+            row.attributes != regular_attributes ||
+            !row.list_attributes.empty()) {
+            RejectSj16("SJ16 extrapolated row metadata mismatch");
+        }
+        return;
+    }
+
+    ValidateSj16RowBase(row, "sj16", "MEASURED", "sj16", "", 30, 1);
+    if (!row.fit_authority.empty() || row.attributes != regular_attributes ||
+        !row.list_attributes.empty()) {
+        RejectSj16("SJ16 measured row metadata mismatch");
+    }
+}
+
+std::string Sj16ProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectSj16("unknown run mode");
+}
+
+}  // namespace
 
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {

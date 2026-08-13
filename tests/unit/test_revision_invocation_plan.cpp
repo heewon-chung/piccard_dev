@@ -15,6 +15,7 @@ using piccard::benchmark::LoadAndValidateRevisionMatrix;
 using piccard::benchmark::RevisionCell;
 using piccard::benchmark::RevisionInvocationPlan;
 using piccard::benchmark::RevisionMatrix;
+using piccard::benchmark::RevisionRow;
 using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::PlanPiccardRevisionCell;
 using piccard::benchmark::PlanFheIndRevisionCell;
@@ -24,6 +25,7 @@ using piccard::benchmark::PlanSqrtRevisionCell;
 using piccard::benchmark::PlanStd192EncodingRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 using piccard::benchmark::PlanBcg12RevisionCell;
+using piccard::benchmark::PlanSj16RevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -86,6 +88,14 @@ std::vector<const RevisionCell*> Bcg12Cells(const RevisionMatrix& matrix) {
         if (cell.family == "bcg12_minhash" || cell.family == "bcg12_exact") {
             cells.push_back(&cell);
         }
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> Sj16Cells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "sj16") cells.push_back(&cell);
     }
     return cells;
 }
@@ -1830,5 +1840,341 @@ TEST(RevisionInvocationPlan,
     cell = minhash_control;
     cell.attributes["unexpected"] = "true";
     EXPECT_THROW(PlanBcg12RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Sj16Cells(matrix);
+    ASSERT_EQ(cells.size(), 11u);
+
+    std::set<std::vector<std::string>> run_paper_argv;
+    std::set<std::vector<std::string>> run_toy_argv;
+    std::set<std::vector<std::string>> run_dry_run_argv;
+    size_t no_spawn_count = 0;
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        const bool no_spawn = cell->invocation_status == "NO_SPAWN";
+        const bool fit = cell->axis == "fit";
+        const bool per_element = fit && cell->axis_value == "per_element";
+        const bool precomputed = fit && cell->axis_value == "precomputed";
+        ASSERT_TRUE(!fit || per_element || precomputed);
+
+        const RevisionInvocationPlan paper =
+            PlanSj16RevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanSj16RevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanSj16RevisionCell(*cell, RevisionRunMode::DryRun);
+
+        ASSERT_EQ(paper.cell_id, cell->cell_id);
+        ASSERT_EQ(toy.cell_id, cell->cell_id);
+        ASSERT_EQ(dry_run.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, cell->producer);
+        EXPECT_EQ(toy.producer, cell->producer);
+        EXPECT_EQ(dry_run.producer, cell->producer);
+        EXPECT_EQ(paper.concrete_profile, "paper-v1");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+        EXPECT_EQ(paper.invocation_status, cell->invocation_status);
+        EXPECT_EQ(toy.invocation_status, cell->invocation_status);
+        EXPECT_EQ(dry_run.invocation_status, cell->invocation_status);
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+
+        if (no_spawn) {
+            ++no_spawn_count;
+            EXPECT_TRUE(paper.argv.empty());
+            EXPECT_TRUE(toy.argv.empty());
+            EXPECT_TRUE(dry_run.argv.empty());
+            EXPECT_EQ(paper.expected_rows.front().status, "EXTRAPOLATED");
+            EXPECT_EQ(paper.expected_rows.front().reason,
+                      "sj16-paillier3072-calibration-bound-v1");
+            EXPECT_EQ(paper.expected_rows.front().fit_authority,
+                      "per_element");
+            EXPECT_EQ(paper.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(toy.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(dry_run.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(paper.expected_rows.front().paper_measured_count, 0u);
+            EXPECT_EQ(paper.expected_rows.front().toy_measured_count, 0u);
+            continue;
+        }
+
+        const std::string paper_trials = "30";
+        const std::string toy_trials = "1";
+        std::vector<std::string> expected_paper;
+        std::vector<std::string> expected_toy;
+        if (per_element) {
+            expected_paper = {
+                "--revision-cell=" + cell->cell_id,
+                "--profile=paper-v1",
+                "--cell=fit-per-element",
+                "--key-bits=3072",
+                "--sizes=4096,8192,16384",
+                "--held-out=32768",
+                "--threads=2",
+                "--precomputed=false",
+                "--query-trials=" + paper_trials,
+                "--enc-iters=" + paper_trials,
+                "--warmup=1",
+                "--seed={seed}",
+                "--output={output}/calibration.csv",
+            };
+            expected_toy = expected_paper;
+            expected_toy[1] = "--profile=readiness-toy-v1";
+            expected_toy[8] = "--query-trials=" + toy_trials;
+            expected_toy[9] = "--enc-iters=" + toy_trials;
+        } else if (precomputed) {
+            expected_paper = {
+                "--revision-cell=" + cell->cell_id,
+                "--profile=paper-v1",
+                "--cell=sj16-fit-precomputed",
+                "--method=sj16_precomputed",
+                "--k=128",
+                "--m=64",
+                "--n=1000",
+                "--universe=65536",
+                "--key-bits=3072",
+                "--threads=2",
+                "--trials=" + paper_trials,
+                "--warmup=1",
+                "--seed={seed}",
+                "--output={output}/comparison.csv",
+            };
+            expected_toy = expected_paper;
+            expected_toy[1] = "--profile=readiness-toy-v1";
+            expected_toy[10] = "--trials=" + toy_trials;
+        } else {
+            expected_paper = {
+                "--revision-cell=" + cell->cell_id,
+                "--profile=paper-v1",
+                "--suite=sj16",
+                "--method=sj16",
+                "--k=128",
+                "--m=64",
+                "--n=" + cell->axes.at("n"),
+                "--universe=" + cell->axes.at("u"),
+                "--key-bits=3072",
+                "--threads=2",
+                "--trials=" + paper_trials,
+                "--seed={seed}",
+                "--output={output}/comparison.csv",
+            };
+            expected_toy = expected_paper;
+            expected_toy[1] = "--profile=readiness-toy-v1";
+            expected_toy[10] = "--trials=" + toy_trials;
+        }
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        run_paper_argv.insert(paper.argv);
+        run_toy_argv.insert(toy.argv);
+        run_dry_run_argv.insert(dry_run.argv);
+
+        const RevisionRow& paper_row = paper.expected_rows.front();
+        const RevisionRow& toy_row = toy.expected_rows.front();
+        EXPECT_EQ(paper_row.measured_count, paper_row.paper_measured_count);
+        EXPECT_EQ(toy_row.measured_count, toy_row.toy_measured_count);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
+                  dry_run.expected_rows.front().paper_measured_count);
+        EXPECT_EQ(paper_row.paper_measured_count, 30u);
+        EXPECT_EQ(toy_row.toy_measured_count, 1u);
+        if (per_element) {
+            EXPECT_EQ(paper_row.status, "DIAGNOSTIC");
+            EXPECT_EQ(paper_row.method, "bench_sj16_calibrate");
+            EXPECT_EQ(cell->attributes.at("fit_authority"), "true");
+        } else if (precomputed) {
+            EXPECT_EQ(paper_row.status, "DIAGNOSTIC");
+            EXPECT_EQ(paper_row.method, "bench_review_comparison");
+            EXPECT_EQ(cell->attributes.at("fit_authority"), "false");
+        } else {
+            EXPECT_EQ(paper_row.status, "MEASURED");
+            EXPECT_EQ(paper_row.method, "sj16");
+            EXPECT_TRUE(paper_row.fit_authority.empty());
+        }
+    }
+    EXPECT_EQ(no_spawn_count, 3u);
+    EXPECT_EQ(run_paper_argv.size(), 8u);
+    EXPECT_EQ(run_toy_argv.size(), 8u);
+    EXPECT_EQ(run_dry_run_argv.size(), 8u);
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidSj16IdentityGeometryCountsAuthorityAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Sj16Cells(matrix);
+    ASSERT_EQ(cells.size(), 11u);
+
+    const RevisionCell measured = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis == "control";
+        });
+    const RevisionCell extrapolated = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis == "n" && cell->axis_value == "100000";
+        });
+    const RevisionCell per_element = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis == "fit" && cell->axis_value == "per_element";
+        });
+    const RevisionCell precomputed = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis == "fit" && cell->axis_value == "precomputed";
+        });
+
+    RevisionCell cell = measured;
+    cell.family = "bcg12_minhash";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.producer = "bench_sj16_calibrate";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.profile = "readiness-toy-v1";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.expected_artifact_schema = "sj16-calibration-v1";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.timeout_class = "extended";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.eligibility = "DIAGNOSTIC_ONLY";
+    cell.table_eligible = false;
+    cell.comparison_eligible = false;
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.cell_id = "paper-v1::sj16::k=128";
+    cell.axis = "k";
+    cell.axis_value = "128";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.axes["m"] = "128";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.axes["k"] = "2048";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.attributes["key_bits"] = "2048";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.attributes["threads"] = "1";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.paper_counts["timing"] = 29;
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.expected_rows.front().status = "DIAGNOSTIC";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.expected_rows.front().attributes["key_bits"] = "2048";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.invocation_status = "RUN";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.paper_count = 0;
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.expected_rows.front().reason = "wrong-reason";
+    cell.expected_rows.front().reason_code = "wrong-reason";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.expected_rows.front().fit_authority.clear();
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = per_element;
+    cell.attributes["fit_authority"] = "false";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = per_element;
+    cell.list_attributes["sizes"].push_back("32768");
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = per_element;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = per_element;
+    cell.expected_rows.front().attributes["warmup_calls"] = "2";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = precomputed;
+    cell.attributes["fit_authority"] = "true";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = precomputed;
+    cell.attributes["precomputed"] = "false";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = precomputed;
+    cell.expected_rows.front().attributes["k"] = "64";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = precomputed;
+    cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
