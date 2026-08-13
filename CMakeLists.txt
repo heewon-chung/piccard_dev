@@ -247,6 +247,22 @@ target_include_directories(
     PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
 )
 
+# OpenFHE-free typed invocation planner for the bounded revision readiness
+# adapters.  It consumes only the canonical matrix model and never executes a
+# producer.
+add_library(
+    piccard_revision_invocation_plan
+    benchmarks/revision_invocation_plan.cpp
+)
+target_include_directories(
+    piccard_revision_invocation_plan
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_revision_invocation_plan
+    PUBLIC piccard_revision_matrix
+)
+
 # Typed Work-4-prefix CSV schema for real-dataset benchmark rows (Work 5
 # Phase 5.2). Pure string/typed-token serialization, no OpenFHE dependency.
 add_library(
@@ -972,6 +988,29 @@ if(BUILD_TESTS)
                     PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN="${CMAKE_SOURCE_DIR}/tests/fixtures/revision_matrix/executable_toy_cell_ids.txt"
             )
             add_test(NAME RevisionMatrix COMMAND test_revision_matrix)
+
+            add_executable(
+                test_revision_invocation_plan
+                tests/unit/test_revision_invocation_plan.cpp
+            )
+            target_link_libraries(
+                test_revision_invocation_plan
+                piccard_revision_invocation_plan
+                test_main
+            )
+            target_include_directories(
+                test_revision_invocation_plan
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_revision_invocation_plan
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME RevisionInvocationPlan
+                COMMAND test_revision_invocation_plan
+            )
 
             add_executable(
                 test_revision_matrix_inventory
