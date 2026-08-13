@@ -25,6 +25,19 @@ struct RevisionRow {
     std::string row_id;
     std::string status;
     std::string reason;
+    std::string reason_code;
+    std::string terminal_status;
+    std::string method;
+    std::string timing_contract;
+    std::string raw_timing_contract;
+    std::string phase;
+    std::string pattern;
+    std::string variant;
+    std::string fit_authority;
+    std::string truth_bases;
+    std::string field_values;
+    std::map<std::string, std::string> attributes;
+    std::map<std::string, std::vector<std::string>> list_attributes;
     uint64_t measured_count = 0;
     uint64_t paper_measured_count = 0;
     uint64_t toy_measured_count = 0;
@@ -44,12 +57,17 @@ struct RevisionCell {
     uint64_t toy_count = 0;
     uint64_t paper_trials = 0;
     uint64_t toy_trials = 0;
+    std::map<std::string, uint64_t> paper_counts;
+    std::map<std::string, uint64_t> toy_counts;
     std::string eligibility;
     bool table_eligible = false;
     bool comparison_eligible = false;
     std::string timeout_class;
     std::string expected_artifact_schema;
     std::string invocation_status;
+    std::map<std::string, std::string> attributes;
+    std::map<std::string, std::vector<std::string>> list_attributes;
+    std::map<std::string, std::map<std::string, std::string>> object_attributes;
     std::vector<RevisionRow> expected_rows;
 };
 

@@ -18,7 +18,7 @@ const piccard::benchmark::RevisionCell& Find(
 
 }  // namespace
 
-TEST(RevisionSingleCellAdapters, MatrixFreezesOneSelectorPerInvocation) {
+TEST(RevisionMatrixInventory, MatrixFreezesOneSelectorPerInvocation) {
     const auto matrix = piccard::benchmark::LoadRevisionMatrix(
         PICCARD_REVISION_MATRIX_PATH);
     for (const auto& cell : matrix.cells) {
@@ -39,7 +39,7 @@ TEST(RevisionSingleCellAdapters, MatrixFreezesOneSelectorPerInvocation) {
               "accuracy");
 }
 
-TEST(RevisionSingleCellAdapters, SyntheticToyInventoryAddsExactly84Points) {
+TEST(RevisionMatrixInventory, SyntheticToyInventoryAddsExactly84Points) {
     const auto matrix = piccard::benchmark::LoadRevisionMatrix(
         PICCARD_REVISION_MATRIX_PATH);
     size_t points = 0;

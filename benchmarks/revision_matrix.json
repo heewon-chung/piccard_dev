@@ -7,7 +7,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -63,7 +63,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -119,7 +119,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -175,7 +175,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -231,7 +231,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -287,7 +287,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -343,7 +343,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -399,7 +399,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -455,7 +455,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -511,7 +511,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -567,7 +567,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -623,7 +623,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -679,7 +679,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -735,7 +735,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -791,7 +791,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -847,7 +847,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -903,7 +903,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -949,7 +949,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -996,7 +996,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -1057,7 +1057,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -1118,7 +1118,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -1179,7 +1179,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -1240,7 +1240,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -1301,7 +1301,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -1362,7 +1362,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -1423,7 +1423,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 128,
@@ -1484,7 +1484,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 16,
@@ -1545,7 +1545,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 256,
@@ -1606,7 +1606,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 32,
@@ -1667,7 +1667,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 64,
@@ -1728,7 +1728,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -1789,7 +1789,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -1850,7 +1850,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -1911,7 +1911,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -1972,7 +1972,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -2027,7 +2027,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -2088,7 +2088,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -2149,7 +2149,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -2210,7 +2210,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -2271,7 +2271,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -2332,7 +2332,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -2393,7 +2393,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -2454,7 +2454,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 128,
@@ -2515,7 +2515,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 16,
@@ -2576,7 +2576,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 256,
@@ -2637,7 +2637,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 32,
@@ -2698,7 +2698,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 64,
@@ -2759,7 +2759,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -2820,7 +2820,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -2881,7 +2881,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -2942,7 +2942,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -3004,7 +3004,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.0",
@@ -3053,7 +3053,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.1",
@@ -3102,7 +3102,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.2",
@@ -3151,7 +3151,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.3",
@@ -3200,7 +3200,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.4",
@@ -3249,7 +3249,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.5",
@@ -3298,7 +3298,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.6",
@@ -3347,7 +3347,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.7",
@@ -3396,7 +3396,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.8",
@@ -3445,7 +3445,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "0.9",
@@ -3494,7 +3494,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "j",
       "axis_value": "1.0",
@@ -3542,7 +3542,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -3594,7 +3594,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -3646,7 +3646,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -3698,7 +3698,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -3750,7 +3750,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -3802,7 +3802,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -3854,7 +3854,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -3900,7 +3900,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -3946,7 +3946,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -3992,7 +3992,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -4038,7 +4038,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -4268,7 +4268,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "profile",
       "axis_value": "feasibility128",
@@ -4340,7 +4340,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "profile",
       "axis_value": "primary40",
@@ -4412,7 +4412,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "profile",
       "axis_value": "sensitivity64",
@@ -4484,7 +4484,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -4544,7 +4544,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -4604,7 +4604,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -4664,7 +4664,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -4724,7 +4724,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -4784,7 +4784,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -4844,7 +4844,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -4904,7 +4904,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 128,
@@ -4964,7 +4964,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 16,
@@ -5024,7 +5024,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 256,
@@ -5084,7 +5084,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 32,
@@ -5144,7 +5144,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 64,
@@ -5204,7 +5204,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -5264,7 +5264,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -5324,7 +5324,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -5384,7 +5384,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -5684,7 +5684,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -5696,9 +5696,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5708,9 +5708,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -5721,17 +5721,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -5742,7 +5744,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -5754,9 +5756,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5766,9 +5768,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -5779,17 +5781,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -5800,7 +5804,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -5812,9 +5816,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5824,9 +5828,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -5837,17 +5841,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -5858,7 +5864,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -5870,9 +5876,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5882,9 +5888,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -5895,17 +5901,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -5916,7 +5924,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -5928,9 +5936,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5940,9 +5948,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -5953,17 +5961,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -5974,7 +5984,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 512,
@@ -5986,9 +5996,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -5998,9 +6008,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6011,17 +6021,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6032,7 +6044,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -6044,9 +6056,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6056,9 +6068,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6069,17 +6081,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6090,7 +6104,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 128,
@@ -6102,9 +6116,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6127,17 +6141,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6148,7 +6164,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 16,
@@ -6160,9 +6176,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6172,9 +6188,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6185,17 +6201,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6206,7 +6224,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 256,
@@ -6218,9 +6236,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6230,9 +6248,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6243,17 +6261,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6264,7 +6284,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 32,
@@ -6276,9 +6296,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6301,17 +6321,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6322,7 +6344,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "m",
       "axis_value": 64,
@@ -6334,9 +6356,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6346,9 +6368,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6359,17 +6381,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6380,7 +6404,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -6392,9 +6416,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6404,9 +6428,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6417,17 +6441,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6438,7 +6464,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -6450,9 +6476,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6462,9 +6488,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6475,17 +6501,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6496,7 +6524,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -6508,9 +6536,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6520,9 +6548,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6533,17 +6561,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6554,7 +6584,7 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
@@ -6566,9 +6596,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6578,9 +6608,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6591,17 +6621,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6624,9 +6656,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6636,9 +6668,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6649,17 +6681,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6682,9 +6716,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6694,9 +6728,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6707,17 +6741,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6740,9 +6776,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6752,9 +6788,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6765,17 +6801,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6798,9 +6836,9 @@
       "expected_rows": [
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_encode",
@@ -6810,9 +6848,9 @@
         },
         {
           "encoding_only": true,
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "piccard_sqrt_encode",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "piccard_sqrt_encode",
@@ -6823,17 +6861,19 @@
       ],
       "family": "piccard_std192_encoding",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "encoding": 1
+        "correctness": 1,
+        "encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "encoding": 1
       },
       "toy_trials": 1
@@ -6846,14 +6886,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "dblp_acm_u65536"
       },
       "axis": "dblp_acm_u65536_artifact",
       "axis_value": "accuracy",
       "cell_id": "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "dblp_acm",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -6897,21 +6937,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "dblp_acm_u65536"
       },
       "axis": "dblp_acm_u65536_artifact",
       "axis_value": "std128_timing",
       "cell_id": "paper-v1::real_dataset::dblp_acm_u65536_artifact=std128_timing",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "dblp_acm",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std128_timing",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std128_timing",
@@ -6923,11 +6963,11 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std128_timing": 1
+        "std128_timing": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": true,
@@ -6948,21 +6988,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "dblp_acm_u65536"
       },
       "axis": "dblp_acm_u65536_artifact",
       "axis_value": "std192_encoding",
       "cell_id": "paper-v1::real_dataset::dblp_acm_u65536_artifact=std192_encoding",
       "comparison_eligible": false,
-      "dataset": "synthetic",
+      "dataset": "dblp_acm",
       "eligibility": "DIAGNOSTIC_ONLY",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std192_encoding",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std192_encoding",
@@ -6974,11 +7014,12 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std192_encoding": 1
+        "correctness": 1,
+        "std192_encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": false,
@@ -6986,6 +7027,7 @@
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "std192_encoding": 1
       },
       "toy_trials": 1,
@@ -6999,14 +7041,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "dblp_acm_u65536"
       },
       "axis": "dblp_acm_u65536_artifact",
       "axis_value": "summary",
       "cell_id": "paper-v1::real_dataset::dblp_acm_u65536_artifact=summary",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "dblp_acm",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -7050,14 +7092,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 1048576,
         "variant": "enron_u1048576"
       },
       "axis": "enron_u1048576_artifact",
       "axis_value": "accuracy",
       "cell_id": "paper-v1::real_dataset::enron_u1048576_artifact=accuracy",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -7101,21 +7143,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 1048576,
         "variant": "enron_u1048576"
       },
       "axis": "enron_u1048576_artifact",
       "axis_value": "std128_timing",
       "cell_id": "paper-v1::real_dataset::enron_u1048576_artifact=std128_timing",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std128_timing",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std128_timing",
@@ -7127,11 +7169,11 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std128_timing": 1
+        "std128_timing": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": true,
@@ -7152,21 +7194,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 1048576,
         "variant": "enron_u1048576"
       },
       "axis": "enron_u1048576_artifact",
       "axis_value": "std192_encoding",
       "cell_id": "paper-v1::real_dataset::enron_u1048576_artifact=std192_encoding",
       "comparison_eligible": false,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "DIAGNOSTIC_ONLY",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std192_encoding",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std192_encoding",
@@ -7178,11 +7220,12 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std192_encoding": 1
+        "correctness": 1,
+        "std192_encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": false,
@@ -7190,6 +7233,7 @@
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "std192_encoding": 1
       },
       "toy_trials": 1,
@@ -7203,14 +7247,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 1048576,
         "variant": "enron_u1048576"
       },
       "axis": "enron_u1048576_artifact",
       "axis_value": "summary",
       "cell_id": "paper-v1::real_dataset::enron_u1048576_artifact=summary",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -7254,14 +7298,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "enron_u65536"
       },
       "axis": "enron_u65536_artifact",
       "axis_value": "accuracy",
       "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=accuracy",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -7305,21 +7349,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "enron_u65536"
       },
       "axis": "enron_u65536_artifact",
       "axis_value": "std128_timing",
       "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=std128_timing",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std128_timing",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std128_timing",
@@ -7331,11 +7375,11 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std128_timing": 1
+        "std128_timing": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": true,
@@ -7356,21 +7400,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "enron_u65536"
       },
       "axis": "enron_u65536_artifact",
       "axis_value": "std192_encoding",
       "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=std192_encoding",
       "comparison_eligible": false,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "DIAGNOSTIC_ONLY",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 30,
           "method": "std192_encoding",
-          "paper_measured_count": 1,
+          "paper_measured_count": 30,
           "reason": "",
           "reason_code": "",
           "row_id": "std192_encoding",
@@ -7382,11 +7426,12 @@
       ],
       "family": "real_dataset",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 30,
       "paper_counts": {
-        "std192_encoding": 1
+        "correctness": 1,
+        "std192_encoding": 30
       },
-      "paper_trials": 1,
+      "paper_trials": 30,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": false,
@@ -7394,6 +7439,7 @@
       "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
+        "correctness": 1,
         "std192_encoding": 1
       },
       "toy_trials": 1,
@@ -7407,14 +7453,14 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384,
+        "u": 65536,
         "variant": "enron_u65536"
       },
       "axis": "enron_u65536_artifact",
       "axis_value": "summary",
       "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=summary",
       "comparison_eligible": true,
-      "dataset": "synthetic",
+      "dataset": "enron",
       "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "real-dataset-csv-v1",
       "expected_rows": [
@@ -7456,7 +7502,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "control",
       "axis_value": "default",
@@ -7505,7 +7551,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "fit",
       "axis_value": "per_element",
@@ -7572,7 +7618,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "fit",
       "axis_value": "precomputed",
@@ -7633,7 +7679,7 @@
         "k": 128,
         "m": 64,
         "n": 100,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 100,
@@ -7682,7 +7728,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 1000,
@@ -7731,7 +7777,7 @@
         "k": 128,
         "m": 64,
         "n": 10000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "n",
       "axis_value": 10000,
@@ -7780,32 +7826,33 @@
         "k": 128,
         "m": 64,
         "n": 100000,
-        "u": 16384
+        "u": 262144
       },
       "axis": "n",
       "axis_value": 100000,
       "cell_id": "paper-v1::sj16::n=100000",
-      "comparison_eligible": true,
+      "comparison_eligible": false,
       "dataset": "synthetic",
-      "eligibility": "TABLE_ELIGIBLE",
+      "eligibility": "DIAGNOSTIC_ONLY",
       "expected_artifact_schema": "review-comparison-csv-v1",
       "expected_rows": [
         {
           "key_bits": 3072,
-          "measured_count": 30,
+          "measured_count": 0,
           "method": "sj16",
-          "paper_measured_count": 30,
-          "reason": "",
-          "reason_code": "",
+          "paper_measured_count": 0,
+          "reason": "sj16-paillier3072-calibration-bound-v1",
+          "reason_code": "sj16-paillier3072-calibration-bound-v1",
           "row_id": "sj16",
-          "status": "MEASURED",
-          "terminal_status": "MEASURED",
+          "status": "EXTRAPOLATED",
+          "terminal_status": "EXTRAPOLATED",
           "threads": 2,
-          "toy_measured_count": 1
+          "toy_measured_count": 0,
+          "fit_authority": "per_element"
         }
       ],
       "family": "sj16",
-      "invocation_status": "RUN",
+      "invocation_status": "NO_SPAWN",
       "key_bits": 3072,
       "paper_count": 30,
       "paper_counts": {
@@ -7814,7 +7861,7 @@
       "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
-      "table_eligible": true,
+      "table_eligible": false,
       "threads": 2,
       "timeout_class": "standard",
       "toy_count": 1,
@@ -8029,7 +8076,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "accuracy_m",
       "axis_value": 128,
@@ -8087,7 +8134,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "accuracy_m",
       "axis_value": 16,
@@ -8145,7 +8192,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "accuracy_m",
       "axis_value": 256,
@@ -8203,7 +8250,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "accuracy_m",
       "axis_value": 32,
@@ -8261,7 +8308,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "accuracy_m",
       "axis_value": 64,
@@ -8319,7 +8366,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "ciphertext_m",
       "axis_value": 128,
@@ -8377,7 +8424,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "ciphertext_m",
       "axis_value": 16,
@@ -8435,7 +8482,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "ciphertext_m",
       "axis_value": 256,
@@ -8493,7 +8540,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "ciphertext_m",
       "axis_value": 32,
@@ -8551,7 +8598,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "ciphertext_m",
       "axis_value": 64,
@@ -8609,7 +8656,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "crossover_m",
       "axis_value": 128,
@@ -8667,7 +8714,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "crossover_m",
       "axis_value": 16,
@@ -8725,7 +8772,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "crossover_m",
       "axis_value": 256,
@@ -8783,7 +8830,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "crossover_m",
       "axis_value": 32,
@@ -8841,7 +8888,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "crossover_m",
       "axis_value": 64,
@@ -8899,7 +8946,7 @@
         "k": 128,
         "m": 128,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "timing_m",
       "axis_value": 128,
@@ -8957,7 +9004,7 @@
         "k": 128,
         "m": 16,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "timing_m",
       "axis_value": 16,
@@ -9015,7 +9062,7 @@
         "k": 128,
         "m": 256,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "timing_m",
       "axis_value": 256,
@@ -9073,7 +9120,7 @@
         "k": 128,
         "m": 32,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "timing_m",
       "axis_value": 32,
@@ -9131,7 +9178,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "timing_m",
       "axis_value": 64,
@@ -9189,7 +9236,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -9236,7 +9283,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -9283,7 +9330,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -9330,7 +9377,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -9377,7 +9424,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -9424,20 +9471,21 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536,
+        "variant": "dblp_acm_u65536"
       },
       "axis": "control",
       "axis_value": "default",
       "cell_id": "paper-v1::threshold_dblp_fpfn::control=default",
       "comparison_eligible": false,
-      "dataset": "synthetic",
+      "dataset": "dblp_acm",
       "eligibility": "DIAGNOSTIC_ONLY",
       "expected_artifact_schema": "real-threshold-csv-v1",
       "expected_rows": [
         {
-          "measured_count": 1,
+          "measured_count": 50,
           "method": "dblp_held_out",
-          "paper_measured_count": 1,
+          "paper_measured_count": 50,
           "reason": "",
           "reason_code": "",
           "row_id": "dblp_held_out",
@@ -9452,11 +9500,11 @@
       ],
       "family": "threshold_dblp_fpfn",
       "invocation_status": "RUN",
-      "paper_count": 1,
+      "paper_count": 50,
       "paper_counts": {
-        "held_out": 1
+        "held_out": 50
       },
-      "paper_trials": 1,
+      "paper_trials": 50,
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": false,
@@ -9469,7 +9517,8 @@
       "truth_bases": [
         "label",
         "exact_jaccard"
-      ]
+      ],
+      "variant": "dblp_acm_u65536"
     },
     {
       "artifact_schema": "threshold-csv-v1",
@@ -9477,7 +9526,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -9524,7 +9573,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -9571,7 +9620,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -9618,7 +9667,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -9665,7 +9714,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,
@@ -9713,7 +9762,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-1",
@@ -9764,7 +9813,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-10",
@@ -9815,7 +9864,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-2",
@@ -9866,7 +9915,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-3",
@@ -9917,7 +9966,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-4",
@@ -9968,7 +10017,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-5",
@@ -10019,7 +10068,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-6",
@@ -10070,7 +10119,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-7",
@@ -10121,7 +10170,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-8",
@@ -10172,7 +10221,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j-9",
@@ -10223,7 +10272,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j0",
@@ -10274,7 +10323,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j1",
@@ -10325,7 +10374,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j10",
@@ -10376,7 +10425,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j2",
@@ -10427,7 +10476,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j3",
@@ -10478,7 +10527,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j4",
@@ -10529,7 +10578,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j5",
@@ -10580,7 +10629,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j6",
@@ -10631,7 +10680,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j7",
@@ -10682,7 +10731,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j8",
@@ -10733,7 +10782,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k128_j9",
@@ -10784,7 +10833,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-1",
@@ -10835,7 +10884,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-10",
@@ -10886,7 +10935,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-2",
@@ -10937,7 +10986,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-3",
@@ -10988,7 +11037,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-4",
@@ -11039,7 +11088,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-5",
@@ -11090,7 +11139,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-6",
@@ -11141,7 +11190,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-7",
@@ -11192,7 +11241,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-8",
@@ -11243,7 +11292,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j-9",
@@ -11294,7 +11343,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j0",
@@ -11345,7 +11394,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j1",
@@ -11396,7 +11445,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j10",
@@ -11447,7 +11496,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j2",
@@ -11498,7 +11547,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j3",
@@ -11549,7 +11598,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j4",
@@ -11600,7 +11649,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j5",
@@ -11651,7 +11700,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j6",
@@ -11702,7 +11751,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j7",
@@ -11753,7 +11802,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j8",
@@ -11804,7 +11853,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k256_j9",
@@ -11855,7 +11904,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-1",
@@ -11906,7 +11955,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-10",
@@ -11957,7 +12006,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-2",
@@ -12008,7 +12057,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-3",
@@ -12059,7 +12108,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-4",
@@ -12110,7 +12159,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-5",
@@ -12161,7 +12210,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-6",
@@ -12212,7 +12261,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-7",
@@ -12263,7 +12312,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-8",
@@ -12314,7 +12363,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j-9",
@@ -12365,7 +12414,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j0",
@@ -12416,7 +12465,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j1",
@@ -12467,7 +12516,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j10",
@@ -12518,7 +12567,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j2",
@@ -12569,7 +12618,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j3",
@@ -12620,7 +12669,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j4",
@@ -12671,7 +12720,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j5",
@@ -12722,7 +12771,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j6",
@@ -12773,7 +12822,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j7",
@@ -12824,7 +12873,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j8",
@@ -12875,7 +12924,7 @@
         "k": 512,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k512_j9",
@@ -12926,7 +12975,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-1",
@@ -12977,7 +13026,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-10",
@@ -13028,7 +13077,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-2",
@@ -13079,7 +13128,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-3",
@@ -13130,7 +13179,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-4",
@@ -13181,7 +13230,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-5",
@@ -13232,7 +13281,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-6",
@@ -13283,7 +13332,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-7",
@@ -13334,7 +13383,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-8",
@@ -13385,7 +13434,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j-9",
@@ -13436,7 +13485,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j0",
@@ -13487,7 +13536,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j1",
@@ -13538,7 +13587,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j10",
@@ -13589,7 +13638,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j2",
@@ -13640,7 +13689,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j3",
@@ -13691,7 +13740,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j4",
@@ -13742,7 +13791,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j5",
@@ -13793,7 +13842,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j6",
@@ -13844,7 +13893,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j7",
@@ -13895,7 +13944,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j8",
@@ -13946,7 +13995,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "point",
       "axis_value": "k64_j9",
@@ -13996,7 +14045,7 @@
         "k": 128,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 128,
@@ -14043,7 +14092,7 @@
         "k": 16,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 16,
@@ -14090,7 +14139,7 @@
         "k": 256,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 256,
@@ -14137,7 +14186,7 @@
         "k": 32,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 32,
@@ -14184,7 +14233,7 @@
         "k": 64,
         "m": 64,
         "n": 1000,
-        "u": 16384
+        "u": 65536
       },
       "axis": "k",
       "axis_value": 64,

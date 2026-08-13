@@ -974,26 +974,26 @@ if(BUILD_TESTS)
             add_test(NAME RevisionMatrix COMMAND test_revision_matrix)
 
             add_executable(
-                test_revision_single_cell_adapters
-                tests/unit/test_revision_single_cell_adapters.cpp
+                test_revision_matrix_inventory
+                tests/unit/test_revision_matrix_inventory.cpp
             )
             target_link_libraries(
-                test_revision_single_cell_adapters
+                test_revision_matrix_inventory
                 piccard_revision_matrix
                 test_main
             )
             target_include_directories(
-                test_revision_single_cell_adapters
+                test_revision_matrix_inventory
                 PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
             )
             target_compile_definitions(
-                test_revision_single_cell_adapters
+                test_revision_matrix_inventory
                 PRIVATE
                     PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
             )
             add_test(
-                NAME RevisionSingleCellAdapters
-                COMMAND test_revision_single_cell_adapters
+                NAME RevisionMatrixInventory
+                COMMAND test_revision_matrix_inventory
             )
 
             add_executable(

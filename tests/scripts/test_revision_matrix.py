@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import pathlib
+import tempfile
 import unittest
 
 from scripts import validate_revision_matrix
@@ -56,6 +57,66 @@ class RevisionMatrixTest(unittest.TestCase):
             sj["expected_rows"][0]["reason"],
             "sj16-paillier3072-calibration-bound-v1")
 
+    def test_family_axes_datasets_and_paper_count_contract(self):
+        cells = {cell["cell_id"]: cell for cell in self.document["cells"]}
+
+        # The comparison control is the frozen U=65536 geometry.  The n sweep
+        # grows only its terminal n=100000 cell to the smallest containing U.
+        for family in ("piccard_std128", "piccard_std192_encoding",
+                       "fhe_ind", "bcg12_minhash", "bcg12_exact", "sj16",
+                       "dynamic_timing", "dynamic_accuracy"):
+            control = cells[f"paper-v1::{family}::control=default"]
+            self.assertEqual(control["axes"]["u"], 65536)
+            n_1000 = cells[f"paper-v1::{family}::n=1000"]
+            self.assertEqual(n_1000["axes"]["u"], 65536)
+            n_100000 = cells[f"paper-v1::{family}::n=100000"]
+            self.assertEqual(n_100000["axes"]["u"], 262144)
+
+        # The explicit U axis remains the complete frozen universe sweep.
+        for family in ("piccard_std128", "piccard_std192_encoding", "fhe_ind",
+                       "sj16"):
+            values = [cells[f"paper-v1::{family}::u={u}"]["axes"]["u"]
+                      for u in (16384, 65536, 262144, 1048576)]
+            self.assertEqual(values, [16384, 65536, 262144, 1048576])
+
+        real_expectations = {
+            "dblp_acm_u65536": ("dblp_acm", 65536),
+            "enron_u65536": ("enron", 65536),
+            "enron_u1048576": ("enron", 1048576),
+        }
+        for variant, (dataset, universe) in real_expectations.items():
+            for artifact in ("accuracy", "summary", "std128_timing",
+                             "std192_encoding"):
+                cell = cells[f"paper-v1::real_dataset::{variant}_artifact={artifact}"]
+                self.assertEqual(cell["dataset"], dataset)
+                self.assertEqual(cell["variant"], variant)
+                self.assertEqual(cell["axes"]["variant"], variant)
+                self.assertEqual(cell["axes"]["u"], universe)
+
+        dblp = cells["paper-v1::threshold_dblp_fpfn::control=default"]
+        self.assertEqual(dblp["dataset"], "dblp_acm")
+        self.assertEqual(dblp["variant"], "dblp_acm_u65536")
+        self.assertEqual(dblp["axes"]["variant"], "dblp_acm_u65536")
+        self.assertEqual(dblp["axes"]["u"], 65536)
+        self.assertEqual(dblp["paper_count"], 50)
+        self.assertEqual(dblp["paper_trials"], 50)
+        self.assertEqual(dblp["paper_counts"]["held_out"], 50)
+        self.assertEqual(dblp["expected_rows"][0]["paper_measured_count"], 50)
+
+        for cell in self.document["cells"]:
+            if cell["family"] == "piccard_std192_encoding":
+                self.assertEqual(cell["paper_count"], 30)
+                self.assertEqual(cell["paper_trials"], 30)
+                self.assertEqual(cell["paper_counts"]["encoding"], 30)
+                self.assertEqual(cell["expected_rows"][0]["paper_measured_count"], 30)
+                self.assertEqual(cell["expected_rows"][0]["measured_count"], 30)
+            if (cell["family"] == "real_dataset" and
+                    cell["axes"]["artifact"] in {"std128_timing", "std192_encoding"}):
+                self.assertEqual(cell["paper_count"], 30)
+                self.assertEqual(cell["paper_trials"], 30)
+                self.assertEqual(cell["expected_rows"][0]["paper_measured_count"], 30)
+                self.assertEqual(cell["expected_rows"][0]["measured_count"], 30)
+
     def test_duplicate_omitted_and_silent_rows_fail_closed(self):
         omitted = copy.deepcopy(self.document)
         omitted["cells"].pop()
@@ -72,6 +133,17 @@ class RevisionMatrixTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_revision_matrix.validate_document(silent, FIXTURES)
 
+        omitted_row = copy.deepcopy(self.document)
+        omitted_row["cells"][0]["expected_rows"].pop()
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(omitted_row, FIXTURES)
+
+        duplicate_row = copy.deepcopy(self.document)
+        duplicate_row["cells"][0]["expected_rows"].append(
+            copy.deepcopy(duplicate_row["cells"][0]["expected_rows"][0]))
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(duplicate_row, FIXTURES)
+
     def test_enron_has_no_threshold_cell_and_every_row_has_terminal_fields(self):
         for cell in self.document["cells"]:
             if cell["family"] == "real_dataset" and cell["axes"].get("variant", "").startswith("enron"):
@@ -81,6 +153,107 @@ class RevisionMatrixTest(unittest.TestCase):
                 self.assertIn("status", row)
                 self.assertIn("reason", row)
                 self.assertIn("measured_count", row)
+
+    def test_runner_contract_mutations_fail_closed(self):
+        def mutate(cell_id, mutation):
+            document = copy.deepcopy(self.document)
+            cell = next(c for c in document["cells"] if c["cell_id"] == cell_id)
+            mutation(cell)
+            with self.assertRaises(ValueError):
+                validate_revision_matrix.validate_document(document, FIXTURES)
+
+        mutate("paper-v1::piccard_std128::control=default",
+               lambda c: c.__setitem__("producer", "bench_review_comparison"))
+        mutate("paper-v1::piccard_std128::control=default",
+               lambda c: c["axes"].__setitem__("u", 16384))
+        mutate("paper-v1::piccard_std128::n=100000",
+               lambda c: c["axes"].__setitem__("u", 65536))
+        mutate("paper-v1::real_dataset::enron_u1048576_artifact=accuracy",
+               lambda c: c.__setitem__("dataset", "synthetic"))
+        mutate("paper-v1::real_dataset::enron_u1048576_artifact=accuracy",
+               lambda c: c["axes"].__setitem__("u", 65536))
+
+        count_cell = "paper-v1::piccard_std128::control=default"
+        for field, value in (("paper_count", 31), ("toy_count", 2),
+                             ("paper_trials", 31), ("toy_trials", 2)):
+            mutate(count_cell, lambda c, f=field, v=value: c.__setitem__(f, v))
+        mutate(count_cell,
+               lambda c: c["paper_counts"].__setitem__("timing", 31))
+        mutate(count_cell,
+               lambda c: c["toy_counts"].__setitem__("timing", 2))
+        mutate(count_cell,
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "paper_measured_count", 31))
+        mutate(count_cell,
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "toy_measured_count", 2))
+
+        mutate("paper-v1::dynamic_refresh::control=default",
+               lambda c: c.__setitem__("updates", 2))
+        mutate("paper-v1::dynamic_refresh::control=default",
+               lambda c: c["expected_rows"][0].__setitem__("updates", 2))
+
+        fit = "paper-v1::sj16::fit=per_element"
+        for field, value in (("sizes", [4096, 8192]),
+                             ("held_out", 16384), ("key_bits", 2048),
+                             ("threads", 1), ("precomputed", True),
+                             ("fit_authority", False)):
+            mutate(fit, lambda c, f=field, v=value: c.__setitem__(f, v))
+        mutate(fit,
+               lambda c: c["paper_counts"].__setitem__("enc_iters", 29))
+        mutate(fit,
+               lambda c: c["expected_rows"][0].__setitem__("warmup_calls", 0))
+
+        mutate("paper-v1::sj16::u=262144",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "reason", ""))
+        mutate("paper-v1::sqrt_comparison::timing_m=32",
+               lambda c: c["expected_rows"][1].__setitem__(
+                   "status", "MEASURED"))
+        mutate("paper-v1::piccard_std192_encoding::control=default",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "method", "piccard_sqrt_encode"))
+        mutate("paper-v1::fhe_ind::control=default",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "raw_timing_contract", "aggregate-only"))
+        mutate("paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "variant", "enron_u65536"))
+
+    def test_toy_inventory_is_exact_and_drift_is_rejected(self):
+        expected = {
+            "paper-v1::bcg12_exact::control=default",
+            "paper-v1::bcg12_minhash::control=default",
+            "paper-v1::deletion_exact::control=default",
+            "paper-v1::deletion_mc::control=default",
+            "paper-v1::dynamic_accuracy::control=default",
+            "paper-v1::dynamic_refresh::control=default",
+            "paper-v1::dynamic_timing::control=default",
+            "paper-v1::estimator_accuracy::j=0.5",
+            "paper-v1::fhe_ind::control=default",
+            "paper-v1::flooding::profile=primary40",
+            "paper-v1::piccard_std128::control=default",
+            "paper-v1::piccard_std192_encoding::control=default",
+            "paper-v1::real_dataset::dblp_acm_u65536_artifact=accuracy",
+            "paper-v1::real_dataset::enron_u65536_artifact=accuracy",
+            "paper-v1::sj16::fit=per_element",
+            "paper-v1::sqrt_comparison::timing_m=64",
+            "paper-v1::threshold_agreement::k=64",
+            "paper-v1::threshold_dblp_fpfn::control=default",
+            "paper-v1::threshold_spec::k=64",
+            "paper-v1::threshold_timing::k=64",
+        }
+        toy = (FIXTURES / "toy_cell_ids.txt").read_text().splitlines()
+        self.assertEqual(set(toy), expected)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for path in FIXTURES.iterdir():
+                (root / path.name).write_text(path.read_text())
+            drifted = ["paper-v1::piccard_std128::k=16"] + toy[1:]
+            (root / "toy_cell_ids.txt").write_text("\n".join(drifted) + "\n")
+            with self.assertRaises(ValueError):
+                validate_revision_matrix.validate_document(self.document, root)
 
 
 if __name__ == "__main__":
