@@ -848,7 +848,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         row = {
             "k": "128", "m": "64", "set_size": "1000",
             "universe_size": "65536", "comparison_eligible": "true",
-            "suite": "bcg12_minhash", "scenario": "review-65536",
+            "suite": "revision-bcg12-minhash-v1", "scenario": "review-65536",
             "method": "bcg12_mh_ec", "cryptographic_profile": "FORGED-FHE",
             "nominal_security_bits": "128", "security_match": "true",
             "comparison_scope": "matched-estimator-component",
@@ -875,7 +875,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
         base = {
             "k": "128", "m": "64", "set_size": "1000",
             "universe_size": "65536",
-            "suite": "bcg12_minhash", "scenario": "review-65536",
+            "suite": "revision-bcg12-minhash-v1", "scenario": "review-65536",
             "method": "bcg12_mh_ec", "cryptographic_profile": "P-256",
             "nominal_security_bits": "128",
             "comparison_scope": "matched-estimator-component",
@@ -906,34 +906,56 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 _bind_cell_shape([row], cell, {"command": command},
                                  cell["cell_id"])
 
-    def test_r6_review_rows_bind_exact_workload_trace_and_timing_arm(self) -> None:
-        sys.path.insert(0, str(ROOT / "scripts"))
+    @staticmethod
+    def _write_versioned_review_sidecars(output: Path, *, suite: str,
+                                         profile: str, methods: tuple[str, ...],
+                                         timing_trials: int, k: int = 16,
+                                         m: int = 16, set_size: int = 10,
+                                         universe: int = 64, seed: int = 7):
+        """Emit the C++ BE wire format without invoking a producer.
+
+        This deliberately duplicates the small serialization contract rather
+        than importing a producer helper.  In particular, the versioned
+        encoding wire contains a correctness-count field and kind-3 record
+        with its own hash domain.  The resulting bytes are consumed by the
+        independent verifier and execution-trace parser exactly as producer
+        artifacts are.
+        """
         import hashlib
         from tests.scripts import review_verifier_fixtures as fixture
-        from verify_revision_benchmarks import (
-            _bind_review_sidecars, RevisionContractError)
-        methods = ("bcg12_mh_ec", "bcg12_mh_ff")
-        seed, k, m, n, universe = 7, 16, 16, 10, 64
-        intersection = fixture._realized_intersection(n, 1, 2)
-        identities = ((0, 0), (1, 0))
-        encoded = []
+        from verify_revision_benchmarks import _correctness_hash_seed
+
+        encoding = set(methods) <= {"piccard_encode", "piccard_sqrt_encode"}
+        correctness_trials = 1 if encoding else 0
+        accuracy_trials = 0
+        records = [(0, 0)]
+        records.extend((1, index) for index in range(timing_trials))
+        records.extend((3, index) for index in range(correctness_trials))
+        intersection = fixture._realized_intersection(set_size, 1, 2)
         workload = bytearray(fixture.WORKLOAD_DOMAIN)
-        workload.extend(fixture._string("revision-test"))
-        workload.extend(fixture._string("readiness-toy-v1"))
+        workload.extend(fixture._string(suite))
+        workload.extend(fixture._string(profile))
         workload.extend(fixture._be64(seed))
-        for value in (k, m, n, universe, 1, 2):
+        for value in (k, m, set_size, universe, 1, 2):
             workload.extend(fixture._be64(value))
         workload.extend(fixture._be32(len(methods)))
         for method in methods:
             workload.extend(fixture._string(method))
-        workload.extend(fixture._be32(1) + fixture._be32(0) +
-                        fixture._be32(len(identities)))
-        for kind, index in identities:
+        workload.extend(fixture._be32(timing_trials))
+        workload.extend(fixture._be32(accuracy_trials))
+        if encoding:
+            workload.extend(fixture._be32(correctness_trials))
+        workload.extend(fixture._be32(len(records)))
+        encoded = []
+        for kind, index in records:
             trial_seed = fixture._trial_seed(seed, kind, index)
-            hash_value = fixture._hash_seed(seed, kind, index)
-            encoded.append((kind, index, trial_seed))
+            if kind == 3:
+                hash_value = _correctness_hash_seed(seed, index)
+            else:
+                hash_value = fixture._hash_seed(seed, kind, index)
             set_a, set_b = fixture._regenerate_sets(
-                universe, n, intersection, trial_seed)
+                universe, set_size, intersection, trial_seed)
+            encoded.append((kind, index, trial_seed))
             workload.extend(bytes([kind]) + fixture._be32(index) +
                             fixture._be64(trial_seed) + fixture._be64(hash_value))
             for values in (set_a, set_b):
@@ -941,52 +963,118 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 for value in values:
                     workload.extend(fixture._be64(value))
             workload.extend(fixture._be64(intersection) +
-                            fixture._be64(2 * n - intersection))
+                            fixture._be64(2 * set_size - intersection))
         workload_bytes = bytes(workload)
         workload_digest = hashlib.sha256(workload_bytes).digest()
         trace = bytearray(fixture.TRACE_DOMAIN + workload_digest)
-        trace.extend(fixture._be32(2) + fixture._be32(2))
+        trace.extend(fixture._be32(len(records)) + fixture._be32(len(records)))
         for kind, index, trial_seed in encoded:
-            order = methods[trial_seed % 2:] + methods[:trial_seed % 2]
+            offset = trial_seed % len(methods)
+            order = methods[offset:] + methods[:offset]
             trace.extend(bytes([kind]) + fixture._be32(index) +
-                         fixture._be32(2) + fixture._be32(2) + b"\0")
+                         fixture._be32(len(methods)) + fixture._be32(len(methods)) + b"\0")
             for method in order:
                 trace.extend(fixture._string(method))
         trace_bytes = bytes(trace)
+        (output / "workload.bin").write_bytes(workload_bytes)
+        (output / "execution-trace.bin").write_bytes(trace_bytes)
+        return workload_digest.hex(), hashlib.sha256(trace_bytes).hexdigest()
+
+    def _bind_versioned_fixture(self, *, cell: dict, mode: str, profile: str,
+                                suite: str, methods: tuple[str, ...],
+                                timing_trials: int, m: int = 16):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _bind_review_sidecars
+        from verify_review_comparison import expected_kind
+        # Keep KATs tiny while retaining the exact family/suite/profile and
+        # row applicability topology.  The production verifier binds these
+        # same fields to the canonical matrix dimensions in its outer call.
+        cell = dict(cell)
+        cell["axes"] = {"k": 16, "m": m, "n": 10, "u": 64}
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            (output / "workload.bin").write_bytes(workload_bytes)
-            (output / "execution-trace.bin").write_bytes(trace_bytes)
-            timing = {
-                "method": "bcg12_mh_ec", "evidence_arm": "timing",
-                "measurement_kind": "psi-timing",
-                "workload_id": f"review-{universe}-{workload_digest.hex()[:16]}",
-                "workload_manifest_sha256": workload_digest.hex(),
-                "execution_trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
-            }
-            cell = {
-                "family": "revision-test", "axes": {"k": k, "m": m,
-                    "n": n, "u": universe},
-                "expected_artifact_schema": "review-comparison-csv-v1",
-                "expected_rows": [
-                    {"method": method, "terminal_status": "MEASURED",
-                     "toy_measured_count": 1, "paper_measured_count": 1}
-                    for method in methods],
-            }
-            plan = {"command": ["--profile=readiness-toy-v1", "--seed=7"]}
-            _bind_review_sidecars(output, [timing], cell, plan, "toy", "cell")
-            for field, forged in (
-                    ("workload_id", "FORGED-WORKLOAD"),
-                    ("workload_manifest_sha256", "not-a-digest"),
-                    ("execution_trace_sha256", "also-forged"),
-                    ("measurement_kind", "FORGED-TIMING-KIND"),
-                    ("evidence_arm", "FORGED-ARM")):
-                with self.subTest(field=field):
-                    mutation = dict(timing)
-                    mutation[field] = forged
-                    with self.assertRaises(RevisionContractError):
-                        _bind_review_sidecars(
-                            output, [mutation], cell, plan, "toy", "cell")
+            workload_digest, trace_digest = self._write_versioned_review_sidecars(
+                output, suite=suite, profile=profile, methods=methods,
+                timing_trials=timing_trials, m=m)
+            rows = [{
+                "method": method, "evidence_arm": "timing",
+                "measurement_kind": expected_kind(method, "timing"),
+                "workload_id": f"review-64-{workload_digest[:16]}",
+                "workload_manifest_sha256": workload_digest,
+                "execution_trace_sha256": trace_digest,
+            } for method in methods]
+            plan = {"command": [f"--profile={profile}", "--seed=7"]}
+            _bind_review_sidecars(output, rows, cell, plan, mode, cell["cell_id"])
+            return output
+
+    def test_r7_encoding_wire_kat_accepts_toy_and_paper_square_and_nonsquare(self) -> None:
+        """The exact C++ versioned wire is accepted in all encoding branches."""
+        for mode, profile, timing in (("toy", "readiness-toy-v1", 1),
+                                      ("paper", "paper-std192-encoding-v1", 30)):
+            for axis_value, methods in (
+                    ("16", ("piccard_encode", "piccard_sqrt_encode")),
+                    ("32", ("piccard_encode",))):
+                with self.subTest(mode=mode, m=axis_value):
+                    cell = self.matrix_cell(
+                        "review-encoding-csv-v1", family="piccard_std192_encoding",
+                        axis="m", axis_value=axis_value)
+                    self._bind_versioned_fixture(
+                        cell=cell, mode=mode, profile=profile,
+                        suite="revision-std192-encoding-v1", methods=methods,
+                        timing_trials=timing, m=int(axis_value))
+
+    def test_r7_review_wire_kat_accepts_producer_suites_and_profiles(self) -> None:
+        """BCG12 MinHash/exact and SJ16 use the concrete revision suite IDs."""
+        cases = (
+            ("bcg12_minhash", "revision-bcg12-minhash-v1",
+             ("bcg12_mh_ec", "bcg12_mh_ff")),
+            ("bcg12_exact", "revision-bcg12-exact-v1",
+             ("bcg12_exact_ec", "bcg12_exact_ff")),
+            ("sj16", "revision-sj16-v1", ("sj16",)),
+        )
+        for family, suite, methods in cases:
+            with self.subTest(family=family):
+                cell = self.matrix_cell("review-comparison-csv-v1",
+                                        family=family, axis="control",
+                                        axis_value="default")
+                self._bind_versioned_fixture(
+                    cell=cell, mode="paper", profile="std128-t40-primary",
+                    suite=suite, methods=methods, timing_trials=30)
+
+    def test_r7_versioned_correctness_hash_domain_mutation_rejected(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_review_sidecars, RevisionContractError)
+        from verify_review_comparison import expected_kind
+        cell = self.matrix_cell("review-encoding-csv-v1",
+                                family="piccard_std192_encoding",
+                                axis="m", axis_value="16")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            digest, trace_digest = self._write_versioned_review_sidecars(
+                output, suite="revision-std192-encoding-v1",
+                profile="readiness-toy-v1",
+                methods=("piccard_encode", "piccard_sqrt_encode"),
+                timing_trials=1)
+            data = bytearray((output / "workload.bin").read_bytes())
+            # The last record is kind=3; flip its hash-seed byte while leaving
+            # the record topology and all set payload bytes intact.  For this
+            # fixture n=10, so the fixed BE wire length of one trial is 213.
+            record_start = len(data) - 213
+            hash_start = record_start + 1 + 4 + 8
+            data[hash_start] ^= 1
+            (output / "workload.bin").write_bytes(data)
+            rows = [{"method": method, "evidence_arm": "timing",
+                     "measurement_kind": expected_kind(method, "timing"),
+                     "workload_id": f"review-64-{digest[:16]}",
+                     "workload_manifest_sha256": digest,
+                     "execution_trace_sha256": trace_digest}
+                    for method in ("piccard_encode", "piccard_sqrt_encode")]
+            with self.assertRaises(RevisionContractError):
+                _bind_review_sidecars(
+                    output, rows, cell,
+                    {"command": ["--profile=readiness-toy-v1", "--seed=7"]},
+                    "toy", cell["cell_id"])
 
     def test_r5_encoding_signature_timing_forgery_is_rejected(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
