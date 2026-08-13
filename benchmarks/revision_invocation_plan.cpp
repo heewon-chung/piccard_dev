@@ -685,6 +685,152 @@ std::string SqrtProfileForMode(RevisionRunMode mode) {
     RejectSqrt("unknown run mode");
 }
 
+[[noreturn]] void RejectStd192Encoding(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid Piccard STD192 encoding revision cell: " + reason);
+}
+
+void ValidateStd192EncodingGeometry(const RevisionCell& cell) {
+    if (cell.cell_id != "paper-v1::piccard_std192_encoding::" + cell.axis +
+                            "=" + cell.axis_value ||
+        cell.axes.size() != 4u) {
+        RejectStd192Encoding("cell ID or axis topology mismatch");
+    }
+
+    const uint64_t k = Axis(cell, "k");
+    const uint64_t m = Axis(cell, "m");
+    const uint64_t n = Axis(cell, "n");
+    const uint64_t u = Axis(cell, "u");
+    if (cell.axis == "control") {
+        if (cell.axis_value != "default") {
+            RejectStd192Encoding("control selector is not default");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+    if (cell.axis == "k") {
+        if (!IsOneOf(k, {16, 32, 64, 128, 256, 512}) ||
+            cell.axis_value != std::to_string(k)) {
+            RejectStd192Encoding("invalid k selector");
+        }
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+    if (cell.axis == "m") {
+        if (!IsOneOf(m, {16, 32, 64, 128, 256}) ||
+            cell.axis_value != std::to_string(m)) {
+            RejectStd192Encoding("invalid m selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+    if (cell.axis == "n") {
+        if (!IsOneOf(n, {100, 1000, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectStd192Encoding("invalid n selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        return;
+    }
+    if (cell.axis == "u") {
+        if (!IsOneOf(u, {16384, 65536, 262144, 1048576}) ||
+            cell.axis_value != std::to_string(u)) {
+            RejectStd192Encoding("invalid u selector");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, u);
+        return;
+    }
+    RejectStd192Encoding("unsupported selector axis");
+}
+
+void ValidateStd192EncodingCell(const RevisionCell& cell) {
+    if (cell.family != "piccard_std192_encoding") {
+        RejectStd192Encoding("family must be piccard_std192_encoding");
+    }
+    if (cell.producer != "bench_review_comparison") {
+        RejectStd192Encoding("producer must be bench_review_comparison");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectStd192Encoding("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectStd192Encoding("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "review-encoding-csv-v1") {
+        RejectStd192Encoding("unexpected encoding artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectStd192Encoding("cell is not RUN");
+    }
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectStd192Encoding("encoding cell must be diagnostic-only");
+    }
+    ValidateStd192EncodingGeometry(cell);
+
+    const uint64_t m = Axis(cell, "m");
+    const bool square = IsPerfectSquareM(m);
+    if (cell.paper_count != 30 || cell.toy_count != 1 ||
+        cell.paper_trials != 30 || cell.toy_trials != 1 ||
+        cell.paper_counts !=
+            std::map<std::string, uint64_t>{{"correctness", 1},
+                                             {"encoding", 30}} ||
+        cell.toy_counts !=
+            std::map<std::string, uint64_t>{{"correctness", 1},
+                                             {"encoding", 1}}) {
+        RejectStd192Encoding("paper/toy count contract mismatch");
+    }
+    if (!cell.attributes.empty() || !cell.list_attributes.empty() ||
+        !cell.object_attributes.empty()) {
+        RejectStd192Encoding("encoding cell attributes must be empty");
+    }
+
+    if (cell.expected_rows.size() != 2u) {
+        RejectStd192Encoding("encoding cells require two expected rows");
+    }
+    const auto validate_row = [&](const RevisionRow& row,
+                                  const std::string& row_id,
+                                  const std::string& status,
+                                  const std::string& reason,
+                                  uint64_t count) {
+        if (row.row_id != row_id || row.status != status ||
+            row.terminal_status != status || row.method != row_id ||
+            row.reason != reason || row.reason_code != reason ||
+            row.measured_count != count || row.paper_measured_count != count ||
+            row.toy_measured_count != (count == 0 ? 0u : 1u) ||
+            row.attributes !=
+                std::map<std::string, std::string>{{"encoding_only", "true"}} ||
+            !row.list_attributes.empty() || !row.timing_contract.empty() ||
+            !row.raw_timing_contract.empty() || !row.phase.empty() ||
+            !row.pattern.empty() || !row.variant.empty() ||
+            !row.fit_authority.empty()) {
+            RejectStd192Encoding("encoding row contract mismatch");
+        }
+    };
+    validate_row(cell.expected_rows.at(0), "piccard_encode", "DIAGNOSTIC", "",
+                 30);
+    validate_row(cell.expected_rows.at(1), "piccard_sqrt_encode",
+                 square ? "DIAGNOSTIC" : "NOT_APPLICABLE",
+                 square ? "" : "sqrt-m-not-perfect-square", square ? 30 : 0);
+}
+
+std::string Std192EncodingProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-std192-encoding-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectStd192Encoding("unknown run mode");
+}
+
 [[noreturn]] void RejectThreshold(const std::string& reason) {
     throw std::invalid_argument(
         "invalid threshold FHE revision invocation cell: " + reason);
@@ -1129,6 +1275,41 @@ RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
         std::string("--trials=") +
             (toy ? "1" : std::to_string(paper_trials)),
         "--seed={seed}",
+    };
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanStd192EncodingRevisionCell(
+    const RevisionCell& cell, RevisionRunMode mode) {
+    ValidateStd192EncodingCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const std::string profile = Std192EncodingProfileForMode(mode);
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--profile=" + profile,
+        "--suite=encoding",
+        "--methods=piccard_encode,piccard_sqrt_encode",
+        "--security=STD192",
+        "--k=" + cell.axes.at("k"),
+        "--m=" + cell.axes.at("m"),
+        "--n=" + cell.axes.at("n"),
+        "--universe=" + cell.axes.at("u"),
+        std::string("--encoding-iters=") + (toy ? "1" : "30"),
+        "--correctness-trials=1",
+        "--seed={seed}",
+        "--output={output}/encoding.csv",
     };
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {

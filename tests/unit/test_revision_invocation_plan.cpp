@@ -21,6 +21,7 @@ using piccard::benchmark::PlanFheIndRevisionCell;
 using piccard::benchmark::PlanEstimatorRevisionCell;
 using piccard::benchmark::PlanDeletionRevisionCell;
 using piccard::benchmark::PlanSqrtRevisionCell;
+using piccard::benchmark::PlanStd192EncodingRevisionCell;
 using piccard::benchmark::PlanThresholdRevisionCell;
 
 RevisionMatrix Load() {
@@ -65,6 +66,15 @@ std::vector<const RevisionCell*> SqrtCells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "sqrt_comparison") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> Std192EncodingCells(
+    const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "piccard_std192_encoding") cells.push_back(&cell);
     }
     return cells;
 }
@@ -709,6 +719,225 @@ TEST(RevisionInvocationPlan,
     cell.expected_rows.pop_back();
     EXPECT_THROW(PlanSqrtRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan,
+     ExhaustivelyPlansAllTwentyStd192EncodingCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Std192EncodingCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanStd192EncodingRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanStd192EncodingRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanStd192EncodingRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        const std::string m = cell->axes.at("m");
+        const bool square = m == "16" || m == "64" || m == "256";
+        const std::string paper_profile = "paper-std192-encoding-v1";
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=" + paper_profile,
+            "--suite=encoding",
+            "--methods=piccard_encode,piccard_sqrt_encode",
+            "--security=STD192",
+            "--k=" + cell->axes.at("k"),
+            "--m=" + m,
+            "--n=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--encoding-iters=30",
+            "--correctness-trials=1",
+            "--seed={seed}",
+            "--output={output}/encoding.csv",
+        };
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--profile=readiness-toy-v1",
+            "--suite=encoding",
+            "--methods=piccard_encode,piccard_sqrt_encode",
+            "--security=STD192",
+            "--k=" + cell->axes.at("k"),
+            "--m=" + m,
+            "--n=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
+            "--encoding-iters=1",
+            "--correctness-trials=1",
+            "--seed={seed}",
+            "--output={output}/encoding.csv",
+        };
+
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(dry_run.argv, expected_paper);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_review_comparison");
+        EXPECT_EQ(toy.producer, "bench_review_comparison");
+        EXPECT_EQ(paper.concrete_profile, paper_profile);
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(dry_run.concrete_profile, paper_profile);
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(paper.expected_rows.size(), 2u);
+        ASSERT_EQ(toy.expected_rows.size(), 2u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 2u);
+
+        const auto& paper_encode = paper.expected_rows.at(0);
+        const auto& paper_sqrt = paper.expected_rows.at(1);
+        EXPECT_EQ(paper_encode.row_id, "piccard_encode");
+        EXPECT_EQ(paper_encode.status, "DIAGNOSTIC");
+        EXPECT_EQ(paper_encode.terminal_status, "DIAGNOSTIC");
+        EXPECT_EQ(paper_encode.method, "piccard_encode");
+        EXPECT_EQ(paper_encode.attributes.at("encoding_only"), "true");
+        EXPECT_EQ(paper_encode.measured_count, 30u);
+        EXPECT_EQ(paper_encode.paper_measured_count, 30u);
+        EXPECT_EQ(paper_encode.toy_measured_count, 1u);
+        EXPECT_EQ(paper_sqrt.row_id, "piccard_sqrt_encode");
+        EXPECT_EQ(paper_sqrt.status, square ? "DIAGNOSTIC" : "NOT_APPLICABLE");
+        EXPECT_EQ(paper_sqrt.terminal_status,
+                  square ? "DIAGNOSTIC" : "NOT_APPLICABLE");
+        EXPECT_EQ(paper_sqrt.reason,
+                  square ? "" : "sqrt-m-not-perfect-square");
+        EXPECT_EQ(paper_sqrt.reason_code,
+                  square ? "" : "sqrt-m-not-perfect-square");
+        EXPECT_EQ(paper_sqrt.attributes.at("encoding_only"), "true");
+        EXPECT_EQ(paper_sqrt.measured_count, square ? 30u : 0u);
+        EXPECT_EQ(paper_sqrt.paper_measured_count, square ? 30u : 0u);
+        EXPECT_EQ(paper_sqrt.toy_measured_count, square ? 1u : 0u);
+        EXPECT_EQ(toy.expected_rows.at(0).measured_count, 1u);
+        EXPECT_EQ(toy.expected_rows.at(1).measured_count, square ? 1u : 0u);
+        EXPECT_EQ(dry_run.expected_rows.at(0).measured_count, 30u);
+        EXPECT_EQ(dry_run.expected_rows.at(1).measured_count,
+                  square ? 30u : 0u);
+        EXPECT_FALSE(HasArg(paper, "--security=TOY"));
+        EXPECT_FALSE(HasArg(paper, "--raw"));
+        EXPECT_FALSE(HasArg(paper, "--fhe"));
+        EXPECT_FALSE(HasArg(paper, "--key"));
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidStd192EncodingIdentityGeometryCountsAndRows) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Std192EncodingCells(matrix);
+    ASSERT_EQ(cells.size(), 20u);
+    const RevisionCell control = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->cell_id ==
+                   "paper-v1::piccard_std192_encoding::control=default";
+        });
+
+    RevisionCell cell = control;
+    cell.family = "piccard_std128";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.dataset = "enron";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.expected_artifact_schema = "piccard-benchmark-csv-v1";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.axis = "x";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.axis_value = "-1";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.axes["k"] = "1024";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.axes["m"] = "32";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.axes.erase("u");
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    const RevisionCell n100000 = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->cell_id ==
+                   "paper-v1::piccard_std192_encoding::n=100000";
+        });
+    cell = n100000;
+    cell.axes["u"] = "65536";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.paper_counts["encoding"] = 29;
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.expected_rows.front().attributes["encoding_only"] = "false";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.expected_rows.at(1).status = "MEASURED";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.expected_rows.at(1).reason = "wrong";
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
+
+    cell = control;
+    cell.expected_rows.pop_back();
+    EXPECT_THROW(
+        PlanStd192EncodingRevisionCell(cell, RevisionRunMode::Paper),
+        std::invalid_argument);
 }
 
 TEST(RevisionInvocationPlan, RejectsNonPiccardOrNonRunCells) {

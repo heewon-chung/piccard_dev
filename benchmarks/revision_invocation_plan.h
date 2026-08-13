@@ -86,6 +86,15 @@ RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
                                             RevisionRunMode mode);
 
 /**
+ * @brief Plan exactly one validated `piccard_std192_encoding` matrix cell.
+ *
+ * The encoding plan is local and diagnostic-only: it carries no FHE setup,
+ * key-generation, or raw timing artifact arguments.
+ */
+RevisionInvocationPlan PlanStd192EncodingRevisionCell(
+    const RevisionCell& cell, RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and
