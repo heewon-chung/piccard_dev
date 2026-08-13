@@ -245,6 +245,16 @@ def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
     return result
 
 
+def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
+    """Independently bind matrix timeout classes to lifecycle budgets."""
+    timeout_class = (
+        "extended"
+        if cell.get("family") == "sj16" and cell.get("axis") == "fit" and
+        str(cell.get("axis_value")) == "per_element"
+        else "standard")
+    return timeout_class, 3600 if timeout_class == "extended" else 600
+
+
 def _check_plans(root: Path, mode: str, cells: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     records = _read_jsonl(root / "planned_argv.jsonl", "planned argv")
     expected_ids = {cell["cell_id"] for cell in cells}
@@ -273,6 +283,13 @@ def _check_plans(root: Path, mode: str, cells: list[dict[str, Any]], manifest: d
                 record.get("producer") != cell["producer"] or \
                 record.get("phase") != phase_for_cell(cell):
             fail(f"planned cell metadata mismatch: {cid}")
+        expected_timeout_class, expected_timeout_seconds = \
+            _expected_timeout_contract(cell)
+        if cell.get("timeout_class") != expected_timeout_class or \
+                record.get("timeout_class") != expected_timeout_class or \
+                type(record.get("timeout_seconds")) is not int or \
+                record.get("timeout_seconds") != expected_timeout_seconds:
+            fail(f"planned timeout contract mismatch: {cid}")
         canonical = canonical_plan_argv(cell, mode)
         if record.get("canonical_argv") != canonical:
             fail(f"canonical argv mismatch: {cid}")
@@ -366,6 +383,9 @@ def _check_receipts(root: Path, mode: str, cells: list[dict[str, Any]], plans: d
             fail(f"receipt schema/identity mismatch: {cid}")
         if receipt.get("canonical_argv") != plans[cid]["canonical_argv"]:
             fail(f"receipt canonical argv mismatch: {cid}")
+        if receipt.get("timeout_class") != plans[cid].get("timeout_class") or \
+                receipt.get("timeout_seconds") != plans[cid].get("timeout_seconds"):
+            fail(f"receipt timeout contract mismatch: {cid}")
         expected_status = (
             "NO_SPAWN" if cell["invocation_status"] == "NO_SPAWN" else
             ("PLANNED" if mode == "dry-run" else "COMPLETED"))

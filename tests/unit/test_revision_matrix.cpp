@@ -116,6 +116,25 @@ TEST(RevisionMatrix, RequiredTerminalRowsAndProducerBindingsAreLiteral) {
     EXPECT_EQ(refresh.axes.at("n"), "1000");
 }
 
+TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
+    const RevisionMatrix matrix = Load();
+    for (const auto& cell : matrix.cells) {
+        if (cell.family != "sj16") continue;
+        const bool per_element = cell.axis == "fit" &&
+                                 cell.axis_value == "per_element";
+        EXPECT_EQ(cell.timeout_class, per_element ? "extended" : "standard")
+            << cell.cell_id;
+        EXPECT_EQ(cell.invocation_status,
+                  (cell.axis == "n" && cell.axis_value == "100000") ||
+                          (cell.axis == "u" &&
+                           (cell.axis_value == "262144" ||
+                            cell.axis_value == "1048576"))
+                      ? "NO_SPAWN"
+                      : "RUN")
+            << cell.cell_id;
+    }
+}
+
 TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
     const RevisionMatrix matrix = Load();
     for (const auto& family : {"piccard_std128", "piccard_std192_encoding",

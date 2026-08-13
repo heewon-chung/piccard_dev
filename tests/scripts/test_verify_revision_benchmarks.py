@@ -179,6 +179,23 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True)
             self.assertNotEqual(check.returncode, 0)
 
+    def test_verifier_rejects_coordinated_sj16_timeout_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_dry_root(temporary)
+            argv_file = root / "planned_argv.jsonl"
+            records = [json.loads(line) for line in argv_file.read_text().splitlines()]
+            target = next(record for record in records
+                          if record["cell_id"] ==
+                          "paper-v1::sj16::fit=per_element")
+            target["timeout_class"] = "standard"
+            target["timeout_seconds"] = 600
+            argv_file.write_text("".join(json.dumps(record, sort_keys=True) + "\n"
+                                             for record in records))
+            check = subprocess.run(
+                [sys.executable, str(VERIFIER), str(root), "--mode=dry-run"],
+                cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(check.returncode, 0)
+
     def test_verifier_rejects_coordinated_materialized_count_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.make_dry_root(temporary)

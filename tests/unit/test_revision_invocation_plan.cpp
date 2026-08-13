@@ -1964,6 +1964,12 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
         EXPECT_EQ(paper.invocation_status, cell->invocation_status);
         EXPECT_EQ(toy.invocation_status, cell->invocation_status);
         EXPECT_EQ(dry_run.invocation_status, cell->invocation_status);
+        EXPECT_EQ(paper.timeout_class,
+                  per_element ? "extended" : "standard");
+        EXPECT_EQ(toy.timeout_class,
+                  per_element ? "extended" : "standard");
+        EXPECT_EQ(dry_run.timeout_class,
+                  per_element ? "extended" : "standard");
         ASSERT_EQ(paper.expected_rows.size(), 1u);
         ASSERT_EQ(toy.expected_rows.size(), 1u);
         ASSERT_EQ(dry_run.expected_rows.size(), 1u);
@@ -2135,6 +2141,14 @@ TEST(RevisionInvocationPlan,
 
     cell = measured;
     cell.timeout_class = "extended";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    const RevisionInvocationPlan per_element_plan =
+        PlanSj16RevisionCell(per_element, RevisionRunMode::Paper);
+    EXPECT_EQ(per_element_plan.timeout_class, "extended");
+    cell = per_element;
+    cell.timeout_class = "standard";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 

@@ -57,6 +57,14 @@ class RevisionMatrixTest(unittest.TestCase):
             sj["expected_rows"][0]["reason"],
             "sj16-paillier3072-calibration-bound-v1")
 
+        sj_fit = next(c for c in self.document["cells"]
+                      if c["cell_id"] == "paper-v1::sj16::fit=per_element")
+        self.assertEqual(sj_fit["invocation_status"], "RUN")
+        self.assertEqual(sj_fit["timeout_class"], "extended")
+        for sj_cell in self.document["cells"]:
+            if sj_cell["family"] == "sj16" and sj_cell is not sj_fit:
+                self.assertEqual(sj_cell["timeout_class"], "standard")
+
     def test_family_axes_datasets_and_paper_count_contract(self):
         cells = {cell["cell_id"]: cell for cell in self.document["cells"]}
 
@@ -203,6 +211,9 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c["paper_counts"].__setitem__("enc_iters", 29))
         mutate(fit,
                lambda c: c["expected_rows"][0].__setitem__("warmup_calls", 0))
+        mutate(fit, lambda c: c.__setitem__("timeout_class", "standard"))
+        mutate("paper-v1::sj16::control=default",
+               lambda c: c.__setitem__("timeout_class", "extended"))
 
         mutate("paper-v1::sj16::u=262144",
                lambda c: c["expected_rows"][0].__setitem__(

@@ -44,6 +44,32 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertEqual(manifest["spawned_processes"], 0)
             self.assertEqual(manifest["cell_count"], 263)
 
+    def test_dry_run_binds_sj16_timeout_class_and_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            build.mkdir()
+            result = self.run_runner(
+                "--mode=dry-run",
+                "--build-dir", str(build),
+                "--results-root", str(Path(temporary) / "dry"),
+                "--seed", "20260729",
+                "--threads", "2",
+                "--matrix", str(MATRIX),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            root = Path(temporary) / "dry"
+            plans = [json.loads(line) for line in
+                     (root / "planned_argv.jsonl").read_text().splitlines()]
+            sj16 = [plan for plan in plans if plan["family"] == "sj16"]
+            self.assertEqual(len(sj16), 11)
+            for plan in sj16:
+                expected_extended = plan["cell_id"] == \
+                    "paper-v1::sj16::fit=per_element"
+                self.assertEqual(plan["timeout_class"],
+                                 "extended" if expected_extended else "standard")
+                self.assertEqual(plan["timeout_seconds"],
+                                 3600 if expected_extended else 600)
+
     def test_dry_run_process_boundary_is_zero_child_including_metadata(self) -> None:
         """The complete in-process dry planner must not create any child.
 

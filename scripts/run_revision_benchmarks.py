@@ -267,6 +267,14 @@ def _record_plans(root: Path, plans: list[dict[str, Any]]) -> None:
         append_jsonl(path, plan)
 
 
+def _timeout_seconds(timeout_class: str) -> int:
+    if timeout_class == "standard":
+        return 600
+    if timeout_class == "extended":
+        return 3600
+    _fail(f"unsupported revision timeout class: {timeout_class}")
+
+
 def _run_one(
     *, root: Path, manifest: dict[str, Any], plan: dict[str, Any],
     command: list[str], mode: str,
@@ -282,6 +290,8 @@ def _run_one(
         "producer": plan["producer"], "phase": plan["phase"],
         "invocation_status": plan["invocation_status"],
         "expected_artifact_schema": plan["expected_artifact_schema"],
+        "timeout_class": plan["timeout_class"],
+        "timeout_seconds": plan["timeout_seconds"],
         "expected_rows": plan["expected_rows"],
         "canonical_argv": plan["canonical_argv"], "argv": plan["argv"],
         "warmup_calls": 1, "mode": mode,
@@ -454,10 +464,11 @@ def run(args: argparse.Namespace) -> int:
                 "phase": phase_for_cell(cell), "producer": cell["producer"],
                 "invocation_status": cell["invocation_status"],
                 "expected_artifact_schema": cell["expected_artifact_schema"],
+                "timeout_class": cell["timeout_class"],
                 "expected_rows": cell["expected_rows"],
                 "canonical_argv": canonical, "argv": command[1:] if command and command[0] == sys.executable else command,
                 "command": command, "output_dir": str(output),
-                "timeout_seconds": 3600 if cell["timeout_class"] == "extended" else 600,
+                "timeout_seconds": _timeout_seconds(cell["timeout_class"]),
             })
         _record_plans(results_root, plans)
         manifest["state"] = "RUNNING"

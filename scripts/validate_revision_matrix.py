@@ -489,6 +489,13 @@ def _validate_cell(cell: Any, index: int) -> None:
              f"{label} ID/family/axis binding mismatch")
     _require(cell["profile"] == "paper-v1", f"{label} profile must be paper-v1")
     _require(cell["producer"] == _expected_producer(cell), f"{label} producer binding mismatch")
+    expected_timeout_class = (
+        "extended"
+        if cell["family"] == "sj16" and cell["axis"] == "fit" and
+        _text(cell["axis_value"]) == "per_element"
+        else "standard")
+    _require(cell["timeout_class"] == expected_timeout_class,
+             f"{label} timeout class contract mismatch")
     _require(isinstance(cell["axes"], dict), f"{label}.axes must be an object")
     _require(cell["axis_value"] != "", f"{label}.axis_value must be explicit")
     for key in ("paper_count", "toy_count", "paper_trials", "toy_trials"):

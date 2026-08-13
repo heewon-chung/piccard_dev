@@ -1709,8 +1709,13 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (cell.dataset != "synthetic") {
         RejectSj16("dataset must be synthetic");
     }
-    if (cell.timeout_class != "standard") {
-        RejectSj16("timeout class must be standard");
+    const bool per_element_timeout =
+        cell.axis == "fit" && cell.axis_value == "per_element";
+    if (cell.timeout_class !=
+        (per_element_timeout ? "extended" : "standard")) {
+        RejectSj16(per_element_timeout
+                       ? "per-element fit timeout class must be extended"
+                       : "timeout class must be standard");
     }
     ValidateSj16Geometry(cell);
 

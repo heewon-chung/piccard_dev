@@ -7604,7 +7604,7 @@
       ],
       "table_eligible": false,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "enc_iters": 1,

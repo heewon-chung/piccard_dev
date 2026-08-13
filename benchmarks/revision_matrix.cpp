@@ -790,7 +790,11 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     if (cell.producer != ExpectedProducer(cell)) {
         throw std::invalid_argument("revision matrix producer/family binding mismatch");
     }
-    if (cell.profile != "paper-v1" || cell.timeout_class != "standard") {
+    const bool extended_timeout =
+        cell.family == "sj16" && cell.axis == "fit" &&
+        cell.axis_value == "per_element";
+    if (cell.profile != "paper-v1" ||
+        cell.timeout_class != (extended_timeout ? "extended" : "standard")) {
         throw std::invalid_argument("revision matrix profile/timeout mismatch");
     }
     if (cell.expected_artifact_schema != ExpectedArtifactSchema(cell)) {
