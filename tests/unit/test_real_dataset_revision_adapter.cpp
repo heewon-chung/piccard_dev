@@ -178,6 +178,19 @@ TEST(RealDatasetRevisionAdapter, EncodingCellCarriesNoFheExecutionMetadata) {
     EXPECT_TRUE(plan.encoding_only);
     EXPECT_EQ(plan.concrete_profile, "readiness-toy-v1");
     EXPECT_EQ(plan.keygen_calls, 0u);
+    EXPECT_EQ(plan.encoding_methods,
+              (std::vector<std::string>{"piccard_encode",
+                                        "piccard_sqrt_encode"}));
+    EXPECT_EQ(plan.encoding_timed_pairs, 1u);
+    EXPECT_EQ(plan.encoding_correctness_calls, 1u);
+
+    const auto paper = PlanRealDatasetRevisionExecution(
+        matrix,
+        PlanRealDatasetRevisionCell(*cell, RevisionRunMode::Paper).argv,
+        RevisionRunMode::Paper);
+    EXPECT_EQ(paper.encoding_methods, plan.encoding_methods);
+    EXPECT_EQ(paper.encoding_timed_pairs, 30u);
+    EXPECT_EQ(paper.encoding_correctness_calls, 1u);
 }
 
 }  // namespace

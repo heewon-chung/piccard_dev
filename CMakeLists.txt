@@ -1331,6 +1331,37 @@ if(BUILD_TESTS)
             )
 
             add_executable(
+                test_real_encoding_driver
+                tests/unit/test_real_encoding_driver.cpp
+                benchmarks/real_encoding_driver.cpp
+                benchmarks/benchmark_profile.cpp
+            )
+            target_link_libraries(
+                test_real_encoding_driver
+                piccard_core
+                piccard_data
+                OpenSSL::Crypto
+                test_main
+            )
+            target_include_directories(
+                test_real_encoding_driver
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_real_encoding_driver
+                PRIVATE
+                    PICCARD_REAL_DATASET_QUICK_MANIFEST="${CMAKE_SOURCE_DIR}/tests/fixtures/real_datasets/quick/dblp_acm_u65536/dataset.manifest.tsv"
+            )
+            add_test(
+                NAME RealEncodingDriver
+                COMMAND test_real_encoding_driver
+            )
+            set_tests_properties(
+                RealEncodingDriver
+                PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            )
+
+            add_executable(
                 test_revision_matrix_inventory
                 tests/unit/test_revision_matrix_inventory.cpp
             )

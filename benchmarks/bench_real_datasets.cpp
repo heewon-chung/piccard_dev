@@ -176,10 +176,18 @@ std::vector<std::string> PrepareLegacyRevisionArguments(
         // These are revision-bound control flags.  The historical parsers
         // must not see them; the adapter has already checked them against the
         // canonical plan before this filtering step.
-        if (omit("--revision-cell=") || omit("--security=") ||
+        const bool encoding_contract_flag =
+            selection.cell.axis_value == "std192_encoding" &&
+            (omit("--methods=") || omit("--encoding-iters=") ||
+             omit("--correctness-trials="));
+        const bool obsolete_revision_flag =
+            omit("--revision-cell=") || omit("--security=") ||
             omit("--raw-timing-dir=") || omit("--raw-timing-profile=") ||
-            omit("--methods=") || omit("--encoding-iters=") ||
-            omit("--correctness-trials=") || omit("--cell=")) {
+            omit("--cell=");
+        const bool unsupported_encoding_flag =
+            (omit("--methods=") || omit("--encoding-iters=") ||
+             omit("--correctness-trials=")) && !encoding_contract_flag;
+        if (obsolete_revision_flag || unsupported_encoding_flag) {
             continue;
         }
         args.push_back(arg);
@@ -200,19 +208,22 @@ std::vector<std::string> PrepareLegacyRevisionArguments(
     } else if (artifact == "std128_timing") {
         AppendOptionIfMissing(args, "--timing-pair", "median");
     } else if (artifact == "std192_encoding") {
-        // The legacy encoder is a one-method entry point.  The canonical
-        // revision cell records the one-hot/sqrt arm pair; the outer runner
-        // owns the two method invocations while this C++ process accepts one
-        // concrete arm at a time.  No FHE flag is introduced here.
-        AppendOptionIfMissing(args, "--method", "piccard_encode");
+        // The legacy encoder remains a one-method entry point.  Revision
+        // cells retain the canonical pair and the driver executes both arms
+        // into one CSV/workload artifact; no FHE flag is introduced here.
+        if (!HasOption(args, "--methods")) {
+            AppendOptionIfMissing(args, "--method", "piccard_encode");
+        }
         AppendOptionIfMissing(args, "--timing-pair", "median");
-        const auto it = std::find_if(
-            planner_argv.begin(), planner_argv.end(), [](const std::string& arg) {
-                return arg.rfind("--encoding-iters=", 0) == 0;
-            });
-        if (it != planner_argv.end()) {
-            AppendOptionIfMissing(args, "--trials",
-                                  it->substr(std::string("--encoding-iters=").size()));
+        if (!HasOption(args, "--encoding-iters")) {
+            const auto it = std::find_if(
+                planner_argv.begin(), planner_argv.end(), [](const std::string& arg) {
+                    return arg.rfind("--encoding-iters=", 0) == 0;
+                });
+            if (it != planner_argv.end()) {
+                AppendOptionIfMissing(args, "--trials",
+                                      it->substr(std::string("--encoding-iters=").size()));
+            }
         }
     }
     return args;
@@ -432,9 +443,12 @@ RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
     bool saw_dataset_manifest = false;
     bool saw_profile = false;
     bool saw_method = false;
+    bool saw_revision_methods = false;
     bool saw_k = false;
     bool saw_m = false;
     bool saw_trials = false;
+    bool saw_encoding_iters = false;
+    bool saw_correctness_trials = false;
     bool saw_timing_pair = false;
     bool saw_seed = false;
     bool saw_csv = false;
@@ -458,6 +472,16 @@ RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
             saw_profile = true;
         } else if (option == "--method") {
             args.method = value;
+            args.methods = {value};
+            saw_method = true;
+        } else if (option == "--methods") {
+            if (value != "onehot,sqrt") {
+                throw std::invalid_argument(
+                    "--methods must be exactly onehot,sqrt for revision encoding");
+            }
+            args.methods = {"piccard_encode", "piccard_sqrt_encode"};
+            args.revision_methods = true;
+            saw_revision_methods = true;
             saw_method = true;
         } else if (option == "--k") {
             args.k = ParseUint32Option(value, option);
@@ -467,7 +491,15 @@ RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
             saw_m = true;
         } else if (option == "--trials") {
             args.trials = ParseUint32Option(value, option);
+            args.encoding_iters = args.trials;
             saw_trials = true;
+        } else if (option == "--encoding-iters") {
+            args.encoding_iters = ParseUint32Option(value, option);
+            args.trials = args.encoding_iters;
+            saw_encoding_iters = true;
+        } else if (option == "--correctness-trials") {
+            args.correctness_trials = ParseUint32Option(value, option);
+            saw_correctness_trials = true;
         } else if (option == "--timing-pair") {
             args.timing_pair = value;
             saw_timing_pair = true;
@@ -485,12 +517,17 @@ RealEncodingCliArgs ParseEncodingArguments(int argc, char** argv) {
         }
     }
     if (!saw_dataset_manifest || !saw_profile || !saw_method || !saw_k || !saw_m ||
-        !saw_trials || !saw_timing_pair || !saw_seed || !saw_csv ||
-        !saw_workload_manifest_out) {
+        !saw_timing_pair || !saw_seed || !saw_csv || !saw_workload_manifest_out ||
+        (!saw_revision_methods && !saw_trials) ||
+        (saw_revision_methods && (!saw_encoding_iters || !saw_correctness_trials))) {
         throw std::invalid_argument(
-            "--mode=encoding requires --dataset-manifest, --profile, --method, "
-            "--k, --m, --trials, --timing-pair, --seed, --csv, and "
-            "--workload-manifest-out (all mandatory, no defaults)");
+            "--mode=encoding requires the complete legacy --method/--trials "
+            "contract or revision --methods/--encoding-iters/--correctness-trials "
+            "contract, plus dataset/profile/k/m/timing/seed/output options");
+    }
+    if (!saw_revision_methods) {
+        args.encoding_iters = args.trials;
+        args.correctness_trials = 0;
     }
     return args;
 }

@@ -47,6 +47,12 @@ struct RealDatasetRevisionExecutionPlan {
     std::size_t keygen_calls = 0;
     bool encoding_only = false;
     bool native_sweep = false;
+    // STD192 real-data encoding is a local diagnostic with two applicable
+    // arms.  These fields make the one-cell/two-method topology explicit
+    // without changing the matrix's artifact-level row/count contract.
+    std::vector<std::string> encoding_methods;
+    std::size_t encoding_timed_pairs = 0;
+    std::size_t encoding_correctness_calls = 0;
 };
 
 /**

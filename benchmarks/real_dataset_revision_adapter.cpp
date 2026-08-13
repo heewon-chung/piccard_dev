@@ -286,6 +286,12 @@ RealDatasetRevisionExecutionPlan PlanRealDatasetRevisionExecution(
     if (execution.expected_row_count != 1u) {
         Reject("real-data revision cells require exactly one expected row");
     }
+    if (execution.encoding_only) {
+        execution.encoding_methods = {"piccard_encode", "piccard_sqrt_encode"};
+        execution.encoding_timed_pairs =
+            mode == RevisionRunMode::Toy ? 1u : 30u;
+        execution.encoding_correctness_calls = 1u;
+    }
     return execution;
 }
 

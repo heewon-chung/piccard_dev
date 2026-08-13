@@ -288,9 +288,217 @@ std::string VersionedEncodingWorkload(
     return output.str();
 }
 
+struct RevisionEncodingMeasurement {
+    std::string method;
+    uint64_t hash_seed = 0;
+    uint64_t encoded_slots_a = 0;
+    uint64_t encoded_slots_b = 0;
+    double encode_a_ms = 0.0;
+    double encode_b_ms = 0.0;
+    double encode_pair_ms = 0.0;
+};
+
+RevisionEncodingMeasurement MeasureRevisionEncodingMethod(
+    const data::RealDatasetRecord& record_a,
+    const data::RealDatasetRecord& record_b,
+    const std::array<unsigned char, 32>& dataset_hash,
+    const RealEncodingCliArgs& args,
+    const std::string& method) {
+    const uint64_t hash_seed = DeriveHashSeed(
+        args.root_seed, dataset_hash, args.k, args.m, args.profile_id, method);
+    const MinHasher hasher(args.k, std::numeric_limits<uint64_t>::max(), hash_seed);
+    const std::vector<uint64_t> signature_a =
+        hasher.ComputeSignature(record_a.bucketed_features);
+    const std::vector<uint64_t> signature_b =
+        hasher.ComputeSignature(record_b.bucketed_features);
+
+    PiccardParams encoder_params;
+    encoder_params.k = args.k;
+    encoder_params.m = args.m;
+    std::unique_ptr<OneHotEncoder> onehot_encoder;
+    std::unique_ptr<SqrtEncoder> sqrt_encoder;
+    if (method == kOneHotMethod) {
+        encoder_params.ring_dim = NextPowerOf2(args.k * args.m);
+        onehot_encoder = std::make_unique<OneHotEncoder>(encoder_params);
+    } else {
+        encoder_params.sqrt_base = ExactSqrtBase(args.m);
+        encoder_params.ring_dim = NextPowerOf2(args.k * 2 * encoder_params.sqrt_base);
+        sqrt_encoder = std::make_unique<SqrtEncoder>(encoder_params);
+    }
+    auto encode = [&](const std::vector<uint64_t>& signature) {
+        return onehot_encoder ? onehot_encoder->Encode(signature)
+                              : sqrt_encoder->Encode(signature);
+    };
+
+    // The revision contract has one discarded pair warmup, N timed pairs,
+    // and one independent correctness pair.  There is no FHE object in this
+    // path: only the local encoder is exercised.
+    static_cast<void>(encode(signature_a));
+    static_cast<void>(encode(signature_b));
+    std::vector<double> encode_a_ms;
+    std::vector<double> encode_b_ms;
+    uint64_t slots_a = 0;
+    uint64_t slots_b = 0;
+    for (uint32_t trial = 0; trial < args.encoding_iters; ++trial) {
+        const auto start_a = std::chrono::steady_clock::now();
+        const auto timed_a = encode(signature_a);
+        const auto stop_a = std::chrono::steady_clock::now();
+        const auto start_b = std::chrono::steady_clock::now();
+        const auto timed_b = encode(signature_b);
+        const auto stop_b = std::chrono::steady_clock::now();
+        encode_a_ms.push_back(std::chrono::duration<double, std::milli>(
+            stop_a - start_a).count());
+        encode_b_ms.push_back(std::chrono::duration<double, std::milli>(
+            stop_b - start_b).count());
+        if (trial == 0) {
+            slots_a = timed_a.size();
+            slots_b = timed_b.size();
+        } else {
+            Require(slots_a == timed_a.size() && slots_b == timed_b.size(),
+                    "revision encoder output size changed across pair calls");
+        }
+    }
+    Require(args.correctness_trials == 1,
+            "revision encoding freezes one correctness pair");
+    for (uint32_t trial = 0; trial < args.correctness_trials; ++trial) {
+        const auto correctness_a = encode(signature_a);
+        const auto correctness_b = encode(signature_b);
+        if (onehot_encoder) {
+            VerifyDecoded(onehot_encoder->Decode(correctness_a), signature_a, args.m);
+            VerifyDecoded(onehot_encoder->Decode(correctness_b), signature_b, args.m);
+        } else {
+            VerifyDecoded(sqrt_encoder->Decode(correctness_a), signature_a, args.m);
+            VerifyDecoded(sqrt_encoder->Decode(correctness_b), signature_b, args.m);
+        }
+    }
+    auto mean = [](const std::vector<double>& values) {
+        if (values.empty()) throw std::logic_error("no revision encoding samples");
+        return std::accumulate(values.begin(), values.end(), 0.0) /
+               static_cast<double>(values.size());
+    };
+    return {method, hash_seed, slots_a, slots_b, mean(encode_a_ms),
+            mean(encode_b_ms), mean(encode_a_ms) + mean(encode_b_ms)};
+}
+
+std::string RevisionEncodingWorkload(
+    const std::string& dataset_sha,
+    const data::RealDatasetPair& pair,
+    const RealEncodingCliArgs& args,
+    const std::vector<RevisionEncodingMeasurement>& measurements) {
+    std::ostringstream output;
+    output << "key\tvalue\n"
+           << "schema_version\tpiccard-real-encoding-revision-workload-v1\n"
+           << "dataset_manifest_sha256\t" << dataset_sha << '\n'
+           << "pair_id\t" << pair.id << '\n'
+           << "record_a\t" << pair.record_a << '\n'
+           << "record_b\t" << pair.record_b << '\n'
+           << "k\t" << args.k << '\n'
+           << "m\t" << args.m << '\n'
+           << "profile_id\t" << args.profile_id << '\n'
+           << "methods\tpiccard_encode,piccard_sqrt_encode\n"
+           << "encoding_iters\t" << args.encoding_iters << '\n'
+           << "correctness_trials\t" << args.correctness_trials << '\n'
+           << "timing_pair\t" << args.timing_pair << '\n'
+           << "root_seed\t" << args.root_seed << '\n'
+           << "encoder_warmup_pairs\t1\n"
+           << "timed_encoder_pairs\t" << args.encoding_iters << '\n'
+           << "correctness_pair_calls\t" << args.correctness_trials << '\n'
+           << "signature_derivation_timed\tfalse\n";
+    for (const auto& measurement : measurements) {
+        output << "method." << measurement.method << ".hash_seed\t"
+               << measurement.hash_seed << '\n'
+               << "method." << measurement.method << ".encoded_slots_a\t"
+               << measurement.encoded_slots_a << '\n'
+               << "method." << measurement.method << ".encoded_slots_b\t"
+               << measurement.encoded_slots_b << '\n';
+    }
+    return output.str();
+}
+
+int RunRevisionEncodingMode(const RealEncodingCliArgs& args) {
+    Require(args.revision_methods,
+            "revision encoding requires the canonical methods selector");
+    Require(args.methods == std::vector<std::string>{kOneHotMethod, kSqrtMethod},
+            "revision encoding requires onehot and square-root methods exactly once");
+    const auto& profile = piccard::benchmark::ResolveBenchmarkProfile(args.profile_id);
+    Require(IsVersionedEncodingProfile(args.profile_id),
+            "revision encoding requires a versioned encoding profile");
+    Require(args.k == 128 && args.m == 64,
+            "revision encoding freezes k=128,m=64");
+    Require(args.encoding_iters == profile.timing_trials,
+            "revision encoding iteration count does not match profile");
+    Require(args.correctness_trials == 1,
+            "revision encoding freezes correctness_trials=1");
+    Require(args.timing_pair == "median",
+            "revision encoding freezes timing_pair=median");
+    Require(args.root_seed > 0,
+            "revision encoding requires a positive seed");
+    Require(!args.csv_path.empty() && !args.workload_manifest_out_path.empty(),
+            "revision encoding requires output paths");
+
+    const fs::path manifest_path(args.dataset_manifest_path);
+    const std::string manifest_bytes = ReadFileBytes(manifest_path);
+    const auto dataset_sha_raw = Sha256Raw(manifest_bytes);
+    const std::string dataset_sha = Hex(dataset_sha_raw);
+    const data::RealDataset dataset = data::LoadRealDataset(manifest_path);
+    Require(IsPaperEncodingVariant(dataset.variant),
+            "revision encoding requires a frozen paper dataset variant");
+    std::unordered_map<std::string, const data::RealDatasetRecord*> records;
+    records.reserve(dataset.records.size());
+    for (const auto& record : dataset.records) records.emplace(record.id, &record);
+    const auto& pair = dataset.pairs[SelectMedianPair(dataset, records)];
+    const auto& record_a = *records.at(pair.record_a);
+    const auto& record_b = *records.at(pair.record_b);
+
+    std::vector<RevisionEncodingMeasurement> measurements;
+    measurements.reserve(args.methods.size());
+    for (const std::string& method : args.methods) {
+        measurements.push_back(MeasureRevisionEncodingMethod(
+            record_a, record_b, dataset_sha_raw, args, method));
+    }
+
+    std::ostringstream csv;
+    csv << VersionedEncodingHeader();
+    for (const auto& measurement : measurements) {
+        csv << args.profile_id << ','
+            << piccard::benchmark::BenchmarkRunClassName(profile.run_class) << ','
+            << profile.target_security_bits << ",false,encoding-only-diagnostic,"
+            << (measurement.method == kOneHotMethod ? "onehot-encoding" : "sqrt-encoding")
+            << ','
+            << (measurement.method == kOneHotMethod ? "piccard-local-encoding"
+                                                    : "piccard-sqrt-local-encoding")
+            << ",encoding-only,false,encoding-timing,"
+            << dataset.dataset << ',' << dataset.variant << ',' << dataset_sha << ','
+            << dataset.records_sha256 << ',' << dataset.pairs_sha256 << ',' << pair.id << ','
+            << pair.kind << ',' << pair.label << ',' << pair.record_a << ',' << pair.record_b << ','
+            << args.k << ',' << args.m << ',' << measurement.method << ','
+            << args.encoding_iters << ',' << args.timing_pair << ',' << args.root_seed << ','
+            << measurement.hash_seed << ",1," << args.encoding_iters << ','
+            << args.correctness_trials << ",false,"
+            << data::FormatReal17(measurement.encode_a_ms) << ','
+            << data::FormatReal17(measurement.encode_b_ms) << ','
+            << data::FormatReal17(measurement.encode_pair_ms) << ','
+            << measurement.encoded_slots_a << ',' << measurement.encoded_slots_b
+            << ",PASS,measured\n";
+    }
+
+    const std::string workload =
+        RevisionEncodingWorkload(dataset_sha, pair, args, measurements);
+    AtomicWriteNew(fs::path(args.workload_manifest_out_path), workload);
+    try {
+        AtomicWriteNew(fs::path(args.csv_path), csv.str());
+    } catch (...) {
+        std::error_code remove_error;
+        fs::remove(fs::path(args.workload_manifest_out_path), remove_error);
+        throw;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int RunRealEncodingMode(const RealEncodingCliArgs& args) {
+    if (args.revision_methods) return RunRevisionEncodingMode(args);
     Require(!args.dataset_manifest_path.empty(), "--dataset-manifest is required");
     const auto& profile = piccard::benchmark::ResolveBenchmarkProfile(args.profile_id);
     const bool legacy_profile = args.profile_id == kProfile;
