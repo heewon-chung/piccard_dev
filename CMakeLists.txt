@@ -263,6 +263,22 @@ target_link_libraries(
     PUBLIC piccard_revision_matrix
 )
 
+# OpenFHE-free Piccard successor argv parser and exact matrix-cell selector.
+# This seam is consumed by tests and later orchestration without running the
+# producer or constructing a crypto context.
+add_library(
+    piccard_revision_adapter
+    benchmarks/piccard_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
 # Typed Work-4-prefix CSV schema for real-dataset benchmark rows (Work 5
 # Phase 5.2). Pure string/typed-token serialization, no OpenFHE dependency.
 add_library(
@@ -1010,6 +1026,29 @@ if(BUILD_TESTS)
             add_test(
                 NAME RevisionInvocationPlan
                 COMMAND test_revision_invocation_plan
+            )
+
+            add_executable(
+                test_piccard_revision_adapter
+                tests/unit/test_piccard_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_piccard_revision_adapter
+                piccard_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_piccard_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_piccard_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME PiccardRevisionAdapter
+                COMMAND test_piccard_revision_adapter
             )
 
             add_executable(
