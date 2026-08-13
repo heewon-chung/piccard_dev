@@ -36,6 +36,8 @@ from revision_benchmark_common import (  # noqa: E402
     cell_output,
     command_for_cell,
     binary_metadata,
+    dry_run_source_metadata,
+    dry_run_tool_metadata,
     expected_row_count,
     file_inventory,
     load_matrix,
@@ -135,6 +137,23 @@ def _copy_toy_manifests(results_root: Path) -> tuple[dict[str, Path], Path]:
                   completed.stderr.strip())
         manifests[variant] = destination / "dataset.manifest.tsv"
     return manifests, manifests["dblp_acm_u65536"]
+
+
+def _dry_run_manifest_bindings(results_root: Path) -> tuple[dict[str, Path], Path]:
+    """Return path-only bindings for the static no-spawn dry plan.
+
+    Dry-run must describe where executable modes *would* consume processed
+    manifests without constructing a toy input tree or invoking a preprocessor.
+    These paths are deliberately absent placeholders under the result root;
+    only command materialization records them.  Toy mode continues to use the
+    bounded, real-grammar fixtures from :func:`_copy_toy_manifests`.
+    """
+    binding_root = results_root / "planned-inputs"
+    variants = {
+        variant: binding_root / variant / "dataset.manifest.tsv"
+        for variant in ("dblp_acm_u65536", "enron_u65536", "enron_u1048576")
+    }
+    return variants, variants["dblp_acm_u65536"]
 
 
 def _script_hashes() -> dict[str, str]:
@@ -390,7 +409,8 @@ def run(args: argparse.Namespace) -> int:
             _fail("paper manifest arguments are only valid in paper mode")
         variant_manifests = None
         dblp_manifest = None
-    source = source_metadata(ROOT)
+    source = (dry_run_source_metadata(ROOT) if mode == "dry-run"
+              else source_metadata(ROOT))
     if mode in {"toy", "paper"} and source.get("dirty"):
         _fail("executable revision runs require a tracked-clean source tree")
     results_root.mkdir()
@@ -399,15 +419,20 @@ def run(args: argparse.Namespace) -> int:
         (results_root / "canonical").mkdir()
         (results_root / "canonical" / "revision_matrix.json").write_bytes(
             matrix_path.read_bytes())
-        if mode in {"toy", "dry-run"}:
+        if mode == "toy":
             variant_manifests, dblp_manifest = _copy_toy_manifests(results_root)
+        elif mode == "dry-run":
+            variant_manifests, dblp_manifest = _dry_run_manifest_bindings(
+                results_root)
         assert variant_manifests is not None and dblp_manifest is not None
         binaries = _binary_metadata(build_dir, cells)
         manifest = _write_initial_manifest(
             results_root, mode=mode, seed=seed, threads=threads,
             matrix_path=matrix_path, matrix_sha=matrix_sha, cells=cells,
             source=source, binaries=binaries,
-            scripts=_script_hashes(), tools=tool_metadata(build_dir),
+            scripts=_script_hashes(), tools=(
+                dry_run_tool_metadata(build_dir) if mode == "dry-run"
+                else tool_metadata(build_dir)),
             build_dir=build_dir, variant_manifests=variant_manifests,
             dblp_manifest=dblp_manifest)
         if mode in {"toy", "paper"}:

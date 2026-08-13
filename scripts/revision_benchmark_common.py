@@ -47,6 +47,8 @@ EVENT_SCHEMA = "piccard-revision-event-v1"
 FLOODING_EXECUTABLE = "scripts/run_noise_profiles.sh"
 SUMMARY_EXECUTABLE = "summarize_real_datasets.py"
 FLOODING_PAYLOAD_DIR = "payload"
+DRY_RUN_METADATA_SCHEMA = "piccard-revision-dry-run-metadata-v1"
+DRY_RUN_METADATA_AVAILABILITY = "UNAVAILABLE_NO_SPAWN"
 
 
 class RevisionContractError(RuntimeError):
@@ -288,6 +290,49 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def dry_run_source_metadata(root: Path) -> dict[str, Any]:
+    """Return explicitly unavailable source metadata for strict dry planning.
+
+    A dry-run is a static matrix projection, not an executable run.  Reading
+    the Git commit/status would require invoking ``git`` (and used to violate
+    the runner's zero-child contract), so the manifest records that those
+    fields are intentionally unavailable rather than presenting a fabricated
+    commit or cleanliness claim.  The verifier recognizes this versioned
+    marker and applies the same no-spawn boundary.
+    """
+    del root  # The path is intentionally not inspected in strict dry-run.
+    return {
+        "schema": DRY_RUN_METADATA_SCHEMA,
+        "availability": DRY_RUN_METADATA_AVAILABILITY,
+        "reason": "strict-dry-run-no-child-processes",
+        "commit": None,
+        "dirty": None,
+        "status": None,
+    }
+
+
+def dry_run_tool_metadata(build_dir: Path | None = None) -> dict[str, Any]:
+    """Return no-spawn tool metadata for a static dry-run plan.
+
+    ``platform.platform()``, compiler version, and CMake version probing can
+    each launch a child on some hosts.  A dry plan therefore records only
+    interpreter values already resident in this process and marks external
+    tool probes unavailable.  ``build_dir`` is accepted to keep the call site
+    parallel to :func:`tool_metadata`; it is deliberately not traversed.
+    """
+    del build_dir
+    return {
+        "schema": DRY_RUN_METADATA_SCHEMA,
+        "availability": DRY_RUN_METADATA_AVAILABILITY,
+        "reason": "strict-dry-run-no-child-processes",
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+        "compiler": None,
+        "cmake": None,
+        "openfhe": os.environ.get("PICCARD_OPENFHE_VERSION", "not-probed"),
+    }
 
 
 def write_json(path: Path, value: Any, *, fsync: bool = True) -> None:

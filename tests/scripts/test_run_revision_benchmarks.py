@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,50 @@ class RevisionRunnerContractTest(unittest.TestCase):
             self.assertEqual(manifest["mode"], "dry-run")
             self.assertEqual(manifest["spawned_processes"], 0)
             self.assertEqual(manifest["cell_count"], 263)
+
+    def test_dry_run_process_boundary_is_zero_child_including_metadata(self) -> None:
+        """The complete in-process dry planner must not create any child.
+
+        Checking only the runner's producer counter is insufficient: metadata
+        probes and toy fixture preparation used to create children before the
+        first planned cell.  Keep this as a subprocess/Popen spy around the
+        complete run, not just a helper-level unit test.
+        """
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import run_revision_benchmarks as runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            build.mkdir()
+            results = Path(temporary) / "dry"
+
+            def forbidden_child(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("dry-run must not create a child process")
+
+            parsed = runner.build_parser().parse_args([
+                "--mode=dry-run", "--build-dir", str(build),
+                "--results-root", str(results), "--seed", "20260729",
+                "--threads", "2", "--matrix", str(MATRIX),
+            ])
+            with patch.object(subprocess, "run", side_effect=forbidden_child), \
+                    patch.object(subprocess, "Popen", side_effect=forbidden_child):
+                self.assertEqual(runner.run(parsed), 0)
+
+            manifest = json.loads((results / "run.json").read_text())
+            self.assertEqual(manifest["cell_count"], 263)
+            self.assertEqual(manifest["planned_processes"], 260)
+            self.assertEqual(manifest["spawned_processes"], 0)
+            self.assertEqual(manifest["source"]["schema"],
+                             "piccard-revision-dry-run-metadata-v1")
+            self.assertEqual(manifest["source"]["availability"],
+                             "UNAVAILABLE_NO_SPAWN")
+            self.assertEqual(manifest["tools"]["schema"],
+                             "piccard-revision-dry-run-metadata-v1")
+            self.assertEqual(manifest["tools"]["availability"],
+                             "UNAVAILABLE_NO_SPAWN")
+            self.assertFalse((results / "toy-input").exists())
+            self.assertFalse(any(path.name == "source.manifest.tsv"
+                                 for path in results.rglob("*")))
 
     def test_paper_requires_explicit_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
