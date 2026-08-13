@@ -11,8 +11,11 @@
 #include "baseline_engine.h"
 #include "build_info.h"
 #include "comparison_workload.h"
+#include "fhe_ind_revision_adapter.h"
 #include "raw_timing_schema.h"
+#include "revision_matrix.h"
 #include "std_security_evidence_schema.h"
+#include "revision_invocation_plan.h"
 #include "version.h"
 
 #include <algorithm>
@@ -87,6 +90,14 @@ struct Options {
     uint64_t trials = 0;
     uint64_t work5_n = 0;
     bool capabilities = false;
+};
+
+struct FheIndSuccessorOptions {
+    bool enabled = false;
+    std::vector<std::string> planner_argv;
+    std::string output;
+    std::string raw_timing_out;
+    std::string identity_output;
 };
 
 struct TupleData {
@@ -235,6 +246,70 @@ void MarkOption(std::set<std::string>* seen, const char* option) {
         throw std::invalid_argument(std::string("duplicate option: --") +
                                     option);
     }
+}
+
+FheIndSuccessorOptions ParseFheIndSuccessorOptions(int argc, char** argv) {
+    FheIndSuccessorOptions options;
+    bool output_seen = false;
+    bool raw_seen = false;
+    bool identity_seen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        if (argument.rfind("--revision-cell=", 0) == 0) {
+            options.enabled = true;
+            options.planner_argv.push_back(argument);
+        } else if (argument.rfind("--output=", 0) == 0) {
+            if (output_seen) {
+                throw std::invalid_argument("duplicate --output");
+            }
+            output_seen = true;
+            options.output = argument.substr(9);
+            if (options.output.empty()) {
+                throw std::invalid_argument("--output must not be empty");
+            }
+        } else if (argument.rfind("--raw-timing-out=", 0) == 0) {
+            if (raw_seen) {
+                throw std::invalid_argument("duplicate --raw-timing-out");
+            }
+            raw_seen = true;
+            options.raw_timing_out = argument.substr(17);
+            if (options.raw_timing_out.empty()) {
+                throw std::invalid_argument(
+                    "--raw-timing-out must not be empty");
+            }
+            options.planner_argv.push_back(
+                "--raw-timing-out={output}/raw");
+        } else if (argument.rfind("--revision-identity-out=", 0) == 0) {
+            if (identity_seen) {
+                throw std::invalid_argument(
+                    "duplicate --revision-identity-out");
+            }
+            identity_seen = true;
+            options.identity_output = argument.substr(24);
+            if (options.identity_output.empty()) {
+                throw std::invalid_argument(
+                    "--revision-identity-out must not be empty");
+            }
+        } else if (argument.rfind("--seed=", 0) == 0) {
+            options.planner_argv.push_back("--seed={seed}");
+        } else {
+            options.planner_argv.push_back(argument);
+        }
+    }
+    if (!options.enabled) {
+        if (identity_seen) {
+            throw std::invalid_argument(
+                "--revision-identity-out requires --revision-cell");
+        }
+        options.planner_argv.clear();
+        return options;
+    }
+    if (!output_seen || !raw_seen || !identity_seen) {
+        throw std::invalid_argument(
+            "FHE-IND successor requires --output, --raw-timing-out, and "
+            "--revision-identity-out");
+    }
+    return options;
 }
 
 Options ParseOptions(int argc, char** argv) {
@@ -420,6 +495,7 @@ Options ParseOptions(int argc, char** argv) {
 }
 
 piccard::SecurityLevel ParseSecurity(const std::string& value) {
+    if (value == "TOY") return piccard::SecurityLevel::TOY;
     if (value == "STD128") return piccard::SecurityLevel::STD128;
     if (value == "STD192") return piccard::SecurityLevel::STD192;
     throw std::invalid_argument("unsupported FHE-IND security profile");
@@ -1193,9 +1269,9 @@ std::string E2eCsv(const Options& options, const WorkloadData& workload,
     return out.str();
 }
 
-benchmark::RawTimingArtifact FheIndRawTimingArtifact(
+benchmark::RawTimingArtifact FheIndRawTimingArtifactForSeed(
     const Options& options,
-    const WorkloadData& workload,
+    const uint64_t base_seed,
     const std::vector<baseline::FheIndQueryResult>& results) {
     benchmark::RawTimingArtifact artifact;
     artifact.producer_id = "bench_fhe_ind";
@@ -1213,7 +1289,6 @@ benchmark::RawTimingArtifact FheIndRawTimingArtifact(
     if (results.size() != artifact.expected_measured) {
         throw std::logic_error("FHE-IND raw timing result count disagrees with profile");
     }
-    const uint64_t base_seed = workload.parsed.Records()[1].trial_seed;
     const auto add_measured = [&](const char* phase, uint64_t trial_index,
                                   uint64_t seed, double raw_ms) {
         benchmark::RawTimingSample sample;
@@ -1264,10 +1339,212 @@ benchmark::RawTimingArtifact FheIndRawTimingArtifact(
     return artifact;
 }
 
+benchmark::RawTimingArtifact FheIndRawTimingArtifact(
+    const Options& options,
+    const WorkloadData& workload,
+    const std::vector<baseline::FheIndQueryResult>& results) {
+    return FheIndRawTimingArtifactForSeed(
+        options, workload.parsed.Records()[1].trial_seed, results);
+}
+
+std::string RevisionE2eCsv(
+    const benchmark::FheIndRevisionExecutionPlan& execution,
+    const std::string& security,
+    const TupleData& tuple,
+    const ProducerIdentity& identity,
+    const benchmark::FheIndBoundedWorkload& workload,
+    const baseline::FheIndQueryResult& result) {
+    const double encode = RequirePositiveTiming(result.phase_encode_ms,
+                                                "phase_encode_ms");
+    const double encrypt = RequirePositiveTiming(result.phase_encrypt_ms,
+                                                 "phase_encrypt_ms");
+    const double evaluate = RequirePositiveTiming(result.phase_evaluate_ms,
+                                                  "phase_evaluate_ms");
+    const double decrypt = RequirePositiveTiming(result.phase_decrypt_ms,
+                                                 "phase_decrypt_ms");
+    const double online = encode + encrypt + evaluate + decrypt;
+    const double setup_context = RequirePositiveTiming(result.setup_context_ms,
+                                                       "setup_context_ms");
+    const double setup_keygen = RequirePositiveTiming(result.setup_keygen_ms,
+                                                      "setup_keygen_ms");
+    const double full = setup_context + setup_keygen + online;
+    const std::string workload_id =
+        "fhe-ind-revision-cell-v1:" + execution.selection.cell.cell_id;
+    const std::vector<uint8_t> workload_id_bytes(workload_id.begin(),
+                                                 workload_id.end());
+    const std::string workload_manifest =
+        benchmark::Sha256Hex(workload_id_bytes);
+    const std::vector<std::string> fields = {
+        execution.selection.cell.cell_id,
+        "fhe_ind",
+        kShapeId,
+        security,
+        "N/A",
+        "N/A",
+        Number(execution.universe),
+        Number(execution.set_size),
+        Number(workload.target_jaccard),
+        Number(workload.intersection_size),
+        Number(workload.union_size),
+        Number(workload.realized_jaccard),
+        Number(0),
+        Number(execution.trial_count),
+        Number(tuple.requested_ring_dim),
+        Number(tuple.natural_ring_dim),
+        Number(tuple.realized_ring_dim),
+        Number(tuple.natural_depth),
+        Number(tuple.provisioned_depth),
+        Number(tuple.scaling_mod_size),
+        Number(tuple.num_limbs),
+        Number(tuple.plaintext_modulus),
+        tuple.bfv_context_fingerprint,
+        Number(tuple.log_q_bits),
+        OrderedRnsJson(tuple.ordered_rns_moduli),
+        OrderedRnsSha256(tuple.ordered_rns_moduli),
+        tuple.openfhe_version,
+        "not-applicable",
+        tuple.context_tuple_sha256,
+        "not-applicable",
+        workload_id,
+        workload_manifest,
+        Number(0),
+        Number(setup_context),
+        Number(setup_keygen),
+        Number(encode),
+        Number(encrypt),
+        Number(evaluate),
+        Number(decrypt),
+        Number(online),
+        Number(full),
+        Number(result.intersection),
+        Number(result.jaccard),
+        "DIAGNOSTIC",
+        "",
+        "fhe_ind",
+        identity.fhe_ind_binary_sha256,
+        identity.capabilities_sha256,
+    };
+    std::ostringstream out;
+    out << CsvHeader();
+    for (size_t index = 0; index < fields.size(); ++index) {
+        if (index != 0) out << ',';
+        out << CsvCell(fields[index]);
+    }
+    out << '\n';
+    return out.str();
+}
+
+void WriteFheIndRevisionIdentity(
+    const std::string& output_path,
+    const benchmark::FheIndRevisionExecutionPlan& execution) {
+    WriteNew(output_path,
+             benchmark::SerializeFheIndRevisionIdentityHeader() +
+                 benchmark::SerializeFheIndRevisionIdentityRow(
+                     execution.selection) +
+                 benchmark::SerializeFheIndRevisionTerminalRow(execution));
+}
+
 std::string CapabilitiesJson(const ProducerIdentity& identity) {
     auto object = CapabilitiesDescriptor(identity.fhe_ind_binary_sha256);
     object.AddString("capabilities_sha256", identity.capabilities_sha256);
     return object.Serialize() + "\n";
+}
+
+int RunRevision(const FheIndSuccessorOptions& successor) {
+#ifdef PICCARD_REVISION_MATRIX_PATH
+    const benchmark::RevisionMatrix matrix =
+        benchmark::LoadAndValidateRevisionMatrix(
+        PICCARD_REVISION_MATRIX_PATH);
+    const benchmark::FheIndRevisionRequest request =
+        benchmark::ParseFheIndRevisionArgs(successor.planner_argv);
+    const benchmark::RevisionRunMode mode =
+        request.raw_timing_profile == "readiness-toy-v1"
+            ? benchmark::RevisionRunMode::Toy : benchmark::RevisionRunMode::Paper;
+    const benchmark::FheIndRevisionExecutionPlan execution =
+        benchmark::PlanFheIndRevisionExecution(
+            matrix, successor.planner_argv, mode);
+
+    RequireAbsolutePath(successor.output, "--output");
+    RequireAbsolutePath(successor.raw_timing_out, "--raw-timing-out");
+    RequireAbsolutePath(successor.identity_output, "--revision-identity-out");
+    if (successor.raw_timing_out == successor.output ||
+        successor.identity_output == successor.output ||
+        successor.identity_output == successor.raw_timing_out) {
+        throw std::invalid_argument(
+            "FHE-IND successor outputs must designate distinct paths");
+    }
+
+    const auto bounded = benchmark::MakeFheIndBoundedWorkload(
+        execution.set_size, 0.5, execution.universe);
+    Options options;
+    options.cell_id = execution.selection.cell.cell_id;
+    options.security = request.security;
+    options.raw_profile = request.raw_timing_profile;
+    options.raw_timing_out = successor.raw_timing_out;
+    options.output = successor.output;
+
+    const ProducerIdentity identity = ProducerIdentityForSelf();
+    baseline::BaselineParams params;
+    if (execution.universe > std::numeric_limits<uint32_t>::max() ||
+        execution.set_size > std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument(
+            "FHE-IND successor dimensions exceed producer uint32 limits");
+    }
+    params.universe_size = static_cast<uint32_t>(execution.universe);
+    params.security = ParseSecurity(request.security);
+    params.Validate();
+
+    // Matrix identity, profile, security, counts, and bounded dimensions have
+    // all been checked above before this first context/keygen side effect.
+    baseline::BaselineEngine engine(params);
+    engine.Initialize();
+    if (!engine.HasGeneratedKeys()) {
+        throw std::logic_error(
+            "FHE-IND successor did not generate its required keys");
+    }
+    const TupleData tuple = TupleFromContext(engine, request.security);
+
+    std::vector<baseline::FheIndQueryResult> results;
+    results.reserve(static_cast<size_t>(execution.trial_count));
+    for (uint64_t index = 0; index < execution.trial_count; ++index) {
+        const auto result = engine.RunQueryPhased(
+            bounded.set_a, bounded.set_b);
+        if (result.intersection !=
+                static_cast<int64_t>(bounded.intersection_size) ||
+            result.union_size != static_cast<int64_t>(bounded.union_size) ||
+            std::abs(result.jaccard - bounded.realized_jaccard) > 1e-12) {
+            throw std::runtime_error(
+                "FHE-IND successor result does not match bounded workload");
+        }
+        results.push_back(result);
+    }
+    if (results.size() != execution.selection.plan.expected_rows.front()
+                              .measured_count) {
+        throw std::logic_error(
+            "FHE-IND successor result count disagrees with matrix row");
+    }
+
+    WriteNew(successor.output,
+             RevisionE2eCsv(execution, request.security, tuple, identity,
+                            bounded, results.front()));
+    const auto raw_artifact = FheIndRawTimingArtifactForSeed(
+        options, 0, results);
+    std::error_code raw_ec;
+    std::filesystem::create_directories(successor.raw_timing_out, raw_ec);
+    if (raw_ec) {
+        throw std::runtime_error(
+            "cannot create FHE-IND successor raw timing directory: " +
+            raw_ec.message());
+    }
+    benchmark::WriteRawTimingArtifactsV1(
+        successor.raw_timing_out, {raw_artifact});
+    WriteFheIndRevisionIdentity(successor.identity_output, execution);
+    return 0;
+#else
+    (void)successor;
+    throw std::runtime_error(
+        "bench_fhe_ind was built without PICCARD_REVISION_MATRIX_PATH");
+#endif
 }
 
 int Run(const Options& options) {
@@ -1399,6 +1676,9 @@ int Run(const Options& options) {
 
 int main(int argc, char** argv) {
     try {
+        const FheIndSuccessorOptions successor =
+            ParseFheIndSuccessorOptions(argc, argv);
+        if (successor.enabled) return RunRevision(successor);
         return Run(ParseOptions(argc, argv));
     } catch (const std::exception& error) {
         std::cerr << "bench_fhe_ind: " << error.what() << '\n';
