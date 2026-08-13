@@ -46,5 +46,15 @@ struct RevisionInvocationPlan {
 RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
                                                RevisionRunMode mode);
 
+/**
+ * @brief Plan exactly one validated `fhe_ind` matrix cell.
+ *
+ * `Paper` and `DryRun` retain the paper diagnostic count; `Toy` projects the
+ * expected row to its toy count.  The returned argv is pure data and no
+ * producer or FHE context is launched.
+ */
+RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
+                                              RevisionRunMode mode);
+
 }  // namespace benchmark
 }  // namespace piccard

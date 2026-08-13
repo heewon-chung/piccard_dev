@@ -193,6 +193,108 @@ bool IsToyMode(RevisionRunMode mode) {
     return mode == RevisionRunMode::Toy;
 }
 
+[[noreturn]] void RejectFheInd(const std::string& reason) {
+    throw std::invalid_argument("invalid FHE-IND revision invocation cell: " +
+                                reason);
+}
+
+void ValidateFheIndGeometry(const RevisionCell& cell) {
+    if (cell.cell_id != "paper-v1::fhe_ind::" + cell.axis + "=" +
+                            cell.axis_value) {
+        RejectFheInd("cell ID does not bind profile, family, axis, and value");
+    }
+    if (cell.axes.size() != 4u) {
+        RejectFheInd("FHE-IND cells require exactly k,m,n,u");
+    }
+
+    const uint64_t k = Axis(cell, "k");
+    const uint64_t m = Axis(cell, "m");
+    const uint64_t n = Axis(cell, "n");
+    const uint64_t u = Axis(cell, "u");
+    if (k != 128 || m != 64) RejectFheInd("k/m geometry must be 128/64");
+
+    if (cell.axis == "control") {
+        if (cell.axis_value != "default") {
+            RejectFheInd("control selector is not default");
+        }
+        RequireControlGeometry(cell, 128, 64, 1000, 65536);
+        return;
+    }
+    if (cell.axis == "n") {
+        if (!IsOneOf(n, {100, 1000, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectFheInd("invalid n selector");
+        }
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        return;
+    }
+    if (cell.axis == "u") {
+        if (!IsOneOf(u, {16384, 65536, 262144, 1048576}) ||
+            cell.axis_value != std::to_string(u)) {
+            RejectFheInd("invalid u selector");
+        }
+        RequireAxisValue(cell, "n", 1000);
+        return;
+    }
+    RejectFheInd("unsupported FHE-IND selector axis");
+}
+
+void ValidateFheIndCounts(const RevisionCell& cell) {
+    if (cell.paper_count != 30 || cell.toy_count != 1 ||
+        cell.paper_trials != 30 || cell.toy_trials != 1) {
+        RejectFheInd("FHE-IND invocation counts must be paper=30 and toy=1");
+    }
+    const std::map<std::string, uint64_t> paper_counts = {{"timing", 30}};
+    const std::map<std::string, uint64_t> toy_counts = {{"timing", 1}};
+    if (cell.paper_counts != paper_counts || cell.toy_counts != toy_counts) {
+        RejectFheInd("FHE-IND per-kind counts do not match the frozen contract");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectFheInd("FHE-IND cells require one diagnostic row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    if (row.row_id != "fhe_ind" || row.status != "DIAGNOSTIC" ||
+        row.terminal_status != "DIAGNOSTIC" || row.method != "fhe_ind" ||
+        row.raw_timing_contract != "raw-phase-v1" || !row.reason.empty() ||
+        !row.reason_code.empty() || row.paper_measured_count != 30 ||
+        row.toy_measured_count != 1 || row.measured_count != 30) {
+        RejectFheInd("FHE-IND diagnostic row contract mismatch");
+    }
+}
+
+void ValidateFheIndCell(const RevisionCell& cell) {
+    if (cell.family != "fhe_ind") RejectFheInd("family must be fhe_ind");
+    if (cell.producer != "bench_fhe_ind") {
+        RejectFheInd("producer must be bench_fhe_ind");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectFheInd("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") RejectFheInd("dataset must be synthetic");
+    if (cell.invocation_status != "RUN") RejectFheInd("cell is not RUN");
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectFheInd("cell must remain diagnostic-only");
+    }
+    if (cell.expected_artifact_schema != "fhe-ind-csv-v1") {
+        RejectFheInd("unexpected FHE-IND artifact schema");
+    }
+    ValidateFheIndGeometry(cell);
+    ValidateFheIndCounts(cell);
+}
+
+std::string FheIndProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectFheInd("unknown run mode");
+}
+
 }  // namespace
 
 RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
@@ -232,6 +334,41 @@ RevisionInvocationPlan PlanPiccardRevisionCell(const RevisionCell& cell,
         for (auto& row : plan.expected_rows) row.measured_count = row.toy_measured_count;
     } else {
         for (auto& row : plan.expected_rows) row.measured_count = row.paper_measured_count;
+    }
+    return plan;
+}
+
+RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
+                                              RevisionRunMode mode) {
+    ValidateFheIndCell(cell);
+
+    const bool toy = IsToyMode(mode);
+    const std::string profile = FheIndProfileForMode(mode);
+    const auto& n = cell.axes.at("n");
+    const auto& u = cell.axes.at("u");
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--mode=e2e",
+        "--cell-id=" + cell.cell_id,
+        std::string("--security=") + (toy ? "TOY" : "STD128"),
+        "--n=" + n,
+        "--universe=" + u,
+        std::string("--trials=") + (toy ? "1" : "30"),
+        "--raw-timing-out={output}/raw",
+        "--raw-timing-profile=" + profile,
+        "--seed={seed}",
+    };
+
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
     }
     return plan;
 }

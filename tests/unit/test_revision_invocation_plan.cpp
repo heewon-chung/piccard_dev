@@ -17,6 +17,7 @@ using piccard::benchmark::RevisionInvocationPlan;
 using piccard::benchmark::RevisionMatrix;
 using piccard::benchmark::RevisionRunMode;
 using piccard::benchmark::PlanPiccardRevisionCell;
+using piccard::benchmark::PlanFheIndRevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -26,6 +27,14 @@ std::vector<const RevisionCell*> PiccardCells(const RevisionMatrix& matrix) {
     std::vector<const RevisionCell*> cells;
     for (const auto& cell : matrix.cells) {
         if (cell.family == "piccard_std128") cells.push_back(&cell);
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> FheIndCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "fhe_ind") cells.push_back(&cell);
     }
     return cells;
 }
@@ -161,4 +170,133 @@ TEST(RevisionInvocationPlan, StructFieldsFollowDeclaredApiOrder) {
     EXPECT_EQ(plan.invocation_status, "RUN");
     EXPECT_TRUE(plan.argv.empty());
     EXPECT_TRUE(plan.expected_rows.empty());
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllNineFheIndCells) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = FheIndCells(matrix);
+    ASSERT_EQ(cells.size(), 9u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    for (const RevisionCell* cell : cells) {
+        const RevisionInvocationPlan paper =
+            PlanFheIndRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan toy =
+            PlanFheIndRevisionCell(*cell, RevisionRunMode::Toy);
+        const RevisionInvocationPlan dry_run =
+            PlanFheIndRevisionCell(*cell, RevisionRunMode::DryRun);
+
+        ASSERT_EQ(paper.cell_id, cell->cell_id);
+        ASSERT_EQ(paper.producer, "bench_fhe_ind");
+        ASSERT_EQ(paper.concrete_profile, "paper-v1");
+        ASSERT_EQ(paper.invocation_status, "RUN");
+        ASSERT_EQ(paper.argv.size(), 10u);
+        EXPECT_EQ(paper.argv,
+                  (std::vector<std::string>{
+                      "--revision-cell=" + cell->cell_id,
+                      "--mode=e2e",
+                      "--cell-id=" + cell->cell_id,
+                      "--security=STD128",
+                      "--n=" + cell->axes.at("n"),
+                      "--universe=" + cell->axes.at("u"),
+                      "--trials=30",
+                      "--raw-timing-out={output}/raw",
+                      "--raw-timing-profile=paper-v1",
+                      "--seed={seed}"}));
+
+        ASSERT_EQ(toy.cell_id, cell->cell_id);
+        ASSERT_EQ(toy.producer, "bench_fhe_ind");
+        ASSERT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        ASSERT_EQ(toy.invocation_status, "RUN");
+        ASSERT_EQ(toy.argv.size(), 10u);
+        EXPECT_EQ(toy.argv,
+                  (std::vector<std::string>{
+                      "--revision-cell=" + cell->cell_id,
+                      "--mode=e2e",
+                      "--cell-id=" + cell->cell_id,
+                      "--security=TOY",
+                      "--n=" + cell->axes.at("n"),
+                      "--universe=" + cell->axes.at("u"),
+                      "--trials=1",
+                      "--raw-timing-out={output}/raw",
+                      "--raw-timing-profile=readiness-toy-v1",
+                      "--seed={seed}"}));
+        EXPECT_EQ(dry_run.argv, paper.argv);
+        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+
+        ASSERT_EQ(paper.expected_rows.size(), 1u);
+        ASSERT_EQ(toy.expected_rows.size(), 1u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+        EXPECT_EQ(paper.expected_rows.front().measured_count,
+                  paper.expected_rows.front().paper_measured_count);
+        EXPECT_EQ(toy.expected_rows.front().measured_count,
+                  toy.expected_rows.front().toy_measured_count);
+        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
+                  dry_run.expected_rows.front().paper_measured_count);
+        EXPECT_EQ(paper.expected_rows.front().row_id, "fhe_ind");
+        EXPECT_EQ(paper.expected_rows.front().status, "DIAGNOSTIC");
+        EXPECT_EQ(paper.expected_rows.front().terminal_status, "DIAGNOSTIC");
+        EXPECT_EQ(paper.expected_rows.front().method, "fhe_ind");
+        EXPECT_EQ(paper.expected_rows.front().raw_timing_contract,
+                  "raw-phase-v1");
+
+        paper_argv.insert(paper.argv);
+        toy_argv.insert(toy.argv);
+        dry_run_argv.insert(dry_run.argv);
+    }
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+}
+
+TEST(RevisionInvocationPlan, RejectsInvalidFheIndIdentityGeometryAndRows) {
+    RevisionMatrix matrix = Load();
+    const RevisionCell source = *FheIndCells(matrix).front();
+
+    RevisionCell cell = source;
+    cell.family = "piccard_std128";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.producer = "bench_piccard";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.axes["u"] = "16384";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.paper_counts["timing"] = 29;
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_rows.front().raw_timing_contract = "wrong";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.eligibility = "TABLE_ELIGIBLE";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = source;
+    cell.expected_artifact_schema = "other-schema";
+    EXPECT_THROW(PlanFheIndRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
 }
