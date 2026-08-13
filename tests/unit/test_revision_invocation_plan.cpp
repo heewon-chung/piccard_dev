@@ -27,6 +27,7 @@ using piccard::benchmark::PlanThresholdRevisionCell;
 using piccard::benchmark::PlanBcg12RevisionCell;
 using piccard::benchmark::PlanSj16RevisionCell;
 using piccard::benchmark::PlanDynamicRevisionCell;
+using piccard::benchmark::PlanFloodingRevisionCell;
 
 RevisionMatrix Load() {
     return LoadAndValidateRevisionMatrix(PICCARD_REVISION_MATRIX_PATH);
@@ -109,6 +110,14 @@ std::vector<const RevisionCell*> DynamicCells(const RevisionMatrix& matrix) {
             cell.family == "dynamic_refresh") {
             cells.push_back(&cell);
         }
+    }
+    return cells;
+}
+
+std::vector<const RevisionCell*> FloodingCells(const RevisionMatrix& matrix) {
+    std::vector<const RevisionCell*> cells;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "flooding") cells.push_back(&cell);
     }
     return cells;
 }
@@ -2490,5 +2499,256 @@ TEST(RevisionInvocationPlan,
     cell = refresh;
     cell.expected_rows.front().attributes["k"] = "64";
     EXPECT_THROW(PlanDynamicRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan,
+     ExhaustivelyPlansAllThreeFloodingCellsAndSupportedToySelection) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = FloodingCells(matrix);
+    ASSERT_EQ(cells.size(), 3u);
+
+    std::set<std::vector<std::string>> paper_argv;
+    std::set<std::vector<std::string>> dry_run_argv;
+    std::set<std::vector<std::string>> toy_argv;
+    for (const RevisionCell* cell : cells) {
+        SCOPED_TRACE(cell->cell_id);
+        ASSERT_EQ(cell->axis, "profile");
+        ASSERT_TRUE(cell->axis_value == "primary40" ||
+                    cell->axis_value == "sensitivity64" ||
+                    cell->axis_value == "feasibility128");
+
+        const std::vector<std::string> expected_paper = {
+            "--revision-cell=" + cell->cell_id,
+            "--run-profile=paper-v1",
+            "--profile=" + cell->axis_value,
+            "--repetitions=5",
+            "--results-root={output}",
+            "--seed={seed}",
+            "--threads={threads}",
+        };
+        std::vector<std::string> expected_dry_run = expected_paper;
+        expected_dry_run.push_back("--dry-run");
+
+        const RevisionInvocationPlan paper =
+            PlanFloodingRevisionCell(*cell, RevisionRunMode::Paper);
+        const RevisionInvocationPlan dry_run =
+            PlanFloodingRevisionCell(*cell, RevisionRunMode::DryRun);
+        EXPECT_EQ(paper.argv, expected_paper);
+        EXPECT_EQ(dry_run.argv, expected_dry_run);
+        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(dry_run.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.producer, "bench_noise");
+        EXPECT_EQ(dry_run.producer, "bench_noise");
+        EXPECT_EQ(paper.concrete_profile, "paper-v1");
+        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        EXPECT_EQ(dry_run.invocation_status, "RUN");
+        EXPECT_FALSE(HasArg(paper, "--resume"));
+        EXPECT_FALSE(HasArg(paper, "--smoke"));
+        EXPECT_FALSE(HasArg(paper, "--finalize-dir"));
+        EXPECT_FALSE(HasArg(paper, "--bench-noise"));
+        EXPECT_TRUE(HasArg(dry_run, "--dry-run"));
+
+        ASSERT_EQ(paper.expected_rows.size(), 3u);
+        ASSERT_EQ(dry_run.expected_rows.size(), 3u);
+        const std::vector<std::string> patterns = {
+            "zero", "random", "adversarial"};
+        for (size_t row_index = 0; row_index < patterns.size(); ++row_index) {
+            const RevisionRow& paper_row = paper.expected_rows.at(row_index);
+            const RevisionRow& dry_row = dry_run.expected_rows.at(row_index);
+            EXPECT_EQ(paper_row.row_id, patterns.at(row_index));
+            EXPECT_EQ(paper_row.pattern, patterns.at(row_index));
+            EXPECT_EQ(dry_row.row_id, patterns.at(row_index));
+            EXPECT_EQ(dry_row.pattern, patterns.at(row_index));
+            EXPECT_EQ(paper_row.status, "DIAGNOSTIC");
+            EXPECT_EQ(paper_row.terminal_status, "DIAGNOSTIC");
+            EXPECT_EQ(dry_row.status, "DIAGNOSTIC");
+            EXPECT_EQ(dry_row.terminal_status, "DIAGNOSTIC");
+            EXPECT_EQ(paper_row.timing_contract, "NOT_APPLICABLE");
+            EXPECT_EQ(dry_row.timing_contract, "NOT_APPLICABLE");
+            EXPECT_TRUE(paper_row.reason.empty());
+            EXPECT_TRUE(paper_row.reason_code.empty());
+            EXPECT_TRUE(dry_row.reason.empty());
+            EXPECT_TRUE(dry_row.reason_code.empty());
+            EXPECT_EQ(paper_row.measured_count, 5u);
+            EXPECT_EQ(paper_row.paper_measured_count, 5u);
+            EXPECT_EQ(paper_row.toy_measured_count, 1u);
+            EXPECT_EQ(dry_row.measured_count, 5u);
+            EXPECT_TRUE(paper_row.method.empty());
+            EXPECT_TRUE(dry_row.method.empty());
+            EXPECT_TRUE(paper_row.attributes.empty());
+            EXPECT_TRUE(paper_row.list_attributes.empty());
+        }
+
+        paper_argv.insert(paper.argv);
+        dry_run_argv.insert(dry_run.argv);
+
+        if (cell->axis_value != "primary40") {
+            EXPECT_THROW(PlanFloodingRevisionCell(*cell, RevisionRunMode::Toy),
+                         std::invalid_argument);
+            continue;
+        }
+
+        const RevisionInvocationPlan toy =
+            PlanFloodingRevisionCell(*cell, RevisionRunMode::Toy);
+        const std::vector<std::string> expected_toy = {
+            "--revision-cell=" + cell->cell_id,
+            "--run-profile=readiness-toy-v1",
+            "--profile=primary40",
+            "--repetitions=1",
+            "--results-root={output}",
+            "--seed={seed}",
+            "--threads={threads}",
+        };
+        EXPECT_EQ(toy.argv, expected_toy);
+        EXPECT_EQ(toy.cell_id, cell->cell_id);
+        EXPECT_EQ(toy.producer, "bench_noise");
+        EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+        EXPECT_EQ(toy.invocation_status, "RUN");
+        EXPECT_FALSE(HasArg(toy, "--dry-run"));
+        EXPECT_FALSE(HasArg(toy, "--resume"));
+        EXPECT_FALSE(HasArg(toy, "--smoke"));
+        EXPECT_FALSE(HasArg(toy, "--finalize-dir"));
+        EXPECT_FALSE(HasArg(toy, "--bench-noise"));
+        ASSERT_EQ(toy.expected_rows.size(), 3u);
+        for (const RevisionRow& toy_row : toy.expected_rows) {
+            EXPECT_EQ(toy_row.measured_count, 1u);
+            EXPECT_EQ(toy_row.toy_measured_count, 1u);
+            EXPECT_EQ(toy_row.paper_measured_count, 5u);
+        }
+        toy_argv.insert(toy.argv);
+    }
+
+    EXPECT_EQ(paper_argv.size(), cells.size());
+    EXPECT_EQ(dry_run_argv.size(), cells.size());
+    EXPECT_EQ(toy_argv.size(), 1u);
+}
+
+TEST(RevisionInvocationPlan,
+     RejectsInvalidFloodingIdentityCountsRowsAndUnsupportedToyProfiles) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = FloodingCells(matrix);
+    ASSERT_EQ(cells.size(), 3u);
+    const RevisionCell primary = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis_value == "primary40";
+        });
+    const RevisionCell sensitivity = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->axis_value == "sensitivity64";
+        });
+
+    RevisionCell cell = primary;
+    cell.family = "dynamic_timing";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.producer = "bench_dynamic";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.profile = "readiness-toy-v1";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.dataset = "enron";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_artifact_schema = "wrong-schema";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.invocation_status = "NO_SPAWN";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.eligibility = "TABLE_ELIGIBLE";
+    cell.table_eligible = true;
+    cell.comparison_eligible = true;
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.axis = "control";
+    cell.axis_value = "default";
+    cell.cell_id = "paper-v1::flooding::control=default";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.axis_value = "primary41";
+    cell.cell_id = "paper-v1::flooding::profile=primary41";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.axes.erase("u");
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.axes["k"] = "256";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.axes["u"] = "262144";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.paper_count = 4;
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.paper_counts["repetitions_per_pattern"] = 4;
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.attributes["noise_profile"] = "sensitivity64";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.attributes["timing_contract"] = "full-query";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_rows.front().pattern = "random";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_rows.front().timing_contract = "full-query";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_rows.front().status = "MEASURED";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_rows.front().row_id = "wrong";
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = primary;
+    cell.expected_rows.pop_back();
+    EXPECT_THROW(PlanFloodingRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    EXPECT_THROW(PlanFloodingRevisionCell(sensitivity, RevisionRunMode::Toy),
                  std::invalid_argument);
 }

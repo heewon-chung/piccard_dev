@@ -2089,6 +2089,149 @@ RevisionInvocationPlan PlanDynamicRevisionCell(const RevisionCell& cell,
     return plan;
 }
 
+namespace {
+
+[[noreturn]] void RejectFlooding(const std::string& reason) {
+    throw std::invalid_argument(
+        "invalid flooding revision invocation cell: " + reason);
+}
+
+bool IsFloodingProfile(const std::string& profile) {
+    return profile == "primary40" || profile == "sensitivity64" ||
+           profile == "feasibility128";
+}
+
+void ValidateFloodingGeometry(const RevisionCell& cell) {
+    if (cell.cell_id != "paper-v1::flooding::profile=" + cell.axis_value) {
+        RejectFlooding("cell ID does not bind profile, family, axis, and value");
+    }
+    if (cell.axis != "profile" || !IsFloodingProfile(cell.axis_value)) {
+        RejectFlooding("axis must select primary40, sensitivity64, or feasibility128");
+    }
+    if (cell.axes.size() != 4u) {
+        RejectFlooding("flooding cells require exactly k,m,n,u");
+    }
+    RequireControlGeometry(cell, 128, 64, 1000, 65536);
+}
+
+void ValidateFloodingRow(const RevisionRow& row, const char* pattern) {
+    if (row.row_id != pattern || row.status != "DIAGNOSTIC" ||
+        row.reason != "" || row.reason_code != "" ||
+        row.terminal_status != "DIAGNOSTIC" || !row.method.empty() ||
+        row.timing_contract != "NOT_APPLICABLE" ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        row.pattern != pattern || !row.variant.empty() ||
+        !row.fit_authority.empty() || !row.truth_bases.empty() ||
+        !row.field_values.empty() || !row.attributes.empty() ||
+        !row.list_attributes.empty() || row.measured_count != 5 ||
+        row.paper_measured_count != 5 || row.toy_measured_count != 1) {
+        RejectFlooding("flooding expected row contract mismatch");
+    }
+}
+
+void ValidateFloodingCell(const RevisionCell& cell) {
+    if (cell.family != "flooding") {
+        RejectFlooding("family must be flooding");
+    }
+    if (cell.producer != "bench_noise") {
+        RejectFlooding("producer must be bench_noise");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectFlooding("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectFlooding("dataset must be synthetic");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectFlooding("timeout class must be standard");
+    }
+    if (cell.expected_artifact_schema != "noise-profile-v1") {
+        RejectFlooding("unexpected noise-profile artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectFlooding("cell is not RUN");
+    }
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectFlooding("flooding cells must be diagnostic-only");
+    }
+    if (cell.attributes !=
+            std::map<std::string, std::string>{
+                {"noise_profile", cell.axis_value},
+                {"timing_contract", "NOT_APPLICABLE"}} ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectFlooding("flooding cell metadata mismatch");
+    }
+    ValidateFloodingGeometry(cell);
+
+    if (cell.paper_count != 5 || cell.toy_count != 1 ||
+        cell.paper_trials != 5 || cell.toy_trials != 1 ||
+        cell.paper_counts !=
+            std::map<std::string, uint64_t>{{"repetitions_per_pattern", 5}} ||
+        cell.toy_counts !=
+            std::map<std::string, uint64_t>{{"repetitions_per_pattern", 1}}) {
+        RejectFlooding("flooding paper/toy repetitions do not match contract");
+    }
+    if (cell.expected_rows.size() != 3u) {
+        RejectFlooding("flooding cells require zero, random, and adversarial rows");
+    }
+    const char* patterns[] = {"zero", "random", "adversarial"};
+    for (size_t index = 0; index < 3u; ++index) {
+        ValidateFloodingRow(cell.expected_rows.at(index), patterns[index]);
+    }
+}
+
+std::string FloodingProfileForMode(RevisionRunMode mode) {
+    switch (mode) {
+        case RevisionRunMode::Paper:
+        case RevisionRunMode::DryRun:
+            return "paper-v1";
+        case RevisionRunMode::Toy:
+            return "readiness-toy-v1";
+    }
+    RejectFlooding("unknown run mode");
+}
+
+}  // namespace
+
+RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
+                                                RevisionRunMode mode) {
+    ValidateFloodingCell(cell);
+
+    const std::string profile = FloodingProfileForMode(mode);
+    const bool toy = IsToyMode(mode);
+    if (toy && cell.axis_value != "primary40") {
+        RejectFlooding("Toy planning supports only the primary40 profile");
+    }
+
+    RevisionInvocationPlan plan;
+    plan.cell_id = cell.cell_id;
+    plan.producer = cell.producer;
+    plan.concrete_profile = profile;
+    plan.invocation_status = cell.invocation_status;
+    plan.argv = {
+        "--revision-cell=" + cell.cell_id,
+        "--run-profile=" + profile,
+        "--profile=" + cell.axis_value,
+        std::string("--repetitions=") +
+            (toy ? std::to_string(cell.toy_count)
+                 : std::to_string(cell.paper_count)),
+        "--results-root={output}",
+        "--seed={seed}",
+        "--threads={threads}",
+    };
+    if (mode == RevisionRunMode::DryRun) {
+        plan.argv.push_back("--dry-run");
+    }
+
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    return plan;
+}
+
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {
     if (cell.family == "threshold_dblp_fpfn") {

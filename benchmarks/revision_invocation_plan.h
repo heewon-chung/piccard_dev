@@ -124,6 +124,17 @@ RevisionInvocationPlan PlanDynamicRevisionCell(const RevisionCell& cell,
                                                RevisionRunMode mode);
 
 /**
+ * @brief Plan one validated flooding/noise-profile matrix cell.
+ *
+ * The returned argv is for the `scripts/run_noise_profiles.sh` wrapper and
+ * is pure data: planning never launches the noise producer.  Paper and
+ * dry-run cover all three profile axes; Toy is executable only for the
+ * representative `primary40` profile.
+ */
+RevisionInvocationPlan PlanFloodingRevisionCell(const RevisionCell& cell,
+                                                RevisionRunMode mode);
+
+/**
  * @brief Plan one supported threshold matrix cell.
  *
  * The fifteen `threshold_timing`, `threshold_spec`, and
