@@ -16,6 +16,7 @@
 #include "util/params.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -137,7 +138,73 @@ struct ReviewSuccessorOptions {
     std::vector<std::string> planner_argv;
     RevisionRunMode mode = RevisionRunMode::Paper;
     ReviewRevisionExecutionPlan execution;
+    // Concrete values are captured before planner placeholders are restored.
+    // They are used only at the producer boundary; the pure planner argv
+    // remains canonical and byte-identical to the matrix contract.
+    std::string concrete_seed;
+    std::filesystem::path concrete_output;
 };
+
+struct ConcreteReviewRuntimeArgs {
+    std::string seed;
+    std::filesystem::path output;
+};
+
+ConcreteReviewRuntimeArgs ParseConcreteReviewRuntimeArgs(
+    const std::vector<std::string>& argv) {
+    ConcreteReviewRuntimeArgs runtime;
+    bool seed_seen = false;
+    bool output_seen = false;
+    for (const std::string& arg : argv) {
+        if (arg.rfind("--seed=", 0) == 0) {
+            if (seed_seen) {
+                throw std::invalid_argument("duplicate concrete review --seed");
+            }
+            seed_seen = true;
+            const std::string value = arg.substr(7);
+            if (value.empty() || value == "{seed}" || value.front() == '+' ||
+                value.front() == '-') {
+                throw std::invalid_argument(
+                    "concrete review --seed must be a positive integer");
+            }
+            uint64_t parsed = 0;
+            const auto result = std::from_chars(
+                value.data(), value.data() + value.size(), parsed);
+            if (result.ec != std::errc{} ||
+                result.ptr != value.data() + value.size() || parsed == 0 ||
+                std::to_string(parsed) != value) {
+                throw std::invalid_argument(
+                    "concrete review --seed must be a canonical unsigned integer");
+            }
+            runtime.seed = value;
+        } else if (arg.rfind("--output=", 0) == 0) {
+            if (output_seen) {
+                throw std::invalid_argument("duplicate concrete review --output");
+            }
+            output_seen = true;
+            const std::string value = arg.substr(9);
+            if (value.empty() || value.find('{') != std::string::npos ||
+                value.find('}') != std::string::npos) {
+                throw std::invalid_argument(
+                    "concrete review --output must be a concrete CSV path");
+            }
+            const std::filesystem::path output(value);
+            const std::string filename = output.filename().string();
+            if (filename != "encoding.csv" && filename != "comparison.csv") {
+                throw std::invalid_argument(
+                    "concrete review --output must end in encoding.csv or comparison.csv");
+            }
+            runtime.output = output;
+        }
+    }
+    if (!seed_seen) {
+        throw std::invalid_argument("missing concrete review --seed");
+    }
+    if (!output_seen) {
+        throw std::invalid_argument("missing concrete review --output");
+    }
+    return runtime;
+}
 
 std::vector<std::string> CanonicalizeReviewPlannerArgv(
     const std::vector<std::string>& argv) {
@@ -148,16 +215,15 @@ std::vector<std::string> CanonicalizeReviewPlannerArgv(
             canonical.push_back("--seed={seed}");
         } else if (arg.rfind("--output=", 0) == 0) {
             const std::string value = arg.substr(9);
-            const std::string suffix = value.size() >= 4
-                ? value.substr(value.size() - 4) : "";
-            if (suffix == ".csv") {
-                const bool encoding = value.find("encoding.csv") !=
-                                      std::string::npos;
-                canonical.push_back(std::string("--output={output}/") +
-                                     (encoding ? "encoding.csv"
-                                               : "comparison.csv"));
+            const std::string filename =
+                std::filesystem::path(value).filename().string();
+            if (filename == "encoding.csv") {
+                canonical.push_back("--output={output}/encoding.csv");
+            } else if (filename == "comparison.csv") {
+                canonical.push_back("--output={output}/comparison.csv");
             } else {
-                canonical.push_back(arg);
+                throw std::invalid_argument(
+                    "concrete review --output must end in encoding.csv or comparison.csv");
             }
         } else {
             canonical.push_back(arg);
@@ -178,6 +244,10 @@ ReviewSuccessorOptions ParseReviewSuccessorOptions(int argc, char** argv) {
         return successor;
     }
 #ifdef PICCARD_REVISION_MATRIX_PATH
+    const ConcreteReviewRuntimeArgs runtime =
+        ParseConcreteReviewRuntimeArgs(successor.planner_argv);
+    successor.concrete_seed = runtime.seed;
+    successor.concrete_output = runtime.output;
     successor.planner_argv = CanonicalizeReviewPlannerArgv(
         successor.planner_argv);
     const ReviewRevisionRequest request = ParseReviewRevisionArgs(
@@ -204,6 +274,28 @@ std::vector<char*> MutableArgv(std::vector<std::string>& arguments) {
         argv.push_back(argument.data());
     }
     return argv;
+}
+
+std::vector<std::string> MaterializeConcreteReviewArgs(
+    const ReviewSuccessorOptions& successor) {
+    std::vector<std::string> args =
+        MakeConcreteReviewArgs(successor.execution);
+    const std::filesystem::path output_parent =
+        successor.concrete_output.parent_path().empty()
+            ? std::filesystem::path(".")
+            : successor.concrete_output.parent_path();
+    for (std::string& arg : args) {
+        if (arg == "--seed={seed}") {
+            arg = "--seed=" + successor.concrete_seed;
+        } else if (arg == "--manifest-out={output}/workload.bin") {
+            arg = "--manifest-out=" +
+                  (output_parent / "workload.bin").string();
+        } else if (arg == "--execution-trace-out={output}/execution-trace.bin") {
+            arg = "--execution-trace-out=" +
+                  (output_parent / "execution-trace.bin").string();
+        }
+    }
+    return args;
 }
 
 void ValidateReviewSuccessorConfig(
@@ -1361,7 +1453,7 @@ int Run(int argc, char** argv) {
     Options options;
     if (successor.enabled) {
         std::vector<std::string> concrete_args =
-            MakeConcreteReviewArgs(successor.execution);
+            MaterializeConcreteReviewArgs(successor);
         std::vector<char*> mutable_argv = MutableArgv(concrete_args);
         options = ParseOptions(static_cast<int>(mutable_argv.size()),
                                mutable_argv.data());

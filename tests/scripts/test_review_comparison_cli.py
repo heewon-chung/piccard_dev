@@ -354,6 +354,60 @@ class ReviewComparisonCliTest(unittest.TestCase):
                          "phase_decrypt_ms"}
             self.assertFalse(forbidden & set(row))
 
+    def test_revision_encoding_materializes_runtime_seed_and_output_at_executable_boundary(self):
+        """The planner's concrete seed/path must reach the real producer parser."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            output = root / "cell" / "encoding.csv"
+            output.parent.mkdir()
+            result = subprocess.run(
+                [
+                    str(self.binary),
+                    "--revision-cell=paper-v1::piccard_std192_encoding::control=default",
+                    "--profile=readiness-toy-v1",
+                    "--suite=encoding",
+                    "--methods=piccard_encode,piccard_sqrt_encode",
+                    "--security=STD192",
+                    "--k=128", "--m=64", "--n=1000", "--universe=65536",
+                    "--encoding-iters=1", "--correctness-trials=1",
+                    "--seed=20260729", f"--output={output}",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "OMP_NUM_THREADS": "2",
+                     "OMP_DYNAMIC": "FALSE"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output.parent / "workload.bin").is_file())
+            self.assertTrue((output.parent / "execution-trace.bin").is_file())
+            self.assertIn("20260729", result.stdout)
+            self.assertIn("schema=review-encoding-terminal-v1", result.stderr)
+            self.assertNotIn("{seed}", result.stdout + result.stderr)
+            self.assertNotIn("{output}", result.stdout + result.stderr)
+
+    def test_revision_encoding_rejects_malformed_runtime_seed_before_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            output = root / "cell" / "encoding.csv"
+            output.parent.mkdir()
+            command = [
+                str(self.binary),
+                "--revision-cell=paper-v1::piccard_std192_encoding::control=default",
+                "--profile=readiness-toy-v1", "--suite=encoding",
+                "--methods=piccard_encode,piccard_sqrt_encode",
+                "--security=STD192", "--k=128", "--m=64",
+                "--n=1000", "--universe=65536", "--encoding-iters=1",
+                "--correctness-trials=1", "--seed=not-a-number",
+                f"--output={output}",
+            ]
+            result = self.run_cli(command)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("concrete review --seed", result.stderr)
+            self.assertFalse((output.parent / "workload.bin").exists())
+            self.assertFalse((output.parent / "execution-trace.bin").exists())
+
     def test_legacy_baseline_method_is_rejected_before_setup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
