@@ -39,10 +39,40 @@ uint64_t ParseUnsigned(const std::string& value, const char* field) {
     return parsed;
 }
 
+int64_t ParseSigned(const std::string& value, const char* field) {
+    if (value.empty() || value.front() == '+' || value == "-" ||
+        value.find_first_not_of("-0123456789") != std::string::npos ||
+        (value.front() == '-' && value.size() == 1u)) {
+        Reject(std::string(field) + " must be a canonical signed integer");
+    }
+    const size_t digits_start = value.front() == '-' ? 1u : 0u;
+    if (value.find_first_not_of("0123456789", digits_start) !=
+        std::string::npos) {
+        Reject(std::string(field) + " must be a canonical signed integer");
+    }
+    size_t consumed = 0;
+    int64_t parsed = 0;
+    try {
+        parsed = std::stoll(value, &consumed, 10);
+    } catch (const std::exception&) {
+        Reject(std::string(field) + " is out of range");
+    }
+    if (consumed != value.size() || std::to_string(parsed) != value) {
+        Reject(std::string(field) + " must be a canonical signed integer");
+    }
+    return parsed;
+}
+
 uint64_t Axis(const RevisionCell& cell, const char* name) {
     const auto it = cell.axes.find(name);
     if (it == cell.axes.end()) Reject(std::string("missing axis ") + name);
     return ParseUnsigned(it->second, name);
+}
+
+int64_t SignedAxis(const RevisionCell& cell, const char* name) {
+    const auto it = cell.axes.find(name);
+    if (it == cell.axes.end()) Reject(std::string("missing axis ") + name);
+    return ParseSigned(it->second, name);
 }
 
 void RequireAxisValue(const RevisionCell& cell, const char* name,
@@ -388,6 +418,95 @@ void ValidateThresholdFheCell(const RevisionCell& cell) {
     }
 }
 
+void ValidateThresholdSyntheticCell(const RevisionCell& cell) {
+    if (cell.family != "threshold_synthetic_fpfn") {
+        RejectThreshold("family must be threshold_synthetic_fpfn");
+    }
+    if (cell.producer != "bench_threshold") {
+        RejectThreshold("producer must be bench_threshold");
+    }
+    if (cell.profile != "paper-v1") {
+        RejectThreshold("matrix profile must be paper-v1");
+    }
+    if (cell.dataset != "synthetic") {
+        RejectThreshold("dataset must be synthetic");
+    }
+    if (cell.expected_artifact_schema != "threshold-fpfn-csv-v1") {
+        RejectThreshold("unexpected threshold FPFN artifact schema");
+    }
+    if (cell.invocation_status != "RUN") {
+        RejectThreshold("cell is not RUN");
+    }
+    if (cell.timeout_class != "standard") {
+        RejectThreshold("unexpected threshold FPFN timeout class");
+    }
+
+    if (cell.axis != "point" || cell.axes.size() != 5u) {
+        RejectThreshold("synthetic threshold cells require point/k/grid/m/n/u");
+    }
+    const uint64_t k = Axis(cell, "k");
+    const int64_t grid_index = SignedAxis(cell, "grid_index");
+    if (!IsOneOf(k, {64, 128, 256, 512})) {
+        RejectThreshold("invalid synthetic threshold point k");
+    }
+    if (grid_index < -10 || grid_index > 10) {
+        RejectThreshold("synthetic threshold grid index is outside -10..10");
+    }
+    const std::string point = "k" + std::to_string(k) + "_j" +
+                              std::to_string(grid_index);
+    if (cell.axis_value != point ||
+        cell.cell_id != "paper-v1::threshold_synthetic_fpfn::point=" + point) {
+        RejectThreshold("synthetic threshold point identity mismatch");
+    }
+    RequireAxisValue(cell, "m", 64);
+    RequireAxisValue(cell, "n", 1000);
+    RequireAxisValue(cell, "u", 65536);
+
+    if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
+        cell.comparison_eligible) {
+        RejectThreshold("synthetic threshold cells must be diagnostic-only");
+    }
+    if (cell.paper_count != 1000 || cell.toy_count != 1 ||
+        cell.paper_trials != 1000 || cell.toy_trials != 1 ||
+        cell.paper_counts != std::map<std::string, uint64_t>{{"trials", 1000}} ||
+        cell.toy_counts != std::map<std::string, uint64_t>{{"trials", 1}}) {
+        RejectThreshold("synthetic threshold paper/toy count contract mismatch");
+    }
+    const auto point_k = cell.attributes.find("point_k");
+    const auto cell_grid = cell.attributes.find("grid_index");
+    if (cell.attributes.size() != 2u || point_k == cell.attributes.end() ||
+        point_k->second != std::to_string(k) ||
+        cell_grid == cell.attributes.end() ||
+        cell_grid->second != std::to_string(grid_index) ||
+        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        RejectThreshold("synthetic threshold cell attributes mismatch");
+    }
+
+    if (cell.expected_rows.size() != 1u) {
+        RejectThreshold("synthetic threshold cells require one expected row");
+    }
+    const RevisionRow& row = cell.expected_rows.front();
+    const auto row_point_k = row.attributes.find("point_k");
+    const auto row_grid = row.attributes.find("grid_index");
+    const auto row_trials = row.attributes.find("trials");
+    if (row.row_id != "synthetic_fpfn" || row.status != "DIAGNOSTIC" ||
+        row.terminal_status != "DIAGNOSTIC" || row.method != "synthetic_fpfn" ||
+        !row.reason.empty() || !row.reason_code.empty() ||
+        row.measured_count != 1000 || row.paper_measured_count != 1000 ||
+        row.toy_measured_count != 1 || row.attributes.size() != 3u ||
+        row_point_k == row.attributes.end() ||
+        row_point_k->second != std::to_string(k) ||
+        row_grid == row.attributes.end() ||
+        row_grid->second != std::to_string(grid_index) ||
+        row_trials == row.attributes.end() || row_trials->second != "1000" ||
+        !row.list_attributes.empty() || !row.timing_contract.empty() ||
+        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        !row.pattern.empty() || !row.variant.empty() ||
+        !row.fit_authority.empty()) {
+        RejectThreshold("synthetic threshold expected row contract mismatch");
+    }
+}
+
 std::string ThresholdProfileForMode(RevisionRunMode mode) {
     switch (mode) {
         case RevisionRunMode::Paper:
@@ -479,6 +598,39 @@ RevisionInvocationPlan PlanFheIndRevisionCell(const RevisionCell& cell,
 
 RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
                                                  RevisionRunMode mode) {
+    if (cell.family == "threshold_synthetic_fpfn") {
+        ValidateThresholdSyntheticCell(cell);
+
+        const bool toy = IsToyMode(mode);
+        const std::string profile = ThresholdProfileForMode(mode);
+        const auto& point_k = cell.axes.at("k");
+        const auto& grid_index = cell.axes.at("grid_index");
+
+        RevisionInvocationPlan plan;
+        plan.cell_id = cell.cell_id;
+        plan.producer = cell.producer;
+        plan.concrete_profile = profile;
+        plan.invocation_status = cell.invocation_status;
+        plan.argv = {
+            "--revision-cell=" + cell.cell_id,
+            "--profile=" + profile,
+            "--mode=fpfn",
+            "--point-k=" + point_k,
+            "--grid-index=" + grid_index,
+            "--m=64",
+            "--set_size=1000",
+            std::string("--trials=") + (toy ? "1" : "1000"),
+            "--seed={seed}",
+            "--hash_randomness=resampled",
+        };
+        plan.expected_rows = cell.expected_rows;
+        for (auto& row : plan.expected_rows) {
+            row.measured_count = toy ? row.toy_measured_count
+                                     : row.paper_measured_count;
+        }
+        return plan;
+    }
+
     ValidateThresholdFheCell(cell);
 
     const bool toy = IsToyMode(mode);
