@@ -279,6 +279,120 @@ target_link_libraries(
     PUBLIC piccard_revision_invocation_plan
 )
 
+# OpenFHE-free strict adapter for the review-comparison baseline successor
+# path. It consumes the canonical invocation plan and only translates one
+# selected matrix cell to the legacy review CLI; it never launches a producer.
+add_library(
+    piccard_review_revision_adapter
+    benchmarks/review_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_review_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_review_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
+# OpenFHE-free threshold successor argv parser and exact matrix-cell selector.
+# The benchmark executable links this seam, while its parser/plan tests remain
+# runnable without constructing a crypto context.
+add_library(
+    piccard_threshold_revision_adapter
+    benchmarks/threshold_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_threshold_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_threshold_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
+# OpenFHE-free dynamic successor argv parser, exact-cell selector, and
+# one-cell execution spy.  The adapter keeps dynamic matrix topology and
+# versioned correctness semantics auditable before an FHE context is built.
+add_library(
+    piccard_dynamic_revision_adapter
+    benchmarks/dynamic_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_dynamic_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_dynamic_revision_adapter
+    PUBLIC piccard_revision_invocation_plan piccard_revision_adapter
+)
+
+# OpenFHE-free sqrt/one-hot/crossover successor argv parser and exact-cell
+# execution planner.  Producers link this seam, while its tests remain pure
+# and never construct a crypto context.
+add_library(
+    piccard_sqrt_revision_adapter
+    benchmarks/sqrt_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_sqrt_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_sqrt_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
+# OpenFHE-free successor argv adapters for the CPU-only revision producers.
+# The library contains only matrix selection and execution-spy seams; it never
+# constructs an estimator, deletion simulation, or Paillier/SJ16 context.
+add_library(
+    piccard_cpu_revision_adapter
+    benchmarks/cpu_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_cpu_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_cpu_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
+# OpenFHE-free FHE-IND successor argv parser, exact-cell selector, and
+# one-point execution spy.  The live producer links this seam while pure
+# adapter tests can validate matrix/count/security identity before any
+# context or key generation is attempted.
+add_library(
+    piccard_fhe_ind_revision_adapter
+    benchmarks/fhe_ind_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_fhe_ind_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_fhe_ind_revision_adapter
+    PUBLIC piccard_revision_invocation_plan
+)
+
+# OpenFHE-free real-data/DBLP threshold successor adapter.  Manifest binding
+# uses only the processed-dataset loader and runs before any live timing
+# driver can construct an FHE context; summary cells remain owned by the
+# Python summarizer and are rejected by the C++ execution seam.
+add_library(
+    piccard_real_dataset_revision_adapter
+    benchmarks/real_dataset_revision_adapter.cpp
+)
+target_include_directories(
+    piccard_real_dataset_revision_adapter
+    PUBLIC ${CMAKE_SOURCE_DIR}/benchmarks
+)
+target_link_libraries(
+    piccard_real_dataset_revision_adapter
+    PUBLIC piccard_revision_invocation_plan piccard_data
+)
+
 # Typed Work-4-prefix CSV schema for real-dataset benchmark rows (Work 5
 # Phase 5.2). Pure string/typed-token serialization, no OpenFHE dependency.
 add_library(
@@ -1052,6 +1166,171 @@ if(BUILD_TESTS)
             )
 
             add_executable(
+                test_review_revision_adapter
+                tests/unit/test_review_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_review_revision_adapter
+                piccard_review_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_review_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_review_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME ReviewRevisionAdapter
+                COMMAND test_review_revision_adapter
+            )
+
+            add_executable(
+                test_threshold_revision_adapter
+                tests/unit/test_threshold_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_threshold_revision_adapter
+                piccard_threshold_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_threshold_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_threshold_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME ThresholdRevisionAdapter
+                COMMAND test_threshold_revision_adapter
+            )
+
+            add_executable(
+                test_dynamic_revision_adapter
+                tests/unit/test_dynamic_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_dynamic_revision_adapter
+                piccard_dynamic_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_dynamic_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_dynamic_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME DynamicRevisionAdapter
+                COMMAND test_dynamic_revision_adapter
+            )
+
+            add_executable(
+                test_sqrt_revision_adapter
+                tests/unit/test_sqrt_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_sqrt_revision_adapter
+                piccard_sqrt_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_sqrt_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_sqrt_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME SqrtRevisionAdapter
+                COMMAND test_sqrt_revision_adapter
+            )
+
+            add_executable(
+                test_cpu_revision_adapter
+                tests/unit/test_cpu_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_cpu_revision_adapter
+                piccard_cpu_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_cpu_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_cpu_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME CpuRevisionAdapter
+                COMMAND test_cpu_revision_adapter
+            )
+
+            add_executable(
+                test_fhe_ind_revision_adapter
+                tests/unit/test_fhe_ind_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_fhe_ind_revision_adapter
+                piccard_fhe_ind_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_fhe_ind_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_fhe_ind_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME FheIndRevisionAdapter
+                COMMAND test_fhe_ind_revision_adapter
+            )
+
+            add_executable(
+                test_real_dataset_revision_adapter
+                tests/unit/test_real_dataset_revision_adapter.cpp
+            )
+            target_link_libraries(
+                test_real_dataset_revision_adapter
+                piccard_real_dataset_revision_adapter
+                test_main
+            )
+            target_include_directories(
+                test_real_dataset_revision_adapter
+                PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+            )
+            target_compile_definitions(
+                test_real_dataset_revision_adapter
+                PRIVATE
+                    PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+            )
+            add_test(
+                NAME RealDatasetRevisionAdapter
+                COMMAND test_real_dataset_revision_adapter
+            )
+            set_tests_properties(
+                RealDatasetRevisionAdapter
+                PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            )
+
+            add_executable(
                 test_revision_matrix_inventory
                 tests/unit/test_revision_matrix_inventory.cpp
             )
@@ -1193,7 +1472,20 @@ if(BUILD_TESTS)
         bench_deletion_survival
         PRIVATE ${CMAKE_SOURCE_DIR}/include
     )
-    target_link_libraries(bench_deletion_survival piccard_dynamic_analysis)
+    target_link_libraries(
+        bench_deletion_survival
+        piccard_dynamic_analysis
+        piccard_cpu_revision_adapter
+    )
+    target_include_directories(
+        bench_deletion_survival
+        PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    target_compile_definitions(
+        bench_deletion_survival
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     # Cross-work approval-record verifier: pure Python standard library, so it
     # is registered independently of GTest. The suite imports itself as
@@ -1325,6 +1617,10 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_revision_matrix
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RevisionFloodingAdapter
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_revision_flooding_adapter
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
@@ -1341,10 +1637,16 @@ if(BUILD_BENCHMARKS)
     target_link_libraries(
         bench_estimator_bias
         piccard_estimator_diagnostic
+        piccard_cpu_revision_adapter
     )
     target_include_directories(
         bench_estimator_bias
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    target_compile_definitions(
+        bench_estimator_bias
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
 
     # Work 5 Sub-phase 5.3: plaintext accuracy mode over real (DBLP-ACM)
@@ -1380,12 +1682,21 @@ if(BUILD_BENCHMARKS)
         piccard_real_dataset_csv_schema
         OpenSSL::Crypto
     )
+    target_link_libraries(
+        bench_real_datasets
+        piccard_real_dataset_revision_adapter
+    )
     if(OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         target_link_libraries(bench_real_datasets piccard_fhe)
     endif()
     target_include_directories(
         bench_real_datasets
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    target_compile_definitions(
+        bench_real_datasets
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
     if(BUILD_TESTS)
         add_test(
@@ -1475,10 +1786,16 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                 piccard_baselines
                 piccard_benchmark_serializers
                 piccard_comparison_workload
+                piccard_review_revision_adapter
         )
         target_include_directories(
             bench_review_comparison
             PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+        )
+        target_compile_definitions(
+            bench_review_comparison
+            PRIVATE
+                PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
         )
         find_library(
             PICCARD_REVIEW_GMPXX_LIBRARY
@@ -1510,8 +1827,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         bench_dynamic
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_dynamic_revision_adapter
     )
     target_include_directories(bench_dynamic PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_dynamic
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
     if(BUILD_TESTS)
         add_test(NAME BenchDynamicProbeIsolation
                  COMMAND ${Python3_EXECUTABLE}
@@ -1532,32 +1855,56 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         bench_threshold
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_threshold_revision_adapter
     )
     target_include_directories(bench_threshold PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_threshold
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     add_executable(bench_sqrt_comparison benchmarks/bench_sqrt_comparison.cpp)
     target_link_libraries(
         bench_sqrt_comparison
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_sqrt_revision_adapter
     )
     target_include_directories(bench_sqrt_comparison PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_sqrt_comparison
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     add_executable(bench_onehot_sqrt benchmarks/bench_onehot_sqrt.cpp)
     target_link_libraries(
         bench_onehot_sqrt
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_sqrt_revision_adapter
     )
     target_include_directories(bench_onehot_sqrt PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_onehot_sqrt
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     add_executable(bench_crossover benchmarks/bench_crossover.cpp)
     target_link_libraries(
         bench_crossover
         piccard_fhe
         piccard_benchmark_serializers
+        piccard_sqrt_revision_adapter
     )
     target_include_directories(bench_crossover PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+    target_compile_definitions(
+        bench_crossover
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+    )
 
     # Decryption-noise calibration for noise flooding (R2-W6). Not a timing
     # benchmark: it measures the evaluation-noise bound that sizes the
@@ -1601,11 +1948,18 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
             piccard_fhe
             piccard_benchmark_serializers
             piccard_comparison_workload
+            piccard_fhe_ind_revision_adapter
+            piccard_revision_matrix
             piccard_std_security_evidence_schema
     )
     target_include_directories(
         bench_fhe_ind
         PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks
+    )
+    target_compile_definitions(
+        bench_fhe_ind
+        PRIVATE
+            PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
     if(BUILD_TESTS)
         add_test(
@@ -1836,6 +2190,7 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
             bench_sj16_calibrate
             piccard_baselines
             piccard_benchmark_serializers
+            piccard_cpu_revision_adapter
         )
         if(OpenMP_CXX_FOUND)
             target_link_libraries(bench_sj16_calibrate OpenMP::OpenMP_CXX)
@@ -1845,6 +2200,11 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
             target_link_libraries(bench_sj16_calibrate ${GMPXX_LIBRARY})
         endif()
         target_include_directories(bench_sj16_calibrate PRIVATE ${CMAKE_SOURCE_DIR}/benchmarks)
+        target_compile_definitions(
+            bench_sj16_calibrate
+            PRIVATE
+                PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
+        )
     endif()
 endif()
 

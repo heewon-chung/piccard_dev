@@ -256,7 +256,9 @@ struct BenchmarkConfig {
     size_t set_size;               // Size of each party's set
     uint64_t universe_size;         // Explicit element universe (0 if absent)
     size_t trials;                 // Number of trials to run
-    std::string mode;              // "accuracy", "timing", or "combined"
+    // Common modes plus producer-specific successor modes (fpfn/spec for
+    // threshold and ciphertext/crossover for sqrt diagnostics).
+    std::string mode;
     SecurityLevel security_level;
     uint64_t seed;                 // RNG seed for accuracy trials (0 = random)
     double overlap;                // Overlap fraction for combined mode
@@ -350,7 +352,8 @@ struct BenchmarkConfig {
                 config.mode = arg.substr(7);
                 if (config.mode != "accuracy" && config.mode != "timing" &&
                     config.mode != "combined" && config.mode != "fpfn" &&
-                    config.mode != "spec") {
+                    config.mode != "spec" && config.mode != "ciphertext" &&
+                    config.mode != "crossover") {
                     throw std::invalid_argument("Invalid mode: " + config.mode);
                 }
             } else if (arg.find("--security=") == 0) {
