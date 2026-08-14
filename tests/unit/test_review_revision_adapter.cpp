@@ -48,7 +48,7 @@ TEST(ReviewRevisionAdapter,
      SelectsEveryOwnedRunCellAndPreservesPlannerBytesForPaperAndToy) {
     const RevisionMatrix matrix = Load();
     const auto cells = OwnedCells(matrix);
-    ASSERT_EQ(cells.size(), 43u);
+    ASSERT_EQ(cells.size(), 44u);
 
     for (const RevisionRunMode mode : {RevisionRunMode::Paper,
                                        RevisionRunMode::Toy}) {
