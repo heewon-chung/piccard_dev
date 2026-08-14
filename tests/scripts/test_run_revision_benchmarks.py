@@ -100,7 +100,7 @@ class RevisionRunnerContractTest(unittest.TestCase):
 
             manifest = json.loads((results / "run.json").read_text())
             self.assertEqual(manifest["cell_count"], 263)
-            self.assertEqual(manifest["planned_processes"], 260)
+            self.assertEqual(manifest["planned_processes"], 261)
             self.assertEqual(manifest["spawned_processes"], 0)
             self.assertEqual(manifest["source"]["schema"],
                              "piccard-revision-dry-run-metadata-v1")
