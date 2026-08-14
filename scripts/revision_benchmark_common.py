@@ -88,6 +88,47 @@ _PAPER_DATASET_BY_VARIANT = {
         "parsing_schema": "enron-maildir-rfc5322-v1",
     },
 }
+_PAPER_DBLP_SOURCE_MANIFEST_SHA256 = (
+    "ccd019830bf62931c6c86e5aaea71c6069d46d992755ad836573efaaa286e398")
+_PAPER_DBLP_SOURCE_IDENTITY = (
+    ("schema_version", "piccard-real-source-v1"),
+    ("dataset", "dblp_acm"),
+    ("dataset_version", "OpenICPSR E100843 V2 (2017-07-21)"),
+    ("source_url", "https://doi.org/10.3886/E100843V2"),
+    ("citation", "Rahm, Erhard, Köpcke, Hanna, and Thor, Andreas. DBLP ACM Dataset. "
+                 "Ann Arbor, MI: Inter-university Consortium for Political and "
+                 "Social Research [distributor], 2017-07-21. "
+                 "https://doi.org/10.3886/E100843V2"),
+    ("license_or_terms_url",
+     "https://www.icpsr.umich.edu/sites/icpsr/about/policies/terms-of-use"),
+    ("acquisition_note", "Downloaded from OpenICPSR project E100843 V2; "
+                         "ACM.csv and DBLP-ACM_perfectMapping.csv are retained "
+                         "as distributed; DBLP2.csv was transcoded from ISO-8859-1 "
+                         "to UTF-8 without changing CSV fields."),
+    ("parsing_schema", "dblp-acm-csv-v1"),
+    ("preprocessing_profile", "dblp-acm-trigram-v1"),
+    ("input.0.role", "dblp_records"),
+    ("input.0.path", "DBLP2.csv"),
+    ("input.0.sha256",
+     "32863e8b4e7e18e5254c3e0e05cbc282af2e1e6e9d58e124605ebcbaa178ae7f"),
+    ("input.1.role", "acm_records"),
+    ("input.1.path", "ACM.csv"),
+    ("input.1.sha256",
+     "32055f1dfa619a4fdca33e7de729c66686a2fb3c71589921a6a3bd3af389120e"),
+    ("input.2.role", "dblp_acm_mapping"),
+    ("input.2.path", "DBLP-ACM_perfectMapping.csv"),
+    ("input.2.sha256",
+     "d9d7c9feaba3d19a2e73ba8bd6ae08407d8b16082881f6e55abc2d703682d53a"),
+)
+_PAPER_DBLP_PROCESSED_COUNTS = {
+    "record_count": "4910",
+    "pair_count": "10000",
+    "requested_pair_count": "10000",
+    "original_positive_count": "2224",
+    "retained_positive_count": "2224",
+    "max_documents": "",
+    "min_related_pairs": "",
+}
 
 
 def _strict_key_value_file(path: Path, label: str) -> tuple[tuple[str, str], ...]:
@@ -189,12 +230,18 @@ def _validate_paper_manifest(path: Path, variant: str, root_seed: int) -> dict[s
         path.parent, values.get("source_manifest_file", ""),
         "source.manifest.tsv", values.get("source_manifest_sha256", ""),
         f"{label} source manifest")
-    source_values = dict(_strict_key_value_file(source, f"{label} source manifest"))
+    source_pairs = _strict_key_value_file(source, f"{label} source manifest")
+    source_values = dict(source_pairs)
     if (source_values.get("schema_version") != "piccard-real-source-v1" or
             source_values.get("dataset") != expected["dataset"] or
             source_values.get("parsing_schema") != expected["parsing_schema"] or
             source_values.get("preprocessing_profile") != expected["preprocessing_version"]):
         raise RevisionContractError(f"{label} source manifest identity mismatch")
+    if expected["dataset"] == "dblp_acm":
+        if values.get("source_manifest_sha256") != _PAPER_DBLP_SOURCE_MANIFEST_SHA256:
+            raise RevisionContractError(f"{label} source manifest is not canonical DBLP-ACM")
+        if source_pairs != _PAPER_DBLP_SOURCE_IDENTITY:
+            raise RevisionContractError(f"{label} source manifest identity mismatch")
     records = _validate_bound_file(
         path.parent, values.get("records_file", ""), "records.tsv",
         values.get("records_sha256", ""), f"{label} records")
@@ -221,9 +268,9 @@ def _validate_paper_manifest(path: Path, variant: str, root_seed: int) -> dict[s
                 "canonical-subject-proxy-not-thread-ground-truth-v1"):
             raise RevisionContractError(f"{label} Enron label/proxy taxonomy mismatch")
     else:
-        if record_count <= 0 or pair_count <= 0 or values.get("max_documents") != "" or \
-                values.get("min_related_pairs") != "":
-            raise RevisionContractError(f"{label} DBLP count fields mismatch")
+        for key, expected_value in _PAPER_DBLP_PROCESSED_COUNTS.items():
+            if values.get(key) != expected_value:
+                raise RevisionContractError(f"{label} DBLP count fields mismatch")
     # Check the bound pair labels independently of the manifest summary.
     try:
         pair_lines = pairs.read_text(encoding="utf-8").splitlines()

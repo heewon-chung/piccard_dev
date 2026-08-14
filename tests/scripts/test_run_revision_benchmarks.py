@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -172,7 +173,7 @@ class RevisionRunnerContractTest(unittest.TestCase):
                     root_seed=20260729,
                 )
 
-    def test_paper_manifest_identity_and_provenance_mutations_fail_closed(self) -> None:
+    def test_paper_rejects_quick_fixture_even_with_paper_seed(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import (RevisionContractError,
                                                _validate_paper_manifest)
@@ -186,35 +187,117 @@ class RevisionRunnerContractTest(unittest.TestCase):
             text = manifest.read_text()
             text = text.replace("\t7\nsource_manifest_file", "\t20260729\nsource_manifest_file")
             manifest.write_text(text)
+            with self.assertRaisesRegex(RevisionContractError, "paper|DBLP|count|source"):
+                _validate_paper_manifest(manifest, "dblp_acm_u65536", 20260729)
+
+    @staticmethod
+    def _canonical_dblp_manifest(root: Path) -> Path:
+        """Create a bounded processed tree with the canonical paper bindings."""
+        destination = root / "processed" / "dblp_acm_u65536"
+        shutil.copytree(
+            ROOT / "tests" / "fixtures" / "real_datasets" / "quick" /
+            "dblp_acm_u65536", destination)
+        canonical_source = ROOT / "datasets" / "manifests" / "dblp_acm.source.tsv"
+        source = destination / "source.manifest.tsv"
+        source.write_bytes(canonical_source.read_bytes())
+
+        def expand(name: str, count: int) -> Path:
+            path = destination / name
+            lines = path.read_text(encoding="utf-8").splitlines()
+            rows = lines[1:]
+            rows = (rows * ((count + len(rows) - 1) // len(rows)))[:count]
+            path.write_text("\n".join([lines[0], *rows]) + "\n", encoding="utf-8")
+            return path
+
+        records = expand("records.tsv", 4910)
+        pairs = expand("pairs.tsv", 10000)
+        replacements = {
+            "seed": "20260729",
+            "source_manifest_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "records_sha256": hashlib.sha256(records.read_bytes()).hexdigest(),
+            "record_count": "4910",
+            "pairs_sha256": hashlib.sha256(pairs.read_bytes()).hexdigest(),
+            "pair_count": "10000",
+            "original_positive_count": "2224",
+            "retained_positive_count": "2224",
+            "requested_pair_count": "10000",
+        }
+        lines = []
+        for line in (destination / "dataset.manifest.tsv").read_text(
+                encoding="utf-8").splitlines():
+            key, value = line.split("\t", 1)
+            lines.append(f"{key}\t{replacements.get(key, value)}")
+        (destination / "dataset.manifest.tsv").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+        return destination / "dataset.manifest.tsv"
+
+    def test_paper_manifest_counts_and_source_mutations_fail_closed(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import (RevisionContractError,
+                                               _validate_paper_manifest)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._canonical_dblp_manifest(Path(temporary))
             _validate_paper_manifest(manifest, "dblp_acm_u65536", 20260729)
-            mutations = {
+            baseline = manifest.read_text(encoding="utf-8")
+            source = manifest.parent / "source.manifest.tsv"
+            source_baseline = source.read_text(encoding="utf-8")
+            source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            manifest_mutations = {
                 "wrong seed": ("seed\t20260729", "seed\t7"),
                 "wrong dataset": ("dataset\tdblp_acm", "dataset\tenron"),
-                "wrong variant": ("variant\tdblp_acm_u65536", "variant\tenron_u65536"),
+                "wrong variant": ("variant\tdblp_acm_u65536",
+                                   "variant\tenron_u65536"),
                 "wrong profile": ("preprocessing_version\tdblp-acm-trigram-v1",
                                    "preprocessing_version\twrong-profile"),
                 "wrong universe": ("universe_size\t65536", "universe_size\t1048576"),
-                "wrong count": ("pair_count\t6", "pair_count\t5"),
-                "wrong labels": ("original_positive_count\t3",
-                                  "original_positive_count\t2"),
-                "wrong source binding": ("source_manifest_sha256\t0b40cef7bfe0eb259a66d094b26685a0bb72f5f5a35371a404a8cb1691de81b4",
-                                          "source_manifest_sha256\t" + "0" * 64),
+                "wrong source binding": (
+                    "source_manifest_sha256\t" + source_digest,
+                    "source_manifest_sha256\t" + "0" * 64),
+                "record count": ("record_count\t4910", "record_count\t4909"),
+                "pair count": ("pair_count\t10000", "pair_count\t9999"),
+                "requested pair count": ("requested_pair_count\t10000",
+                                          "requested_pair_count\t9999"),
+                "original positives": ("original_positive_count\t2224",
+                                        "original_positive_count\t2223"),
+                "retained positives": ("retained_positive_count\t2224",
+                                        "retained_positive_count\t2223"),
+                "max documents": ("max_documents\t", "max_documents\t1"),
             }
-            for label, (old, new) in mutations.items():
+            for label, (old, new) in manifest_mutations.items():
                 with self.subTest(label=label):
-                    mutated = destination / f"{label.replace(' ', '_')}.tsv"
-                    mutated_lines = []
-                    replaced = False
-                    for line in text.splitlines(keepends=True):
-                        if line.startswith(old):
-                            mutated_lines.append(new + "\n")
-                            replaced = True
-                        else:
-                            mutated_lines.append(line)
-                    self.assertTrue(replaced, label)
-                    mutated.write_text("".join(mutated_lines))
+                    mutated = manifest.parent / f"{label.replace(' ', '_')}.tsv"
+                    self.assertIn(old, baseline)
+                    mutated.write_text(baseline.replace(old, new, 1), encoding="utf-8")
                     with self.assertRaises(RevisionContractError):
                         _validate_paper_manifest(mutated, "dblp_acm_u65536", 20260729)
+
+            source_mutations = {
+                "source role": ("input.0.role\tdblp_records",
+                                 "input.0.role\twrong_role"),
+                "source path": ("input.0.path\tDBLP2.csv",
+                                 "input.0.path\twrong.csv"),
+                "source hash": ("input.0.sha256\t"
+                                 "32863e8b4e7e18e5254c3e0e05cbc282af2e1e6e9d58e124605ebcbaa178ae7f",
+                                 "input.0.sha256\t" + "0" * 64),
+                "source identity": (
+                    "dataset_version\tOpenICPSR E100843 V2 (2017-07-21)",
+                    "dataset_version\tother-release"),
+            }
+            for label, (old, new) in source_mutations.items():
+                with self.subTest(label=label):
+                    self.assertIn(old, source_baseline)
+                    source.write_text(source_baseline.replace(old, new, 1),
+                                      encoding="utf-8")
+                    mutated = manifest.parent / f"{label.replace(' ', '_')}.tsv"
+                    source_mutated_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                    mutated.write_text(
+                        baseline.replace(source_digest, source_mutated_digest, 1),
+                        encoding="utf-8")
+                    with self.assertRaises(RevisionContractError):
+                        _validate_paper_manifest(mutated, "dblp_acm_u65536", 20260729)
+                    source.write_text(source_baseline, encoding="utf-8")
 
     def test_paper_materialization_uses_explicit_manifests_not_toy_input(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
