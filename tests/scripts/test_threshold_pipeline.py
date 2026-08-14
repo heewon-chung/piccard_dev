@@ -97,23 +97,28 @@ class ThresholdPipelineContractTest(unittest.TestCase):
 
         for cell in cells:
             with self.subTest(cell=cell["cell_id"]):
-                command = [
-                    str(BINARY),
-                    *[argument.replace("{seed}", str(SEED))
-                      for argument in canonical_plan_argv(cell, "toy")],
-                ]
-                result = subprocess.run(
-                    command,
-                    cwd=ROOT,
-                    text=True,
-                    capture_output=True,
-                    env={**os.environ, "OMP_DYNAMIC": "FALSE",
-                         "OMP_NUM_THREADS": "2"},
-                    timeout=120,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("--trials=1", command)
-                self.assertNotEqual(result.stdout, "")
+                with tempfile.TemporaryDirectory(prefix="threshold-toy-") as output:
+                    command = [
+                        str(BINARY),
+                        *[argument.replace("{seed}", str(SEED))
+                          .replace("{output}", output)
+                          for argument in canonical_plan_argv(cell, "toy")],
+                    ]
+                    self.assertTrue(all(
+                        "{seed}" not in argument and "{output}" not in argument
+                        for argument in command))
+                    result = subprocess.run(
+                        command,
+                        cwd=ROOT,
+                        text=True,
+                        capture_output=True,
+                        env={**os.environ, "OMP_DYNAMIC": "FALSE",
+                             "OMP_NUM_THREADS": "2"},
+                        timeout=120,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("--trials=1", command)
+                    self.assertNotEqual(result.stdout, "")
 
     def test_revision_paper_fhe_trial_counts_remain_frozen(self):
         sys.path.insert(0, str(ROOT / "scripts"))
