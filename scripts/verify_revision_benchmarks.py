@@ -1156,6 +1156,21 @@ def _raw_float(value: str, field: str, cid: str,
     return parsed
 
 
+def _raw_sample_sd(values: list[float]) -> float | None:
+    """Recompute C++ sample SD with Release-mode fused multiply-add."""
+    if len(values) < 2:
+        return None
+    total = 0.0
+    for value in values:
+        total += value
+    mean = total / len(values)
+    sum_sq = 0.0
+    for value in values:
+        delta = value - mean
+        sum_sq = math.fma(delta, delta, sum_sq)
+    return math.sqrt(sum_sq / (len(values) - 1))
+
+
 def _raw_phase_parse(path: Path, cid: str) -> tuple[dict[str, str], list[dict[str, str]], list[dict[str, str]]]:
     try:
         payload = path.read_bytes()
@@ -1264,13 +1279,7 @@ def _raw_check_primary(producer: str, primary_rows: list[dict[str, str]],
             middle = len(ordered) // 2
             median = (ordered[middle] if len(ordered) % 2 else
                       (ordered[middle - 1] + ordered[middle]) / 2.0)
-            sd: float | None = None
-            if len(values) >= 2:
-                sum_sq = 0.0
-                for value in values:
-                    delta = value - mean
-                    sum_sq += delta * delta
-                sd = math.sqrt(sum_sq / (len(values) - 1))
+            sd = _raw_sample_sd(values)
             primary_mean = row.get(base_field, "")
             if primary_mean != format(mean, ".3f"):
                 fail(f"Piccard primary {base_field} aggregate mismatch for {cid}")
@@ -1485,11 +1494,7 @@ def _check_raw_phase_sidecar(
         ci_low: float | None = None
         ci_high: float | None = None
         if len(values) >= 2:
-            sum_sq = 0.0
-            for value in values:
-                delta = value - mean
-                sum_sq += delta * delta
-            sd = math.sqrt(sum_sq / (len(values) - 1))
+            sd = _raw_sample_sd(values)
             margin = _RAW_STUDENT_T95[len(values) - 1] * sd / math.sqrt(len(values))
             ci_low, ci_high = mean - margin, mean + margin
         aggregate = aggregates_by_phase[phase]

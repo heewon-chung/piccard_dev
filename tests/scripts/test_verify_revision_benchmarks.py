@@ -1950,6 +1950,16 @@ class RevisionVerifierContractTest(unittest.TestCase):
                                            "measured"))
                 row = rows[index]
                 rows[index] = (row[0], row[1], row[2], row[3], row[4] + 9.0)
+            if mutate == "warmup_nonfinite":
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == "discarded_warmup")
+                row = rows[index]
+                rows[index] = (row[0], row[1], row[2], row[3], float("nan"))
+            if mutate == "warmup_negative":
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == "discarded_warmup")
+                row = rows[index]
+                rows[index] = (row[0], row[1], row[2], row[3], -1.0)
 
             values_by_phase: dict[str, list[float]] = {phase: [] for phase, _ in phases}
             for phase, kind, _trial, _seed, value in rows:
@@ -1990,11 +2000,6 @@ class RevisionVerifierContractTest(unittest.TestCase):
                                      (sd_value, mean - margin, mean + margin))
                 if mutate == "aggregate" and phase == sorted(phases)[0][0]:
                     mean = mean + 1.0
-                if mutate == "warmup_value" and phase == sorted(phases)[0][0]:
-                    # Deliberately model warmup-value leakage into the
-                    # published aggregate; a discarded warmup alone is not
-                    # part of the measured evidence.
-                    mean = mean + 9.0
                 lines.append("\t".join(("aggregate", producer, profile, cid,
                                         phase, str(count), format(mean, ".17g"),
                                         sd, format(median, ".17g"), low, high,
@@ -2128,7 +2133,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
                         cell, plan, _ = write_case(root, producer, mode)
                         _check_family_artifacts(root, mode, [cell], plan)
             for mutation in ("swapped_index", "duplicate_index", "missing_index",
-                             "seed", "warmup_kind", "warmup_value", "aggregate",
+                             "seed", "warmup_kind", "aggregate",
                              "wrong_path", "header"):
                 with self.subTest(producer=producer, mutation=mutation):
                     with tempfile.TemporaryDirectory() as temporary:
@@ -2137,6 +2142,34 @@ class RevisionVerifierContractTest(unittest.TestCase):
                                                    mutation=mutation)
                         with self.assertRaises(RevisionContractError):
                             _check_family_artifacts(root, "paper", [cell], plan)
+
+            if producer == "bench_piccard":
+                with self.subTest(producer=producer, mutation="warmup_value"):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        cell, plan, _ = write_case(
+                            root, producer, "paper", mutation="warmup_value")
+                        # Warmup timing is diagnostic and non-authoritative:
+                        # changing only its finite value must remain valid.
+                        _check_family_artifacts(root, "paper", [cell], plan)
+                for mutation in ("warmup_nonfinite", "warmup_negative"):
+                    with self.subTest(producer=producer, mutation=mutation):
+                        with tempfile.TemporaryDirectory() as temporary:
+                            root = Path(temporary)
+                            cell, plan, _ = write_case(
+                                root, producer, "paper", mutation=mutation)
+                            with self.assertRaises(RevisionContractError):
+                                _check_family_artifacts(root, "paper", [cell], plan)
+
+    def test_raw_phase_release_fma_statistic_is_byte_exact(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import _raw_sample_sd
+
+        values = [586855846.00507104, 3804800778.6489544]
+        # AppleClang Release contracts delta * delta + sum_sq as FMA in the
+        # producer.  The expected 17-digit spelling differs from a separate
+        # multiply followed by addition by one final bit.
+        self.assertEqual(_raw_sample_sd(values), 2275430683.357378)
 
 
 if __name__ == "__main__":
