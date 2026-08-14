@@ -138,6 +138,86 @@ class RevisionVerifierContractTest(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         return root
 
+    def test_event_timestamps_follow_event_stream_order_and_bind_cells(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import EVENT_SCHEMA, RevisionContractError
+        from verify_revision_benchmarks import _check_events
+
+        first_cell = "paper-v1::estimator_accuracy::j=0.5"
+        second_cell = "paper-v1::fhe_ind::control=default"
+        plans = {
+            # The matrix/planned inventory order differs from phase execution:
+            # synthetic starts with estimator_accuracy, then fhe_ind.
+            second_cell: {"command": ["producer", second_cell],
+                          "invocation_status": "RUN"},
+            first_cell: {"command": ["producer", first_cell],
+                         "invocation_status": "RUN"},
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            event_files: dict[str, tuple[str, str]] = {}
+            for cell_id in (first_cell, second_cell):
+                output = root / "cells" / cell_id.replace("::", "_")
+                output.mkdir(parents=True)
+                stdout = output / "stdout.log"
+                stderr = output / "stderr.log"
+                stdout.write_text(f"stdout:{cell_id}\n", encoding="utf-8")
+                stderr.write_text(f"stderr:{cell_id}\n", encoding="utf-8")
+                event_files[cell_id] = (
+                    str(stdout.relative_to(root)), str(stderr.relative_to(root)))
+
+            def digest(relative_path: str) -> str:
+                return hashlib.sha256((root / relative_path).read_bytes()).hexdigest()
+
+            def event_stream() -> list[dict]:
+                events = []
+                sequence = 1
+                for cell_id, start_ns, end_ns in (
+                        (first_cell, 10, 20), (second_cell, 30, 40)):
+                    stdout_path, stderr_path = event_files[cell_id]
+                    events.append({
+                        "schema": EVENT_SCHEMA, "version": 1,
+                        "sequence": sequence, "event": "START",
+                        "cell_id": cell_id, "argv": plans[cell_id]["command"],
+                    })
+                    sequence += 1
+                    events.append({
+                        "schema": EVENT_SCHEMA, "version": 1,
+                        "sequence": sequence, "event": "END",
+                        "cell_id": cell_id, "exit_code": 0,
+                        "start_ns": start_ns, "end_ns": end_ns,
+                        "stdout_path": stdout_path, "stderr_path": stderr_path,
+                        "stdout_sha256": digest(stdout_path),
+                        "stderr_sha256": digest(stderr_path),
+                    })
+                    sequence += 1
+                return events
+
+            def write_events(events: list[dict]) -> None:
+                (root / "events.jsonl").write_text(
+                    "".join(json.dumps(event, sort_keys=True) + "\n"
+                            for event in events), encoding="utf-8")
+
+            write_events(event_stream())
+            # This is the real phase/event order and must be accepted despite
+            # plans being supplied in matrix insertion order.
+            _check_events(root, "toy", plans)
+
+            mutations = {
+                "overlapping global chronology": lambda events: (
+                    events[3].update(start_ns=19, end_ns=29)),
+                "cross-cell START/END binding": lambda events: (
+                    events[1].update(cell_id=second_cell)),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    events = event_stream()
+                    mutate(events)
+                    write_events(events)
+                    with self.assertRaises(RevisionContractError):
+                        _check_events(root, "toy", plans)
+
     def test_verifier_rejects_changed_manifest_and_cell_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "dry"

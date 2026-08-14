@@ -352,6 +352,13 @@ def _check_events(root: Path, mode: str, plans: dict[str, dict[str, Any]]) -> No
         if event.get("schema") != EVENT_SCHEMA or event.get("event") not in {"START", "END"}:
             fail("event schema or event type mismatch")
         by_id.setdefault(event.get("cell_id"), []).append(event)
+        if event.get("event") == "END":
+            if not isinstance(event.get("start_ns"), int) or \
+                    not isinstance(event.get("end_ns"), int) or \
+                    event["start_ns"] > event["end_ns"] or \
+                    event["start_ns"] < previous_end:
+                fail(f"event timestamps are invalid for {event.get('cell_id')}")
+            previous_end = event["end_ns"]
     for cid, plan in plans.items():
         if plan["invocation_status"] == "NO_SPAWN":
             continue
@@ -362,10 +369,6 @@ def _check_events(root: Path, mode: str, plans: dict[str, dict[str, Any]]) -> No
         start = selected[0]
         if start.get("argv") != plan.get("command") or end.get("exit_code") != 0:
             fail(f"event argv/exit binding mismatch for {cid}")
-        if not isinstance(end.get("start_ns"), int) or not isinstance(end.get("end_ns"), int) or \
-                end["start_ns"] > end["end_ns"] or end["start_ns"] < previous_end:
-            fail(f"event timestamps are invalid for {cid}")
-        previous_end = end["end_ns"]
         for key in ("stdout_sha256", "stderr_sha256"):
             require_sha(end.get(key), f"{cid}.{key}")
         for key in ("stdout_path", "stderr_path"):
