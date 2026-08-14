@@ -1521,6 +1521,834 @@ def _check_raw_phase_sidecar(
     _raw_check_primary(producer, primary_rows, measured_by_phase, cid)
 
 
+# Newer revision families all publish the same raw-phase-v1 wire format.  The
+# producer implementations intentionally keep their legacy CSVs, so the
+# verifier must bind the sidecars to the matrix row/method identity rather
+# than accepting a structurally valid TSV from an adjacent cell.  The small
+# contract table below is verifier-owned: it is not imported from a producer
+# and therefore cannot be changed by mutating producer output.
+_RAW_PHASES_ONEHOT = (
+    "decrypt", "encode", "encrypt", "flood", "minhash", "multiply",
+    "rotate_sum", "total",
+)
+_RAW_PHASES_CROSSOVER = ("onehot_total", "sqrt_total")
+_RAW_PHASES_THRESHOLD = (
+    "decrypt", "encode", "encrypt", "flood", "mask", "minhash",
+    "multiply", "poly_eval", "rotate_sum", "total",
+)
+_RAW_PHASES_REAL = (
+    "phase_bias_correction_ms", "phase_cloud_multiply_ms",
+    "phase_cloud_rotate_ms", "phase_decrypt_ms", "phase_encode_ms",
+    "phase_encrypt_ms", "phase_minhash_ms", "phase_sanitize_ms", "total",
+)
+_RAW_PHASES_SJ16 = ("encrypt", "query")
+_RAW_U64_MASK = (1 << 64) - 1
+
+
+def _raw_profile_for_mode(mode: str) -> str:
+    if mode == "toy":
+        return "readiness-toy-v1"
+    if mode == "paper":
+        return "paper-v1"
+    fail(f"raw timing is not defined for verifier mode {mode}")
+
+
+def _raw_expected_count(mode: str) -> int:
+    return 1 if mode == "toy" else 30
+
+
+def _raw_contract_rows(cell: dict[str, Any], cid: str) -> list[dict[str, Any]]:
+    rows = cell.get("expected_rows")
+    if not isinstance(rows, list):
+        fail(f"raw timing expected-row taxonomy is malformed for {cid}")
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            fail(f"raw timing expected-row taxonomy is malformed for {cid}")
+        contract = row.get("raw_timing_contract")
+        if contract is not None and contract != "raw-phase-v1":
+            fail(f"unknown raw timing contract for {cid}")
+        if contract == "raw-phase-v1" and row.get("terminal_status") != "NOT_APPLICABLE":
+            selected.append(row)
+    return selected
+
+
+def _raw_command_directory(
+        output: Path, plan: dict[str, Any], producer: str, cid: str) -> Path:
+    """Return and bind the one canonical raw output directory for a producer."""
+    command = plan.get("command", [])
+    if not isinstance(command, list):
+        fail(f"raw timing command is malformed for {cid}")
+    # Keep spelling strict.  The concrete adapters deliberately use different
+    # option spellings for historical producers; accepting an alias here would
+    # let a forged plan hide the sidecar under a path the producer never owned.
+    bindings: dict[str, tuple[tuple[str, ...], Path]] = {
+        "bench_piccard": (("--raw_timing_dir=",), output),
+        "bench_fhe_ind": (("--raw-timing-out=",), output / "raw"),
+        "bench_onehot_sqrt": (("--raw_timing_dir=",), output / "raw"),
+        "bench_crossover": (("--raw_timing_dir=",), output / "raw"),
+        "bench_review_comparison": (("--raw-timing-out=", "--raw_timing_dir="),
+                                     output / "raw"),
+        "bench_sj16_calibrate": (("--raw_timing_dir=",), output / "raw"),
+        "bench_threshold": (("--raw_timing_dir=",), output / "raw"),
+        "real_timing": (("--raw-timing-dir=",), output / "raw"),
+    }
+    try:
+        prefixes, expected = bindings[producer]
+    except KeyError:
+        fail(f"raw timing producer is not registered: {producer}")
+    values: list[str] = []
+    for prefix in prefixes:
+        values.extend(_command_value(command, prefix))
+    if len(values) != 1:
+        fail(f"raw timing directory binding count mismatch for {cid}")
+    raw_dir = Path(values[0])
+    if not raw_dir.is_absolute():
+        raw_dir = output.parent.parent / raw_dir
+    if raw_dir.is_symlink() or not raw_dir.is_dir() or \
+            raw_dir.resolve() != expected.resolve():
+        fail(f"raw timing directory path mismatch for {cid}")
+    # Reject a second spelling even when it points at the same directory.
+    aliases = {
+        "--raw-timing-dir=", "--raw_timing_dir=", "--raw-timing-out=",
+        "--raw_timing_out=",
+    }
+    if sum(1 for arg in command if any(arg.startswith(alias) for alias in aliases)) != 1:
+        fail(f"raw timing has duplicate or non-canonical path bindings for {cid}")
+    return expected.resolve()
+
+
+def _raw_bind_command_profile(
+        plan: dict[str, Any], producer: str, mode: str, cid: str) -> None:
+    """Bind the raw profile option to the producer's versioned profile.
+
+    Most successor binaries derive the raw profile from their ordinary
+    ``--profile`` argument.  Real timing deliberately has a more specific
+    legacy profile (``paper-std128-t40-v1``), so it carries an explicit raw
+    profile option; SJ16 calibration likewise carries a separate raw profile
+    option.  Checking both forms here catches a sidecar copied from an
+    adjacent profile even when its CSV shape is identical.
+    """
+    command = plan.get("command", [])
+    expected = _raw_profile_for_mode(mode)
+    if producer == "real_timing":
+        raw_profiles = _command_value(command, "--raw-timing-profile=")
+        if len(raw_profiles) != 1 or raw_profiles[0] != expected:
+            fail(f"real raw timing profile binding mismatch for {cid}")
+        profiles = _command_value(command, "--profile=")
+        expected_cli = "readiness-toy-v1" if mode == "toy" \
+            else "paper-std128-t40-v1"
+        if profiles != [expected_cli]:
+            fail(f"real timing CLI profile binding mismatch for {cid}")
+        return
+    if producer == "bench_sj16_calibrate":
+        raw_profiles = _command_value(command, "--raw_timing_profile=")
+        if len(raw_profiles) != 1 or raw_profiles[0] != expected:
+            fail(f"SJ16 raw timing profile binding mismatch for {cid}")
+    else:
+        raw_profiles = (_command_value(command, "--raw-timing-profile=") +
+                        _command_value(command, "--raw_timing_profile="))
+        if raw_profiles and (len(raw_profiles) != 1 or raw_profiles[0] != expected):
+            fail(f"raw timing profile binding mismatch for {cid}")
+    profiles = _command_value(command, "--profile=")
+    if len(profiles) != 1 or profiles[0] != expected:
+        fail(f"raw timing CLI profile binding mismatch for {cid}")
+
+
+def _raw_inventory_paths(
+        output: Path, receipt: dict[str, Any], producer: str,
+        specs: list[dict[str, Any]], raw_dir: Path, cid: str) -> dict[str, Path]:
+    output = output.resolve()
+    raw_dir = raw_dir.resolve()
+    expected: dict[str, Path] = {}
+    for spec in specs:
+        filename = (f"{_raw_safe_component(producer)}__"
+                    f"{_raw_safe_component(spec['cell_id'])}__"
+                    f"{_raw_safe_component(spec['profile'])}.tsv")
+        path = raw_dir / filename
+        try:
+            relative = path.relative_to(output).as_posix()
+        except ValueError:
+            fail(f"raw timing path escapes canonical output for {cid}")
+        if relative in expected:
+            fail(f"raw timing sidecar path collision for {cid}")
+        expected[relative] = path
+
+    inventory = receipt.get("artifact_inventory")
+    if not isinstance(inventory, list):
+        fail(f"raw timing artifact inventory is malformed for {cid}")
+    raw_relative = raw_dir.relative_to(output).as_posix()
+    observed = sorted(
+        str(item.get("path", "")) for item in inventory
+        if isinstance(item, dict) and
+        (str(item.get("path", "")) == raw_relative or
+         str(item.get("path", "")).startswith(raw_relative + "/")))
+    if observed != sorted(expected):
+        fail(f"raw timing artifact inventory mismatch for {cid}")
+    actual = sorted(path.relative_to(output).as_posix()
+                    for path in raw_dir.rglob("*") if path.is_file())
+    if actual != sorted(expected):
+        fail(f"raw timing output contains an unrelated or missing TSV for {cid}")
+    for relative, path in expected.items():
+        if path.is_symlink() or not path.is_file() or path.resolve().parent != raw_dir:
+            fail(f"raw timing sidecar path is unsafe for {cid}: {relative}")
+    return expected
+
+
+def _raw_stats(values: list[float]) -> tuple[float, float | None, float, float | None, float | None]:
+    if not values:
+        raise ValueError("raw timing phase has no measured values")
+    total = 0.0
+    for value in values:
+        total += value
+    mean = total / len(values)
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    median = (ordered[middle] if len(ordered) % 2 else
+              (ordered[middle - 1] + ordered[middle]) / 2.0)
+    if len(values) < 2:
+        return mean, None, median, None, None
+    sum_sq = 0.0
+    for value in values:
+        delta = value - mean
+        # Match the Release C++ expression ``sum_sq += delta * delta`` when
+        # the compiler contracts it to one binary64 FMA.
+        sum_sq = math.fma(delta, delta, sum_sq)
+    sd = math.sqrt(sum_sq / (len(values) - 1))
+    margin = _RAW_STUDENT_T95[len(values) - 1] * sd / math.sqrt(len(values))
+    return mean, sd, median, mean - margin, mean + margin
+
+
+def _raw_seed_from_review_workload(output: Path, cid: str,
+                                   count: int) -> tuple[int, list[int], list[int]]:
+    try:
+        from verify_review_comparison import Reader, WORKLOAD_DOMAIN
+        reader = Reader((output / "workload.bin").read_bytes(),
+                        "review raw timing workload")
+        reader.domain(WORKLOAD_DOMAIN)
+        _suite = reader.string()
+        _profile = reader.string()
+        root_seed = reader.u64()
+        _k, _m, _set_size, _universe = (reader.u64() for _ in range(4))
+        _numerator, _denominator = reader.u64(), reader.u64()
+        method_count = reader.u32()
+        for _ in range(method_count):
+            reader.string()
+        timing_trials = reader.u32()
+        _accuracy_trials = reader.u32()
+        record_count = reader.u32()
+        records: list[tuple[int, int, int]] = []
+        for _ in range(record_count):
+            kind = reader.u8()
+            index = reader.u32()
+            trial_seed = reader.u64()
+            _hash_seed = reader.u64()
+            reader.vector()
+            reader.vector()
+            reader.u64()
+            reader.u64()
+            records.append((kind, index, trial_seed))
+        reader.finish()
+    except Exception as exc:  # noqa: BLE001 - evidence is untrusted
+        fail(f"review raw timing workload is invalid for {cid}: {exc}")
+    warmups = [seed for kind, index, seed in records if kind == 0 and index == 0]
+    measured = [seed for kind, _index, seed in records if kind == 1]
+    measured_indices = [index for kind, index, _seed in records if kind == 1]
+    if timing_trials != count or len(warmups) != 1 or len(measured) != count or \
+            measured_indices != list(range(count)) or \
+            len(records) != 1 + count:
+        fail(f"review raw timing workload trial topology mismatch for {cid}")
+    return root_seed, warmups, measured
+
+
+def _raw_real_hash_seed(root_seed: int, manifest_digest: str,
+                        k: int, m: int, profile_id: str, cid: str) -> int:
+    if re.fullmatch(r"[0-9a-f]{64}", manifest_digest or "") is None:
+        fail(f"real raw timing dataset manifest digest is malformed for {cid}")
+    payload = (b"piccard-real-timing-crs-v1\0" + struct.pack(">Q", root_seed) +
+               bytes.fromhex(manifest_digest) + struct.pack(">I", k) +
+               struct.pack(">I", m) + struct.pack(">I", len(profile_id)) +
+               profile_id.encode("utf-8"))
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _raw_specs_for_cell(cell: dict[str, Any], rows: list[dict[str, str]] | None,
+                        mode: str, cid: str, output: Path,
+                        plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build canonical sidecar identities from matrix rows and primary bytes."""
+    contract_rows = _raw_contract_rows(cell, cid)
+    if not contract_rows:
+        return []
+    producer = str(cell.get("producer", ""))
+    profile = _raw_profile_for_mode(mode)
+    count = _raw_expected_count(mode)
+    specs: list[dict[str, Any]] = []
+    methods = [str(row.get("method", "")) for row in contract_rows]
+
+    def add(cell_id: str, phases: tuple[str, ...], *, method: str = "",
+            seed_kind: str = "root", primary: dict[str, Any] | None = None) -> None:
+        specs.append({"cell_id": cell_id, "phases": phases, "method": method,
+                      "profile": profile, "count": count, "seed_kind": seed_kind,
+                      "primary": primary or {}})
+
+    if producer in {"bench_piccard", "bench_fhe_ind"}:
+        # These are kept on their older independent checker so its successor
+        # identity and derived E2E phase checks remain byte-for-byte stable.
+        return []
+    if producer == "bench_onehot_sqrt":
+        if any(method not in {"onehot", "sqrt"} for method in methods):
+            fail(f"sqrt raw timing method taxonomy mismatch for {cid}")
+        for method in methods:
+            add(f"{cid}::{method}", _RAW_PHASES_ONEHOT, method=method,
+                primary={"kind": "sqrt", "method": method})
+        return specs
+    if producer == "bench_crossover":
+        if any(method not in {"onehot", "sqrt"} for method in methods):
+            fail(f"crossover raw timing method taxonomy mismatch for {cid}")
+        phases = tuple(
+            phase for phase, method in (("onehot_total", "onehot"),
+                                        ("sqrt_total", "sqrt"))
+            if method in methods)
+        add(cid, phases, primary={"kind": "crossover"})
+        return specs
+    if producer == "bench_review_comparison":
+        methods = _review_method_tokens(cell, plan, cid)
+        if len(methods) != len(contract_rows):
+            fail(f"review raw timing method/count taxonomy mismatch for {cid}")
+        if rows is not None:
+            observed_methods = [str(row.get("method", "")) for row in rows]
+            if sorted(observed_methods) != sorted(methods):
+                fail(f"review primary method identity mismatch for {cid}")
+        if any(not method for method in methods):
+            fail(f"review raw timing method identity is missing for {cid}")
+        for method in methods:
+            add(f"{cid}::{method}", ("total",), method=method,
+                seed_kind="review", primary={"kind": "review", "method": method})
+        return specs
+    if producer == "bench_sj16_calibrate":
+        if methods != ["bench_sj16_calibrate"]:
+            fail(f"SJ16 calibration raw timing method taxonomy mismatch for {cid}")
+        command = plan.get("command", [])
+        key_bits = _command_int_once(command, "--key-bits=", cid)
+        if key_bits != 3072:
+            fail(f"SJ16 calibration raw timing key size mismatch for {cid}")
+        sizes_text = _command_value_once(command, "--sizes=", cid)
+        held_text = _command_value_once(command, "--held-out=", cid)
+        sizes = [4096, 8192, 16384]
+        if sizes_text is not None:
+            try:
+                parsed = [int(value) for value in sizes_text.split(",")]
+            except ValueError:
+                fail(f"SJ16 calibration raw timing sizes are malformed for {cid}")
+            if parsed != sizes:
+                fail(f"SJ16 calibration raw timing sizes mismatch for {cid}")
+        if held_text is not None and held_text != "32768":
+            fail(f"SJ16 calibration raw timing held-out size mismatch for {cid}")
+        add(f"{cid}::encrypt", ("encrypt",), seed_kind="sj16_encrypt",
+            primary={"kind": "sj16", "detail": "encrypt"})
+        for size in (*sizes, 32768):
+            add(f"{cid}::query_m={size}", ("query",), seed_kind="sj16_query",
+                primary={"kind": "sj16", "detail": str(size)})
+        return specs
+    if producer == "bench_threshold":
+        if methods != ["timing"]:
+            fail(f"threshold raw timing method taxonomy mismatch for {cid}")
+        add(cid, _RAW_PHASES_THRESHOLD, method="timing",
+            primary={"kind": "threshold"})
+        return specs
+    if producer == "bench_real_datasets":
+        if methods != ["std128_timing"]:
+            fail(f"real raw timing method taxonomy mismatch for {cid}")
+        add("", _RAW_PHASES_REAL, method="std128_timing",
+            seed_kind="real", primary={"kind": "real"})
+        return specs
+    if producer in {"dynamic_timing", "dynamic_refresh"}:
+        return []
+    fail(f"raw timing producer is not registered for {cid}: {producer}")
+
+
+def _raw_primary_stat_binding(
+        spec: dict[str, Any], primary_rows: list[dict[str, str]],
+        measured_by_phase: dict[str, list[tuple[int, float]]],
+        cid: str) -> None:
+    """Bind common raw aggregates to fixed-precision primary CSV fields."""
+    primary = spec.get("primary", {})
+    kind = primary.get("kind")
+    if kind == "crossover":
+        if len(primary_rows) != 1:
+            fail(f"crossover primary row topology mismatch for {cid}")
+        row = primary_rows[0]
+        fields = {"onehot_total": "onehot_total_ms", "sqrt_total": "sqrt_total_ms"}
+        for phase, field in fields.items():
+            if phase not in measured_by_phase:
+                continue
+            values = [value for _, value in sorted(measured_by_phase[phase])]
+            _mean, _sd, median, _low, _high = _raw_stats(values)
+            # The crossover CSV intentionally reports the historical median
+            # total, while the sidecar aggregate carries both mean and
+            # median.  Bind the legacy field to the statistic it actually
+            # serializes rather than silently treating it as a mean.
+            if row.get(field, "") != format(median, ".3f"):
+                fail(f"crossover primary {field} aggregate mismatch for {cid}")
+        return
+    if kind == "review":
+        method = primary.get("method", "")
+        matches = [row for row in primary_rows if row.get("method") == method]
+        if len(matches) != 1:
+            fail(f"review primary method topology mismatch for {cid}")
+        row = matches[0]
+        values = [value for _, value in sorted(measured_by_phase["total"])]
+        mean, sd, median, _low, _high = _raw_stats(values)
+        if row.get("total_ms", "") != format(mean, ".6f") or \
+                row.get("total_ms_median", "") != format(median, ".6f"):
+            fail(f"review primary total aggregate mismatch for {cid}")
+        expected_sd = "" if sd is None else format(sd, ".6f")
+        if row.get("total_ms_sd", "") != expected_sd:
+            fail(f"review primary total_ms_sd aggregate mismatch for {cid}")
+        return
+    if kind == "threshold":
+        if len(primary_rows) != 1:
+            fail(f"threshold primary row topology mismatch for {cid}")
+        row = primary_rows[0]
+        fields = {
+            "total": "total_ms", "minhash": "phase_minhash_ms",
+            "encode": "phase_encode_ms", "encrypt": "phase_encrypt_ms",
+            "multiply": "phase_multiply_ms", "rotate_sum": "phase_rotate_sum_ms",
+            "mask": "phase_mask_ms", "poly_eval": "phase_poly_eval_ms",
+            "flood": "phase_flood_ms", "decrypt": "phase_decrypt_ms",
+        }
+        for phase, field in fields.items():
+            values = [value for _, value in sorted(measured_by_phase[phase])]
+            mean, sd, median, _low, _high = _raw_stats(values)
+            if row.get(field, "") != format(mean, ".3f") or \
+                    row.get(field + "_median", "") != format(median, ".3f") or \
+                    row.get(field + "_sd", "") != (format(sd, ".3f") if sd is not None else "-1.000"):
+                fail(f"threshold primary {field} aggregate mismatch for {cid}")
+        return
+    if kind == "sqrt":
+        method = primary.get("method", "")
+        wanted = method
+        matches = [row for row in primary_rows if row.get("encoding") == wanted]
+        if len(matches) != 1:
+            fail(f"sqrt primary method topology mismatch for {cid}")
+        row = matches[0]
+        fields = {
+            "total": "time_ms", "minhash": "phase_minhash_ms",
+            "encode": "phase_encode_ms", "encrypt": "phase_encrypt_ms",
+            "multiply": "phase_multiply_ms", "rotate_sum": "phase_rotate_sum_ms",
+            "flood": "phase_flood_ms", "decrypt": "phase_decrypt_ms",
+        }
+        for phase, field in fields.items():
+            values = [value for _, value in sorted(measured_by_phase[phase])]
+            mean, sd, median, _low, _high = _raw_stats(values)
+            if row.get(field, "") != format(mean, ".3f") or \
+                    row.get(field + "_median", "") != format(median, ".3f") or \
+                    row.get(field + "_sd", "") != (format(sd, ".3f") if sd is not None else "-1.000"):
+                fail(f"sqrt primary {field} aggregate mismatch for {cid}")
+        return
+    fail(f"raw primary aggregate binding is not registered for {cid}")
+
+
+def _raw_real_primary_binding(
+        spec: dict[str, Any], primary_rows: list[dict[str, str]],
+        measured_by_phase: dict[str, list[tuple[int, float]]], cid: str) -> None:
+    """Bind every real-timing raw sample back to its fixed CSV trial row."""
+    count = int(spec["count"])
+    if len(primary_rows) != count:
+        fail(f"real timing primary row count mismatch for {cid}")
+    row_by_trial: dict[int, dict[str, str]] = {}
+    for row in primary_rows:
+        trial = _int_field(row, "trial_index", cid)
+        if trial in row_by_trial or trial not in range(count):
+            fail(f"real timing primary trial topology mismatch for {cid}")
+        row_by_trial[trial] = row
+        if row.get("pair_id", "") != spec["pair_id"] or \
+                row.get("variant", "") != spec["variant"] or \
+                row.get("dataset", "") != spec["dataset"] or \
+                _int_field(row, "k", cid) != int(spec["k"]) or \
+                _int_field(row, "m", cid) != int(spec["m"]):
+            fail(f"real timing primary pair/shape binding mismatch for {cid}")
+    if set(row_by_trial) != set(range(count)):
+        fail(f"real timing primary trial coverage mismatch for {cid}")
+    fields = {
+        "total": "total_query_ms",
+        "phase_minhash_ms": "phase_minhash_ms",
+        "phase_encode_ms": "phase_encode_ms",
+        "phase_encrypt_ms": "phase_encrypt_ms",
+        "phase_cloud_multiply_ms": "phase_cloud_multiply_ms",
+        "phase_cloud_rotate_ms": "phase_cloud_rotate_ms",
+        "phase_sanitize_ms": "phase_sanitize_ms",
+        "phase_decrypt_ms": "phase_decrypt_ms",
+        "phase_bias_correction_ms": "phase_bias_correction_ms",
+    }
+    by_phase = {
+        phase: {trial: value for trial, value in values}
+        for phase, values in measured_by_phase.items()
+    }
+    for trial in range(count):
+        row = row_by_trial[trial]
+        for phase, field in fields.items():
+            value = by_phase[phase][trial]
+            if row.get(field, "") != format(value, ".17g"):
+                fail(f"real timing primary {field} binding mismatch for {cid}")
+        total = 0.0
+        for phase in fields:
+            if phase == "total":
+                continue
+            total += by_phase[phase][trial]
+        if by_phase["total"][trial] != total:
+            fail(f"real timing total phase contract mismatch for {cid}")
+
+
+def _raw_validate_spec(
+        path: Path, spec: dict[str, Any], command: list[str], cid: str,
+        primary_rows: list[dict[str, str]] | None = None,
+        *, sj16_details: dict[str, dict[str, Any]] | None = None) -> None:
+    metadata, samples, aggregates = _raw_phase_parse(path, cid)
+    # The raw artifact producer is always encoded in the filename/spec; real
+    # dataset cells are the one exception where the matrix producer is the
+    # wrapper and the sidecar producer is ``real_timing``.
+    raw_producer = spec.get("raw_producer", "")
+    if not raw_producer:
+        raw_producer = "real_timing" if spec.get("seed_kind") == "real" else ""
+    expected_metadata = {
+        "producer_id": raw_producer,
+        "profile_id": spec["profile"],
+        "cell_id": spec["cell_id"],
+        "warmup_policy": spec["warmup"],
+        "expected_measured": str(spec["count"]),
+    }
+    if metadata != expected_metadata:
+        fail(f"raw timing metadata identity/count mismatch for {cid}")
+
+    phases = tuple(spec["phases"])
+    phase_set = set(phases)
+    measured_by_phase: dict[str, list[tuple[int, float]]] = {
+        phase: [] for phase in phase_set
+    }
+    expected_keys: list[tuple[str, str, int]] = []
+    for phase in sorted(phases):
+        if spec["warmup"] == "discard_one":
+            expected_keys.append((phase, "discarded_warmup", 0))
+        expected_keys.extend((phase, "measured", trial)
+                             for trial in range(spec["count"]))
+
+    def expected_seed(kind: str, trial: int) -> int:
+        seed_kind = spec.get("seed_kind", "root")
+        if seed_kind == "root":
+            root = spec.get("root_seed")
+            if root is None:
+                fail(f"raw timing root seed is missing for {cid}")
+            if kind == "discarded_warmup":
+                return int(root)
+            return (int(root) + trial * 10007 + 500) & _RAW_U64_MASK
+        if seed_kind == "fhe":
+            root = spec.get("root_seed")
+            if root is None:
+                fail(f"FHE-IND raw timing root seed is missing for {cid}")
+            return int(root) + trial
+        if seed_kind == "review":
+            measured = spec.get("review_measured", [])
+            warmups = spec.get("review_warmups", [])
+            if kind == "discarded_warmup":
+                if len(warmups) != 1:
+                    fail(f"review raw timing warmup seed topology mismatch for {cid}")
+                return int(warmups[0])
+            if trial >= len(measured):
+                fail(f"review raw timing measured seed topology mismatch for {cid}")
+            return int(measured[trial])
+        if seed_kind == "sj16_encrypt":
+            base = int(spec["root_seed"]) ^ 0xE11C0DE5EED ^ 3072
+            return base if kind == "discarded_warmup" else base + trial
+        if seed_kind == "sj16_query":
+            base = (0xC0FFEE ^ (3072 << 8) ^ int(spec["root_seed"])) & _RAW_U64_MASK
+            size = int(spec["query_size"])
+            query_base = (base ^ size) & _RAW_U64_MASK
+            if kind == "discarded_warmup":
+                return (query_base ^ 0x9E3779B97F4A7C15) & _RAW_U64_MASK
+            return (query_base + trial * 1009) & _RAW_U64_MASK
+        if seed_kind == "real":
+            return int(spec["real_seed"])
+        fail(f"raw timing seed contract is not registered for {cid}")
+
+    observed_keys: list[tuple[str, str, int]] = []
+    for sample in samples:
+        if sample["producer"] != raw_producer or \
+                sample["profile"] != spec["profile"] or \
+                sample["cell"] != spec["cell_id"] or \
+                sample["phase"] not in phase_set:
+            fail(f"raw timing sample identity/phase mismatch for {cid}")
+        trial = _raw_unsigned(sample["trial"], "trial_index", cid)
+        seed = _raw_unsigned(sample["seed"], "seed", cid)
+        value = _raw_float(sample["value"], "raw_ms", cid, nonnegative=True)
+        kind = sample["kind"]
+        if kind not in {"discarded_warmup", "measured"}:
+            fail(f"raw timing sample kind mismatch for {cid}")
+        if kind == "discarded_warmup":
+            if spec["warmup"] != "discard_one" or trial != 0:
+                fail(f"raw timing warmup topology mismatch for {cid}")
+        else:
+            if trial >= spec["count"]:
+                fail(f"raw timing trial index mismatch for {cid}")
+            measured_by_phase[sample["phase"]].append((trial, value))
+        if seed != expected_seed(kind, trial):
+            fail(f"raw timing seed/index mismatch for {cid}")
+        observed_keys.append((sample["phase"], kind, trial))
+    if observed_keys != expected_keys:
+        fail(f"raw timing sample topology/order mismatch for {cid}")
+    if any(len(values) != spec["count"] for values in measured_by_phase.values()):
+        fail(f"raw timing measured phase count mismatch for {cid}")
+
+    # The aggregate section is itself canonical and ordered lexicographically
+    # by phase.  A sidecar with omitted, duplicated, or extra aggregates is not
+    # admissible even if its CSV summary happens to match.
+    aggregates_by_phase: dict[str, dict[str, str]] = {}
+    for aggregate in aggregates:
+        if aggregate["producer"] != raw_producer or \
+                aggregate["profile"] != spec["profile"] or \
+                aggregate["cell"] != spec["cell_id"] or \
+                aggregate["phase"] not in phase_set or \
+                aggregate["phase"] in aggregates_by_phase or \
+                aggregate["count"] != str(spec["count"]) or \
+                aggregate["format"] != "17-digit":
+            fail(f"raw timing aggregate identity/topology mismatch for {cid}")
+        aggregates_by_phase[aggregate["phase"]] = aggregate
+    if set(aggregates_by_phase) != phase_set or \
+            [aggregate["phase"] for aggregate in aggregates] != sorted(phases):
+        fail(f"raw timing aggregate order/coverage mismatch for {cid}")
+
+    for phase in sorted(phases):
+        values = [value for _, value in sorted(measured_by_phase[phase])]
+        mean, sd, median, ci_low, ci_high = _raw_stats(values)
+        aggregate = aggregates_by_phase[phase]
+        actual_mean = _raw_float(aggregate["mean"], "mean_ms", cid,
+                                 nonnegative=True)
+        actual_median = _raw_float(aggregate["median"], "median_ms", cid,
+                                   nonnegative=True)
+        actual_sd = _raw_optional_stat(aggregate["sd"], "sample_sd_ms", cid)
+        actual_low = _raw_optional_stat(aggregate["ci_low"], "ci95_low_ms", cid)
+        actual_high = _raw_optional_stat(aggregate["ci_high"], "ci95_high_ms", cid)
+        if (actual_sd is not None and actual_sd < 0.0) or \
+                (actual_low is not None and not math.isfinite(actual_low)) or \
+                (actual_high is not None and not math.isfinite(actual_high)):
+            fail(f"raw timing aggregate numeric domain mismatch for {cid}")
+        _raw_require_stat(aggregate["mean"], actual_mean, mean, "mean_ms", cid)
+        _raw_require_stat(aggregate["sd"], actual_sd, sd, "sample_sd_ms", cid)
+        _raw_require_stat(aggregate["median"], actual_median, median,
+                          "median_ms", cid)
+        _raw_require_stat(aggregate["ci_low"], actual_low, ci_low,
+                          "ci95_low_ms", cid)
+        _raw_require_stat(aggregate["ci_high"], actual_high, ci_high,
+                          "ci95_high_ms", cid)
+
+    # Derived totals are independently reconstructed for every producer that
+    # exposes component phases.  This closes the common mutation where only
+    # the total row is changed while all per-phase rows remain untouched.
+    if spec.get("derived_total"):
+        components = tuple(spec["derived_total"])
+        by_trial = {
+            phase: {trial: value for trial, value in values}
+            for phase, values in measured_by_phase.items()
+        }
+        for trial in range(spec["count"]):
+            total = 0.0
+            for phase in components:
+                total += by_trial[phase][trial]
+            if by_trial["total"][trial] != total:
+                fail(f"raw timing total phase contract mismatch for {cid}")
+
+    if primary_rows is not None and spec.get("primary", {}).get("kind") in {
+            "crossover", "review", "threshold", "sqrt"}:
+        _raw_primary_stat_binding(spec, primary_rows, measured_by_phase, cid)
+    if primary_rows is not None and spec.get("primary", {}).get("kind") == "real":
+        _raw_real_primary_binding(spec, primary_rows, measured_by_phase, cid)
+    if spec.get("primary", {}).get("kind") == "sj16":
+        if sj16_details is None:
+            fail(f"SJ16 primary dispersion details are missing for {cid}")
+        detail = sj16_details.get(spec["cell_id"])
+        if detail is None:
+            fail(f"SJ16 primary dispersion binding is missing for {cid}")
+        measured = [value for _, value in sorted(measured_by_phase[spec["phases"][0]])]
+        expected_samples = [format(value, ".6f") for value in measured]
+        if detail["samples"] != expected_samples or \
+                detail["median"] != format(_raw_stats(measured)[2], ".6f"):
+            fail(f"SJ16 primary raw timing aggregate mismatch for {cid}")
+
+
+def _raw_add_seed_contracts(
+        specs: list[dict[str, Any]], cell: dict[str, Any],
+        plan: dict[str, Any], mode: str, cid: str,
+        primary_rows: list[dict[str, str]] | None, output: Path) -> None:
+    command = plan.get("command", [])
+    producer = str(cell.get("producer", ""))
+    root_seed = _command_int_once(command, "--seed=", cid)
+    if producer in {"bench_onehot_sqrt", "bench_crossover", "bench_threshold"}:
+        if root_seed is None or root_seed < 0:
+            fail(f"raw timing command has no valid root seed for {cid}")
+        for spec in specs:
+            spec["root_seed"] = root_seed
+            spec["raw_producer"] = producer
+            spec["warmup"] = "discard_one"
+            spec["derived_total"] = (
+                ("minhash", "encode", "encrypt", "multiply", "rotate_sum",
+                 "flood", "decrypt") if producer == "bench_onehot_sqrt" else
+                ("minhash", "encode", "encrypt", "multiply", "rotate_sum",
+                 "mask", "poly_eval", "flood", "decrypt") if producer == "bench_threshold" else
+                ())
+        return
+    if producer == "bench_review_comparison":
+        if root_seed is None or root_seed < 0:
+            fail(f"review raw timing command has no valid root seed for {cid}")
+        workload_root, warmups, measured = _raw_seed_from_review_workload(
+            output, cid, _raw_expected_count(mode))
+        if workload_root != root_seed:
+            fail(f"review raw timing workload root seed mismatch for {cid}")
+        for spec in specs:
+            spec["raw_producer"] = producer
+            spec["warmup"] = "discard_one"
+            spec["review_warmups"] = warmups
+            spec["review_measured"] = measured
+        return
+    if producer == "bench_sj16_calibrate":
+        if root_seed is None or root_seed < 0:
+            fail(f"SJ16 calibration command has no valid root seed for {cid}")
+        for spec in specs:
+            spec["root_seed"] = root_seed
+            spec["raw_producer"] = producer
+            spec["warmup"] = "discard_one"
+            if spec.get("seed_kind") == "sj16_query":
+                spec["query_size"] = int(str(spec["cell_id"]).rsplit("=", 1)[1])
+        return
+    if producer == "bench_real_datasets":
+        if root_seed is None or root_seed < 0 or not primary_rows:
+            fail(f"real raw timing root/primary seed binding is missing for {cid}")
+        profile_values = _command_value(command, "--profile=")
+        if len(profile_values) != 1:
+            fail(f"real raw timing profile binding count mismatch for {cid}")
+        first = primary_rows[0]
+        pair_id = first.get("pair_id", "")
+        variant = first.get("variant", "")
+        dataset = first.get("dataset", "")
+        if not pair_id or not variant or not dataset:
+            fail(f"real raw timing primary pair identity is missing for {cid}")
+        k = _int_field(first, "k", cid)
+        m = _int_field(first, "m", cid)
+        if any(row.get("pair_id") != pair_id or row.get("variant") != variant or
+               row.get("dataset") != dataset or _int_field(row, "k", cid) != k or
+               _int_field(row, "m", cid) != m
+               for row in primary_rows):
+            fail(f"real raw timing primary pair/shape topology mismatch for {cid}")
+        real_seed = _raw_real_hash_seed(
+            root_seed, first.get("dataset_manifest_sha256", ""), k, m,
+            profile_values[0], cid)
+        if any(_int_field(row, "hash_seed", cid) != real_seed for row in primary_rows):
+            fail(f"real raw timing primary hash seed mismatch for {cid}")
+        for spec in specs:
+            spec["raw_producer"] = "real_timing"
+            spec["warmup"] = "discard_one"
+            spec["real_seed"] = real_seed
+            spec["cell_id"] = (f"real_timing:{variant}:{pair_id}:k={k}:m={m}")
+            spec["pair_id"] = pair_id
+            spec["variant"] = variant
+            spec["dataset"] = dataset
+            spec["k"] = k
+            spec["m"] = m
+        return
+    fail(f"raw timing seed contract is not registered for {cid}")
+
+
+def _sj16_raw_detail_map(
+        root: Path, output: Path, plan: dict[str, Any], mode: str,
+        cid: str) -> dict[str, dict[str, Any]]:
+    """Extract the calibration dispersion samples used by raw sidecars."""
+    values = _command_value(plan.get("command", []), "--output=")
+    if len(values) != 1:
+        fail(f"SJ16 calibration lacks one canonical --output for {cid}")
+    artifact = _output_path(root, output, values[0], "SJ16 calibration")
+    try:
+        lines = artifact.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"SJ16 calibration is not readable for {cid}: {exc}")
+    expected_count = _raw_expected_count(mode)
+    detail_re = re.compile(
+        r"^k3072_(?P<kind>t_enc|fit_m=(?P<fit>\d+)|heldout_m=(?P<held>\d+)) "
+        r"median=(?P<median>[^ ]+)"
+        r"(?: q1=(?P<q1>[^ ]+) q3=(?P<q3>[^ ]+))?"
+        r" iqr=(?P<iqr>[^ ]+) samples=(?P<samples>.*)$")
+    details: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        match = detail_re.match(line)
+        if match is None:
+            continue
+        key = ("t_enc" if match.group("kind") == "t_enc" else
+               f"fit_m={match.group('fit')}" if match.group("fit") else
+               f"heldout_m={match.group('held')}")
+        if key in details:
+            fail(f"SJ16 calibration duplicate dispersion row for {cid}")
+        numeric = [match.group(name) for name in ("median", "q1", "q3", "iqr")
+                   if match.group(name) is not None]
+        try:
+            if any(not math.isfinite(float(value)) for value in numeric):
+                raise ValueError
+            samples = [item for item in match.group("samples").split(",") if item]
+            if len(samples) != expected_count or any(
+                    not math.isfinite(float(item)) for item in samples):
+                raise ValueError
+        except ValueError:
+            fail(f"SJ16 calibration dispersion/sample topology mismatch for {cid}")
+        details[key] = {"median": match.group("median"),
+                        "samples": samples}
+    expected_keys = {"t_enc", *(f"fit_m={size}" for size in (4096, 8192, 16384)),
+                     "heldout_m=32768"}
+    if set(details) != expected_keys:
+        fail(f"SJ16 calibration dispersion topology mismatch for {cid}")
+    mapped: dict[str, dict[str, Any]] = {f"{cid}::encrypt": details["t_enc"]}
+    for size in (4096, 8192, 16384):
+        mapped[f"{cid}::query_m={size}"] = details[f"fit_m={size}"]
+    mapped[f"{cid}::query_m=32768"] = details["heldout_m=32768"]
+    return mapped
+
+
+def _check_declared_raw_sidecars(
+        root: Path, output: Path, cell: dict[str, Any],
+        plan: dict[str, Any], receipt: dict[str, Any], mode: str, cid: str,
+        primary_rows: list[dict[str, str]] | None) -> None:
+    """Enforce raw-phase-v1 for every matrix row that declares it."""
+    output = output.resolve()
+    if not _raw_contract_rows(cell, cid):
+        return
+    producer = str(cell.get("producer", ""))
+    if producer == "bench_dynamic":
+        # Dynamic timing/refresh has a long-standing, family-specific checker
+        # invoked at the top of _check_family_artifacts.  Keeping that path
+        # separate preserves its update/refresh phase taxonomy.
+        return
+    if producer in {"bench_piccard", "bench_fhe_ind"}:
+        _check_raw_phase_sidecar(output, cell, plan, receipt, mode, cid,
+                                 primary_rows or [], producer)
+        return
+    specs = _raw_specs_for_cell(cell, primary_rows, mode, cid, output, plan)
+    if not specs:
+        fail(f"raw timing contract has no canonical sidecar specs for {cid}")
+    raw_producer = "real_timing" if producer == "bench_real_datasets" else producer
+    _raw_bind_command_profile(plan, raw_producer, mode, cid)
+    _raw_add_seed_contracts(specs, cell, plan, mode, cid, primary_rows, output)
+    raw_dir = _raw_command_directory(output, plan, raw_producer, cid)
+    paths = _raw_inventory_paths(output, receipt, raw_producer, specs, raw_dir, cid)
+    sj16_details = (_sj16_raw_detail_map(root, output, plan, mode, cid)
+                    if producer == "bench_sj16_calibrate" else None)
+    for spec in specs:
+        path = paths.get(
+            (raw_dir / (f"{_raw_safe_component(raw_producer)}__"
+                        f"{_raw_safe_component(spec['cell_id'])}__"
+                        f"{_raw_safe_component(spec['profile'])}.tsv"))
+            .relative_to(output).as_posix())
+        if path is None:
+            fail(f"raw timing sidecar path binding is missing for {cid}")
+        _raw_validate_spec(path, spec, plan.get("command", []), cid,
+                           primary_rows, sj16_details=sj16_details)
+
+
 def _terminal_records(stderr: bytes, cell_id: str) -> list[dict[str, str]]:
     records = []
     for line in stderr.decode("utf-8", errors="strict").splitlines():
@@ -1706,6 +2534,46 @@ def _review_taxonomy(method: str, target_bits: int,
     return {}
 
 
+def _review_method_tokens(cell: dict[str, Any], plan: dict[str, Any],
+                          cid: str) -> list[str]:
+    """Return concrete review methods from the canonical command.
+
+    The SJ16 precomputed matrix row names its producer in ``method`` for
+    historical compatibility, while its concrete argv and CSV use
+    ``sj16_precomputed``.  For raw identity and workload binding the concrete
+    method token is authoritative; all other review rows already use the
+    same token in both places.
+    """
+    command = plan.get("command", [])
+    method_values = _command_value(command, "--method=")
+    methods_values = _command_value(command, "--methods=")
+    if method_values and methods_values:
+        fail(f"review command has both --method and --methods for {cid}")
+    if len(method_values) > 1 or len(methods_values) > 1:
+        fail(f"review command has duplicate method bindings for {cid}")
+    if method_values:
+        methods = [method_values[0]]
+    elif methods_values:
+        methods = methods_values[0].split(",")
+        if any(not method for method in methods):
+            fail(f"review command method taxonomy is malformed for {cid}")
+    else:
+        methods = [str(row.get("method", "")) for row in cell.get("expected_rows", [])
+                   if row.get("terminal_status") != "NOT_APPLICABLE"]
+    if not methods or len(methods) != len(set(methods)):
+        fail(f"review command method taxonomy is malformed for {cid}")
+    if cell.get("family") == "piccard_std192_encoding":
+        try:
+            m = int(cell.get("axes", {}).get("m"))
+        except (TypeError, ValueError):
+            fail(f"review encoding m axis is malformed for {cid}")
+        root = int(m ** 0.5)
+        if root * root != m:
+            methods = [method for method in methods
+                       if method != "piccard_sqrt_encode"]
+    return methods
+
+
 def _revision_suite_for_family(family: str) -> str:
     """Return the concrete versioned suite emitted by the C++ adapter."""
     return {
@@ -1768,9 +2636,7 @@ def _bind_review_sidecars(output: Path, rows: list[dict[str, str]],
             expected_profile = ("paper-std192-encoding-v1" if encoding_workload
                                 else "std128-t40-primary")
         axes = cell["axes"]
-        expected_methods = tuple(
-            str(item["method"]) for item in cell["expected_rows"]
-            if item.get("terminal_status") != "NOT_APPLICABLE")
+        expected_methods = tuple(_review_method_tokens(cell, plan, cid))
         expected_timing = int(cell["expected_rows"][0][
             "toy_measured_count" if mode == "toy" else "paper_measured_count"])
         expected_accuracy = 0
@@ -2862,6 +3728,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         # SJ16 writes a structured key=value artifact, not a CSV stream.
         if schema == "sj16-calibration-v1":
             _check_sj16_calibration(root, output, plan, cell, mode, cid)
+            _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                         mode, cid, None)
             continue
 
         if schema == "noise-profile-v1":
@@ -2907,6 +3775,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 _check_terminal_ids(stderr, cell,
                                     {"sqrt"} if na else set(),
                                     reason="sqrt-m-not-perfect-square")
+                _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                             mode, cid, rows)
             else:
                 rows = _csv_table(stdout, _CROSSOVER_HEADER, f"sqrt crossover {cid}")
                 _bind_cell_shape(rows, cell, plan, cid, mode)
@@ -2919,6 +3789,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 _check_terminal_ids(stderr, cell,
                                     {"sqrt"} if nonsquare else set(),
                                     reason="sqrt-m-not-perfect-square")
+                _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                             mode, cid, rows)
             continue
 
         if schema == "threshold-csv-v1":
@@ -2952,6 +3824,9 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 if len(rows) != 1 or rows[0].get("label") != cid or \
                         _int_field(rows[0], "trials", cid) != expected_count:
                     fail(f"threshold timing row/trial topology mismatch for {cid}")
+                if cell["family"] == "threshold_timing":
+                    _check_declared_raw_sidecars(root, output, cell, plan,
+                                                 receipt, mode, cid, rows)
             continue
 
         if schema == "threshold-fpfn-csv-v1":
@@ -3090,6 +3965,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         any(not row.get("pair_id") or row.get("pair_kind", "") == ""
                             for row in rows):
                     fail(f"real timing pair/trial topology mismatch for {cid}")
+                _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                             mode, cid, rows)
             continue
         if schema == "real-threshold-csv-v1":
             payload, _ = _canonical_payload(root, output, plan, schema)
@@ -3168,21 +4045,16 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                     rows[0].get("method") != "fhe_ind" or \
                     _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"FHE-IND cell/trial taxonomy mismatch for {cid}")
-            # The canonical planner binds this flag for every current
-            # FHE-IND cell.  Keep sparse legacy CSV-shape unit fixtures (which
-            # intentionally omit sidecars) focused on CSV topology; a real
-            # root cannot omit the flag because _check_plans compares the
-            # materialized argv to the frozen matrix contract.
-            if _command_value(plan.get("command", []), "--raw-timing-out="):
-                _check_raw_phase_sidecar(
-                    output, cell, plan, receipt, mode, cid, rows,
-                    "bench_fhe_ind")
+            _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                         mode, cid, rows)
         elif schema == "review-comparison-csv-v1":
             _bind_review_sidecars(output, rows, cell, plan, mode, cid)
+            concrete_methods = _review_method_tokens(cell, plan, cid)
             expected_by_method = {
-                str(item["method"]): int(item["toy_measured_count"] if mode == "toy"
-                                          else item["paper_measured_count"])
-                for item in expected_rows
+                method: int(expected_rows[index][
+                    "toy_measured_count" if mode == "toy"
+                    else "paper_measured_count"])
+                for index, method in enumerate(concrete_methods)
             }
             observed_by_method: dict[str, int] = {}
             for row in rows:
@@ -3192,6 +4064,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 observed_by_method[method] = _int_field(row, "trials", cid)
             if observed_by_method != expected_by_method:
                 fail(f"review comparison row/trial taxonomy mismatch for {cid}")
+            _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                         mode, cid, rows)
         elif schema == "piccard-benchmark-csv-v1":
             if len(rows) != 2 or any(row.get("label") != cid for row in rows):
                 fail(f"Piccard cell identity/row topology mismatch for {cid}")
@@ -3206,10 +4080,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                              (expected_accuracy, expected_accuracy)))
             if observed != wanted:
                 fail(f"Piccard measured-count binding mismatch for {cid}")
-            if _command_value(plan.get("command", []), "--raw_timing_dir="):
-                _check_raw_phase_sidecar(
-                    output, cell, plan, receipt, mode, cid, rows,
-                    "bench_piccard")
+            _check_declared_raw_sidecars(root, output, cell, plan, receipt,
+                                         mode, cid, rows)
         elif schema == "estimator-diagnostic-csv-v1":
             if len(rows) != 1 or _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"estimator trial topology mismatch for {cid}")

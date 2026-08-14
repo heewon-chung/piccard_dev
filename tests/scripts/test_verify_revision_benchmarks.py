@@ -484,6 +484,9 @@ class RevisionVerifierContractTest(unittest.TestCase):
         cell = self.matrix_cell("piccard-benchmark-csv-v1",
                                 family="piccard_std128",
                                 axis="control", axis_value="default")
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
         cid = cell["cell_id"]
         expected_identity = (
             "schema,cell_id,universe_size\n"
@@ -648,6 +651,9 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _FHE_IND_HEADER, _check_family_artifacts, RevisionContractError)
         cell = self.matrix_cell("fhe-ind-csv-v1", family="fhe_ind",
                                 axis="control", axis_value="default")
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
         fields = _FHE_IND_HEADER.rstrip("\n").split(",")
         values = [""] * len(fields)
         for name, value in {
@@ -863,6 +869,12 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _SQRT_TIMING_HEADER, _check_family_artifacts)
         cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
                                 axis="timing_m", axis_value="128")
+        # This is intentionally a legacy sparse-shape fixture.  The canonical
+        # matrix now carries raw-phase-v1 authority for this RUN row, so make
+        # the legacy test explicit about opting out of that newer contract.
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
         fields = _SQRT_TIMING_HEADER.rstrip("\n").split(",")
         values = [""] * len(fields)
         values[fields.index("label")] = "revision_" + cell["cell_id"]
@@ -884,6 +896,624 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 encoding="utf-8")
             _check_family_artifacts(root, "toy", [cell],
                                     {cell["cell_id"]: {"command": []}})
+
+    def test_family_verifier_rejects_missing_canonical_raw_sidecar(self) -> None:
+        """A RUN timing row with raw-phase-v1 authority cannot omit its sidecar."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output
+        from verify_revision_benchmarks import (
+            _SQRT_TIMING_HEADER, _check_family_artifacts,
+            RevisionContractError)
+        cell = self.matrix_cell("sqrt-comparison-csv-v1", family="sqrt_comparison",
+                                axis="timing_m", axis_value="128")
+        fields = _SQRT_TIMING_HEADER.rstrip("\n").split(",")
+        values = [""] * len(fields)
+        values[fields.index("label")] = "revision_" + cell["cell_id"]
+        values[fields.index("k")] = "128"
+        values[fields.index("m")] = "128"
+        values[fields.index("set_size")] = "1000"
+        values[fields.index("comparison_eligible")] = "true"
+        values[fields.index("encoding")] = "onehot"
+        values[fields.index("trials")] = "1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            (output / "stdout.log").write_text(
+                _SQRT_TIMING_HEADER + ",".join(values) + "\n",
+                encoding="utf-8")
+            (output / "stderr.log").write_text(
+                "revision_terminal,schema=sqrt-revision-terminal-v1,"
+                f"cell_id={cell['cell_id']},row_id=sqrt,status=NOT_APPLICABLE,"
+                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
+                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n",
+                encoding="utf-8")
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": []}) + "\n",
+                encoding="utf-8")
+            raw_dir = output / "raw"
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(
+                    root, "toy", [cell],
+                    {cell["cell_id"]: {"command": [
+                        f"--raw_timing_dir={raw_dir}"]}})
+
+    def test_raw_phase_v1_new_sqrt_positive_and_mutation_matrix(self) -> None:
+        """The new raw contract accepts one toy artifact and rejects mutations."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _SQRT_TIMING_HEADER, _check_family_artifacts,
+            RevisionContractError)
+
+        source_cell = self.matrix_cell(
+            "sqrt-comparison-csv-v1", family="sqrt_comparison",
+            axis="timing_m", axis_value="128")
+        cid = source_cell["cell_id"]
+        phases = ("decrypt", "encode", "encrypt", "flood", "minhash",
+                  "multiply", "rotate_sum", "total")
+        producer = "bench_onehot_sqrt"
+        profile = "readiness-toy-v1"
+        raw_cell = cid + "::onehot"
+        root_seed = 7
+
+        def build(mutation: str | None = None) -> tuple[Path, dict, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            fields = _SQRT_TIMING_HEADER.rstrip("\n").split(",")
+            values = [""] * len(fields)
+            primary = {
+                "label": "revision_" + cid, "k": "128", "m": "128",
+                "set_size": "1000", "encoding": "onehot", "trials": "1",
+                "profile_id": profile, "run_class": "smoke",
+                "target_security_bits": "0", "comparison_eligible": "false",
+                "measurement_kind": "fhe-timing", "time_ms": "7.000",
+                "time_ms_sd": "-1.000", "time_ms_median": "7.000",
+            }
+            for name, value in primary.items():
+                values[fields.index(name)] = value
+            for phase in phases:
+                if phase == "total":
+                    continue
+                for suffix, value in (("", "1.000"), ("_sd", "-1.000"),
+                                      ("_median", "1.000")):
+                    values[fields.index("phase_" + phase + "_ms" + suffix)] = value
+            for suffix, value in (("", "7.000"), ("_sd", "-1.000"),
+                                  ("_median", "7.000")):
+                values[fields.index("time_ms" + suffix)] = value
+            (output / "stdout.log").write_text(
+                _SQRT_TIMING_HEADER + ",".join(values) + "\n", encoding="utf-8")
+            (output / "stderr.log").write_text(
+                "revision_terminal,schema=sqrt-revision-terminal-v1,"
+                f"cell_id={cid},row_id=sqrt,status=NOT_APPLICABLE,"
+                "terminal_status=NOT_APPLICABLE,reason=sqrt-m-not-perfect-square,"
+                "reason_code=sqrt-m-not-perfect-square,measured_count=0\n",
+                encoding="utf-8")
+            raw_dir = output / "raw"
+            raw_dir.mkdir()
+            samples: list[tuple[str, str, int, int, str]] = []
+            for phase in sorted(phases):
+                sample_phase = ("bogus" if mutation == "phase" and
+                                phase == "encrypt" else phase)
+                measured_index = 1 if mutation == "index" and phase == "encrypt" else 0
+                measured_seed = (root_seed + 501 if mutation == "seed" and
+                                 phase == "encrypt" else root_seed + 500)
+                measured_value = "7" if phase == "total" else "1"
+                samples.append((sample_phase, "discarded_warmup", 0,
+                                root_seed, "1"))
+                samples.append((sample_phase, "measured", measured_index,
+                                measured_seed, measured_value))
+            lines = [
+                "schema_version\tpiccard-paper-raw-timing-v1",
+                "artifact_type\traw_timing_v1", f"producer_id\t{producer}",
+                f"profile_id\t{profile}", f"cell_id\t{raw_cell}",
+                "warmup_policy\tdiscard_one", "expected_measured\t1", "samples",
+                "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\t"
+                "trial_index\tseed\traw_ms",
+            ]
+            for phase, kind, index, seed, value in samples:
+                lines.append("\t".join(("sample", producer, profile, raw_cell,
+                                        phase, kind, str(index), str(seed), value)))
+            lines += [
+                "aggregates",
+                "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                "ci95_low_ms\tci95_high_ms\tformat_version",
+            ]
+            for phase in sorted(phases):
+                mean = "2" if mutation == "aggregate" and phase == "encrypt" else (
+                    "7" if phase == "total" else "1")
+                count = "2" if mutation == "count" and phase == "encrypt" else "1"
+                lines.append("\t".join(("aggregate", producer, profile, raw_cell,
+                                        phase, count, mean, "N/A", mean, "N/A",
+                                        "N/A", "17-digit")))
+            safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                            for ch in raw_cell) or "artifact"
+            raw_path = raw_dir / f"{producer}__{safe}__{profile}.tsv"
+            raw_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            if mutation == "extra":
+                (raw_dir / "unrelated.tsv").write_text("not raw evidence\n",
+                                                         encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt) + "\n",
+                                                  encoding="utf-8")
+            cell = json.loads(json.dumps(source_cell))
+            plan = {cid: {"command": [f"--profile={profile}", "--seed=7",
+                                        f"--raw_timing_dir={raw_dir}"]}}
+            return root, cell, plan
+
+        root, cell, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+        for mutation in ("seed", "phase", "index", "count", "aggregate", "extra"):
+            with self.subTest(mutation=mutation):
+                root, cell, plan = build(mutation)
+                try:
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(root, "toy", [cell], plan)
+                finally:
+                    import shutil
+                    shutil.rmtree(root)
+
+    def test_raw_phase_v1_review_bcg_positive_and_workload_seed_mutation(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _REVIEW_HEADER, _check_family_artifacts, _review_taxonomy,
+            RevisionContractError)
+        from verify_review_comparison import expected_kind
+        from tests.scripts import review_verifier_fixtures as fixture
+
+        source_cell = self.matrix_cell(
+            "review-comparison-csv-v1", family="bcg12_minhash",
+            axis="control", axis_value="default")
+        cid = source_cell["cell_id"]
+        methods = ("bcg12_mh_ec", "bcg12_mh_ff")
+        profile = "readiness-toy-v1"
+
+        def build(mutate_workload: bool = False) -> tuple[Path, dict, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            digest, trace_digest = self._write_versioned_review_sidecars(
+                output, suite="revision-bcg12-minhash-v1", profile=profile,
+                methods=methods, timing_trials=1, k=128, m=64,
+                set_size=1000, universe=65536)
+            fields = _REVIEW_HEADER.rstrip("\n").split(",")
+            rows = []
+            for method in methods:
+                values = {
+                    "suite": "revision-bcg12-minhash-v1",
+                    "scenario": "review-65536", "method": method,
+                    "profile_id": profile, "run_class": "smoke",
+                    "target_security_bits": "0", "measurement_kind": expected_kind(method, "timing"),
+                    "evidence_arm": "timing", "workload_id": f"review-65536-{digest[:16]}",
+                    "workload_manifest_sha256": digest,
+                    "execution_trace_sha256": trace_digest, "root_seed": "7",
+                    "k": "128", "m": "64", "set_size": "1000",
+                    "universe_size": "65536", "timing_trials": "1",
+                    "accuracy_trials": "0", "trials": "1",
+                    "hash_randomness": "fixed", "hash_seed": str(fixture._hash_seed(7, 1, 0)),
+                    "total_ms": "3.000000", "total_ms_sd": "",
+                    "total_ms_median": "3.000000",
+                    "comparison_eligible": "false",
+                }
+                values.update(_review_taxonomy(method, 0, True))
+                rows.append(",".join(values.get(field, "") for field in fields))
+            (output / "stdout.log").write_text(
+                _REVIEW_HEADER + "\n".join(rows) + "\n", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            raw_dir = output / "raw"
+            raw_dir.mkdir()
+            warmup_seed = fixture._trial_seed(7, 0, 0)
+            measured_seed = fixture._trial_seed(7, 1, 0)
+            for method in methods:
+                raw_cell = cid + "::" + method
+                safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                                for ch in raw_cell)
+                lines = [
+                    "schema_version\tpiccard-paper-raw-timing-v1",
+                    "artifact_type\traw_timing_v1",
+                    "producer_id\tbench_review_comparison",
+                    f"profile_id\t{profile}", f"cell_id\t{raw_cell}",
+                    "warmup_policy\tdiscard_one", "expected_measured\t1", "samples",
+                    "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\t"
+                    "trial_index\tseed\traw_ms",
+                    f"sample\tbench_review_comparison\t{profile}\t{raw_cell}\t"
+                    f"total\tdiscarded_warmup\t0\t{warmup_seed}\t3",
+                    f"sample\tbench_review_comparison\t{profile}\t{raw_cell}\t"
+                    f"total\tmeasured\t0\t{measured_seed}\t3",
+                    "aggregates",
+                    "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                    "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                    "ci95_low_ms\tci95_high_ms\tformat_version",
+                    f"aggregate\tbench_review_comparison\t{profile}\t{raw_cell}\t"
+                    "total\t1\t3\tN/A\t3\tN/A\tN/A\t17-digit",
+                ]
+                (raw_dir / f"bench_review_comparison__{safe}__{profile}.tsv").write_text(
+                    "\n".join(lines) + "\n", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt) + "\n",
+                                                  encoding="utf-8")
+            plan = {cid: {"command": [
+                f"--revision-cell={cid}", f"--profile={profile}",
+                "--suite=bcg12-minhash", "--methods=" + ",".join(methods),
+                "--k=128", "--m=64", "--n=1000", "--universe=65536",
+                "--trials=1", "--seed=7", f"--raw_timing_dir={raw_dir}",
+                f"--output={output / 'comparison.csv'}"]}}
+            if mutate_workload:
+                payload = bytearray((output / "workload.bin").read_bytes())
+                payload[-1] ^= 1
+                (output / "workload.bin").write_bytes(payload)
+            return root, source_cell, plan
+
+        root, cell, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+        root, cell, plan = build(True)
+        try:
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+
+    def test_raw_phase_v1_sj16_calibration_positive_and_dispersion_mutations(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _check_family_artifacts, RevisionContractError)
+
+        source_cell = self.matrix_cell(
+            "sj16-calibration-v1", family="sj16",
+            axis="fit", axis_value="per_element")
+        cid = source_cell["cell_id"]
+        profile = "readiness-toy-v1"
+        base = 0xC0FFEE ^ (3072 << 8) ^ 7
+        enc_seed = 0xE11C0DE5EED ^ 3072 ^ 7
+        specs = [(cid + "::encrypt", "encrypt", enc_seed, enc_seed, "1.000000")]
+        for size, value in ((4096, "1.000000"), (8192, "1.000000"),
+                            (16384, "1.000000"), (32768, "33.000000")):
+            query_base = (base ^ size) & ((1 << 64) - 1)
+            specs.append((cid + f"::query_m={size}", "query",
+                          query_base ^ 0x9E3779B97F4A7C15, query_base, value))
+
+        def build(mutation: str | None = None) -> tuple[Path, dict, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            text = self.full_sj16_fixture().replace(
+                "k3072_t_enc median=1 iqr=0 samples=1",
+                "k3072_t_enc median=1.000000 iqr=0.000000 samples=1.000000")
+            for size in (4096, 8192, 16384):
+                text = text.replace(
+                    f"k3072_fit_m={size} median=1 q1=1 q3=1 iqr=0 samples=1",
+                    f"k3072_fit_m={size} median=1.000000 q1=1.000000 "
+                    "q3=1.000000 iqr=0.000000 samples=1.000000")
+            text = text.replace(
+                "k3072_heldout_m=32768 median=33 q1=33 q3=33 iqr=0 samples=33",
+                "k3072_heldout_m=32768 median=33.000000 q1=33.000000 "
+                "q3=33.000000 iqr=0.000000 samples=33.000000")
+            (output / "calibration.csv").write_text(text, encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            raw_dir = output / "raw"
+            raw_dir.mkdir()
+            for cell_id, phase, warmup_seed, measured_seed, measured in specs:
+                value = ("2" if mutation == "sample" and cell_id.endswith("encrypt")
+                         else measured)
+                median = ("2" if mutation == "median" and cell_id.endswith("encrypt")
+                          else value)
+                aggregate_value = value.split(".", 1)[0]
+                aggregate_median = median.split(".", 1)[0]
+                safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                                for ch in cell_id)
+                lines = [
+                    "schema_version\tpiccard-paper-raw-timing-v1",
+                    "artifact_type\traw_timing_v1",
+                    "producer_id\tbench_sj16_calibrate", f"profile_id\t{profile}",
+                    f"cell_id\t{cell_id}", "warmup_policy\tdiscard_one",
+                    "expected_measured\t1", "samples",
+                    "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\t"
+                    "trial_index\tseed\traw_ms",
+                    f"sample\tbench_sj16_calibrate\t{profile}\t{cell_id}\t{phase}\t"
+                    f"discarded_warmup\t0\t{warmup_seed}\t{measured}",
+                    f"sample\tbench_sj16_calibrate\t{profile}\t{cell_id}\t{phase}\t"
+                    f"measured\t0\t{measured_seed}\t{value}", "aggregates",
+                    "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                    "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                    "ci95_low_ms\tci95_high_ms\tformat_version",
+                    f"aggregate\tbench_sj16_calibrate\t{profile}\t{cell_id}\t{phase}\t"
+                    f"1\t{aggregate_value}\tN/A\t{aggregate_median}\tN/A\tN/A\t17-digit",
+                ]
+                (raw_dir / f"bench_sj16_calibrate__{safe}__{profile}.tsv").write_text(
+                    "\n".join(lines) + "\n", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt) + "\n",
+                                                  encoding="utf-8")
+            command = [f"--profile={profile}", "--key-bits=3072",
+                       "--sizes=4096,8192,16384", "--held-out=32768",
+                       "--threads=2", "--query-trials=1", "--enc-iters=1",
+                       "--warmup=1", "--seed=7", f"--raw_timing_dir={raw_dir}",
+                       f"--raw_timing_profile={profile}",
+                       f"--output={output / 'calibration.csv'}"]
+            return root, source_cell, {cid: {"command": command}}
+
+        root, cell, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+        for mutation in ("sample", "median"):
+            with self.subTest(mutation=mutation):
+                root, cell, plan = build(mutation)
+                try:
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(root, "toy", [cell], plan)
+                finally:
+                    import shutil
+                    shutil.rmtree(root)
+
+    def test_raw_phase_v1_threshold_positive_and_aggregate_mutation(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _RAW_PHASES_THRESHOLD, _THRESHOLD_HEADER,
+            _check_family_artifacts, RevisionContractError)
+
+        cell = self.matrix_cell("threshold-csv-v1", family="threshold_timing",
+                                axis="k", axis_value="128")
+        cid = cell["cell_id"]
+        profile = "readiness-toy-v1"
+        root_seed = 7
+        phases = {phase: 1.0 for phase in _RAW_PHASES_THRESHOLD}
+        phases["total"] = 9.0
+
+        def build(mutation: str | None = None) -> tuple[Path, dict, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            row_values: dict[str, str] = {
+                "label": cid, "k": "128", "m": "64", "set_size": "1000",
+                "trials": "1", "hash_randomness": "fixed",
+                "hash_seed": str(root_seed), "hash_root_seed": str(root_seed),
+                "accuracy_trials": "0", "threshold_result": "1",
+                "threshold_expected": "1", "threshold_correct": "1",
+                "jaccard_computed": "0.5", "jaccard_expected": "0.5",
+                "jaccard_error": "0", "jaccard_rel_error": "0",
+            }
+            field_for_phase = {
+                "total": "total_ms", "minhash": "phase_minhash_ms",
+                "encode": "phase_encode_ms", "encrypt": "phase_encrypt_ms",
+                "multiply": "phase_multiply_ms",
+                "rotate_sum": "phase_rotate_sum_ms", "mask": "phase_mask_ms",
+                "poly_eval": "phase_poly_eval_ms", "flood": "phase_flood_ms",
+                "decrypt": "phase_decrypt_ms",
+            }
+            for phase, field in field_for_phase.items():
+                value = phases[phase]
+                row_values[field] = format(value, ".3f")
+                row_values[field + "_sd"] = "-1.000"
+                row_values[field + "_median"] = format(value, ".3f")
+            (output / "stdout.log").write_text(
+                _THRESHOLD_HEADER + self.csv_row(_THRESHOLD_HEADER, **row_values) + "\n",
+                encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            raw_dir = output / "raw"
+            raw_dir.mkdir()
+            safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                            for ch in cid)
+            lines = [
+                "schema_version\tpiccard-paper-raw-timing-v1",
+                "artifact_type\traw_timing_v1",
+                "producer_id\tbench_threshold", f"profile_id\t{profile}",
+                f"cell_id\t{cid}", "warmup_policy\tdiscard_one",
+                "expected_measured\t1", "samples",
+                "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\t"
+                "trial_index\tseed\traw_ms",
+            ]
+            for phase in sorted(_RAW_PHASES_THRESHOLD):
+                sample_phase = phase
+                lines.append(
+                    f"sample\tbench_threshold\t{profile}\t{cid}\t{sample_phase}\t"
+                    f"discarded_warmup\t0\t{root_seed}\t{format(phases[phase], '.17g')}")
+                measured_seed = root_seed + 500
+                if mutation == "seed" and phase == "minhash":
+                    measured_seed += 1
+                lines.append(
+                    f"sample\tbench_threshold\t{profile}\t{cid}\t{phase}\t"
+                    f"measured\t0\t{measured_seed}\t{format(phases[phase], '.17g')}")
+            lines.extend([
+                "aggregates",
+                "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                "ci95_low_ms\tci95_high_ms\tformat_version",
+            ])
+            for phase in sorted(_RAW_PHASES_THRESHOLD):
+                mean = phases[phase]
+                if mutation == "aggregate" and phase == "decrypt":
+                    mean += 1.0
+                lines.append(
+                    f"aggregate\tbench_threshold\t{profile}\t{cid}\t{phase}\t"
+                    f"1\t{format(mean, '.17g')}\tN/A\t{format(phases[phase], '.17g')}\t"
+                    "N/A\tN/A\t17-digit")
+            raw_name = f"bench_threshold__{safe}__{profile}.tsv"
+            (raw_dir / raw_name).write_text("\n".join(lines) + "\n",
+                                            encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt) + "\n",
+                                                  encoding="utf-8")
+            command = [
+                f"--revision-cell={cid}", f"--profile={profile}",
+                "--security=TOY", "--mode=timing", "--k=128", "--m=64",
+                "--set_size=1000", "--universe=65536", "--trials=1",
+                "--seed=7", f"--raw_timing_dir={raw_dir}",
+            ]
+            return root, cell, {cid: {"command": command}}
+
+        root, cell, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+        for mutation in ("aggregate",):
+            with self.subTest(mutation=mutation):
+                root, cell, plan = build(mutation)
+                try:
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(root, "toy", [cell], plan)
+                finally:
+                    import shutil
+                    shutil.rmtree(root)
+
+    def test_raw_phase_v1_real_dynamic_cell_positive_and_seed_phase_mutations(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _REAL_TIMING_HEADER, _RAW_PHASES_REAL, _raw_real_hash_seed,
+            _check_family_artifacts, RevisionContractError)
+
+        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
+                                axis="dblp_acm_u65536_artifact",
+                                axis_value="std128_timing")
+        cid = cell["cell_id"]
+        profile = "readiness-toy-v1"
+        variant = "dblp_acm_u65536"
+        dataset = "dblp_acm"
+        pair_id = "p0"
+        manifest_digest = "a" * 64
+        root_seed = 7
+        k, m = 128, 64
+        real_seed = _raw_real_hash_seed(root_seed, manifest_digest, k, m,
+                                        profile, cid)
+        raw_cell = f"real_timing:{variant}:{pair_id}:k={k}:m={m}"
+        phases = {phase: 1.0 for phase in _RAW_PHASES_REAL}
+        phases["total"] = 8.0
+
+        def build(mutation: str | None = None) -> tuple[Path, dict, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            row_values: dict[str, str] = {
+                "profile_id": profile, "run_class": "smoke",
+                "target_security_bits": "0", "comparison_eligible": "false",
+                "comparison_scope": "full-protocol", "primitive": "piccard",
+                "protocol_model": "piccard-ckks", "output_semantics": "jaccard",
+                "assurance_scope": "readiness", "security_basis": "toy",
+                "cost_scope": "full-query", "precomputation_mode": "off",
+                "secure_division_included": "true", "measurement_kind": "timing",
+                "workload_id": "w0", "workload_manifest_sha256": manifest_digest,
+                "execution_trace_sha256": "b" * 64, "root_seed": str(root_seed),
+                "omp_threads": "1", "estimator_model": "none",
+                "sanitizer_model": "none", "sanitizer_assurance": "none",
+                "transcript_stat_bits": "0", "max_queries": "1",
+                "query_stat_bits": "0", "coefficient_stat_bits": "0",
+                "flood_margin_bits": "0", "eval_noise_bits": "0",
+                "flood_noise_bits": "0", "actual_ring_dim": "4096",
+                "log_q_bits": "0", "plaintext_modulus": "0", "num_limbs": "1",
+                "openfhe_version": "toy", "target_semantics": "jaccard",
+                "target_jaccard": "0.5", "realized_intersection": "1",
+                "realized_union": "2", "realized_jaccard": "0.5",
+                "timing_trials": "1", "accuracy_trials": "0",
+                "omp_dynamic": "false", "measurement_status": "measured",
+                "dataset": dataset, "variant": variant,
+                "dataset_manifest_sha256": manifest_digest,
+                "records_sha256": "b" * 64, "pairs_sha256": "c" * 64,
+                "pair_id": pair_id, "pair_kind": "positive", "label": "1",
+                "record_a": "a", "record_b": "b", "k": str(k), "m": str(m),
+                "hash_seed": str(real_seed), "trial_index": "0",
+                "phase_minhash_ms": "1", "phase_encode_ms": "1",
+                "phase_encrypt_ms": "1", "phase_cloud_multiply_ms": "1",
+                "phase_cloud_rotate_ms": "1", "phase_sanitize_ms": "1",
+                "phase_decrypt_ms": "1", "phase_bias_correction_ms": "1",
+                "total_query_ms": "8", "result_value": "0.5",
+                "ciphertext_bytes": "1", "upload_bytes": "1", "download_bytes": "1",
+            }
+            (output / "timing.csv").write_text(
+                _REAL_TIMING_HEADER + self.csv_row(_REAL_TIMING_HEADER,
+                                                    **row_values) + "\n",
+                encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            raw_dir = output / "raw"
+            raw_dir.mkdir()
+            safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                            for ch in raw_cell)
+            lines = [
+                "schema_version\tpiccard-paper-raw-timing-v1",
+                "artifact_type\traw_timing_v1", "producer_id\treal_timing",
+                f"profile_id\t{profile}", f"cell_id\t{raw_cell}",
+                "warmup_policy\tdiscard_one", "expected_measured\t1", "samples",
+                "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\t"
+                "trial_index\tseed\traw_ms",
+            ]
+            for phase in sorted(_RAW_PHASES_REAL):
+                sample_phase = ("wrong_phase" if mutation == "phase" and
+                                phase == "phase_minhash_ms" else phase)
+                lines.append(
+                    f"sample\treal_timing\t{profile}\t{raw_cell}\t{sample_phase}\t"
+                    f"discarded_warmup\t0\t{real_seed}\t{format(phases[phase], '.17g')}")
+                measured_seed = real_seed + (1 if mutation == "seed" and
+                                              phase == "phase_minhash_ms" else 0)
+                lines.append(
+                    f"sample\treal_timing\t{profile}\t{raw_cell}\t{phase}\t"
+                    f"measured\t0\t{measured_seed}\t{format(phases[phase], '.17g')}")
+            lines.extend([
+                "aggregates",
+                "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\t"
+                "measured_count\tmean_ms\tsample_sd_ms\tmedian_ms\t"
+                "ci95_low_ms\tci95_high_ms\tformat_version",
+            ])
+            for phase in sorted(_RAW_PHASES_REAL):
+                value = phases[phase]
+                lines.append(
+                    f"aggregate\treal_timing\t{profile}\t{raw_cell}\t{phase}\t"
+                    f"1\t{format(value, '.17g')}\tN/A\t{format(value, '.17g')}\t"
+                    "N/A\tN/A\t17-digit")
+            (raw_dir / f"real_timing__{safe}__{profile}.tsv").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(json.dumps(receipt) + "\n",
+                                                  encoding="utf-8")
+            command = [
+                f"--revision-cell={cid}", f"--profile={profile}",
+                "--raw-timing-profile=readiness-toy-v1", "--security=TOY",
+                "--mode=timing", f"--dataset={dataset}", f"--variant={variant}",
+                "--k=128", "--m=64", "--set_size=1000", "--universe=65536",
+                "--trials=1", "--seed=7", f"--csv={output / 'timing.csv'}",
+                f"--raw-timing-dir={raw_dir}",
+            ]
+            return root, cell, {cid: {"command": command}}
+
+        root, cell, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+        for mutation in ("seed", "phase"):
+            with self.subTest(mutation=mutation):
+                root, cell, plan = build(mutation)
+                try:
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(root, "toy", [cell], plan)
+                finally:
+                    import shutil
+                    shutil.rmtree(root)
 
     def test_family_verifier_accepts_real_versioned_encoding_pair(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -927,6 +1557,9 @@ class RevisionVerifierContractTest(unittest.TestCase):
         from verify_revision_benchmarks import _check_family_artifacts
         cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
                                 axis="fit", axis_value="per_element")
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
         text = self.full_sj16_fixture()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
