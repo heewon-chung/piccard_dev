@@ -1867,6 +1867,277 @@ class RevisionVerifierContractTest(unittest.TestCase):
         with self.assertRaises(RevisionContractError):
             _bind_cell_shape([row], cell, {"command": []}, cell["cell_id"])
 
+    def test_raw_phase_v1_actual_shape_kat_and_mutation_matrix(self) -> None:
+        """Piccard/FHE-IND raw-phase-v1 is independent, canonical evidence."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _FHE_IND_HEADER, _SQRT_TIMING_HEADER, _check_family_artifacts,
+            RevisionContractError)
+
+        def safe(value: str) -> str:
+            return "".join(ch if ch.isalnum() or ch in "_.-" else "_"
+                           for ch in value) or "artifact"
+
+        def raw_payload(producer: str, cid: str, profile: str, count: int,
+                        root_seed: int, *, mutate: str | None = None) -> str:
+            phases = (("bias_correction", 8.0), ("decrypt", 7.0),
+                      ("encode", 2.0), ("encrypt", 3.0),
+                      ("evaluate", 5.0), ("flood", 6.0),
+                      ("full_e2e", 38.0), ("minhash", 1.0),
+                      ("multiply", 4.0), ("online_e2e", 17.0),
+                      ("rotate_sum", 5.0), ("setup_context", 10.0),
+                      ("setup_keygen", 11.0), ("total", 36.0))
+            wanted = {"bench_piccard": {
+                "bias_correction", "decrypt", "encode", "encrypt",
+                "flood", "minhash", "multiply", "rotate_sum", "total"},
+                "bench_fhe_ind": {
+                "decrypt", "encode", "encrypt", "evaluate", "full_e2e",
+                "online_e2e", "setup_context", "setup_keygen"}}[producer]
+            phases = tuple((phase, base) for phase, base in phases
+                           if phase in wanted)
+            rows: list[tuple[str, str, int, int, float]] = []
+            for phase, base in phases:
+                if producer == "bench_piccard":
+                    rows.append((phase, "discarded_warmup", 0, root_seed,
+                                 base + 0.25))
+                for trial in range(count):
+                    seed = (root_seed + trial * 10007 + 500
+                            if producer == "bench_piccard" else root_seed + trial)
+                    increment = 0.25
+                    if producer == "bench_piccard" and phase == "total":
+                        increment = 2.0
+                    elif producer == "bench_fhe_ind" and phase == "online_e2e":
+                        increment = 1.0
+                    elif producer == "bench_fhe_ind" and phase == "full_e2e":
+                        increment = 1.5
+                    rows.append((phase, "measured", trial, seed,
+                                 base + trial * increment))
+            if mutate == "swapped_index":
+                if count < 2:
+                    raise AssertionError("swap mutation needs paper count")
+                first = next(i for i, row in enumerate(rows)
+                             if row[1] == "measured" and row[2] == 0)
+                second = next(i for i, row in enumerate(rows)
+                              if row[1] == "measured" and row[2] == 1)
+                left, right = rows[first], rows[second]
+                rows[first] = (left[0], left[1], 1, left[3], left[4])
+                rows[second] = (right[0], right[1], 0, right[3], right[4])
+            if mutate in {"duplicate_index", "missing_index"}:
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == "measured" and row[2] == count - 1)
+                row = rows[index]
+                rows[index] = (row[0], row[1], count - 2, row[3], row[4])
+            if mutate == "seed":
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == "measured")
+                row = rows[index]
+                rows[index] = (row[0], row[1], row[2], row[3] + 1, row[4])
+            if mutate == "warmup_kind":
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == ("discarded_warmup" if
+                                           producer == "bench_piccard" else
+                                           "measured"))
+                row = rows[index]
+                rows[index] = (row[0],
+                               "measured" if producer == "bench_piccard"
+                               else "discarded_warmup",
+                               row[2], row[3], row[4])
+            if mutate == "warmup_value":
+                index = next(i for i, row in enumerate(rows)
+                             if row[1] == ("discarded_warmup" if
+                                           producer == "bench_piccard" else
+                                           "measured"))
+                row = rows[index]
+                rows[index] = (row[0], row[1], row[2], row[3], row[4] + 9.0)
+
+            values_by_phase: dict[str, list[float]] = {phase: [] for phase, _ in phases}
+            for phase, kind, _trial, _seed, value in rows:
+                if kind == "measured":
+                    values_by_phase[phase].append(value)
+            lines = ["schema_version\tpiccard-paper-raw-timing-v1",
+                     "artifact_type\traw_timing_v1",
+                     f"producer_id\t{producer}", f"profile_id\t{profile}",
+                     f"cell_id\t{cid}",
+                     f"warmup_policy\t{'discard_one' if producer == 'bench_piccard' else 'none'}",
+                     f"expected_measured\t{count}", "samples",
+                     "sample\tproducer_id\tprofile_id\tcell_id\tphase\tsample_kind\ttrial_index\tseed\traw_ms"]
+            # Canonical serializer order is phase, warmup-before-measured, trial.
+            for phase, _base in phases:
+                phase_rows = [row for row in rows if row[0] == phase]
+                phase_rows.sort(key=lambda row: (row[1] != "discarded_warmup", row[2]))
+                for _phase, kind, trial, seed, value in phase_rows:
+                    lines.append("\t".join(("sample", producer, profile, cid,
+                                              phase, kind, str(trial), str(seed),
+                                              format(value, ".17g"))))
+            lines += ["aggregates",
+                      "aggregate\tproducer_id\tprofile_id\tcell_id\tphase\tmeasured_count\tmean_ms\tsample_sd_ms\tmedian_ms\tci95_low_ms\tci95_high_ms\tformat_version"]
+            for phase, _base in sorted(phases):
+                values = values_by_phase[phase]
+                mean = sum(values) / len(values)
+                median = values[len(values) // 2] if len(values) % 2 else (
+                    values[len(values) // 2 - 1] + values[len(values) // 2]) / 2.0
+                if len(values) == 1:
+                    sd = low = high = "N/A"
+                else:
+                    sd_value = (sum((value - mean) ** 2 for value in values) /
+                                (len(values) - 1)) ** 0.5
+                    # The frozen producer uses Student-t 95% values; mutation
+                    # tests only need a structurally valid aggregate, so use a
+                    # deterministic zero-width CI for the toy positive case.
+                    margin = 0.0 if count == 1 else 2.045229642132703 * sd_value / count ** 0.5
+                    sd, low, high = (format(item, ".17g") for item in
+                                     (sd_value, mean - margin, mean + margin))
+                if mutate == "aggregate" and phase == sorted(phases)[0][0]:
+                    mean = mean + 1.0
+                if mutate == "warmup_value" and phase == sorted(phases)[0][0]:
+                    # Deliberately model warmup-value leakage into the
+                    # published aggregate; a discarded warmup alone is not
+                    # part of the measured evidence.
+                    mean = mean + 9.0
+                lines.append("\t".join(("aggregate", producer, profile, cid,
+                                        phase, str(count), format(mean, ".17g"),
+                                        sd, format(median, ".17g"), low, high,
+                                        "17-digit")))
+            return "\n".join(lines) + "\n"
+
+        def write_case(root: Path, producer: str, mode: str,
+                       mutation: str | None = None) -> tuple[dict, dict, Path]:
+            family = "piccard_std128" if producer == "bench_piccard" else "fhe_ind"
+            schema = ("piccard-benchmark-csv-v1" if producer == "bench_piccard"
+                      else "fhe-ind-csv-v1")
+            cell = self.matrix_cell(schema, family=family,
+                                    axis="control", axis_value="default")
+            cid = cell["cell_id"]
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            count = 1 if mode == "toy" else 30
+            profile = "readiness-toy-v1" if mode == "toy" else "paper-v1"
+            row_profile = (profile if mode == "toy" else
+                           "paper-std128-t40-v1")
+            seed = 7
+            if producer == "bench_piccard":
+                phase_values = {"bias_correction": 8.0, "decrypt": 7.0,
+                                "encode": 2.0, "encrypt": 3.0, "flood": 6.0,
+                                "minhash": 1.0, "multiply": 4.0,
+                                "rotate_sum": 5.0, "total": 36.0}
+                fields = {"label": cid, "k": 128, "m": 64,
+                          "set_size": 1000, "trials": count,
+                          "accuracy_trials": 0, "profile_id": row_profile,
+                          "run_class": "smoke" if mode == "toy" else "primary",
+                          "target_security_bits": 0 if mode == "toy" else 128,
+                          "comparison_eligible": "false" if mode == "toy" else "true",
+                          "hash_seed": seed, "hash_root_seed": seed,
+                          "measurement_kind": "fhe-timing"}
+                for phase, value in phase_values.items():
+                    name = "time_ms" if phase == "total" else f"phase_{phase}_ms"
+                    increment = 2.0 if phase == "total" else 0.25
+                    mean = value + increment * (count - 1) / 2.0
+                    sd = -1.0 if count == 1 else (
+                        (sum((value + increment * trial - mean) ** 2
+                             for trial in range(count)) / (count - 1)) ** 0.5)
+                    fields[name] = format(mean, ".3f")
+                    fields[f"{name}_sd"] = format(sd, ".3f")
+                    fields[f"{name}_median"] = format(mean, ".3f")
+                timing = self.csv_row(_SQRT_TIMING_HEADER, **fields)
+                accuracy = self.csv_row(
+                    _SQRT_TIMING_HEADER, label=cid, k=128, m=64,
+                    set_size=1000, trials=50 if mode == "paper" else 1,
+                    accuracy_trials=50 if mode == "paper" else 1,
+                    profile_id=row_profile,
+                    run_class="smoke" if mode == "toy" else "primary",
+                    target_security_bits=0 if mode == "toy" else 128,
+                    comparison_eligible="false" if mode == "toy" else "true",
+                    measurement_kind="fhe-accuracy")
+                (output / "stdout.log").write_text(
+                    _SQRT_TIMING_HEADER + timing + "\n" + accuracy + "\n",
+                    encoding="utf-8")
+                raw_dir = output
+                command = [f"--revision-cell={cid}",
+                           f"--profile={'readiness-toy-v1' if mode == 'toy' else 'paper-std128-t40-v1'}",
+                           "--mode=combined", "--security=TOY" if mode == "toy" else "--security=STD128",
+                           "--k=128", "--m=64", "--set_size=1000", "--universe=65536",
+                           f"--trials={count}", f"--accuracy_trials={1 if mode == 'toy' else 50}",
+                           f"--seed={seed}", f"--raw_timing_dir={raw_dir}",
+                           f"--revision-identity-out={output / 'identity.csv'}"]
+                raw_name = f"bench_piccard__{safe(cid)}__{profile}.tsv"
+            else:
+                fields = {"cell_id": cid, "circuit": "fhe_ind", "shape_id": "fhe-ind",
+                          "security": "TOY" if mode == "toy" else "STD128",
+                          "k": "N/A", "m": "N/A", "universe": 65536,
+                          "set_size": 1000, "seed": 0, "trials": count,
+                          "timing_hash_seed": 0,
+                          "status": "DIAGNOSTIC", "method": "fhe_ind"}
+                phase_values = {"setup_context": 10.0, "setup_keygen": 11.0,
+                                "encode": 2.0, "encrypt": 3.0, "evaluate": 5.0,
+                                "decrypt": 7.0, "online_e2e": 17.0,
+                                "full_e2e": 38.0}
+                for phase, value in phase_values.items():
+                    fields[{"encode": "phase_encode_ms", "encrypt": "phase_encrypt_ms",
+                            "evaluate": "phase_evaluate_ms", "decrypt": "phase_decrypt_ms",
+                            "online_e2e": "online_e2e_ms", "full_e2e": "full_e2e_ms"}.get(phase, phase + "_ms")] = format(value, ".17g")
+                (output / "fhe_ind.csv").write_text(
+                    _FHE_IND_HEADER + self.csv_row(_FHE_IND_HEADER, **fields) + "\n",
+                    encoding="utf-8")
+                raw_dir = output / "raw"
+                raw_dir.mkdir()
+                command = [f"--revision-cell={cid}", "--mode=e2e",
+                           f"--cell-id={cid}",
+                           f"--security={'TOY' if mode == 'toy' else 'STD128'}",
+                           "--n=1000", "--universe=65536", f"--trials={count}",
+                           f"--raw-timing-out={raw_dir}",
+                           f"--raw-timing-profile={profile}", f"--seed={seed}",
+                           f"--output={output / 'fhe_ind.csv'}",
+                           f"--revision-identity-out={output / 'identity.csv'}"]
+                raw_name = f"bench_fhe_ind__{safe(cid)}__{profile}.tsv"
+            identity = ("schema,cell_id,universe_size\n"
+                        f"piccard-revision-cell-v1,{cid},{cell['axes']['u']}\n"
+                        if producer == "bench_piccard" else "identity\n")
+            (output / "identity.csv").write_text(identity, encoding="utf-8")
+            if producer == "bench_fhe_ind":
+                (output / "stdout.log").write_text("", encoding="utf-8")
+            raw_path = raw_dir / raw_name
+            raw_text = raw_payload(
+                producer, cid, profile, count,
+                seed if producer == "bench_piccard" else 0,
+                mutate=mutation)
+            if mutation == "header":
+                raw_text = raw_text.replace(
+                    "schema_version\tpiccard-paper-raw-timing-v1",
+                    "schema_version\twrong-raw-timing-v1", 1)
+            raw_path.write_text(raw_text, encoding="utf-8")
+            if mutation == "wrong_path":
+                wrong_prefix = ("--raw_timing_dir=" if
+                                producer == "bench_piccard" else
+                                "--raw-timing-out=")
+                wrong = output / "wrong-raw"
+                command = [wrong_prefix + str(wrong) if item.startswith(wrong_prefix)
+                           else item for item in command]
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(
+                json.dumps(receipt) + "\n", encoding="utf-8")
+            return cell, {cid: {"command": command}}, raw_path
+
+        for producer in ("bench_piccard", "bench_fhe_ind"):
+            for mode in ("toy", "paper"):
+                with self.subTest(producer=producer, mode=mode):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        cell, plan, _ = write_case(root, producer, mode)
+                        _check_family_artifacts(root, mode, [cell], plan)
+            for mutation in ("swapped_index", "duplicate_index", "missing_index",
+                             "seed", "warmup_kind", "warmup_value", "aggregate",
+                             "wrong_path", "header"):
+                with self.subTest(producer=producer, mutation=mutation):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        cell, plan, _ = write_case(root, producer, "paper",
+                                                   mutation=mutation)
+                        with self.assertRaises(RevisionContractError):
+                            _check_family_artifacts(root, "paper", [cell], plan)
+
 
 if __name__ == "__main__":
     unittest.main()
