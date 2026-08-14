@@ -56,6 +56,7 @@ from revision_benchmark_common import (  # noqa: E402
     producer_output_dir,
     tool_metadata,
 )
+from prepare_real_datasets import parse_two_column_tsv  # noqa: E402
 
 
 VERIFICATION_SCHEMA = "piccard-revision-verification-receipt-v1"
@@ -1772,6 +1773,102 @@ def _raw_real_hash_seed(root_seed: int, manifest_digest: str,
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
+def _real_timing_manifest_contract(
+        root: Path, cell: dict[str, Any], plan: dict[str, Any], cid: str
+        ) -> dict[str, Any]:
+    """Load and independently resolve the canonical real-timing pair.
+
+    The real timing CSV repeats provenance fields for convenience, but those
+    fields are evidence, not authority.  The producer's exact
+    ``--dataset-manifest`` argv binding is the authority for the manifest
+    bytes, the records/pairs files, and the median-combined-bucketed-size pair
+    selection used by ``real_timing_driver.cpp``.
+    """
+    manifest = _command_file(root, plan.get("command", []),
+                             "--dataset-manifest=", cid)
+    if manifest is None:
+        fail(f"real timing command has no canonical --dataset-manifest for {cid}")
+    try:
+        manifest_pairs = parse_two_column_tsv(manifest)
+        keys = tuple(key for key, _ in manifest_pairs)
+        if len(set(keys)) != len(keys):
+            fail(f"real timing dataset manifest has duplicate keys for {cid}")
+        values = dict(manifest_pairs)
+        dataset = values.get("dataset", "")
+        if not dataset:
+            fail(f"real timing dataset manifest has no dataset for {cid}")
+        # This helper checks the exact processed-manifest key order and the
+        # frozen DBLP/Enron variant/preprocessing/pair-proxy contract.
+        from verify_real_dataset_outputs import (
+            _load_bound_processed_dataset,
+            _validate_processed_manifest,
+        )
+        values = _validate_processed_manifest(manifest, dataset)
+        bound = _load_bound_processed_dataset(manifest.parent.resolve(), values)
+    except RevisionContractError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - manifest is untrusted evidence
+        fail(f"real timing dataset manifest is invalid for {cid}: {exc}")
+
+    expected_dataset = _expected_dataset_name(str(cell.get("variant", "")))
+    if values.get("schema_version") != "piccard-real-processed-v1" or \
+            values.get("dataset") != expected_dataset or \
+            values.get("variant") != str(cell.get("variant", "")) or \
+            values.get("universe_size") != str(cell["axes"]["u"]):
+        fail(f"real timing dataset manifest/cell identity mismatch for {cid}")
+
+    command = plan.get("command", [])
+    k = _command_int_once(command, "--k=", cid)
+    m = _command_int_once(command, "--m=", cid)
+    if k is None or m is None:
+        fail(f"real timing command has no canonical k/m for {cid}")
+    if k != int(cell["axes"]["k"]) or m != int(cell["axes"]["m"]):
+        fail(f"real timing command k/m is not bound to the matrix for {cid}")
+
+    records = bound["records"]
+    pairs = bound["pairs"]
+    if not pairs:
+        fail(f"real timing dataset manifest has no timing pair candidates for {cid}")
+    combined_sizes = [
+        len(records[pair["record_a"]]["bucketed"]) +
+        len(records[pair["record_b"]]["bucketed"])
+        for pair in pairs
+    ]
+    ordered_sizes = sorted(combined_sizes)
+    middle = len(ordered_sizes) // 2
+    if len(ordered_sizes) % 2:
+        median = float(ordered_sizes[middle])
+    else:
+        median = (float(ordered_sizes[middle - 1]) +
+                  float(ordered_sizes[middle])) / 2.0
+    best_index = 0
+    best_distance = math.inf
+    for index, combined_size in enumerate(combined_sizes):
+        distance = abs(float(combined_size) - median)
+        if distance < best_distance or (
+                distance == best_distance and
+                pairs[index]["pair_id"].encode("utf-8") <
+                pairs[best_index]["pair_id"].encode("utf-8")):
+            best_index = index
+            best_distance = distance
+    pair = pairs[best_index]
+    return {
+        "manifest_path": manifest,
+        "manifest_digest": sha256_file(manifest),
+        "dataset": values["dataset"],
+        "variant": values["variant"],
+        "records_sha256": values["records_sha256"],
+        "pairs_sha256": values["pairs_sha256"],
+        "pair_id": pair["pair_id"],
+        "pair_kind": pair["pair_kind"],
+        "label": pair["label"],
+        "record_a": pair["record_a"],
+        "record_b": pair["record_b"],
+        "k": k,
+        "m": m,
+    }
+
+
 def _raw_specs_for_cell(cell: dict[str, Any], rows: list[dict[str, str]] | None,
                         mode: str, cid: str, output: Path,
                         plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2178,7 +2275,8 @@ def _raw_validate_spec(
 def _raw_add_seed_contracts(
         specs: list[dict[str, Any]], cell: dict[str, Any],
         plan: dict[str, Any], mode: str, cid: str,
-        primary_rows: list[dict[str, str]] | None, output: Path) -> None:
+        primary_rows: list[dict[str, str]] | None, output: Path,
+        root: Path) -> None:
     command = plan.get("command", [])
     producer = str(cell.get("producer", ""))
     root_seed = _command_int_once(command, "--seed=", cid)
@@ -2225,21 +2323,34 @@ def _raw_add_seed_contracts(
         profile_values = _command_value(command, "--profile=")
         if len(profile_values) != 1:
             fail(f"real raw timing profile binding count mismatch for {cid}")
-        first = primary_rows[0]
-        pair_id = first.get("pair_id", "")
-        variant = first.get("variant", "")
-        dataset = first.get("dataset", "")
-        if not pair_id or not variant or not dataset:
-            fail(f"real raw timing primary pair identity is missing for {cid}")
-        k = _int_field(first, "k", cid)
-        m = _int_field(first, "m", cid)
-        if any(row.get("pair_id") != pair_id or row.get("variant") != variant or
-               row.get("dataset") != dataset or _int_field(row, "k", cid) != k or
-               _int_field(row, "m", cid) != m
-               for row in primary_rows):
-            fail(f"real raw timing primary pair/shape topology mismatch for {cid}")
+        contract = _real_timing_manifest_contract(root, cell, plan, cid)
+        pair_id = contract["pair_id"]
+        variant = contract["variant"]
+        dataset = contract["dataset"]
+        k = contract["k"]
+        m = contract["m"]
+        expected_primary_identity = {
+            "dataset": dataset,
+            "variant": variant,
+            "dataset_manifest_sha256": contract["manifest_digest"],
+            "records_sha256": contract["records_sha256"],
+            "pairs_sha256": contract["pairs_sha256"],
+            "pair_id": pair_id,
+            "pair_kind": contract["pair_kind"],
+            "record_a": contract["record_a"],
+            "record_b": contract["record_b"],
+            "k": str(k),
+            "m": str(m),
+            "root_seed": str(root_seed),
+        }
+        for row in primary_rows:
+            for field, expected in expected_primary_identity.items():
+                if row.get(field, "") != expected:
+                    fail(f"real raw timing primary {field} binding mismatch for {cid}")
+            if _int_field(row, "label", cid) != int(contract["label"]):
+                fail(f"real raw timing primary label binding mismatch for {cid}")
         real_seed = _raw_real_hash_seed(
-            root_seed, first.get("dataset_manifest_sha256", ""), k, m,
+            root_seed, contract["manifest_digest"], k, m,
             profile_values[0], cid)
         if any(_int_field(row, "hash_seed", cid) != real_seed for row in primary_rows):
             fail(f"real raw timing primary hash seed mismatch for {cid}")
@@ -2332,7 +2443,7 @@ def _check_declared_raw_sidecars(
         fail(f"raw timing contract has no canonical sidecar specs for {cid}")
     raw_producer = "real_timing" if producer == "bench_real_datasets" else producer
     _raw_bind_command_profile(plan, raw_producer, mode, cid)
-    _raw_add_seed_contracts(specs, cell, plan, mode, cid, primary_rows, output)
+    _raw_add_seed_contracts(specs, cell, plan, mode, cid, primary_rows, output, root)
     raw_dir = _raw_command_directory(output, plan, raw_producer, cid)
     paths = _raw_inventory_paths(output, receipt, raw_producer, specs, raw_dir, cid)
     sj16_details = (_sj16_raw_detail_map(root, output, plan, mode, cid)

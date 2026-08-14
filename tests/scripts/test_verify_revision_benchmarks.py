@@ -1379,34 +1379,121 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     import shutil
                     shutil.rmtree(root)
 
-    def test_raw_phase_v1_real_dynamic_cell_positive_and_seed_phase_mutations(self) -> None:
+    def test_raw_phase_v1_real_manifest_bound_pair_identity_all_variants(self) -> None:
+        """Real timing must bind the raw cell to the canonical processed data.
+
+        The mutations update the primary CSV and, where applicable, the raw
+        sidecar together.  A verifier that derives pair identity or hash
+        seed from that CSV therefore accepts the forged evidence; only an
+        independently loaded manifest contract rejects it.
+        """
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import cell_output, file_inventory
         from verify_revision_benchmarks import (
             _REAL_TIMING_HEADER, _RAW_PHASES_REAL, _raw_real_hash_seed,
             _check_family_artifacts, RevisionContractError)
 
-        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
-                                axis="dblp_acm_u65536_artifact",
-                                axis_value="std128_timing")
-        cid = cell["cell_id"]
+        variants = (
+            ("dblp_acm_u65536", "dblp_acm", 65536),
+            ("enron_u65536", "enron", 65536),
+            ("enron_u1048576", "enron", 1048576),
+        )
+        root_seed, k, m = 7, 128, 64
         profile = "readiness-toy-v1"
-        variant = "dblp_acm_u65536"
-        dataset = "dblp_acm"
-        pair_id = "p0"
-        manifest_digest = "a" * 64
-        root_seed = 7
-        k, m = 128, 64
-        real_seed = _raw_real_hash_seed(root_seed, manifest_digest, k, m,
-                                        profile, cid)
-        raw_cell = f"real_timing:{variant}:{pair_id}:k={k}:m={m}"
-        phases = {phase: 1.0 for phase in _RAW_PHASES_REAL}
-        phases["total"] = 8.0
 
-        def build(mutation: str | None = None) -> tuple[Path, dict, dict]:
+        def build(variant: str, dataset: str, universe: int,
+                  mutation: str | None = None) -> tuple[Path, dict, dict]:
             root = Path(tempfile.mkdtemp())
+            cell = self.matrix_cell(
+                "real-dataset-csv-v1", family="real_dataset",
+                axis=f"{variant}_artifact", axis_value="std128_timing")
+            cid = cell["cell_id"]
             output = cell_output(root, cid)
             output.mkdir(parents=True)
+
+            source_bytes = b"key\tvalue\nsource\thermetic-real-timing\n"
+            (output / "source.manifest.tsv").write_bytes(source_bytes)
+            records_bytes = (
+                b"record_id\traw_feature_count\traw_features_csv\t"
+                b"bucketed_feature_count\tbucketed_features_csv\n"
+                b"a\t1\t1\t1\t1\n"
+                b"b\t3\t1,2,3\t3\t2,3,4\n"
+                b"c\t2\t5,6\t2\t5,6\n"
+                b"d\t4\t7,8,9,10\t4\t7,8,9,10\n")
+            pairs_bytes = (
+                b"pair_id\trecord_a\trecord_b\tpair_kind\tlabel\n" +
+                (b"pair_b\ta\tb\tknown_match\t1\n"
+                 b"pair_a\tc\td\tsampled_nonmatch\t0\n"
+                 if dataset == "dblp_acm" else
+                 b"pair_b\ta\tb\tcross_thread\t-1\n"
+                 b"pair_a\tc\td\tthread_related\t-1\n"))
+            (output / "records.tsv").write_bytes(records_bytes)
+            (output / "pairs.tsv").write_bytes(pairs_bytes)
+            digest = lambda payload: hashlib.sha256(payload).hexdigest()
+            manifest_pairs = [
+                ("schema_version", "piccard-real-processed-v1"),
+                ("dataset", dataset), ("variant", variant),
+                ("preprocessing_version", "dblp-acm-trigram-v1" if
+                 dataset == "dblp_acm" else "enron-shingle5-v2"),
+                ("universe_size", str(universe)), ("seed", "7"),
+                ("source_manifest_file", "source.manifest.tsv"),
+                ("source_manifest_sha256", digest(source_bytes)),
+                ("records_file", "records.tsv"),
+                ("records_sha256", digest(records_bytes)),
+                ("record_count", "4"), ("pairs_file", "pairs.tsv"),
+                ("pairs_sha256", digest(pairs_bytes)), ("pair_count", "2"),
+                ("raw_set_size_min", "1"), ("raw_set_size_median", "2"),
+                ("raw_set_size_p95", "4"), ("raw_set_size_max", "4"),
+                ("bucketed_set_size_min", "1"),
+                ("bucketed_set_size_median", "2"),
+                ("bucketed_set_size_p95", "4"),
+                ("bucketed_set_size_max", "4"),
+                ("original_positive_count", "1" if dataset == "dblp_acm" else "0"),
+                ("retained_positive_count", "1" if dataset == "dblp_acm" else "0"),
+                ("requested_pair_count", "2"),
+                ("max_documents", "" if dataset == "dblp_acm" else "4"),
+                ("min_related_pairs", "" if dataset == "dblp_acm" else "1"),
+            ]
+            if dataset == "enron":
+                manifest_pairs.append(
+                    ("pair_proxy", "canonical-subject-proxy-not-thread-ground-truth-v1"))
+            manifest_pairs.extend(
+                (key, "0") for key in (
+                    ("dropped.empty_features_dblp", "dropped.empty_features_acm")
+                    if dataset == "dblp_acm" else
+                    ("dropped.charset_or_mime", "dropped.empty_body",
+                     "dropped.short_body", "dropped.duplicate_copy",
+                     "dropped.duplicate_message_id")))
+            manifest_bytes = ("key\tvalue\n" + "".join(
+                f"{key}\t{value}\n" for key, value in manifest_pairs)).encode()
+            (output / "dataset.manifest.tsv").write_bytes(manifest_bytes)
+            manifest_digest = digest(manifest_bytes)
+
+            # real_timing_driver.cpp selects pair_a: combined sizes are 4 and
+            # 6, so both are equally distant from median 5 and pair_a wins the
+            # lexical tie-break even though pairs.tsv lists pair_b first.
+            selected_pair = "pair_a"
+            selected_a, selected_b = "c", "d"
+            selected_kind, selected_label = (
+                ("sampled_nonmatch", "0") if dataset == "dblp_acm" else
+                ("thread_related", "-1"))
+            row_pair, row_a, row_b = selected_pair, selected_a, selected_b
+            row_digest = manifest_digest
+            if mutation == "pair":
+                row_pair, row_a, row_b = "pair_b", "a", "b"
+                selected_kind, selected_label = (
+                    ("known_match", "1") if dataset == "dblp_acm" else
+                    ("cross_thread", "-1"))
+            elif mutation == "endpoints":
+                row_a, row_b = "a", "b"
+            elif mutation == "manifest_digest":
+                row_digest = "0" * 64
+
+            real_seed = _raw_real_hash_seed(
+                root_seed, row_digest, k, m, profile, cid)
+            raw_cell = f"real_timing:{variant}:{row_pair}:k={k}:m={m}"
+            phases = {phase: 1.0 for phase in _RAW_PHASES_REAL}
+            phases["total"] = 8.0
             row_values: dict[str, str] = {
                 "profile_id": profile, "run_class": "smoke",
                 "target_security_bits": "0", "comparison_eligible": "false",
@@ -1415,7 +1502,7 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 "assurance_scope": "readiness", "security_basis": "toy",
                 "cost_scope": "full-query", "precomputation_mode": "off",
                 "secure_division_included": "true", "measurement_kind": "timing",
-                "workload_id": "w0", "workload_manifest_sha256": manifest_digest,
+                "workload_id": "w0", "workload_manifest_sha256": "b" * 64,
                 "execution_trace_sha256": "b" * 64, "root_seed": str(root_seed),
                 "omp_threads": "1", "estimator_model": "none",
                 "sanitizer_model": "none", "sanitizer_assurance": "none",
@@ -1430,10 +1517,11 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 "timing_trials": "1", "accuracy_trials": "0",
                 "omp_dynamic": "false", "measurement_status": "measured",
                 "dataset": dataset, "variant": variant,
-                "dataset_manifest_sha256": manifest_digest,
-                "records_sha256": "b" * 64, "pairs_sha256": "c" * 64,
-                "pair_id": pair_id, "pair_kind": "positive", "label": "1",
-                "record_a": "a", "record_b": "b", "k": str(k), "m": str(m),
+                "dataset_manifest_sha256": row_digest,
+                "records_sha256": digest(records_bytes),
+                "pairs_sha256": digest(pairs_bytes), "pair_id": row_pair,
+                "pair_kind": selected_kind, "label": selected_label,
+                "record_a": row_a, "record_b": row_b, "k": str(k), "m": str(m),
                 "hash_seed": str(real_seed), "trial_index": "0",
                 "phase_minhash_ms": "1", "phase_encode_ms": "1",
                 "phase_encrypt_ms": "1", "phase_cloud_multiply_ms": "1",
@@ -1493,27 +1581,30 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 f"--revision-cell={cid}", f"--profile={profile}",
                 "--raw-timing-profile=readiness-toy-v1", "--security=TOY",
                 "--mode=timing", f"--dataset={dataset}", f"--variant={variant}",
-                "--k=128", "--m=64", "--set_size=1000", "--universe=65536",
-                "--trials=1", "--seed=7", f"--csv={output / 'timing.csv'}",
-                f"--raw-timing-dir={raw_dir}",
+                f"--dataset-manifest={output / 'dataset.manifest.tsv'}",
+                "--k=128", "--m=64", "--set_size=1000",
+                f"--universe={universe}", "--trials=1", "--seed=7",
+                f"--csv={output / 'timing.csv'}", f"--raw-timing-dir={raw_dir}",
             ]
             return root, cell, {cid: {"command": command}}
 
-        root, cell, plan = build()
-        try:
-            _check_family_artifacts(root, "toy", [cell], plan)
-        finally:
-            import shutil
-            shutil.rmtree(root)
-        for mutation in ("seed", "phase"):
-            with self.subTest(mutation=mutation):
-                root, cell, plan = build(mutation)
+        for variant, dataset, universe in variants:
+            with self.subTest(variant=variant, mutation="positive"):
+                root, cell, plan = build(variant, dataset, universe)
                 try:
-                    with self.assertRaises(RevisionContractError):
-                        _check_family_artifacts(root, "toy", [cell], plan)
+                    _check_family_artifacts(root, "toy", [cell], plan)
                 finally:
                     import shutil
                     shutil.rmtree(root)
+            for mutation in ("pair", "endpoints", "manifest_digest", "seed", "phase"):
+                with self.subTest(variant=variant, mutation=mutation):
+                    root, cell, plan = build(variant, dataset, universe, mutation)
+                    try:
+                        with self.assertRaises(RevisionContractError):
+                            _check_family_artifacts(root, "toy", [cell], plan)
+                    finally:
+                        import shutil
+                        shutil.rmtree(root)
 
     def test_family_verifier_accepts_real_versioned_encoding_pair(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
