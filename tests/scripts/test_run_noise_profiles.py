@@ -411,6 +411,16 @@ class NoiseProfileRunnerTest(unittest.TestCase):
             "PICCARD_TEST_TIMEOUT_MS": "50",
             "PICCARD_TEST_TERM_GRACE_MS": "20",
         }
+        # The delayed fixture publishes readiness only after installing its
+        # trap.  Under a loaded scheduler, 20 ms is short enough for the
+        # shell to receive TERM but not run the trap before the supervisor's
+        # KILL edge.  Give this fixture a realistic scheduling window while
+        # preserving the production TERM -> grace -> KILL contract.
+        self.delayed_trap_timing_env = {
+            "PICCARD_TEST_SUPERVISOR": "1",
+            "PICCARD_TEST_TIMEOUT_MS": "50",
+            "PICCARD_TEST_TERM_GRACE_MS": "100",
+        }
         self.diagnostic_flood_timing_env = {
             "PICCARD_TEST_SUPERVISOR": "1",
             "PICCARD_TEST_TIMEOUT_MS": "2000",
@@ -424,10 +434,12 @@ class NoiseProfileRunnerTest(unittest.TestCase):
         env = self.env.copy()
         env["FAKE_MODE"] = mode
         if mode in (
-            "preflight_hang", "preflight_startup_delay", "measurement_hang",
+            "preflight_hang", "measurement_hang",
             "measurement_no_readiness",
         ):
             env.update(self.test_timing_env)
+        if mode == "preflight_startup_delay":
+            env.update(self.delayed_trap_timing_env)
         if mode == "diagnostic_flood":
             env.update(self.diagnostic_flood_timing_env)
         guarded_faults = {

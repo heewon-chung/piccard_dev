@@ -2806,12 +2806,28 @@ def verify_root(root: Path, *, mode: str, write_receipt: bool = False,
     effective_mode = raw_manifest.get("mode") if mode == "post-seal" else mode
     if effective_mode not in {"toy", "dry-run", "paper"}:
         fail("sealed run has an unsupported mode")
+    sealed_verification = False
     if mode == "post-seal":
         from seal_revision_benchmarks import verify_post_seal
         verify_post_seal(root)
         if write_receipt:
             fail("post-seal verification is read-only")
+        sealed_verification = True
         lifecycle_stage = "complete" if effective_mode == "dry-run" else "sealed"
+    elif (effective_mode == "toy" and lifecycle_stage == "complete" and
+          any((root / name).exists() or (root / name).is_symlink()
+              for name in ("seal.json", "seal.json.sha256"))):
+        # A runner-produced toy root terminates its immutable phase stream at
+        # seal=STARTED.  Treat a valid seal as the lifecycle discriminator,
+        # while retaining toy as the semantic mode (and all toy count/science
+        # checks below).  Presence alone is not enough: a partial or forged
+        # seal must fail closed and a sealed root must remain read-only.
+        from seal_revision_benchmarks import verify_post_seal
+        verify_post_seal(root)
+        if write_receipt:
+            fail("sealed verification is read-only")
+        sealed_verification = True
+        lifecycle_stage = "sealed"
     manifest = _check_run_manifest(root, effective_mode)
     _, matrix_sha, cells = _check_matrix(root, manifest, effective_mode)
     expected_measured = sum(expected_row_count(cell, effective_mode) for cell in cells)
@@ -2824,11 +2840,11 @@ def verify_root(root: Path, *, mode: str, write_receipt: bool = False,
     _check_receipts(root, effective_mode, cells, plans)
     _check_family_taxonomy(cells)
     _check_family_artifacts(root, effective_mode, cells, plans)
-    if mode == "post-seal":
+    if sealed_verification:
         seal = load_json(root / "seal.json", "seal")
         if seal.get("readiness_status") != "READINESS_ONLY" or \
                 seal.get("performance_status") != "PAPER_PERFORMANCE_PENDING":
-            fail("post-seal toy status is not readiness-only")
+            fail("sealed toy status is not readiness-only")
         sums = root / "seal.json.sha256"
         if not sums.is_file() or sums.read_text(encoding="ascii") != \
                 f"{sha256_file(root / 'seal.json')}  seal.json\n":

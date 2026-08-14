@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +138,143 @@ class RevisionVerifierContractTest(unittest.TestCase):
             cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         return root
+
+    @staticmethod
+    def _root_snapshot(root: Path) -> dict[str, str]:
+        return {
+            path.relative_to(root).as_posix(): hashlib.sha256(
+                path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_toy_and_post_seal_modes_accept_canonical_sealed_lifecycle_read_only(self) -> None:
+        """A sealed toy root accepts both required read-only verifier modes.
+
+        The complete artifact/science checks are already covered by the
+        independent dry/toy KATs.  This KAT isolates the lifecycle boundary:
+        it creates the same terminal phase stream and seal that the runner
+        creates, then invokes both public CLI modes without allowing the
+        semantic checks to be bypassed in production.
+        """
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import seal_revision_benchmarks as sealer
+        import verify_revision_benchmarks as verifier
+        from revision_benchmark_common import PHASES
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "toy"
+            (root / "verification").mkdir(parents=True)
+            phase_status = {}
+            phase_records = []
+            for phase in PHASES:
+                phase_status[phase] = "STARTED"
+                phase_records.append({
+                    "schema": "piccard-revision-phase-v1",
+                    "phase": phase, "state": "STARTED",
+                    "reason": "", "index": PHASES.index(phase),
+                    "time_ns": PHASES.index(phase) + 1,
+                })
+                if phase != "seal":
+                    phase_status[phase] = "COMPLETED"
+                    phase_records.append({
+                        "schema": "piccard-revision-phase-v1",
+                        "phase": phase, "state": "COMPLETED",
+                        "reason": "", "index": PHASES.index(phase),
+                        "time_ns": len(phase_records) + 1,
+                    })
+            run = {
+                "schema": "piccard-revision-readiness-run-v1",
+                "version": 1, "mode": "toy", "state": "COMPLETED",
+                "phase_status": phase_status,
+                "readiness_status": "READINESS_ONLY",
+                "performance_status": "PAPER_PERFORMANCE_PENDING",
+                "cell_count": 0, "toy_measured_count": 0,
+                "matrix_sha256": "a" * 64,
+            }
+            (root / "run.json").write_text(
+                json.dumps(run, sort_keys=True) + "\n", encoding="utf-8")
+            (root / "verification" / "receipt.json").write_text(
+                json.dumps({"verdict": "PASS"}, sort_keys=True) + "\n",
+                encoding="utf-8")
+            (root / "phases.jsonl").write_text(
+                "".join(json.dumps(record, sort_keys=True) + "\n"
+                        for record in phase_records), encoding="utf-8")
+
+            # Keep the real phase/seal checks active.  The remaining checks
+            # need a 104-cell producer campaign and are not the subject of
+            # this lifecycle KAT.
+            check_patches = [
+                patch.object(verifier, "_check_run_manifest", return_value=run),
+                patch.object(verifier, "_check_matrix",
+                             return_value=({}, "a" * 64, [])),
+                patch.object(verifier, "_check_source_and_tools"),
+                patch.object(verifier, "_check_plans", return_value={}),
+                patch.object(verifier, "_check_events"),
+                patch.object(verifier, "_check_receipts"),
+                patch.object(verifier, "_check_family_taxonomy"),
+                patch.object(verifier, "_check_family_artifacts"),
+            ]
+            for item in check_patches:
+                item.start()
+            try:
+                # The runner's internal pre-seal call still selects the
+                # explicit verification stage rather than the sealed stage.
+                preseal_records = phase_records[:phase_records.index(
+                    next(record for record in phase_records
+                         if record["phase"] == "verification" and
+                         record["state"] == "STARTED")) + 1]
+                (root / "phases.jsonl").write_text(
+                    "".join(json.dumps(record, sort_keys=True) + "\n"
+                            for record in preseal_records), encoding="utf-8")
+                run["state"] = "VERIFYING"
+                run["phase_status"]["verification"] = "STARTED"
+                (root / "run.json").write_text(
+                    json.dumps(run, sort_keys=True) + "\n", encoding="utf-8")
+                self.assertEqual(
+                    verifier.verify_root(root, mode="toy",
+                                        lifecycle_stage="verification")["mode"],
+                    "toy")
+
+                # Complete the immutable stream and install the canonical
+                # non-replacing seal, exactly as the runner does.
+                (root / "phases.jsonl").write_text(
+                    "".join(json.dumps(record, sort_keys=True) + "\n"
+                            for record in phase_records), encoding="utf-8")
+                run["state"] = "COMPLETED"
+                run["phase_status"] = phase_status
+                (root / "run.json").write_text(
+                    json.dumps(run, sort_keys=True) + "\n", encoding="utf-8")
+                sealer.create_seal(root)
+
+                for mode in ("toy", "post-seal"):
+                    with self.subTest(mode=mode):
+                        before = self._root_snapshot(root)
+                        self.assertEqual(
+                            verifier.main([str(root), f"--mode={mode}"]), 0)
+                        self.assertEqual(before, self._root_snapshot(root))
+
+                # A seal or lifecycle mutation must fail closed, and the
+                # failure must not repair or rewrite any root member.
+                seal_before = (root / "seal.json").read_bytes()
+                (root / "seal.json").write_bytes(seal_before + b"\n")
+                tampered_before = self._root_snapshot(root)
+                self.assertEqual(
+                    verifier.main([str(root), "--mode=toy"]), 2)
+                self.assertEqual(tampered_before, self._root_snapshot(root))
+                (root / "seal.json").write_bytes(seal_before)
+                phases_before = (root / "phases.jsonl").read_bytes()
+                (root / "phases.jsonl").write_text(
+                    phases_before.decode().replace('"state": "STARTED"',
+                                                     '"state": "COMPLETED"', 1),
+                    encoding="utf-8")
+                lifecycle_before = self._root_snapshot(root)
+                self.assertEqual(
+                    verifier.main([str(root), "--mode=post-seal"]), 2)
+                self.assertEqual(lifecycle_before, self._root_snapshot(root))
+            finally:
+                for item in reversed(check_patches):
+                    item.stop()
 
     def test_event_timestamps_follow_event_stream_order_and_bind_cells(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
