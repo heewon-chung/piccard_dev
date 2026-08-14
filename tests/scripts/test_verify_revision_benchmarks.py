@@ -503,6 +503,139 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 _check_family_artifacts(root, "toy", [cell],
                                         {cell["cell_id"]: {"command": []}})
 
+    def test_fhe_ind_allows_only_canonical_output_and_rejects_extra_csv(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _FHE_IND_HEADER, _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("fhe-ind-csv-v1", family="fhe_ind",
+                                axis="control", axis_value="default")
+        fields = _FHE_IND_HEADER.rstrip("\n").split(",")
+        values = [""] * len(fields)
+        for name, value in {
+                "cell_id": cell["cell_id"], "method": "fhe_ind",
+                "k": "N/A", "m": "N/A", "universe": "65536",
+                "set_size": "1000", "seed": "0", "trials": "1"}.items():
+            values[fields.index(name)] = value
+        payload = _FHE_IND_HEADER + ",".join(values) + "\n"
+
+        def write_fixture(root: Path, output_name: str,
+                          *, unrelated: bool = False) -> list[str]:
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            (output / output_name).write_text(payload, encoding="utf-8")
+            if unrelated:
+                (output / "unrelated.csv").write_text("not evidence\n",
+                                                        encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(
+                json.dumps(receipt) + "\n", encoding="utf-8")
+            return [f"--output={output / output_name}",
+                    "--universe=65536", "--set_size=1000", "--seed=7"]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "canonical"
+            command = write_fixture(root, "fhe_ind.csv")
+            _check_family_artifacts(
+                root, "toy", [cell], {cell["cell_id"]: {"command": command}})
+
+            for label, output_name, unrelated in (
+                    ("substitute output", "substitute.csv", False),
+                    ("unrelated CSV", "fhe_ind.csv", True)):
+                with self.subTest(label=label):
+                    case_root = Path(temporary) / label.replace(" ", "_")
+                    case_command = write_fixture(
+                        case_root, output_name, unrelated=unrelated)
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(
+                            case_root, "toy", [cell],
+                            {cell["cell_id"]: {"command": case_command}})
+
+    def test_fhe_ind_binds_universe_set_size_seed_and_allows_na_k_m(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _FHE_IND_HEADER, _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("fhe-ind-csv-v1", family="fhe_ind",
+                                axis="control", axis_value="default")
+        fields = _FHE_IND_HEADER.rstrip("\n").split(",")
+        row = {field: "" for field in fields}
+        row.update({"cell_id": cell["cell_id"], "k": "N/A", "m": "N/A",
+                    "universe": "65536", "set_size": "1000", "seed": "0"})
+        command = ["--output=/tmp/fhe_ind.csv", "--universe=65536",
+                   "--set_size=1000", "--seed=7"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
+
+        for label, field, value in (("seed", "seed", "1"),
+                                    ("universe", "universe", "32768"),
+                                    ("set size", "set_size", "999")):
+            with self.subTest(label=label):
+                mutated = dict(row)
+                mutated[field] = value
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([mutated], cell,
+                                     {"command": command}, cell["cell_id"])
+
+    def test_toy_real_accuracy_binds_ineligible_without_profile_and_paper_stays_eligible(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _REAL_ACCURACY_HEADER, _check_family_artifacts,
+            RevisionContractError)
+        cell = self.matrix_cell("real-dataset-csv-v1", family="real_dataset",
+                                axis_value="accuracy",
+                                axis="dblp_acm_u65536_artifact")
+        fields = _REAL_ACCURACY_HEADER.rstrip("\n").split(",")
+        values = [""] * len(fields)
+        for name, value in {
+                "dataset": "dblp_acm", "variant": "dblp_acm_u65536",
+                "k": "128", "m": "64", "root_seed": "7",
+                "comparison_eligible": "false", "pair_id": "pair-0",
+                "pair_kind": "sampled_nonmatch", "accuracy_trial_index": "0"}.items():
+            values[fields.index(name)] = value
+
+        def write_fixture(root: Path, eligible: str) -> list[str]:
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            row_values = list(values)
+            row_values[fields.index("comparison_eligible")] = eligible
+            (output / "accuracy.csv").write_text(
+                _REAL_ACCURACY_HEADER + ",".join(row_values) + "\n",
+                encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(
+                json.dumps(receipt) + "\n", encoding="utf-8")
+            command = [f"--revision-cell={cell['cell_id']}",
+                       "--mode=accuracy", "--seed=7",
+                       f"--csv={output / 'accuracy.csv'}"]
+            self.assertFalse(any(arg.startswith("--profile=") for arg in command))
+            return command
+
+        with tempfile.TemporaryDirectory() as temporary:
+            toy_root = Path(temporary) / "toy"
+            toy_command = write_fixture(toy_root, "false")
+            _check_family_artifacts(
+                toy_root, "toy", [cell],
+                {cell["cell_id"]: {"command": toy_command}})
+
+            forged_root = Path(temporary) / "forged"
+            forged_command = write_fixture(forged_root, "true")
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(
+                    forged_root, "toy", [cell],
+                    {cell["cell_id"]: {"command": forged_command}})
+
+            paper_root = Path(temporary) / "paper"
+            paper_command = write_fixture(paper_root, "true")
+            _check_family_artifacts(
+                paper_root, "paper", [cell],
+                {cell["cell_id"]: {"command": paper_command}})
+
     def test_family_verifier_rejects_duplicate_piccard_rows_and_wrong_trials(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import cell_output
@@ -1063,6 +1196,107 @@ class RevisionVerifierContractTest(unittest.TestCase):
             with self.assertRaises(RevisionContractError):
                 _check_family_artifacts(root, "toy", [cell],
                                         {cell["cell_id"]: {"command": command}})
+
+    def test_real_threshold_science_uses_evaluation_workload_rows_only(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _REAL_THRESHOLD_HEADER, _check_family_artifacts,
+            _threshold_boundary, _threshold_seed, _threshold_tau,
+            RevisionContractError)
+        cell = self.matrix_cell("real-threshold-csv-v1",
+                                family="threshold_dblp_fpfn")
+        requested = 0.25
+        tau = _threshold_tau(requested, 128, 64)
+        realized = _threshold_boundary(tau, 128, 64)
+        evaluation_pair = "evaluation-pair"
+        calibration_pair = "calibration-pair"
+        output_row = {
+            "schema_version": "piccard-real-threshold-v1",
+            "dataset": "dblp_acm", "variant": "dblp_acm_u65536",
+            "dataset_manifest_sha256": "a" * 64,
+            "records_sha256": "b" * 64, "pairs_sha256": "c" * 64,
+            "pair_id": evaluation_pair, "pair_kind": "sampled_nonmatch",
+            "label": "0", "record_a": "evaluation-a", "record_b": "evaluation-b",
+            "k": "128", "m": "64", "hash_randomness": "resampled",
+            "root_seed": "7", "split": "evaluation", "rank_position": "1",
+            "threshold_trial_index": "0",
+            "hash_seed": str(_threshold_seed(7, evaluation_pair, 0)),
+            "match_count": "0", "decision": "0", "label_truth": "0",
+            "label_outcome": "TN", "exact_j_truth": "0",
+            "exact_j_outcome": "TN", "exact_jaccard_bucketed": "0",
+            "requested_j_threshold": str(requested), "tau_count": str(tau),
+            "realized_j_tau": str(realized), "calibration_fpr": "0",
+            "calibration_fnr": "0", "calibration_balanced_error": "0",
+            "calibration_digest": "d" * 64, "evaluation_digest": "e" * 64,
+            "threshold_workload_sha256": "f" * 64,
+        }
+        workload_header = (
+            "pair_id\tlabel\tsplit\trank_position\trecord_a\trecord_b\t"
+            "exact_jaccard_bucketed\n")
+        base_workload = [
+            (calibration_pair, "0", "calibration", "0", "calibration-a",
+             "calibration-b", "0"),
+            (evaluation_pair, "0", "evaluation", "1", "evaluation-a",
+             "evaluation-b", "0"),
+        ]
+        def write_fixture(root: Path, *, row: dict[str, str] = output_row,
+                          workload: list[tuple[str, ...]] = base_workload) -> list[str]:
+            output = cell_output(root, cell["cell_id"])
+            output.mkdir(parents=True)
+            (output / "threshold.csv").write_text(
+                _REAL_THRESHOLD_HEADER + self.csv_row(_REAL_THRESHOLD_HEADER,
+                                                       **row) + "\n",
+                encoding="utf-8")
+            workload_text = workload_header + "".join(
+                "\t".join(values) + "\n" for values in workload)
+            (output / "threshold.rows.tsv").write_text(
+                workload_text, encoding="utf-8")
+            (output / "stdout.log").write_text("", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            receipt = {"artifact_inventory": file_inventory(
+                output, exclude={"stdout.log", "stderr.log", "receipt.json"})}
+            (output / "receipt.json").write_text(
+                json.dumps(receipt) + "\n", encoding="utf-8")
+            return [f"--csv={output / 'threshold.csv'}", "--seed=7",
+                    "--threshold-trials=1",
+                    f"--workload-rows-out={output / 'threshold.rows.tsv'}"]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "valid"
+            command = write_fixture(root)
+            _check_family_artifacts(
+                root, "toy", [cell], {cell["cell_id"]: {"command": command}})
+
+            mutations: dict[str, tuple[dict[str, str], list[tuple[str, ...]]]] = {}
+            leaked = dict(output_row)
+            leaked["pair_id"] = calibration_pair
+            mutations["calibration pair leaked to output"] = (leaked, base_workload)
+            mutations["missing evaluation pair"] = (
+                output_row, [base_workload[0]])
+            mutations["extra evaluation pair"] = (
+                output_row, base_workload + [
+                    ("extra-evaluation-pair", "0", "evaluation", "2",
+                     "extra-a", "extra-b", "0")])
+            mutations["duplicate workload pair"] = (
+                output_row, base_workload + [base_workload[0]])
+            malformed_split = list(base_workload)
+            malformed_split[0] = (calibration_pair, "0", "unknown", "0",
+                                  "calibration-a", "calibration-b", "0")
+            mutations["malformed split"] = (output_row, malformed_split)
+            malformed_rank = list(base_workload)
+            malformed_rank[0] = (calibration_pair, "0", "calibration", "bad",
+                                  "calibration-a", "calibration-b", "0")
+            mutations["malformed rank"] = (output_row, malformed_rank)
+            for label, (row, workload) in mutations.items():
+                with self.subTest(label=label):
+                    case_root = Path(temporary) / label.replace(" ", "_")
+                    case_command = write_fixture(
+                        case_root, row=dict(row), workload=list(workload))
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(
+                            case_root, "toy", [cell],
+                            {cell["cell_id"]: {"command": case_command}})
 
     def test_r5_blank_canonical_axes_are_rejected_across_schema_families(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))

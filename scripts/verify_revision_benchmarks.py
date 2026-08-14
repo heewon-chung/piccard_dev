@@ -1406,7 +1406,8 @@ def _bind_review_sidecars(output: Path, rows: list[dict[str, str]],
 
 
 def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
-                     plan: dict[str, Any], cid: str) -> None:
+                     plan: dict[str, Any], cid: str,
+                     mode: str | None = None) -> None:
     """Bind every shape/security field exposed by a family CSV header.
 
     Shape is derived from the canonical matrix and the concrete argv, never
@@ -1435,13 +1436,19 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 expected_axes[axis] = value
     # BCG12 MinHash consumes k but not the one-hot m dimension.  Exact-
-    # cardinality BCG12 and SJ16 consume neither MinHash dimension.  Their
-    # serializers intentionally emit the corresponding fields as N/A/blank;
-    # retaining an m axis for MinHash would reject a legitimate producer row.
-    if cell.get("family") in {"bcg12_minhash", "bcg12_exact", "sj16"}:
+    # cardinality BCG12, universe-sized FHE-IND and SJ16 consume neither
+    # MinHash dimension.  Their serializers intentionally emit the
+    # corresponding fields as N/A/blank; retaining an unused axis would
+    # reject a legitimate producer row.
+    if cell.get("family") in {"bcg12_minhash", "bcg12_exact", "fhe_ind", "sj16"}:
         expected_axes.pop("m", None)
-    if cell.get("family") in {"bcg12_exact", "sj16"}:
+    if cell.get("family") in {"bcg12_exact", "fhe_ind", "sj16"}:
         expected_axes.pop("k", None)
+    if cell.get("family") == "fhe_ind":
+        for row in rows:
+            for field in ("k", "m"):
+                if field in row and row[field] != "N/A":
+                    fail(f"FHE-IND {field} must be N/A for {cid}")
     # Matrix aliases are explicit in the schema; bind their exposed CSV names.
     row_fields = {"k": ("k",), "m": ("m",), "n": ("set_size", "n"),
                   "u": ("universe_size", "universe")}
@@ -1456,7 +1463,13 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
     seed = _command_int_once(command, "--seed=", cid)
     if seed is not None:
         for row in rows:
-            _require_value(row, "root_seed", seed, cid)
+            for field in ("root_seed", "seed"):
+                # The FHE-IND revision CSV carries its fixed workload seed;
+                # the outer run seed is retained in the command provenance.
+                if field in row:
+                    expected_seed = (0 if cell.get("family") == "fhe_ind" and
+                                     field == "seed" else seed)
+                    _require_value(row, field, expected_seed, cid)
     profile = _command_value_once(command, "--profile=", cid)
     if profile is not None:
         run_class, target_bits = _profile_security(profile, command)
@@ -1486,7 +1499,10 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
             _require_value(row, "variant", variant, cid)
     if "comparison_eligible" in cell:
         expected_eligible = bool(cell["comparison_eligible"])
-        if profile == "readiness-toy-v1":
+        # Real-dataset toy commands intentionally omit --profile; the
+        # verifier's independently selected mode is authoritative here.
+        if (mode == "toy" and cell.get("family") == "real_dataset") or \
+                profile == "readiness-toy-v1":
             expected_eligible = False
         for row in rows:
             _require_value(row, "comparison_eligible",
@@ -1730,9 +1746,21 @@ def _check_real_threshold_science(root: Path, output: Path,
                 pair_id = str(item.get("pair_id", ""))
                 if not pair_id or pair_id in workload_rows:
                     fail(f"real threshold workload pair identity is malformed for {cid}")
+                if item.get("split") not in {"calibration", "evaluation"}:
+                    fail(f"real threshold workload split is malformed for {cid}")
+                try:
+                    rank = int(str(item.get("rank_position", "")))
+                except (TypeError, ValueError):
+                    fail(f"real threshold workload rank is malformed for {cid}")
+                if rank < 0:
+                    fail(f"real threshold workload rank is malformed for {cid}")
                 workload_rows[pair_id] = dict(item)
         except (OSError, UnicodeDecodeError, csv.Error) as exc:
             fail(f"cannot read real threshold workload for {cid}: {exc}")
+        evaluation_workload_rows = {
+            pair_id: pair for pair_id, pair in workload_rows.items()
+            if pair.get("split") == "evaluation"
+        }
         for row in rows:
             pair = workload_rows.get(row["pair_id"])
             if pair is None or pair.get("split") != "evaluation" or \
@@ -1744,7 +1772,7 @@ def _check_real_threshold_science(root: Path, output: Path,
                 if not math.isclose(float(row[field]), float(pair[field]),
                                     rel_tol=0.0, abs_tol=1e-12):
                     fail(f"real threshold workload field {field} mismatch for {cid}")
-        if {row["pair_id"] for row in rows} != set(workload_rows):
+        if {row["pair_id"] for row in rows} != set(evaluation_workload_rows):
             fail(f"real threshold output/workload pair set mismatch for {cid}")
 
     workload_manifest = _command_file(root, command, "--workload-manifest-out=", cid)
@@ -2351,11 +2379,17 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             allowed_csvs = {"summary.csv"}
         elif schema == "piccard-benchmark-csv-v1":
             allowed_csvs = {"identity.csv"}
+        elif schema == "fhe-ind-csv-v1":
+            output_values = _command_value(plan.get("command", []), "--output=")
+            if len(output_values) != 1 or \
+                    Path(output_values[0]).name != "fhe_ind.csv":
+                fail(f"FHE-IND plan lacks canonical --output=fhe_ind.csv for {cid}")
+            allowed_csvs = {"fhe_ind.csv"}
         elif schema not in {"review-comparison-csv-v1", "review-encoding-csv-v1",
                             "sqrt-comparison-csv-v1", "threshold-csv-v1",
                             "threshold-fpfn-csv-v1", "dynamic-benchmark-csv-v1",
                             "piccard-benchmark-csv-v1", "estimator-diagnostic-csv-v1",
-                            "deletion-survival-csv-v1", "fhe-ind-csv-v1"}:
+                            "deletion-survival-csv-v1"}:
             for prefix in ("--csv=", "--output="):
                 values = _command_value(plan.get("command", []), prefix)
                 if len(values) == 1:
@@ -2410,7 +2444,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         if row.get("terminal_status") != "NOT_APPLICABLE"]
             if axis == "accuracy_m":
                 rows = _csv_table(stdout, _SQRT_HEADER, f"sqrt accuracy {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
                 wanted = {"onehot": "OneHot", "sqrt": "Sqrt"}
                 if len(rows) != len(expected) or \
                         {row.get("encoding") for row in rows} != \
@@ -2424,7 +2458,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             elif axis == "timing_m":
                 rows = _csv_table(stdout, _SQRT_TIMING_HEADER,
                                   f"sqrt timing {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
                 wanted = {"onehot", "sqrt"}
                 applicable_methods = {str(item["method"]) for item in expected}
                 if len(rows) != len(expected) or \
@@ -2445,7 +2479,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                                     reason="sqrt-m-not-perfect-square")
             else:
                 rows = _csv_table(stdout, _CROSSOVER_HEADER, f"sqrt crossover {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
                 if len(rows) != 1:
                     fail(f"sqrt crossover/ciphertext requires one combined row for {cid}")
                 nonsquare = any(item.get("terminal_status") == "NOT_APPLICABLE"
@@ -2460,7 +2494,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
         if schema == "threshold-csv-v1":
             if cell["family"] == "threshold_spec":
                 rows = _csv_table(stdout, _THRESHOLD_SPEC_HEADER, f"threshold spec {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
                 if len(rows) != 1 or rows[0].get("schema_version") != "piccard-threshold-spec-v2" or \
                         _int_field(rows[0], "k", cid) != int(cell["axes"]["k"]):
                     fail(f"threshold spec k/schema topology mismatch for {cid}")
@@ -2474,7 +2508,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                         fail(f"threshold spec SKIPPED row fabricated live metadata for {cid}")
                 continue
             rows = _csv_table(stdout, _THRESHOLD_HEADER, f"threshold {cid}")
-            _bind_cell_shape(rows, cell, plan, cid)
+            _bind_cell_shape(rows, cell, plan, cid, mode)
             expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
                                  if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
             if cell["family"] == "threshold_agreement":
@@ -2492,7 +2526,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
 
         if schema == "threshold-fpfn-csv-v1":
             rows = _csv_table(stdout, _THRESHOLD_FPFN_HEADER, f"threshold FP/FN {cid}")
-            _bind_cell_shape(rows, cell, plan, cid)
+            _bind_cell_shape(rows, cell, plan, cid, mode)
             expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
                                  if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
             trials = [_int_field(row, "trial_index", cid) for row in rows]
@@ -2527,7 +2561,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
 
         if schema == "review-encoding-csv-v1":
             rows = _csv_table(stdout, _REVIEW_ENCODING_HEADER, f"review encoding {cid}")
-            _bind_cell_shape(rows, cell, plan, cid)
+            _bind_cell_shape(rows, cell, plan, cid, mode)
             _bind_review_sidecars(output, rows, cell, plan, mode, cid)
             applicable = [row for row in cell["expected_rows"]
                           if row.get("terminal_status") != "NOT_APPLICABLE"]
@@ -2554,7 +2588,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 payload, _ = _canonical_payload(root, output, plan, schema)
                 rows = _csv_table(payload, _REAL_ENCODING_HEADER,
                                   f"real encoding {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
                 expected_trials = int(cell["expected_rows"][0][
                     "toy_measured_count" if mode == "toy" else "paper_measured_count"])
                 if len(rows) != 2 or \
@@ -2570,7 +2604,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                           else _REAL_TIMING_HEADER)
                 payload, _ = _canonical_payload(root, output, plan, schema)
                 rows = _csv_table(payload, header, f"real dataset {cid}")
-                _bind_cell_shape(rows, cell, plan, cid)
+                _bind_cell_shape(rows, cell, plan, cid, mode)
             if not rows or any(row.get("dataset") != expected_dataset or
                                row.get("variant") != variant or
                                _int_field(row, "k", cid) != int(cell["axes"]["k"]) or
@@ -2631,7 +2665,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             payload, _ = _canonical_payload(root, output, plan, schema)
             rows = _csv_table(payload, _REAL_THRESHOLD_HEADER,
                               f"real threshold {cid}")
-            _bind_cell_shape(rows, cell, plan, cid)
+            _bind_cell_shape(rows, cell, plan, cid, mode)
             trials = (_command_int(plan.get("command", []),
                                    "--threshold-trials=", cid) or
                       int(cell["expected_rows"][0][
@@ -2693,7 +2727,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             except UnicodeDecodeError:
                 fail(f"{schema} artifact is not UTF-8 for {cid}")
             rows = list(csv.DictReader(io.StringIO(text)))
-        _bind_cell_shape(rows, cell, plan, cid)
+        _bind_cell_shape(rows, cell, plan, cid, mode)
         expected_rows = [row for row in cell["expected_rows"]
                          if row.get("terminal_status") != "NOT_APPLICABLE"]
         expected_counts = [int(row["toy_measured_count"] if mode == "toy"
