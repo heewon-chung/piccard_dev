@@ -301,8 +301,8 @@ def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
                               method="bench_review_comparison", k=128, m=64, n=1000,
                               u=65536, key_bits=3072, precomputed=True, threads=2,
                               warmup_calls=1)]
-        extrapolated = (_text(axes.get("u")) in {"262144", "1048576"} or
-                        (cell["axis"] == "n" and _text(cell["axis_value"]) == "100000"))
+        extrapolated = (cell["axis"] == "u" and
+                        _text(axes.get("u")) in {"262144", "1048576"})
         if extrapolated:
             return [_row_spec("sj16", "EXTRAPOLATED",
                               "sj16-paillier3072-calibration-bound-v1", 0, 0,
@@ -460,8 +460,6 @@ def _expected_eligibility(cell: dict[str, Any]) -> tuple[str, bool, bool, str]:
         if cell["axis"] == "fit":
             return "DIAGNOSTIC_ONLY", False, False, "RUN"
         if cell["axis"] == "u" and _text(cell["axis_value"]) in {"262144", "1048576"}:
-            return "DIAGNOSTIC_ONLY", False, False, "NO_SPAWN"
-        if cell["axis"] == "n" and _text(cell["axis_value"]) == "100000":
             return "DIAGNOSTIC_ONLY", False, False, "NO_SPAWN"
         return "TABLE_ELIGIBLE", True, True, "RUN"
     if family == "dynamic_refresh" or family == "threshold_timing" or family == "threshold_agreement":

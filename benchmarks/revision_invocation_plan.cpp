@@ -1624,9 +1624,8 @@ namespace {
 }
 
 bool IsSj16Extrapolated(const RevisionCell& cell) {
-    if (cell.axis == "n" && cell.axis_value == "100000") return true;
     const auto it = cell.axes.find("u");
-    return it != cell.axes.end() &&
+    return cell.axis == "u" && it != cell.axes.end() &&
            (it->second == "262144" || it->second == "1048576");
 }
 

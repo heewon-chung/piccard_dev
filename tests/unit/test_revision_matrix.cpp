@@ -125,8 +125,7 @@ TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
         EXPECT_EQ(cell.timeout_class, per_element ? "extended" : "standard")
             << cell.cell_id;
         EXPECT_EQ(cell.invocation_status,
-                  (cell.axis == "n" && cell.axis_value == "100000") ||
-                          (cell.axis == "u" &&
+                  (cell.axis == "u" &&
                            (cell.axis_value == "262144" ||
                             cell.axis_value == "1048576"))
                       ? "NO_SPAWN"
@@ -172,10 +171,43 @@ TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
 
     const auto& sj_terminal = Find(
         matrix, "paper-v1::sj16::n=100000");
-    EXPECT_EQ(sj_terminal.invocation_status, "NO_SPAWN");
-    EXPECT_EQ(sj_terminal.expected_rows.front().status, "EXTRAPOLATED");
-    EXPECT_EQ(sj_terminal.expected_rows.front().measured_count, 0u);
+    EXPECT_EQ(sj_terminal.axes.at("u"), "262144");
+    EXPECT_EQ(sj_terminal.invocation_status, "RUN");
+    EXPECT_EQ(sj_terminal.expected_rows.front().status, "MEASURED");
+    EXPECT_EQ(sj_terminal.expected_rows.front().measured_count, 30u);
     EXPECT_EQ(sj_terminal.paper_count, 30u);
+}
+
+TEST(RevisionMatrix, Sj16N100000IsMeasuredAndOnlyLargeUCellsExtrapolate) {
+    const RevisionMatrix matrix = Load();
+    const auto& n100000 = Find(matrix, "paper-v1::sj16::n=100000");
+    ASSERT_EQ(n100000.axes.at("k"), "128");
+    ASSERT_EQ(n100000.axes.at("m"), "64");
+    ASSERT_EQ(n100000.axes.at("n"), "100000");
+    ASSERT_EQ(n100000.axes.at("u"), "262144");
+    EXPECT_EQ(n100000.profile, "paper-v1");
+    EXPECT_EQ(n100000.paper_count, 30u);
+    EXPECT_EQ(n100000.toy_count, 1u);
+    EXPECT_EQ(n100000.paper_counts.at("timing"), 30u);
+    EXPECT_EQ(n100000.toy_counts.at("timing"), 1u);
+    EXPECT_EQ(n100000.invocation_status, "RUN");
+    ASSERT_EQ(n100000.expected_rows.size(), 1u);
+    EXPECT_EQ(n100000.expected_rows.front().status, "MEASURED");
+    EXPECT_EQ(n100000.expected_rows.front().measured_count, 30u);
+    EXPECT_EQ(n100000.expected_rows.front().paper_measured_count, 30u);
+    EXPECT_EQ(n100000.expected_rows.front().toy_measured_count, 1u);
+
+    for (const auto& value : {"262144", "1048576"}) {
+        const auto& cell = Find(
+            matrix, std::string("paper-v1::sj16::u=") + value);
+        EXPECT_EQ(cell.invocation_status, "NO_SPAWN") << cell.cell_id;
+        ASSERT_EQ(cell.expected_rows.size(), 1u);
+        EXPECT_EQ(cell.expected_rows.front().status, "EXTRAPOLATED")
+            << cell.cell_id;
+        EXPECT_EQ(cell.expected_rows.front().reason,
+                  "sj16-paillier3072-calibration-bound-v1")
+            << cell.cell_id;
+    }
 }
 
 TEST(RevisionMatrix, ToyInventoriesAreExactAndDerived) {

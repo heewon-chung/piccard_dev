@@ -2085,10 +2085,71 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
             EXPECT_TRUE(paper_row.fit_authority.empty());
         }
     }
-    EXPECT_EQ(no_spawn_count, 3u);
-    EXPECT_EQ(run_paper_argv.size(), 8u);
-    EXPECT_EQ(run_toy_argv.size(), 8u);
-    EXPECT_EQ(run_dry_run_argv.size(), 8u);
+    EXPECT_EQ(no_spawn_count, 2u);
+    EXPECT_EQ(run_paper_argv.size(), 9u);
+    EXPECT_EQ(run_toy_argv.size(), 9u);
+    EXPECT_EQ(run_dry_run_argv.size(), 9u);
+}
+
+TEST(RevisionInvocationPlan,
+     PlansSj16N100000AsMeasuredWithCanonicalControlUniverse) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = Sj16Cells(matrix);
+    const RevisionCell& cell = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* candidate) {
+            return candidate->axis == "n" && candidate->axis_value == "100000";
+        });
+
+    ASSERT_EQ(cell.axes.at("k"), "128");
+    ASSERT_EQ(cell.axes.at("m"), "64");
+    ASSERT_EQ(cell.axes.at("n"), "100000");
+    ASSERT_EQ(cell.axes.at("u"), "262144");
+
+    const RevisionInvocationPlan paper =
+        PlanSj16RevisionCell(cell, RevisionRunMode::Paper);
+    const RevisionInvocationPlan toy =
+        PlanSj16RevisionCell(cell, RevisionRunMode::Toy);
+    const RevisionInvocationPlan dry_run =
+        PlanSj16RevisionCell(cell, RevisionRunMode::DryRun);
+
+    const std::vector<std::string> expected_paper = {
+        "--revision-cell=paper-v1::sj16::n=100000",
+        "--profile=paper-v1",
+        "--suite=sj16",
+        "--method=sj16",
+        "--k=128",
+        "--m=64",
+        "--n=100000",
+        "--universe=262144",
+        "--key-bits=3072",
+        "--threads=2",
+        "--trials=30",
+        "--seed={seed}",
+        "--output={output}/comparison.csv",
+    };
+    std::vector<std::string> expected_toy = expected_paper;
+    expected_toy[1] = "--profile=readiness-toy-v1";
+    expected_toy[10] = "--trials=1";
+
+    EXPECT_EQ(cell.profile, "paper-v1");
+    EXPECT_EQ(cell.invocation_status, "RUN");
+    EXPECT_EQ(paper.invocation_status, "RUN");
+    EXPECT_EQ(toy.invocation_status, "RUN");
+    EXPECT_EQ(dry_run.invocation_status, "RUN");
+    EXPECT_EQ(paper.concrete_profile, "paper-v1");
+    EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
+    EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
+    EXPECT_EQ(paper.argv, expected_paper);
+    EXPECT_EQ(toy.argv, expected_toy);
+    EXPECT_EQ(dry_run.argv, expected_paper);
+
+    ASSERT_EQ(paper.expected_rows.size(), 1u);
+    ASSERT_EQ(toy.expected_rows.size(), 1u);
+    ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+    EXPECT_EQ(paper.expected_rows.front().status, "MEASURED");
+    EXPECT_EQ(paper.expected_rows.front().measured_count, 30u);
+    EXPECT_EQ(toy.expected_rows.front().measured_count, 1u);
+    EXPECT_EQ(dry_run.expected_rows.front().measured_count, 30u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -2103,7 +2164,7 @@ TEST(RevisionInvocationPlan,
         });
     const RevisionCell extrapolated = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
-            return cell->axis == "n" && cell->axis_value == "100000";
+            return cell->axis == "u" && cell->axis_value == "262144";
         });
     const RevisionCell per_element = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
@@ -2222,7 +2283,7 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 
     cell = extrapolated;
-    cell.paper_count = 0;
+    cell.paper_count = 30;
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
@@ -3774,8 +3835,8 @@ TEST(RevisionInvocationPlan,
         }
     }
 
-    EXPECT_EQ(run_count, 260u);
-    EXPECT_EQ(no_spawn_count, 3u);
+    EXPECT_EQ(run_count, 261u);
+    EXPECT_EQ(no_spawn_count, 2u);
     EXPECT_EQ(paper_ids.size(), 263u);
     EXPECT_EQ(dry_run_ids.size(), 263u);
 }

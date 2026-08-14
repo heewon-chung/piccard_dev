@@ -944,10 +944,10 @@ void ValidateFamilyCell(const RevisionCell& cell) {
             }
             return;
         }
-        const bool extrapolated = RequiredAxis(cell, "u") == "262144" ||
-                                   RequiredAxis(cell, "u") == "1048576" ||
-                                   (cell.axis == "n" && cell.axis_value == "100000");
-        const bool request_metadata = cell.axis == "n" && cell.axis_value == "100000";
+        const bool extrapolated =
+            cell.axis == "u" &&
+            (RequiredAxis(cell, "u") == "262144" ||
+             RequiredAxis(cell, "u") == "1048576");
         if (cell.expected_rows.size() != 1) {
             throw std::invalid_argument("SJ16 row topology mismatch");
         }
@@ -959,10 +959,8 @@ void ValidateFamilyCell(const RevisionCell& cell) {
             if (cell.invocation_status != "NO_SPAWN" || cell.expected_rows.front().measured_count != 0) {
                 throw std::invalid_argument("SJ16 extrapolation spawn/count mismatch");
             }
-            RequireCounts(cell, request_metadata ? 30 : 0, request_metadata ? 1 : 0,
-                          request_metadata ? 30 : 0, request_metadata ? 1 : 0,
-                          {{"timing", request_metadata ? 30 : 0}},
-                          {{"timing", request_metadata ? 1 : 0}});
+            RequireCounts(cell, 0, 0, 0, 0, {{"timing", 0}},
+                          {{"timing", 0}});
         } else {
             RequireEligibility(cell, "TABLE_ELIGIBLE", true, true);
             RequireRow(cell.expected_rows.front(), "sj16", "MEASURED", "", 30, 1,
