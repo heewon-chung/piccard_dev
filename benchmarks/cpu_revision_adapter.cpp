@@ -175,6 +175,10 @@ CpuRevisionRequest ParseCpuRevisionArgs(
                       request.jaccard_grid);
         string_option("--seed=", "seed", request.seed);
         string_option("--output=", "output", request.output);
+        string_option("--raw_timing_dir=", "raw-timing-dir",
+                      request.raw_timing_dir);
+        string_option("--raw_timing_profile=", "raw-timing-profile",
+                      request.raw_timing_profile);
         integer_option("--k=", "k", request.k);
         integer_option("--m=", "m", request.m);
         integer_option("--set_size=", "set_size", request.set_size);
@@ -246,11 +250,13 @@ CpuRevisionRequest ParseCpuRevisionArgs(
                                     "--key-bits", "--sizes", "--held-out",
                                     "--threads", "--precomputed",
                                     "--query-trials", "--enc-iters", "--warmup",
-                                    "--seed", "--output"});
+                                    "--seed", "--output", "--raw_timing_dir",
+                                    "--raw_timing_profile"});
             Require(seen, {"--revision-cell", "--profile", "--cell",
                            "--key-bits", "--sizes", "--held-out", "--threads",
                            "--precomputed", "--query-trials", "--enc-iters",
-                           "--warmup", "--seed", "--output"});
+                           "--warmup", "--seed", "--output", "--raw_timing_dir",
+                           "--raw_timing_profile"});
             if (request.cell != "fit-per-element" || request.precomputed) {
                 Reject("SJ16 calibration requires --cell=fit-per-element and "
                        "--precomputed=false");

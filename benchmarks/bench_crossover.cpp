@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -354,7 +355,8 @@ static void RunCrossoverSweep(const BenchmarkConfig& config,
 /** @brief Run one ciphertext/crossover matrix point, preserving legacy sweeps. */
 static void RunRevisionCell(const BenchmarkConfig& config,
                             const SqrtRevisionExecutionPlan& execution,
-                            CrossoverCSVWriter& csv) {
+                            CrossoverCSVWriter& csv,
+                            const RawTimingOptions* raw_options = nullptr) {
     if (execution.role != "ciphertext" && execution.role != "crossover") {
         throw std::invalid_argument(
             "bench_crossover revision cells require ciphertext_m or crossover_m role");
@@ -387,11 +389,32 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     result.onehot_flood_noise_bits = onehot.GetParams().FloodNoiseBits();
     result.sanitizer = MakeSanitizerMetadata(onehot.GetParams());
 
+    RawTimingArtifact raw_artifact;
+    RawTimingArtifact* raw = nullptr;
+    if (raw_options != nullptr) {
+        raw_artifact.producer_id = kRawTimingProducerId;
+        raw_artifact.profile_id = raw_options->profile_id;
+        raw_artifact.cell_id = execution.selection.cell.cell_id;
+        raw_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+        raw_artifact.expected_measured = raw_options->measured_trials;
+        raw = &raw_artifact;
+    }
+
     std::vector<double> onehot_times;
     onehot_times.reserve(execution.onehot_runs);
+    const double onehot_warmup = RunOneHotTotal(onehot, set_a, set_b);
+    if (raw != nullptr) {
+        AddRawTimingSample(*raw, "onehot_total", SampleKind::DiscardedWarmup,
+                           0, config.seed, onehot_warmup);
+    }
     for (size_t trial = 0; trial < execution.onehot_runs; ++trial) {
-        onehot_times.push_back(RunOneHotTotal(
-            onehot, set_a, set_b));
+        const double value = RunOneHotTotal(onehot, set_a, set_b);
+        onehot_times.push_back(value);
+        if (raw != nullptr) {
+            AddRawTimingSample(*raw, "onehot_total", SampleKind::Measured,
+                               static_cast<uint64_t>(trial),
+                               TrialSeed(config.seed, trial, 0.5), value);
+        }
     }
     result.onehot_total_ms = Median(onehot_times);
 
@@ -403,6 +426,11 @@ static void RunRevisionCell(const BenchmarkConfig& config,
         result.sqrt_faster = false;
         result.speedup_ratio = 0.0;
         csv.WriteRow(result);
+        if (raw != nullptr) {
+            std::filesystem::create_directories(raw_options->output_directory);
+            WriteRawTimingArtifactsV1(raw_options->output_directory,
+                                      {std::move(raw_artifact)});
+        }
         PrintSqrtRevisionTerminalRow(execution);
         return;
     }
@@ -432,15 +460,30 @@ static void RunRevisionCell(const BenchmarkConfig& config,
 
     std::vector<double> sqrt_times;
     sqrt_times.reserve(execution.sqrt_runs);
+    const double sqrt_warmup = RunSqrtTotal(sqrt_engine, set_a, set_b);
+    if (raw != nullptr) {
+        AddRawTimingSample(*raw, "sqrt_total", SampleKind::DiscardedWarmup,
+                           0, config.seed, sqrt_warmup);
+    }
     for (size_t trial = 0; trial < execution.sqrt_runs; ++trial) {
-        sqrt_times.push_back(RunSqrtTotal(
-            sqrt_engine, set_a, set_b));
+        const double value = RunSqrtTotal(sqrt_engine, set_a, set_b);
+        sqrt_times.push_back(value);
+        if (raw != nullptr) {
+            AddRawTimingSample(*raw, "sqrt_total", SampleKind::Measured,
+                               static_cast<uint64_t>(trial),
+                               TrialSeed(config.seed, trial, 0.5), value);
+        }
     }
     result.sqrt_total_ms = Median(sqrt_times);
     result.sqrt_faster = result.sqrt_total_ms < result.onehot_total_ms;
     result.speedup_ratio = result.sqrt_total_ms > 0.0
         ? result.onehot_total_ms / result.sqrt_total_ms : 0.0;
     csv.WriteRow(result);
+    if (raw != nullptr) {
+        std::filesystem::create_directories(raw_options->output_directory);
+        WriteRawTimingArtifactsV1(raw_options->output_directory,
+                                  {std::move(raw_artifact)});
+    }
 }
 
 // ============================================================================
@@ -489,7 +532,8 @@ int main(int argc, char** argv) {
         const auto execution = PlanSqrtRevisionExecution(
             matrix, std::vector<std::string>(argv + 1, argv + argc),
             RevisionModeForProfile(config.profile.id));
-        RunRevisionCell(config, execution, csv);
+        RunRevisionCell(config, execution, csv,
+                        raw_options.enabled ? &raw_options : nullptr);
         return 0;
     }
 

@@ -260,6 +260,27 @@ def _row_spec(row_id: str, status: str, reason: str, paper: int, toy: int,
             "toy_measured_count": toy, **fields}
 
 
+def _requires_raw_timing(cell: dict[str, Any], row_id: str) -> bool:
+    """Return whether one RUN row carries the independent raw timing contract."""
+    if cell.get("invocation_status") != "RUN":
+        return False
+    family = cell["family"]
+    if family == "piccard_std128":
+        return row_id == "onehot_timing"
+    if family in {"fhe_ind", "bcg12_minhash", "bcg12_exact",
+                  "dynamic_timing", "dynamic_refresh", "threshold_timing"}:
+        return True
+    if family == "sj16":
+        return not (cell["axis"] == "u" and
+                    _text(cell["axis_value"]) in {"262144", "1048576"})
+    if family == "sqrt_comparison" and cell["axis"] in {"timing_m", "crossover_m"}:
+        return row_id == "onehot" or (
+            row_id == "sqrt" and _text(cell["axes"].get("m")) in SQRT_M)
+    if family == "real_dataset":
+        return cell["axes"].get("artifact") == "std128_timing"
+    return False
+
+
 def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
     family = cell["family"]
     axes = cell["axes"]
@@ -581,6 +602,10 @@ def _validate_cell(cell: Any, index: int) -> None:
         for key, value in contract.items():
             _require(observed.get(key) == value,
                      f"{label}.expected_rows[{row_index}] {key} contract mismatch")
+        expected_raw = "raw-phase-v1" if _requires_raw_timing(
+            cell, str(observed.get("row_id", ""))) else ""
+        _require(observed.get("raw_timing_contract", "") == expected_raw,
+                 f"{label}.expected_rows[{row_index}] raw timing contract mismatch")
 
     paper_count, toy_count, paper_trials, toy_trials, paper_counts, toy_counts = _expected_counts(cell)
     _require((cell["paper_count"], cell["toy_count"], cell["paper_trials"], cell["toy_trials"],

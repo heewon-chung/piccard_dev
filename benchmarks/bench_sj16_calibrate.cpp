@@ -85,6 +85,7 @@ struct Config {
     size_t enc_iters = 1000;
     std::string raw_timing_out;
     std::string raw_profile;
+    std::string revision_cell;
     std::string result_output;
     uint64_t root_seed = 0;
 };
@@ -128,6 +129,9 @@ std::vector<std::string> CanonicalizeRevisionArguments(
         } else if (argument.rfind("--output=", 0) == 0 &&
                    argument != "--output={output}/calibration.csv") {
             canonical.emplace_back("--output={output}/calibration.csv");
+        } else if (argument.rfind("--raw_timing_dir=", 0) == 0 ||
+                   argument.rfind("--raw-timing-dir=", 0) == 0) {
+            canonical.emplace_back("--raw_timing_dir={output}/raw");
         } else {
             canonical.push_back(argument);
         }
@@ -157,6 +161,15 @@ std::string ConcreteOutput(const std::vector<std::string>& arguments) {
         const std::string value = argument.substr(9);
         if (value == "{output}/calibration.csv") return {};
         return value;
+    }
+    return {};
+}
+
+std::string ConcreteRawTimingDir(const std::vector<std::string>& arguments) {
+    for (const std::string& argument : arguments) {
+        if (argument.rfind("--raw_timing_dir=", 0) == 0) {
+            return argument.substr(std::string("--raw_timing_dir=").size());
+        }
     }
     return {};
 }
@@ -705,6 +718,9 @@ int main(int argc, char** argv) {
         cfg.threads = static_cast<int>(request.threads);
         cfg.root_seed = ConcreteSeed(revision_arguments);
         cfg.result_output = ConcreteOutput(revision_arguments);
+        cfg.raw_timing_out = ConcreteRawTimingDir(revision_arguments);
+        cfg.raw_profile = request.raw_timing_profile;
+        cfg.revision_cell = request.revision_cell;
 #else
         throw std::runtime_error(
             "bench_sj16_calibrate was built without PICCARD_REVISION_MATRIX_PATH");
@@ -1014,15 +1030,21 @@ int main(int argc, char** argv) {
             results.push_back(std::move(kr));
 
             if (write_raw_timing) {
+                const std::string raw_prefix = cfg.revision_cell.empty()
+                    ? "sj16-k" + std::to_string(K)
+                    : cfg.revision_cell + "::";
                 raw_artifacts.push_back(MakeSj16RawTimingArtifact(
                     raw_profile,
-                    "sj16-k" + std::to_string(K) + "-encrypt", "encrypt",
+                    cfg.revision_cell.empty() ? raw_prefix + "-encrypt"
+                                              : raw_prefix + "encrypt",
+                    "encrypt",
                     raw_encryption));
                 for (uint32_t m : all_sizes) {
                     raw_artifacts.push_back(MakeSj16RawTimingArtifact(
                         raw_profile,
-                        "sj16-k" + std::to_string(K) + "-m" +
-                            std::to_string(m),
+                        cfg.revision_cell.empty()
+                            ? raw_prefix + "-m" + std::to_string(m)
+                            : raw_prefix + "query_m=" + std::to_string(m),
                         "query", raw_queries.at(m)));
                 }
             }

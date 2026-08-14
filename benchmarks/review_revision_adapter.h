@@ -46,6 +46,7 @@ struct ReviewRevisionRequest {
     uint64_t threads = 0;
     std::string seed;
     std::string output;
+    std::string raw_timing_dir;
 };
 
 /** @brief Exact matrix cell and byte-identical planner output. */

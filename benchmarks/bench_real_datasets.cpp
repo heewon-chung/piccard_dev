@@ -185,9 +185,13 @@ std::vector<std::string> PrepareLegacyRevisionArguments(
             selection.cell.axis_value == "std192_encoding" &&
             (omit("--methods=") || omit("--encoding-iters=") ||
              omit("--correctness-trials="));
+        const bool keep_raw_contract =
+            selection.cell.family == "real_dataset" &&
+            selection.cell.axis_value == "std128_timing";
         const bool obsolete_revision_flag =
             omit("--revision-cell=") || omit("--security=") ||
-            omit("--raw-timing-dir=") || omit("--raw-timing-profile=") ||
+            (omit("--raw-timing-dir=") && !keep_raw_contract) ||
+            (omit("--raw-timing-profile=") && !keep_raw_contract) ||
             omit("--cell=");
         const bool unsupported_encoding_flag =
             (omit("--methods=") || omit("--encoding-iters=") ||
@@ -423,6 +427,13 @@ RealTimingCliArgs ParseTimingArguments(int argc, char** argv) {
         } else if (option == "--workload-manifest-out") {
             args.workload_manifest_out_path = value;
             saw_workload_manifest_out = true;
+        } else if (option == "--raw-timing-dir") {
+            args.raw_timing_out_path = value;
+        } else if (option == "--raw-timing-profile") {
+            if (value != "paper-v1" && value != "readiness-toy-v1") {
+                throw std::invalid_argument(
+                    "--raw-timing-profile must be paper-v1 or readiness-toy-v1");
+            }
         } else {
             throw std::invalid_argument("unknown option: " + option);
         }

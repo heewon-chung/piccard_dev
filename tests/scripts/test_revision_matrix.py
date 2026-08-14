@@ -65,6 +65,54 @@ class RevisionMatrixTest(unittest.TestCase):
             if sj_cell["family"] == "sj16" and sj_cell is not sj_fit:
                 self.assertEqual(sj_cell["timeout_class"], "standard")
 
+    def test_raw_phase_contract_covers_timing_rows_only(self):
+        """The matrix is the allow-list for independent raw timing evidence."""
+        expected = set()
+        for cell in self.document["cells"]:
+            family = cell["family"]
+            axis = cell["axis"]
+            value = str(cell["axis_value"])
+            raw = False
+            if family in {"piccard_std128", "bcg12_minhash", "bcg12_exact",
+                          "dynamic_timing", "dynamic_refresh",
+                          "threshold_timing"}:
+                raw = True
+            elif family == "fhe_ind":
+                raw = True
+            elif family == "real_dataset" and cell["axes"].get("artifact") == "std128_timing":
+                raw = True
+            elif family == "sj16":
+                raw = not (axis == "u" and value in {"262144", "1048576"})
+            elif family == "sqrt_comparison" and axis in {"timing_m", "crossover_m"}:
+                # A non-square m has no sqrt producer row, hence no sqrt raw
+                # artifact; the onehot timing row remains contract-bound.
+                raw = True
+
+            rows = cell["expected_rows"]
+            for row in rows:
+                row_key = (cell["cell_id"], row["row_id"])
+                has_contract = row.get("raw_timing_contract") == "raw-phase-v1"
+                if family == "sqrt_comparison" and axis in {"timing_m", "crossover_m"}:
+                    expected_row = row["row_id"] == "onehot" or (
+                        row["row_id"] == "sqrt" and value in {"16", "64", "256"})
+                    self.assertEqual(has_contract, expected_row, row_key)
+                elif family == "piccard_std128":
+                    self.assertEqual(has_contract,
+                                     row["row_id"] == "onehot_timing",
+                                     row_key)
+                else:
+                    self.assertEqual(has_contract, raw, row_key)
+                if has_contract:
+                    expected.add(row_key)
+
+        # These sentinels make accidental broadening (accuracy/ciphertext/
+        # status-only rows) fail loudly even if the family loop above changes.
+        self.assertNotIn(("paper-v1::sqrt_comparison::accuracy_m=64", "onehot"), expected)
+        self.assertNotIn(("paper-v1::sqrt_comparison::ciphertext_m=64", "onehot"), expected)
+        self.assertNotIn(("paper-v1::threshold_spec::k=64", "spec"), expected)
+        self.assertNotIn(("paper-v1::real_dataset::enron_u65536_artifact=std192_encoding",
+                          "std192_encoding"), expected)
+
     def test_family_axes_datasets_and_paper_count_contract(self):
         cells = {cell["cell_id"]: cell for cell in self.document["cells"]}
 

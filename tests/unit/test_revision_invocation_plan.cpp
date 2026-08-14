@@ -653,7 +653,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
             axis == "timing_m" ? "30"
             : (axis == "accuracy_m" ? "50"
                                      : (axis == "ciphertext_m" ? "1" : "30"));
-        const std::vector<std::string> expected_paper = {
+        std::vector<std::string> expected_paper = {
             "--revision-cell=" + cell->cell_id,
             "--profile=" + paper_profile,
             "--cell=" + axis,
@@ -666,7 +666,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
             "--trials=" + paper_trials,
             "--seed={seed}",
         };
-        const std::vector<std::string> expected_toy = {
+        std::vector<std::string> expected_toy = {
             "--revision-cell=" + cell->cell_id,
             "--profile=readiness-toy-v1",
             "--cell=" + axis,
@@ -679,6 +679,11 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
             "--trials=1",
             "--seed={seed}",
         };
+
+        if (axis == "timing_m" || axis == "crossover_m") {
+            expected_paper.push_back("--raw_timing_dir={output}/raw");
+            expected_toy.push_back("--raw_timing_dir={output}/raw");
+        }
 
         EXPECT_EQ(paper.argv, expected_paper);
         EXPECT_EQ(toy.argv, expected_toy);
@@ -726,7 +731,8 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
                   paper.expected_rows.at(1).status);
         EXPECT_EQ(dry_run.expected_rows.at(1).measured_count,
                   paper.expected_rows.at(1).measured_count);
-        EXPECT_FALSE(HasArg(paper, "--raw"));
+        EXPECT_EQ(HasArg(paper, "--raw"),
+                  axis == "timing_m" || axis == "crossover_m");
 
         paper_argv.insert(paper.argv);
         toy_argv.insert(toy.argv);
@@ -1269,7 +1275,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFifteenThresholdFheCells) {
                 cell->family == "threshold_timing"
                     ? "30"
                     : (cell->family == "threshold_spec" ? "0" : "50");
-            const std::vector<std::string> expected_paper = {
+            std::vector<std::string> expected_paper = {
                 "--revision-cell=" + cell->cell_id,
                 "--profile=paper-v1",
                 "--mode=" + mode,
@@ -1281,7 +1287,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFifteenThresholdFheCells) {
                 "--trials=" + paper_trials,
                 "--seed={seed}",
             };
-            const std::vector<std::string> expected_toy = {
+            std::vector<std::string> expected_toy = {
                 "--revision-cell=" + cell->cell_id,
                 "--profile=readiness-toy-v1",
                 "--mode=" + mode,
@@ -1293,6 +1299,10 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFifteenThresholdFheCells) {
                 "--trials=1",
                 "--seed={seed}",
             };
+            if (cell->family == "threshold_timing") {
+                expected_paper.push_back("--raw_timing_dir={output}/raw");
+                expected_toy.push_back("--raw_timing_dir={output}/raw");
+            }
             EXPECT_EQ(paper.argv, expected_paper);
             EXPECT_EQ(toy.argv, expected_toy);
             EXPECT_EQ(paper.producer, "bench_threshold");
@@ -1306,7 +1316,8 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFifteenThresholdFheCells) {
                                                         : "MEASURED");
             EXPECT_EQ(paper.expected_rows.front().attributes.at("k"),
                       cell->axes.at("k"));
-            EXPECT_FALSE(HasArg(paper, "--raw"));
+            EXPECT_EQ(HasArg(paper, "--raw"),
+                      cell->family == "threshold_timing");
         } else {
             FAIL() << "unexpected threshold family: " << cell->family;
         }
@@ -1738,9 +1749,10 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
             "--universe=" + cell->axes.at("u"),
             "--trials=30",
             "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
         };
-        const std::vector<std::string> expected_toy = {
+        std::vector<std::string> expected_toy = {
             "--revision-cell=" + cell->cell_id,
             "--profile=readiness-toy-v1",
             "--suite=" + suite,
@@ -1751,6 +1763,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
             "--universe=" + cell->axes.at("u"),
             "--trials=1",
             "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
         };
 
@@ -1791,7 +1804,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
         EXPECT_EQ(paper.expected_rows.at(1).method,
                   minhash ? "bcg12_mh_ff" : "bcg12_exact_ff");
         EXPECT_FALSE(HasArg(paper, "--security="));
-        EXPECT_FALSE(HasArg(paper, "--raw"));
+        EXPECT_TRUE(HasArg(paper, "--raw_timing_dir="));
         EXPECT_FALSE(HasArg(paper, "--fhe"));
 
         paper_argv.insert(paper.argv);
@@ -2010,12 +2023,15 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
                 "--enc-iters=" + paper_trials,
                 "--warmup=1",
                 "--seed={seed}",
+                "--raw_timing_dir={output}/raw",
+                "--raw_timing_profile=paper-v1",
                 "--output={output}/calibration.csv",
             };
             expected_toy = expected_paper;
             expected_toy[1] = "--profile=readiness-toy-v1";
             expected_toy[8] = "--query-trials=" + toy_trials;
             expected_toy[9] = "--enc-iters=" + toy_trials;
+            expected_toy[13] = "--raw_timing_profile=readiness-toy-v1";
         } else if (precomputed) {
             expected_paper = {
                 "--revision-cell=" + cell->cell_id,
@@ -2031,6 +2047,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
                 "--trials=" + paper_trials,
                 "--warmup=1",
                 "--seed={seed}",
+                "--raw_timing_dir={output}/raw",
                 "--output={output}/comparison.csv",
             };
             expected_toy = expected_paper;
@@ -2050,6 +2067,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
                 "--threads=2",
                 "--trials=" + paper_trials,
                 "--seed={seed}",
+                "--raw_timing_dir={output}/raw",
                 "--output={output}/comparison.csv",
             };
             expected_toy = expected_paper;
@@ -2125,6 +2143,7 @@ TEST(RevisionInvocationPlan,
         "--threads=2",
         "--trials=30",
         "--seed={seed}",
+        "--raw_timing_dir={output}/raw",
         "--output={output}/comparison.csv",
     };
     std::vector<std::string> expected_toy = expected_paper;
@@ -3924,4 +3943,40 @@ TEST(RevisionInvocationPlan, RejectsUnknownFamilyBeforeAnyProducerPlanning) {
     unknown.family = "unknown_revision_family";
     EXPECT_THROW(PlanRevisionCell(unknown, RevisionRunMode::Paper),
                  std::invalid_argument);
+}
+
+TEST(RevisionInvocationPlan, RawTimingFlagsAreCellLocalAndTimingOnly) {
+    const RevisionMatrix matrix = Load();
+    for (const RevisionCell& cell : matrix.cells) {
+        if (cell.invocation_status != "RUN") continue;
+        const RevisionInvocationPlan plan =
+            PlanRevisionCell(cell, RevisionRunMode::Paper);
+        bool expected = false;
+        if (cell.family == "piccard_std128" || cell.family == "fhe_ind" ||
+            cell.family == "bcg12_minhash" || cell.family == "bcg12_exact" ||
+            cell.family == "dynamic_timing" ||
+            cell.family == "dynamic_refresh" ||
+            cell.family == "threshold_timing") {
+            expected = true;
+        } else if (cell.family == "real_dataset" &&
+                   cell.axes.at("artifact") == "std128_timing") {
+            expected = true;
+        } else if (cell.family == "sj16") {
+            expected = !(cell.axis == "u" &&
+                         (cell.axis_value == "262144" ||
+                          cell.axis_value == "1048576"));
+        } else if (cell.family == "sqrt_comparison" &&
+                   (cell.axis == "timing_m" || cell.axis == "crossover_m")) {
+            expected = true;
+        }
+        const bool has_raw = HasArg(plan, "--raw_timing_dir=") ||
+                             HasArg(plan, "--raw-timing-dir=") ||
+                             HasArg(plan, "--raw-timing-out=");
+        EXPECT_EQ(has_raw, expected)
+            << cell.cell_id;
+        if (cell.family == "sqrt_comparison" &&
+            (cell.axis == "accuracy_m" || cell.axis == "ciphertext_m")) {
+            EXPECT_FALSE(HasArg(plan, "--raw")) << cell.cell_id;
+        }
+    }
 }

@@ -22,6 +22,7 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1795,6 +1796,8 @@ static std::vector<std::string> CanonicalizeThresholdPlannerArgv(
         const std::string arg(argv[index]);
         if (arg.rfind("--seed=", 0) == 0 && arg != "--seed={seed}") {
             canonical.push_back("--seed={seed}");
+        } else if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+            canonical.push_back("--raw_timing_dir={output}/raw");
         } else {
             canonical.push_back(arg);
         }
@@ -1838,7 +1841,8 @@ static SecurityLevel ThresholdSecurityForRevisionProfile(
 static int RunThresholdRevisionCell(
     const ThresholdRevisionRequest& request,
     const ThresholdRevisionExecutionPlan& execution,
-    uint64_t concrete_seed) {
+    uint64_t concrete_seed,
+    const RawTimingOptions* raw_options = nullptr) {
     if (execution.selected_point_count != 1 || execution.native_sweep ||
         execution.keygen_calls != 0) {
         throw std::logic_error(
@@ -1906,10 +1910,26 @@ static int RunThresholdRevisionCell(
     engine->SetHashSeed(concrete_seed);
     auto [set_a, set_b] = MakeSetsWithOverlap(execution.set_size, 0.5);
     const TruthContext truth = MakeTruthContext(*engine, set_a, set_b);
+    RawTimingArtifact raw_artifact;
+    RawTimingArtifact* raw = nullptr;
+    if (raw_options != nullptr) {
+        raw_artifact.producer_id = kRawTimingProducerId;
+        raw_artifact.profile_id = raw_options->profile_id;
+        raw_artifact.cell_id = execution.selection.cell.cell_id;
+        raw_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+        raw_artifact.expected_measured = raw_options->measured_trials;
+        raw = &raw_artifact;
+    }
     const auto row = RunMultiTrialThreshold(
         *engine, set_a, set_b, truth, execution.selection.cell.cell_id,
-        static_cast<size_t>(execution.trials));
+        static_cast<size_t>(execution.trials), raw, concrete_seed, 0.5);
     csv.WriteRow(row);
+    if (raw != nullptr) {
+        ValidateRawTimingArtifact(raw_artifact);
+        std::filesystem::create_directories(raw_options->output_directory);
+        WriteRawTimingArtifactsV1(raw_options->output_directory,
+                                  {std::move(raw_artifact)});
+    }
     return 0;
 }
 
@@ -1926,7 +1946,22 @@ static int RunThresholdRevisionSuccessor(int argc, char** argv) {
         PICCARD_REVISION_MATRIX_PATH);
     const ThresholdRevisionExecutionPlan execution =
         PlanThresholdRevisionExecution(matrix, planner_argv, mode);
-    return RunThresholdRevisionCell(request, execution, concrete_seed);
+    RawTimingOptions raw_options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument(argv[index]);
+        if (argument.rfind("--raw_timing_dir=", 0) == 0) {
+            raw_options.enabled = true;
+            raw_options.output_directory = argument.substr(17);
+        }
+    }
+    if (raw_options.enabled) {
+        raw_options.profile_id = request.profile == "readiness-toy-v1"
+            ? kReadinessTimingProfileVersion : kPaperTimingProfileVersion;
+        raw_options.measured_trials = static_cast<size_t>(execution.trials);
+    }
+    return RunThresholdRevisionCell(
+        request, execution, concrete_seed,
+        raw_options.enabled ? &raw_options : nullptr);
 #else
     (void)argc;
     (void)argv;

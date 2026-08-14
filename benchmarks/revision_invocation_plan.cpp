@@ -213,7 +213,8 @@ void ValidateCounts(const RevisionCell& cell) {
         timing.terminal_status != "MEASURED" || timing.method != "piccard" ||
         timing.timing_contract != "full-query" || !timing.reason.empty() ||
         !timing.reason_code.empty() || timing.paper_measured_count != 30 ||
-        timing.toy_measured_count != 1 || timing.measured_count != 30) {
+        timing.toy_measured_count != 1 || timing.measured_count != 30 ||
+        timing.raw_timing_contract != "raw-phase-v1") {
         Reject("Piccard timing row contract mismatch");
     }
     const RevisionRow& accuracy = cell.expected_rows.at(1);
@@ -224,7 +225,8 @@ void ValidateCounts(const RevisionCell& cell) {
         accuracy.timing_contract != "NOT_APPLICABLE" ||
         !accuracy.reason.empty() || !accuracy.reason_code.empty() ||
         accuracy.paper_measured_count != 50 ||
-        accuracy.toy_measured_count != 1 || accuracy.measured_count != 50) {
+        accuracy.toy_measured_count != 1 || accuracy.measured_count != 50 ||
+        !accuracy.raw_timing_contract.empty()) {
         Reject("Piccard accuracy row contract mismatch");
     }
 }
@@ -684,7 +686,9 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         onehot.paper_measured_count != paper_trials ||
         onehot.toy_measured_count != 1 || !onehot.attributes.empty() ||
         !onehot.list_attributes.empty() || !onehot.timing_contract.empty() ||
-        !onehot.raw_timing_contract.empty() || !onehot.phase.empty() ||
+        onehot.raw_timing_contract !=
+            ((cell.axis == "timing_m" || cell.axis == "crossover_m")
+                 ? "raw-phase-v1" : "") || !onehot.phase.empty() ||
         !onehot.pattern.empty() || !onehot.variant.empty() ||
         !onehot.fit_authority.empty()) {
         RejectSqrt("onehot row contract mismatch");
@@ -701,7 +705,10 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         sqrt.paper_measured_count != sqrt_count ||
         sqrt.toy_measured_count != (square ? 1u : 0u) ||
         !sqrt.attributes.empty() || !sqrt.list_attributes.empty() ||
-        !sqrt.timing_contract.empty() || !sqrt.raw_timing_contract.empty() ||
+        !sqrt.timing_contract.empty() ||
+        sqrt.raw_timing_contract !=
+            ((cell.axis == "timing_m" || cell.axis == "crossover_m") && square
+                 ? "raw-phase-v1" : "") ||
         !sqrt.phase.empty() || !sqrt.pattern.empty() ||
         !sqrt.variant.empty() || !sqrt.fit_authority.empty()) {
         RejectSqrt("sqrt row contract mismatch");
@@ -982,7 +989,7 @@ void ValidateBcg12Cell(const RevisionCell& cell) {
             !row.reason.empty() || !row.reason_code.empty() ||
             row.measured_count != 30 || row.paper_measured_count != 30 ||
             row.toy_measured_count != 1 || !row.timing_contract.empty() ||
-            !row.raw_timing_contract.empty() || !row.phase.empty() ||
+            row.raw_timing_contract != "raw-phase-v1" || !row.phase.empty() ||
             !row.pattern.empty() || !row.variant.empty() ||
             !row.fit_authority.empty() || !row.truth_bases.empty() ||
             !row.field_values.empty() || !row.attributes.empty() ||
@@ -1092,6 +1099,8 @@ void ValidateThresholdFheCell(const RevisionCell& cell) {
         row.measured_count != paper_trials ||
         row.paper_measured_count != paper_trials ||
         row.toy_measured_count != 1 || row.attributes.size() != 1u ||
+        (kind == "timing" ? row.raw_timing_contract != "raw-phase-v1"
+                           : !row.raw_timing_contract.empty()) ||
         row_k == row.attributes.end() || row_k->second != std::to_string(k) ||
         !row.list_attributes.empty()) {
         RejectThreshold("expected threshold row contract mismatch");
@@ -1456,6 +1465,9 @@ RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
             (toy ? "1" : std::to_string(paper_trials)),
         "--seed={seed}",
     };
+    if (axis == "timing_m" || axis == "crossover_m") {
+        plan.argv.push_back("--raw_timing_dir={output}/raw");
+    }
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {
         row.measured_count = toy ? row.toy_measured_count
@@ -1525,6 +1537,7 @@ RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
         "--universe=" + cell.axes.at("u"),
         std::string("--trials=") + (toy ? "1" : "30"),
         "--seed={seed}",
+        "--raw_timing_dir={output}/raw",
         "--output={output}/comparison.csv",
     };
     plan.expected_rows = cell.expected_rows;
@@ -1573,6 +1586,8 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
             std::string("--enc-iters=") + (toy ? "1" : "30"),
             "--warmup=1",
             "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
+            "--raw_timing_profile=" + profile,
             "--output={output}/calibration.csv",
         };
         return plan;
@@ -1593,6 +1608,7 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
             std::string("--trials=") + (toy ? "1" : "30"),
             "--warmup=1",
             "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
         };
         return plan;
@@ -1611,6 +1627,7 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
         "--threads=2",
         std::string("--trials=") + (toy ? "1" : "30"),
         "--seed={seed}",
+        "--raw_timing_dir={output}/raw",
         "--output={output}/comparison.csv",
     };
     return plan;
@@ -1679,7 +1696,7 @@ void ValidateSj16Geometry(const RevisionCell& cell) {
 void ValidateSj16RowBase(const RevisionRow& row, const std::string& row_id,
                          const std::string& status, const std::string& method,
                          const std::string& reason, uint64_t paper_count,
-                         uint64_t toy_count) {
+                         uint64_t toy_count, bool raw_timing) {
     if (row.row_id != row_id) RejectSj16("SJ16 row ID mismatch");
     if (row.status != status || row.terminal_status != status) {
         RejectSj16("SJ16 row status mismatch");
@@ -1693,7 +1710,9 @@ void ValidateSj16RowBase(const RevisionRow& row, const std::string& row_id,
         row.toy_measured_count != toy_count) {
         RejectSj16("SJ16 row count mismatch");
     }
-    if (!row.timing_contract.empty() || !row.raw_timing_contract.empty() ||
+    if (!row.timing_contract.empty() ||
+        (raw_timing ? row.raw_timing_contract != "raw-phase-v1"
+                    : !row.raw_timing_contract.empty()) ||
         !row.phase.empty() || !row.pattern.empty() || !row.variant.empty() ||
         !row.field_values.empty()) {
         RejectSj16("SJ16 row optional field mismatch");
@@ -1806,7 +1825,7 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     const RevisionRow& row = cell.expected_rows.front();
     if (per_element) {
         ValidateSj16RowBase(row, "sj16_fit_per_element", "DIAGNOSTIC",
-                             "bench_sj16_calibrate", "", 30, 1);
+                             "bench_sj16_calibrate", "", 30, 1, true);
         const std::map<std::string, std::string> row_attributes = {
             {"held_out", "32768"}, {"key_bits", "3072"},
             {"precomputed", "false"}, {"threads", "2"},
@@ -1820,7 +1839,7 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     }
     if (precomputed) {
         ValidateSj16RowBase(row, "sj16_fit_precomputed", "DIAGNOSTIC",
-                             "bench_review_comparison", "", 30, 1);
+                             "bench_review_comparison", "", 30, 1, true);
         const std::map<std::string, std::string> row_attributes = {
             {"k", "128"}, {"key_bits", "3072"}, {"m", "64"},
             {"n", "1000"}, {"precomputed", "true"}, {"threads", "2"},
@@ -1835,7 +1854,7 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (extrapolated) {
         ValidateSj16RowBase(row, "sj16", "EXTRAPOLATED", "sj16",
                              "sj16-paillier3072-calibration-bound-v1",
-                             0, 0);
+                             0, 0, false);
         if (row.fit_authority != "per_element" ||
             row.attributes != regular_attributes ||
             !row.list_attributes.empty()) {
@@ -1844,7 +1863,8 @@ void ValidateSj16Cell(const RevisionCell& cell) {
         return;
     }
 
-    ValidateSj16RowBase(row, "sj16", "MEASURED", "sj16", "", 30, 1);
+    ValidateSj16RowBase(row, "sj16", "MEASURED", "sj16", "", 30, 1,
+                        true);
     if (!row.fit_authority.empty() || row.attributes != regular_attributes ||
         !row.list_attributes.empty()) {
         RejectSj16("SJ16 measured row metadata mismatch");
@@ -1953,14 +1973,16 @@ void ValidateDynamicGeometry(const RevisionCell& cell) {
 
 void ValidateDynamicRow(const RevisionRow& row, const std::string& row_id,
                         const std::string& phase, const std::string& method,
-                        uint64_t paper_count) {
+                        uint64_t paper_count, bool raw_timing) {
     if (row.row_id != row_id || row.status != "MEASURED" ||
         row.terminal_status != "MEASURED" || row.reason != "" ||
         row.reason_code != "" || row.measured_count != paper_count ||
         row.paper_measured_count != paper_count ||
         row.toy_measured_count != 1 || row.phase != phase ||
         row.method != method || !row.timing_contract.empty() ||
-        !row.raw_timing_contract.empty() || !row.pattern.empty() ||
+        (raw_timing ? row.raw_timing_contract != "raw-phase-v1"
+                    : !row.raw_timing_contract.empty()) ||
+        !row.pattern.empty() ||
         !row.variant.empty() || !row.fit_authority.empty() ||
         !row.truth_bases.empty() || !row.field_values.empty() ||
         !row.list_attributes.empty()) {
@@ -2026,7 +2048,7 @@ void ValidateDynamicCell(const RevisionCell& cell) {
             RejectDynamic("refresh requires one expected row");
         }
         const RevisionRow& row = cell.expected_rows.front();
-        ValidateDynamicRow(row, "refresh", "", "refresh", 30);
+        ValidateDynamicRow(row, "refresh", "", "refresh", 30, true);
         if (row.attributes !=
             std::map<std::string, std::string>{{"k", "128"},
                                                 {"m", "64"},
@@ -2056,9 +2078,9 @@ void ValidateDynamicCell(const RevisionCell& cell) {
     const std::string first_id = accuracy ? "insert_correctness" : "insert";
     const std::string second_id = accuracy ? "delete_correctness" : "delete";
     ValidateDynamicRow(cell.expected_rows.at(0), first_id, "insert", "",
-                      paper_trials);
+                      paper_trials, !accuracy);
     ValidateDynamicRow(cell.expected_rows.at(1), second_id, "delete", "",
-                      paper_trials);
+                      paper_trials, !accuracy);
     const std::map<std::string, std::string> row_attributes = {
         {"updates", "1"}};
     if (cell.expected_rows.at(0).attributes != row_attributes ||
@@ -2290,13 +2312,15 @@ void ValidateRealDatasetRow(const RevisionRow& row,
                             const std::string& artifact,
                             const std::string& variant,
                             uint64_t paper_count,
-                            bool diagnostic) {
+                            bool diagnostic, bool raw_timing) {
     const std::string expected_status = diagnostic ? "DIAGNOSTIC" : "MEASURED";
     if (row.row_id != artifact || row.status != expected_status ||
         row.reason != "" || row.reason_code != "" ||
         row.terminal_status != expected_status || row.method != artifact ||
         row.variant != variant || !row.timing_contract.empty() ||
-        !row.raw_timing_contract.empty() || !row.phase.empty() ||
+        (raw_timing ? row.raw_timing_contract != "raw-phase-v1"
+                    : !row.raw_timing_contract.empty()) ||
+        !row.phase.empty() ||
         !row.pattern.empty() || !row.fit_authority.empty() ||
         !row.truth_bases.empty() || !row.field_values.empty() ||
         !row.attributes.empty() || !row.list_attributes.empty() ||
@@ -2397,7 +2421,7 @@ void ValidateRealDatasetCell(const RevisionCell& cell) {
         RejectRealDataset("real-dataset cells require one expected row");
     }
     ValidateRealDatasetRow(cell.expected_rows.front(), artifact, variant,
-                            paper_count, encoding);
+                           paper_count, encoding, artifact == "std128_timing");
 }
 
 void ValidateRealDatasetMode(RevisionRunMode mode) {
@@ -2589,6 +2613,9 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
         "--trials=" + trials,
         "--seed={seed}",
     };
+    if (kind == "timing") {
+        plan.argv.push_back("--raw_timing_dir={output}/raw");
+    }
 
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {

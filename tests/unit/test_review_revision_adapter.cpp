@@ -159,6 +159,10 @@ TEST(ReviewRevisionAdapter,
                   }), 0);
         EXPECT_NE(std::find(args.begin(), args.end(), "--diagnostic-security"),
                   args.end());
+        const bool raw_expected = cell->family != "piccard_std192_encoding";
+        EXPECT_EQ(std::count_if(args.begin(), args.end(), [](const std::string& arg) {
+                      return arg == "--raw-timing-out={output}/raw";
+                  }), raw_expected ? 1 : 0);
     }
 }
 

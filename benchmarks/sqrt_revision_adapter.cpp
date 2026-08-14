@@ -65,7 +65,11 @@ std::vector<std::string> CanonicalizeSqrtRevisionPlannerArgv(
     canonical.reserve(argv.size());
     for (const std::string& arg : argv) {
         if (arg.rfind("--seed=", 0) != 0) {
-            canonical.push_back(arg);
+            if (arg.rfind("--raw_timing_dir=", 0) == 0) {
+                canonical.emplace_back("--raw_timing_dir={output}/raw");
+            } else {
+                canonical.push_back(arg);
+            }
             continue;
         }
 
@@ -105,6 +109,12 @@ SqrtRevisionRequest ParseSqrtRevisionArgs(
                        }) ||
             ParseValue(arg, "--seed=", "--seed", seen,
                        [&](const std::string& value) { request.seed = value; })) {
+            continue;
+        }
+        if (ParseValue(arg, "--raw_timing_dir=", "--raw_timing_dir", seen,
+                       [&](const std::string& value) {
+                           request.raw_timing_dir = value;
+                       })) {
             continue;
         }
 

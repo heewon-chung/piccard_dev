@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -839,7 +840,8 @@ static void PrintSqrtRevisionTerminalRow(
  */
 static void RunRevisionCell(const BenchmarkConfig& config,
                             const SqrtRevisionExecutionPlan& execution,
-                            CSVWriter& csv) {
+                            CSVWriter& csv,
+                            const RawTimingOptions* raw_options = nullptr) {
     if (execution.role != "timing") {
         throw std::invalid_argument(
             "bench_onehot_sqrt revision cells require timing_m role");
@@ -858,10 +860,23 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     const auto [set_a, set_b] = MakeRandomSetsWithOverlap(
         execution.point.set_size, 0.5, revision_rng);
     const double j_true = ExactJaccard(set_a, set_b);
+    RawTimingArtifact onehot_artifact;
+    RawTimingArtifact sqrt_artifact;
+    RawTimingArtifact* onehot_raw = nullptr;
+    RawTimingArtifact* sqrt_raw = nullptr;
+    if (raw_options != nullptr) {
+        onehot_artifact.producer_id = kRawTimingProducerId;
+        onehot_artifact.profile_id = raw_options->profile_id;
+        onehot_artifact.cell_id = execution.selection.cell.cell_id + "::onehot";
+        onehot_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+        onehot_artifact.expected_measured = raw_options->measured_trials;
+        onehot_raw = &onehot_artifact;
+    }
     auto onehot_row = RunMultiTrial(
         onehot, set_a, set_b, j_true,
         "revision_" + execution.selection.cell.cell_id, "onehot", 1,
-        execution.onehot_runs);
+        execution.onehot_runs, onehot_raw,
+        raw_options == nullptr ? 0 : config.seed, 0.5);
     onehot_row.param_set_size = execution.point.set_size;
     onehot_row.hash_randomness = HashRandomnessName(config.hash_randomness);
     onehot_row.hash_root_seed = config.seed;
@@ -872,6 +887,11 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     csv.WriteRow(onehot_row);
 
     if (!execution.sqrt_applicable) {
+        if (onehot_raw != nullptr) {
+            std::filesystem::create_directories(raw_options->output_directory);
+            WriteRawTimingArtifactsV1(raw_options->output_directory,
+                                      {std::move(onehot_artifact)});
+        }
         PrintSqrtRevisionTerminalRow(execution);
         return;
     }
@@ -880,10 +900,19 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     sqrt_params.ValidateSqrt();
     SqrtPiccard sqrt_engine(sqrt_params);
     sqrt_engine.KeyGen();
+    if (raw_options != nullptr) {
+        sqrt_artifact.producer_id = kRawTimingProducerId;
+        sqrt_artifact.profile_id = raw_options->profile_id;
+        sqrt_artifact.cell_id = execution.selection.cell.cell_id + "::sqrt";
+        sqrt_artifact.warmup_policy = WarmupPolicy::DiscardOne;
+        sqrt_artifact.expected_measured = raw_options->measured_trials;
+        sqrt_raw = &sqrt_artifact;
+    }
     auto sqrt_row = RunMultiTrial(
         sqrt_engine, set_a, set_b, j_true,
         "revision_" + execution.selection.cell.cell_id, "sqrt", 3,
-        execution.sqrt_runs);
+        execution.sqrt_runs, sqrt_raw,
+        raw_options == nullptr ? 0 : config.seed, 0.5);
     sqrt_row.param_set_size = execution.point.set_size;
     sqrt_row.hash_randomness = HashRandomnessName(config.hash_randomness);
     sqrt_row.hash_root_seed = config.seed;
@@ -892,6 +921,12 @@ static void RunRevisionCell(const BenchmarkConfig& config,
     ApplyBenchmarkProfile(config, sqrt_row,
                           BenchmarkMeasurementKind::FheTiming);
     csv.WriteRow(sqrt_row);
+    if (onehot_raw != nullptr) {
+        std::filesystem::create_directories(raw_options->output_directory);
+        WriteRawTimingArtifactsV1(raw_options->output_directory,
+                                  {std::move(onehot_artifact),
+                                   std::move(sqrt_artifact)});
+    }
 }
 
 // ============================================================================
@@ -952,7 +987,8 @@ int main(int argc, char** argv) {
         const auto execution = PlanSqrtRevisionExecution(
             matrix, std::vector<std::string>(argv + 1, argv + argc),
             RevisionModeForProfile(config.profile.id));
-        RunRevisionCell(config, execution, csv);
+        RunRevisionCell(config, execution, csv,
+                        raw_options.enabled ? &raw_options : nullptr);
         return 0;
     }
 

@@ -504,9 +504,27 @@ RawTimingArtifact MakeRawTimingArtifact(
     return artifact;
 }
 
-fs::path RawTimingOutputPath(const RealTimingCliArgs& args) {
+std::string RawSafeComponent(const std::string& value) {
+    std::string result;
+    for (const char c : value) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+            result.push_back(c);
+        } else {
+            result.push_back('_');
+        }
+    }
+    return result.empty() ? "artifact" : result;
+}
+
+fs::path RawTimingOutputPath(const RealTimingCliArgs& args,
+                             const RawTimingArtifact& artifact) {
     if (!args.raw_timing_out_path.empty()) {
-        return fs::path(args.raw_timing_out_path);
+        const fs::path configured(args.raw_timing_out_path);
+        if (configured.extension() == ".tsv") return configured;
+        return configured / (RawSafeComponent(artifact.producer_id) + "__" +
+                             RawSafeComponent(artifact.cell_id) + "__" +
+                             RawSafeComponent(artifact.profile_id) + ".tsv");
     }
     return fs::path(args.csv_path + ".raw.tsv");
 }
@@ -739,7 +757,7 @@ int RunRealTimingMode(const RealTimingCliArgs& args) {
     if (versioned_raw_timing) {
         const RawTimingArtifact raw_artifact = MakeRawTimingArtifact(
             dataset, pair, args, hash_seed, warmup_trial, measured_trials);
-        const fs::path raw_path = RawTimingOutputPath(args);
+        const fs::path raw_path = RawTimingOutputPath(args, raw_artifact);
         if (raw_path.has_parent_path()) {
             std::error_code mkdir_ec;
             fs::create_directories(raw_path.parent_path(), mkdir_ec);

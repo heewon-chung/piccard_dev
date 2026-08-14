@@ -30,6 +30,7 @@ struct ThresholdRevisionRequest {
     std::string security;
     std::string seed;
     std::string hash_randomness;
+    std::string raw_timing_dir;
     uint32_t k = 0;
     uint32_t m = 0;
     uint32_t set_size = 0;

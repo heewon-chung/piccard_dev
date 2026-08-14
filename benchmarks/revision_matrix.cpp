@@ -721,6 +721,33 @@ bool IsSquareRootApplicable(const RevisionCell& cell) {
            (it->second == "16" || it->second == "64" || it->second == "256");
 }
 
+bool RequiresRawTiming(const RevisionCell& cell, const RevisionRow& row) {
+    if (cell.invocation_status != "RUN") return false;
+    if (cell.family == "piccard_std128" && row.row_id == "onehot_timing") {
+        return true;
+    }
+    if (cell.family == "fhe_ind" || cell.family == "bcg12_minhash" ||
+        cell.family == "bcg12_exact" || cell.family == "dynamic_timing" ||
+        cell.family == "dynamic_refresh" || cell.family == "threshold_timing") {
+        return true;
+    }
+    if (cell.family == "sj16") {
+        return !(cell.axis == "u" &&
+                 (cell.axis_value == "262144" ||
+                  cell.axis_value == "1048576"));
+    }
+    if (cell.family == "sqrt_comparison" &&
+        (cell.axis == "timing_m" || cell.axis == "crossover_m")) {
+        return row.row_id == "onehot" ||
+               (row.row_id == "sqrt" && IsSquareRootApplicable(cell));
+    }
+    if (cell.family == "real_dataset" &&
+        RequiredAxis(cell, "artifact") == "std128_timing") {
+        return true;
+    }
+    return false;
+}
+
 void RequireRow(const RevisionRow& row, const char* row_id, const char* status,
                 const char* reason, uint64_t paper_count, uint64_t toy_count,
                 const char* method = nullptr, const char* timing_contract = nullptr) {
@@ -826,6 +853,16 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     if (cell.family == "threshold_dblp_fpfn") {
         if (OptionalAttribute(cell.attributes, "variant") != "dblp_acm_u65536") {
             throw std::invalid_argument("revision matrix DBLP threshold binding mismatch");
+        }
+    }
+
+    for (const auto& row : cell.expected_rows) {
+        const std::string expected = RequiresRawTiming(cell, row)
+                                         ? "raw-phase-v1"
+                                         : "";
+        if (row.raw_timing_contract != expected) {
+            throw std::invalid_argument(
+                "revision matrix raw timing contract mismatch");
         }
     }
 

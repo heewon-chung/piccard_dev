@@ -50,6 +50,8 @@ struct CpuRevisionRequest {
     uint32_t threads = 0;
     std::vector<uint32_t> sizes;
     bool precomputed = false;
+    std::string raw_timing_dir;
+    std::string raw_timing_profile;
 };
 
 /** @brief One exact matrix cell and its canonical producer plan. */

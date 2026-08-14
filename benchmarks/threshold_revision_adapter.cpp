@@ -132,6 +132,7 @@ ThresholdRevisionRequest ParseThresholdRevisionArgs(
         string_arg("--security=", request.security);
         string_arg("--seed=", request.seed);
         string_arg("--hash_randomness=", request.hash_randomness);
+        string_arg("--raw_timing_dir=", request.raw_timing_dir);
         if (recognized) continue;
 
         uint32_arg("--k=", "--k", request.k);

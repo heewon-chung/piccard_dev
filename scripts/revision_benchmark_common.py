@@ -506,12 +506,15 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
         paper = 50 if axis == "accuracy_m" else (1 if axis == "ciphertext_m" else 30)
         mode_arg = {"timing_m": "timing", "accuracy_m": "accuracy",
                     "ciphertext_m": "ciphertext", "crossover_m": "crossover"}[axis]
-        return [
+        args = [
             f"--revision-cell={cid}", f"--profile={profile}", f"--cell={axis}",
             f"--mode={mode_arg}", f"--security={'TOY' if toy else 'STD128'}",
             "--k=128", f"--m={_axis(cell, 'm')}", "--set_size=1000",
             "--universe=65536", f"--trials={trials(paper)}", "--seed={seed}",
         ]
+        if axis in {"timing_m", "crossover_m"}:
+            args.append("--raw_timing_dir={output}/raw")
+        return args
     if family == "piccard_std192_encoding":
         return [
             f"--revision-cell={cid}", f"--profile={profile}", "--suite=encoding",
@@ -528,6 +531,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--methods={'bcg12_mh_ec,bcg12_mh_ff' if minhash else 'bcg12_exact_ec,bcg12_exact_ff'}",
             f"--k={k}", "--m=64", f"--n={n}", f"--universe={universe}",
             f"--trials={trials(30)}", "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
         ]
     if family == "sj16":
@@ -540,6 +544,8 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
                 "--sizes=4096,8192,16384", "--held-out=32768", "--threads=2",
                 "--precomputed=false", f"--query-trials={trials(30)}",
                 f"--enc-iters={trials(30)}", "--warmup=1", "--seed={seed}",
+                "--raw_timing_dir={output}/raw",
+                f"--raw_timing_profile={profile}",
                 "--output={output}/calibration.csv",
             ]
         if axis == "fit" and value == "precomputed":
@@ -548,13 +554,16 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
                 "--cell=sj16-fit-precomputed", "--method=sj16_precomputed",
                 "--k=128", "--m=64", "--n=1000", "--universe=65536",
                 "--key-bits=3072", "--threads=2", f"--trials={trials(30)}",
-                "--warmup=1", "--seed={seed}", "--output={output}/comparison.csv",
+                "--warmup=1", "--seed={seed}",
+                "--raw_timing_dir={output}/raw",
+                "--output={output}/comparison.csv",
             ]
         return [
             f"--revision-cell={cid}", f"--profile={profile}", "--suite=sj16",
             "--method=sj16", "--k=128", "--m=64", f"--n={n}",
             f"--universe={universe}", "--key-bits=3072", "--threads=2",
             f"--trials={trials(30)}", "--seed={seed}",
+            "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
         ]
     if family in {"dynamic_timing", "dynamic_accuracy", "dynamic_refresh"}:
@@ -644,6 +653,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--security={'TOY' if toy else 'STD128'}", f"--k={_axis(cell, 'k')}",
             "--m=64", "--set_size=1000", f"--trials={trials(paper)}",
             "--seed={seed}",
+            *( ["--raw_timing_dir={output}/raw"] if kind == "timing" else [] ),
         ]
     raise RevisionContractError(f"no planner for family {family}")
 

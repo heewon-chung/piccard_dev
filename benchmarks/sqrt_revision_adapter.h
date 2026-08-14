@@ -35,6 +35,7 @@ struct SqrtRevisionRequest {
     uint64_t universe = 0;
     uint64_t trials = 0;
     std::string seed;
+    std::string raw_timing_dir;
 };
 
 /** @brief Selected matrix cell and byte-identical canonical plan. */

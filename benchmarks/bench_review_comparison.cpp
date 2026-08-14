@@ -229,6 +229,9 @@ std::vector<std::string> CanonicalizeReviewPlannerArgv(
                 throw std::invalid_argument(
                     "concrete review --output must end in encoding.csv or comparison.csv");
             }
+        } else if (arg.rfind("--raw-timing-out=", 0) == 0 ||
+                   arg.rfind("--raw_timing_dir=", 0) == 0) {
+            canonical.push_back("--raw_timing_dir={output}/raw");
         } else {
             canonical.push_back(arg);
         }
@@ -297,6 +300,8 @@ std::vector<std::string> MaterializeConcreteReviewArgs(
         } else if (arg == "--execution-trace-out={output}/execution-trace.bin") {
             arg = "--execution-trace-out=" +
                   (output_parent / "execution-trace.bin").string();
+        } else if (arg == "--raw-timing-out={output}/raw") {
+            arg = "--raw-timing-out=" + (output_parent / "raw").string();
         }
     }
     return args;
@@ -1522,6 +1527,17 @@ int Run(int argc, char** argv) {
     if (successor.enabled) {
         std::vector<std::string> concrete_args =
             MaterializeConcreteReviewArgs(successor);
+        for (const std::string& argument : concrete_args) {
+            if (argument.rfind("--raw-timing-out=", 0) != 0) continue;
+            const std::filesystem::path raw_path = argument.substr(17);
+            std::error_code error;
+            std::filesystem::create_directories(raw_path, error);
+            if (error) {
+                throw std::runtime_error(
+                    "cannot create review raw timing directory: " +
+                    error.message());
+            }
+        }
         std::vector<char*> mutable_argv = MutableArgv(concrete_args);
         options = ParseOptions(static_cast<int>(mutable_argv.size()),
                                mutable_argv.data());
@@ -1639,8 +1655,10 @@ int Run(int argc, char** argv) {
                     RawTimingSample sample;
                     sample.producer_id = "bench_review_comparison";
                     sample.profile_id = raw_timing_profile;
-                    sample.cell_id = "review-" + std::to_string(options.universe) +
-                                     "-" + method;
+                    sample.cell_id = options.revision_cell.empty()
+                        ? "review-" + std::to_string(options.universe) +
+                              "-" + method
+                        : options.revision_cell + "::" + method;
                     sample.phase = "total";
                     sample.sample_kind = trial.kind == TrialKind::Warmup
                         ? SampleKind::DiscardedWarmup : SampleKind::Measured;

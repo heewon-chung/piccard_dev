@@ -120,6 +120,7 @@ ReviewRevisionRequest ParseReviewRevisionArgs(
         else if (key == "--security") request.security = value;
         else if (key == "--seed") request.seed = value;
         else if (key == "--output") request.output = value;
+        else if (key == "--raw_timing_dir") request.raw_timing_dir = value;
         else if (key == "--k") request.k = ParsePositive(value, "--k");
         else if (key == "--m") request.m = ParsePositive(value, "--m");
         else if (key == "--n") request.set_size = ParsePositive(value, "--n");
@@ -285,6 +286,10 @@ std::vector<std::string> MakeConcreteReviewArgs(
         "--manifest-out={output}/workload.bin",
         "--execution-trace-out={output}/execution-trace.bin",
     };
+    const bool needs_raw = std::find(
+        execution.selection.plan.argv.begin(), execution.selection.plan.argv.end(),
+        "--raw_timing_dir={output}/raw") != execution.selection.plan.argv.end();
+    if (needs_raw) args.push_back("--raw-timing-out={output}/raw");
     return args;
 }
 
