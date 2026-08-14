@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -62,6 +63,81 @@ class ThresholdPipelineContractTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
+
+    def test_revision_toy_fhe_commands_reach_the_canonical_selector(self):
+        """The Python planner and C++ successor must agree for all toy FHE cells.
+
+        This is intentionally an executable boundary test rather than a
+        string-only assertion.  The producer canonicalizes the concrete seed
+        before selecting a matrix cell, so a planner drift (notably a
+        diagnostic spec trial count) must fail here before any FHE work.
+        """
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import (
+            canonical_plan_argv,
+            load_matrix,
+            select_cells,
+        )
+
+        document, _ = load_matrix(ROOT / "benchmarks" / "revision_matrix.json")
+        cells = [
+            cell for cell in select_cells(document, "toy")
+            if cell["family"] in {
+                "threshold_timing", "threshold_spec", "threshold_agreement",
+            }
+        ]
+        self.assertEqual(
+            [cell["cell_id"] for cell in cells],
+            [
+                "paper-v1::threshold_agreement::k=64",
+                "paper-v1::threshold_spec::k=64",
+                "paper-v1::threshold_timing::k=64",
+            ],
+        )
+
+        for cell in cells:
+            with self.subTest(cell=cell["cell_id"]):
+                command = [
+                    str(BINARY),
+                    *[argument.replace("{seed}", str(SEED))
+                      for argument in canonical_plan_argv(cell, "toy")],
+                ]
+                result = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    env={**os.environ, "OMP_DYNAMIC": "FALSE",
+                         "OMP_NUM_THREADS": "2"},
+                    timeout=120,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--trials=1", command)
+                self.assertNotEqual(result.stdout, "")
+
+    def test_revision_paper_fhe_trial_counts_remain_frozen(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import canonical_plan_argv, load_matrix
+
+        document, _ = load_matrix(ROOT / "benchmarks" / "revision_matrix.json")
+        expected = {
+            "threshold_timing": "--trials=30",
+            "threshold_spec": "--trials=0",
+            "threshold_agreement": "--trials=50",
+        }
+        for family, trials in expected.items():
+            with self.subTest(family=family):
+                cell = next(
+                    candidate for candidate in document["cells"]
+                    if candidate["family"] == family and
+                    candidate["axes"]["k"] == 64
+                )
+                command = canonical_plan_argv(cell, "paper")
+                self.assertEqual(command.count(trials), 1)
+                self.assertEqual(
+                    sum(argument.startswith("--trials=") for argument in command),
+                    1,
+                )
 
     def test_point_emits_exactly_one_selected_row_with_literal_geometry(self):
         result = _run_point(64, 0)

@@ -642,7 +642,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--revision-cell={cid}", f"--profile={profile}",
             f"--mode={'accuracy' if kind == 'agreement' else kind}", f"--cell={kind}",
             f"--security={'TOY' if toy else 'STD128'}", f"--k={_axis(cell, 'k')}",
-            "--m=64", "--set_size=1000", f"--trials={trials(paper) if paper else 0}",
+            "--m=64", "--set_size=1000", f"--trials={trials(paper)}",
             "--seed={seed}",
         ]
     raise RevisionContractError(f"no planner for family {family}")
