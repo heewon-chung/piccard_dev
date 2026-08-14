@@ -232,6 +232,11 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertIn("frozen policy", rejected.stderr)
 
     def test_std192_encoding_only_shared_and_m_extra_execute_without_fhe_or_calibration(self):
+        source = (ROOT / "benchmarks" / "bench_review_comparison.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("ResolveEncodingWorkUnit", source)
+        self.assertIn("EncodingWorkUnit::LegacyAOnly", source)
+        self.assertIn("EncodingWorkUnit::VersionedPair", source)
         cases = (
             ("work5-std192-piccard", 64, "piccard_encode,piccard_sqrt_encode",
              ["piccard_encode", "piccard_sqrt_encode"]),
@@ -268,6 +273,9 @@ class ReviewComparisonCliTest(unittest.TestCase):
                              row["encoder_correctness_calls"],
                              row["encoder_correctness_status"]),
                             ("1", "1", "1", "PASS"))
+                        self.assertNotIn("encoder_warmup_pairs", row)
+                        self.assertNotIn("timed_encoder_pairs", row)
+                        self.assertNotIn("correctness_pair_calls", row)
                         self.assertEqual(row["comparison_eligible"], "false")
                         self.assertEqual(row["comparison_scope"],
                                          "encoding-only-diagnostic")
@@ -348,6 +356,10 @@ class ReviewComparisonCliTest(unittest.TestCase):
             self.assertEqual(row["correctness_pair_calls"], "1")
             self.assertEqual(row["signature_derivation_timed"], "false")
             self.assertEqual(row["correctness_status"], "PASS")
+            self.assertTrue(row["correctness_feature_sha256_a"])
+            self.assertTrue(row["correctness_feature_sha256_b"])
+            self.assertGreater(int(row["encoded_slots_a"]), 0)
+            self.assertGreater(int(row["encoded_slots_b"]), 0)
             self.assertEqual(float(row["encode_pair_ms"]),
                              float(row["encode_a_ms"]) +
                              float(row["encode_b_ms"]))

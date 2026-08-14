@@ -741,6 +741,8 @@ class RealDatasetPipelineEncodingTest(unittest.TestCase):
         for forbidden in ("openfhe", "lbcrypto", "bfv_context", "keygen(",
                           "encrypt(", "decrypt(", "eval"):
             self.assertNotIn(forbidden, source)
+        self.assertIn("encodingworkunit::legacyaonly", source)
+        self.assertIn("encodingworkunit::versionedpair", source)
 
     def test_versioned_encoding_profile_emits_two_endpoint_pair_timing(self):
         csv_path = self.out_dir / "versioned-pair.csv"

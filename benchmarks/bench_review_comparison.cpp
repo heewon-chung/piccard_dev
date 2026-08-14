@@ -3,6 +3,7 @@
 #include "benchmark_profile.h"
 #include "benchmark_provenance.h"
 #include "comparison_workload.h"
+#include "encoding_work_unit.h"
 #include "raw_timing_schema.h"
 #include "review_revision_adapter.h"
 #include "baselines/bcg12.h"
@@ -86,6 +87,9 @@ using piccard::benchmark::SecurityBasisName;
 using piccard::benchmark::TrialKind;
 using piccard::benchmark::ValidateAggregateMembership;
 using piccard::benchmark::WorkloadSpec;
+using piccard::benchmark::EncodingWorkUnit;
+using piccard::benchmark::EncodeEndpointWorkUnit;
+using piccard::benchmark::ResolveEncodingWorkUnit;
 using piccard::benchmark::LoadAndValidateRevisionMatrix;
 using piccard::benchmark::ParseReviewRevisionArgs;
 using piccard::benchmark::PlanReviewRevisionExecution;
@@ -581,8 +585,10 @@ private:
 class EncodingAdapter final : public Adapter {
 public:
     EncodingAdapter(std::string method, const WorkloadSpec& spec,
+                    EncodingWorkUnit work_unit,
                     BaselineCapability capability)
         : Adapter(std::move(method), std::move(capability)),
+          work_unit_(work_unit),
           sqrt_(Name() == "piccard_sqrt_encode") {
         params_.k = static_cast<uint32_t>(spec.k);
         params_.m = static_cast<uint32_t>(spec.m);
@@ -602,25 +608,40 @@ public:
     }
 
     Observation Run(const ComparisonTrial& trial) override {
-        // Both endpoint signatures are constructed before any warmup or
-        // timing boundary.  MinHash is therefore never part of an endpoint
-        // or pair encoder measurement.
+        // Signature construction is intentionally complete before any warmup
+        // or timing boundary. MinHash is never part of an encoder measurement.
         const MinHasher hasher(
             params_.k, std::numeric_limits<uint64_t>::max(), trial.hash_seed)
             ;
         const std::vector<uint64_t> signature_a =
             hasher.ComputeSignature(trial.set_a);
-        const std::vector<uint64_t> signature_b =
-            hasher.ComputeSignature(trial.set_b);
+        std::optional<std::vector<uint64_t>> signature_b;
+        if (work_unit_ == EncodingWorkUnit::VersionedPair) {
+            signature_b = hasher.ComputeSignature(trial.set_b);
+        }
+        const std::vector<uint64_t>& endpoint_b =
+            signature_b ? *signature_b : signature_a;
         Observation out;
         if (trial.kind == TrialKind::Warmup) {
+            if (work_unit_ == EncodingWorkUnit::LegacyAOnly) {
+                static_cast<void>(EncodeEndpointWorkUnit(
+                    EncodingWorkUnit::LegacyAOnly, signature_a, endpoint_b,
+                    [&](const std::vector<uint64_t>& signature) {
+                        return Encode(signature);
+                    }));
+                ++audit_.warmup_calls;
+                return out;
+            }
             const auto warmup_start = Clock::now();
-            static_cast<void>(Encode(signature_a));
-            static_cast<void>(Encode(signature_b));
+            static_cast<void>(EncodeEndpointWorkUnit(
+                EncodingWorkUnit::VersionedPair, signature_a, endpoint_b,
+                [&](const std::vector<uint64_t>& signature) {
+                    return Encode(signature);
+                }));
             const auto warmup_stop = Clock::now();
-            // The aggregate still discards this record.  Keeping a real
+            // The aggregate still discards this record. Keeping a real
             // boundary here lets the optional raw sidecar label the discarded
-            // first-touch call instead of publishing a synthetic zero.
+            // first-touch pair instead of publishing a synthetic zero.
             out.encode_pair_ms = std::chrono::duration<double, std::milli>(
                 warmup_stop - warmup_start).count();
             out.cost.total_ms = out.encode_pair_ms;
@@ -629,17 +650,50 @@ public:
             return out;
         }
         if (trial.kind == TrialKind::Timing) {
-            const auto start_a = Clock::now();
-            const std::vector<int64_t> feature_a = Encode(signature_a);
-            const auto stop_a = Clock::now();
-            const auto start_b = Clock::now();
-            const std::vector<int64_t> feature_b = Encode(signature_b);
-            const auto stop_b = Clock::now();
-            out.encode_a_ms = std::chrono::duration<double, std::milli>(
-                stop_a - start_a).count();
-            out.encode_b_ms = std::chrono::duration<double, std::milli>(
-                stop_b - start_b).count();
-            out.encode_pair_ms = out.encode_a_ms + out.encode_b_ms;
+            if (work_unit_ == EncodingWorkUnit::LegacyAOnly) {
+                const auto start = Clock::now();
+                const auto result = EncodeEndpointWorkUnit(
+                    EncodingWorkUnit::LegacyAOnly, signature_a, endpoint_b,
+                    [&](const std::vector<uint64_t>& signature) {
+                        return Encode(signature);
+                    });
+                const auto stop = Clock::now();
+                const double elapsed = std::chrono::duration<double, std::milli>(
+                    stop - start).count();
+                out.encode_a_ms = elapsed;
+                // Keep the raw sidecar's encoding phase tied to the legacy
+                // scalar work unit without changing its old CSV schema.
+                out.encode_pair_ms = elapsed;
+                out.cost.total_ms = elapsed;
+                audit_.feature_size = static_cast<uint32_t>(result.a.size());
+                ++audit_.timed_calls;
+                return out;
+            }
+            const auto result = EncodeEndpointWorkUnit(
+                EncodingWorkUnit::VersionedPair, signature_a, endpoint_b,
+                [&](const std::vector<uint64_t>& signature) {
+                    const auto begin = Clock::now();
+                    std::vector<int64_t> feature = Encode(signature);
+                    const auto end = Clock::now();
+                    struct TimedFeature {
+                        std::vector<int64_t> feature;
+                        double elapsed_ms;
+                    };
+                    return TimedFeature{
+                        std::move(feature),
+                        std::chrono::duration<double, std::milli>(
+                            end - begin).count()};
+                });
+            const std::vector<int64_t>& feature_a = result.a.feature;
+            if (!result.b.has_value()) {
+                throw std::logic_error("versioned encoding omitted endpoint B");
+            }
+            const std::vector<int64_t>& feature_b = result.b->feature;
+            const double a_ms = result.a.elapsed_ms;
+            const double b_ms = result.b->elapsed_ms;
+            out.encode_a_ms = a_ms;
+            out.encode_b_ms = b_ms;
+            out.encode_pair_ms = a_ms + b_ms;
             out.cost.total_ms = out.encode_pair_ms;
             audit_.feature_size = static_cast<uint32_t>(feature_a.size());
             audit_.feature_size_b = static_cast<uint32_t>(feature_b.size());
@@ -651,17 +705,26 @@ public:
             trial.kind != TrialKind::Correctness) {
             throw std::logic_error("unknown encoding trial kind");
         }
-        const std::vector<int64_t> feature_a = Encode(signature_a);
-        const std::vector<int64_t> feature_b = Encode(signature_b);
+        const auto result = EncodeEndpointWorkUnit(
+            work_unit_, signature_a, endpoint_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return Encode(signature);
+            });
+        const std::vector<int64_t>& feature_a = result.a;
         ValidateFeature(signature_a, feature_a);
-        ValidateFeature(signature_b, feature_b);
         audit_.feature_size = static_cast<uint32_t>(feature_a.size());
-        audit_.feature_size_b = static_cast<uint32_t>(feature_b.size());
         audit_.correctness_feature_sha256 = FeatureSha256(feature_a);
-        audit_.correctness_feature_sha256_b = FeatureSha256(feature_b);
+        if (work_unit_ == EncodingWorkUnit::VersionedPair) {
+            if (!result.b.has_value()) {
+                throw std::logic_error("versioned encoding omitted endpoint B");
+            }
+            ValidateFeature(endpoint_b, *result.b);
+            audit_.feature_size_b = static_cast<uint32_t>(result.b->size());
+            audit_.correctness_feature_sha256_b = FeatureSha256(*result.b);
+            ++audit_.correctness_pair_calls;
+        }
         audit_.correctness_passed = true;
         ++audit_.correctness_calls;
-        ++audit_.correctness_pair_calls;
         return out;
     }
 
@@ -697,6 +760,7 @@ private:
         }
     }
 
+    EncodingWorkUnit work_unit_;
     bool sqrt_;
     PiccardParams params_;
     std::unique_ptr<OneHotEncoder> onehot_encoder_;
@@ -1425,8 +1489,11 @@ std::vector<std::unique_ptr<Adapter>> SetupAdapters(
             profile.target_security_bits, BaselineEvidenceKind::Timing,
             policy, precomputed);
         if (IsEncodingMethod(method)) {
+            const EncodingWorkUnit work_unit = ResolveEncodingWorkUnit(
+                profile.id, workload.Spec().suite,
+                workload.Spec().correctness_trials);
             adapters.push_back(std::make_unique<EncodingAdapter>(
-                method, workload.Spec(), std::move(capability)));
+                method, workload.Spec(), work_unit, std::move(capability)));
         } else if (method == "piccard") {
             adapters.push_back(std::make_unique<PiccardAdapter>(
                 workload.Spec(), options.security, profile, std::move(capability)));

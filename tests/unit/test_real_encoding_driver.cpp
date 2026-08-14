@@ -1,4 +1,5 @@
 #include "real_encoding_driver.h"
+#include "encoding_work_unit.h"
 
 #include <gtest/gtest.h>
 
@@ -14,6 +15,8 @@ namespace {
 
 using piccard::bench::RealEncodingCliArgs;
 using piccard::bench::RunRealEncodingMode;
+using piccard::benchmark::EncodingWorkUnit;
+using piccard::benchmark::EncodeEndpointWorkUnit;
 namespace fs = std::filesystem;
 
 std::vector<std::string> SplitCsvLine(const std::string& line) {
@@ -61,6 +64,49 @@ class TemporaryOutputDirectory {
   private:
     fs::path path_;
 };
+
+TEST(EncodingWorkUnit, LegacyUsesOnlyEndpointAAndVersionedUsesBothEndpoints) {
+    const std::vector<int> endpoint_a = {1, 2};
+    const std::vector<int> endpoint_b = {7, 8};
+    std::vector<std::vector<int>> calls;
+    const auto encode = [&](const std::vector<int>& endpoint) {
+        calls.push_back(endpoint);
+        return endpoint;
+    };
+
+    const auto legacy = EncodeEndpointWorkUnit(
+        EncodingWorkUnit::LegacyAOnly, endpoint_a, endpoint_b, encode);
+    ASSERT_FALSE(legacy.b.has_value());
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0], endpoint_a);
+
+    calls.clear();
+    const auto versioned = EncodeEndpointWorkUnit(
+        EncodingWorkUnit::VersionedPair, endpoint_a, endpoint_b, encode);
+    ASSERT_TRUE(versioned.b.has_value());
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[0], endpoint_a);
+    EXPECT_EQ(calls[1], endpoint_b);
+}
+
+TEST(EncodingWorkUnit, ProfileAndSuitePolicySelectsLegacyOrVersionedUnit) {
+    EXPECT_EQ(
+        piccard::benchmark::ResolveEncodingWorkUnit(
+            "work5-std192-t40-single-trial", "work5-std192-piccard", 0),
+        EncodingWorkUnit::LegacyAOnly);
+    EXPECT_EQ(
+        piccard::benchmark::ResolveEncodingWorkUnit(
+            "paper-std192-encoding-v1", "paper-std192-encoding-v1", 1),
+        EncodingWorkUnit::VersionedPair);
+    EXPECT_EQ(
+        piccard::benchmark::ResolveEncodingWorkUnit(
+            "readiness-toy-v1", "revision-std192-encoding-v1", 1),
+        EncodingWorkUnit::VersionedPair);
+    EXPECT_THROW(
+        piccard::benchmark::ResolveEncodingWorkUnit(
+            "work5-std192-t40-single-trial", "work5-std192-piccard", 1),
+        std::invalid_argument);
+}
 
 TEST(RealEncodingDriver,
      RevisionEncodingExecutesBothLocalArmsAndEmitsToyPairMetadata) {
@@ -111,6 +157,47 @@ TEST(RealEncodingDriver,
               workload.end());
     EXPECT_NE(std::find(workload.begin(), workload.end(), "timed_encoder_pairs\t1"),
               workload.end());
+}
+
+TEST(RealEncodingDriver,
+     LegacyEncodingRetainsScalarAOnlySchemaAndWorkUnit) {
+    TemporaryOutputDirectory output;
+    RealEncodingCliArgs args;
+    args.dataset_manifest_path = PICCARD_REAL_DATASET_QUICK_MANIFEST;
+    args.profile_id = "work5-std192-t40-single-trial";
+    args.method = "piccard_encode";
+    args.k = 128;
+    args.m = 64;
+    args.trials = 1;
+    args.timing_pair = "median";
+    args.root_seed = 20260729;
+    args.csv_path = (output.path() / "legacy.csv").string();
+    args.workload_manifest_out_path =
+        (output.path() / "legacy.manifest.tsv").string();
+
+    EXPECT_EQ(RunRealEncodingMode(args), 0);
+
+    const auto lines = ReadLines(args.csv_path);
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_NE(lines[0].find("encoder_warmup_calls"), std::string::npos);
+    EXPECT_EQ(lines[0].find("encoder_warmup_pairs"), std::string::npos);
+    EXPECT_EQ(lines[0].find("encode_a_ms"), std::string::npos);
+    const auto row = SplitCsvLine(lines[1]);
+    ASSERT_EQ(row.size(), 35u);
+    EXPECT_EQ(row[22], "piccard_encode");
+    EXPECT_EQ(row[25], "20260729");
+    EXPECT_EQ(row[27], "1");
+    EXPECT_EQ(row[28], "1");
+    EXPECT_EQ(row[29], "1");
+    EXPECT_EQ(row[30], "false");
+    EXPECT_EQ(row[33], "PASS");
+
+    const auto workload = ReadLines(args.workload_manifest_out_path);
+    ASSERT_FALSE(workload.empty());
+    EXPECT_NE(std::find(workload.begin(), workload.end(),
+                        "encoder_warmup_calls\t1"), workload.end());
+    EXPECT_EQ(std::find(workload.begin(), workload.end(),
+                        "encoder_warmup_pairs\t1"), workload.end());
 }
 
 }  // namespace

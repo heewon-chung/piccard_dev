@@ -9,6 +9,7 @@
 #include "data/real_dataset.h"
 #include "data/real_dataset_metrics.h"
 #include "benchmark_profile.h"
+#include "encoding_work_unit.h"
 #include "util/params.h"
 
 #include <openssl/evp.h>
@@ -41,6 +42,9 @@ namespace fs = std::filesystem;
 constexpr char kProfile[] = "work5-std192-t40-single-trial";
 constexpr char kOneHotMethod[] = "piccard_encode";
 constexpr char kSqrtMethod[] = "piccard_sqrt_encode";
+
+using piccard::benchmark::EncodingWorkUnit;
+using piccard::benchmark::EncodeEndpointWorkUnit;
 
 void Require(const bool condition, const std::string& detail) {
     if (!condition) throw std::invalid_argument(detail);
@@ -298,6 +302,11 @@ struct RevisionEncodingMeasurement {
     double encode_pair_ms = 0.0;
 };
 
+struct TimedEncoding {
+    std::vector<int64_t> feature;
+    double elapsed_ms = 0.0;
+};
+
 RevisionEncodingMeasurement MeasureRevisionEncodingMethod(
     const data::RealDatasetRecord& record_a,
     const data::RealDatasetRecord& record_b,
@@ -333,42 +342,58 @@ RevisionEncodingMeasurement MeasureRevisionEncodingMethod(
     // The revision contract has one discarded pair warmup, N timed pairs,
     // and one independent correctness pair.  There is no FHE object in this
     // path: only the local encoder is exercised.
-    static_cast<void>(encode(signature_a));
-    static_cast<void>(encode(signature_b));
+    static_cast<void>(EncodeEndpointWorkUnit(
+        EncodingWorkUnit::VersionedPair, signature_a, signature_b,
+        [&](const std::vector<uint64_t>& signature) {
+            return encode(signature);
+        }));
     std::vector<double> encode_a_ms;
     std::vector<double> encode_b_ms;
     uint64_t slots_a = 0;
     uint64_t slots_b = 0;
     for (uint32_t trial = 0; trial < args.encoding_iters; ++trial) {
-        const auto start_a = std::chrono::steady_clock::now();
-        const auto timed_a = encode(signature_a);
-        const auto stop_a = std::chrono::steady_clock::now();
-        const auto start_b = std::chrono::steady_clock::now();
-        const auto timed_b = encode(signature_b);
-        const auto stop_b = std::chrono::steady_clock::now();
-        encode_a_ms.push_back(std::chrono::duration<double, std::milli>(
-            stop_a - start_a).count());
-        encode_b_ms.push_back(std::chrono::duration<double, std::milli>(
-            stop_b - start_b).count());
+        const auto timed = EncodeEndpointWorkUnit(
+            EncodingWorkUnit::VersionedPair, signature_a, signature_b,
+            [&](const std::vector<uint64_t>& signature) {
+                const auto start = std::chrono::steady_clock::now();
+                auto feature = encode(signature);
+                const auto stop = std::chrono::steady_clock::now();
+                return TimedEncoding{
+                    std::move(feature),
+                    std::chrono::duration<double, std::milli>(
+                        stop - start).count()};
+            });
+        if (!timed.b.has_value()) {
+            throw std::logic_error("revision encoding omitted endpoint B");
+        }
+        encode_a_ms.push_back(timed.a.elapsed_ms);
+        encode_b_ms.push_back(timed.b->elapsed_ms);
         if (trial == 0) {
-            slots_a = timed_a.size();
-            slots_b = timed_b.size();
+            slots_a = timed.a.feature.size();
+            slots_b = timed.b->feature.size();
         } else {
-            Require(slots_a == timed_a.size() && slots_b == timed_b.size(),
+            Require(slots_a == timed.a.feature.size() &&
+                        slots_b == timed.b->feature.size(),
                     "revision encoder output size changed across pair calls");
         }
     }
     Require(args.correctness_trials == 1,
             "revision encoding freezes one correctness pair");
     for (uint32_t trial = 0; trial < args.correctness_trials; ++trial) {
-        const auto correctness_a = encode(signature_a);
-        const auto correctness_b = encode(signature_b);
+        const auto correctness = EncodeEndpointWorkUnit(
+            EncodingWorkUnit::VersionedPair, signature_a, signature_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return encode(signature);
+            });
+        if (!correctness.b.has_value()) {
+            throw std::logic_error("revision encoding omitted endpoint B");
+        }
         if (onehot_encoder) {
-            VerifyDecoded(onehot_encoder->Decode(correctness_a), signature_a, args.m);
-            VerifyDecoded(onehot_encoder->Decode(correctness_b), signature_b, args.m);
+            VerifyDecoded(onehot_encoder->Decode(correctness.a), signature_a, args.m);
+            VerifyDecoded(onehot_encoder->Decode(*correctness.b), signature_b, args.m);
         } else {
-            VerifyDecoded(sqrt_encoder->Decode(correctness_a), signature_a, args.m);
-            VerifyDecoded(sqrt_encoder->Decode(correctness_b), signature_b, args.m);
+            VerifyDecoded(sqrt_encoder->Decode(correctness.a), signature_a, args.m);
+            VerifyDecoded(sqrt_encoder->Decode(*correctness.b), signature_b, args.m);
         }
     }
     auto mean = [](const std::vector<double>& values) {
@@ -550,11 +575,17 @@ int RunRealEncodingMode(const RealEncodingCliArgs& args) {
     const uint64_t hash_seed = DeriveHashSeed(args.root_seed, dataset_sha_raw, args.k,
                                                args.m, args.profile_id, args.method);
     const MinHasher hasher(args.k, std::numeric_limits<uint64_t>::max(), hash_seed);
-    // Both signatures are derived before the warmup and every timer.
+    // Signature derivation is complete before the warmup and every timer.
     const std::vector<uint64_t> signature_a =
         hasher.ComputeSignature(record_a.bucketed_features);
-    const std::vector<uint64_t> signature_b =
-        hasher.ComputeSignature(record_b.bucketed_features);
+    std::optional<std::vector<uint64_t>> signature_b;
+    const EncodingWorkUnit work_unit = legacy_profile
+        ? EncodingWorkUnit::LegacyAOnly : EncodingWorkUnit::VersionedPair;
+    if (work_unit == EncodingWorkUnit::VersionedPair) {
+        signature_b = hasher.ComputeSignature(record_b.bucketed_features);
+    }
+    const std::vector<uint64_t>& endpoint_b =
+        signature_b ? *signature_b : signature_a;
 
     PiccardParams encoder_params;
     encoder_params.k = args.k;
@@ -574,57 +605,106 @@ int RunRealEncodingMode(const RealEncodingCliArgs& args) {
         return onehot_encoder ? onehot_encoder->Encode(signature)
                               : sqrt_encoder->Encode(signature);
     };
-    // One discarded warmup always encodes both endpoints.
-    static_cast<void>(encode(signature_a));
-    static_cast<void>(encode(signature_b));
-
-    std::vector<double> encode_a_ms;
-    std::vector<double> encode_b_ms;
-    std::vector<double> encode_pair_ms;
+    // Legacy Work 5 retains one A-only encoder call per logical event and its
+    // old scalar timing unit. Versioned profiles retain one A+B pair warmup,
+    // separately timed endpoint calls, and one pair correctness call.
+    double mean_a = 0.0;
+    double mean_b = 0.0;
+    double mean_pair = 0.0;
     uint64_t slots_a = 0;
     uint64_t slots_b = 0;
-    for (uint32_t trial = 0; trial < args.trials; ++trial) {
-        const auto start_a = std::chrono::steady_clock::now();
-        const auto timed_a = encode(signature_a);
-        const auto stop_a = std::chrono::steady_clock::now();
-        const auto start_b = std::chrono::steady_clock::now();
-        const auto timed_b = encode(signature_b);
-        const auto stop_b = std::chrono::steady_clock::now();
-        const double a_ms = std::chrono::duration<double, std::milli>(
-            stop_a - start_a).count();
-        const double b_ms = std::chrono::duration<double, std::milli>(
-            stop_b - start_b).count();
-        encode_a_ms.push_back(a_ms);
-        encode_b_ms.push_back(b_ms);
-        encode_pair_ms.push_back(a_ms + b_ms);
-        if (trial == 0) {
-            slots_a = timed_a.size();
-            slots_b = timed_b.size();
-        } else {
-            Require(slots_a == timed_a.size() && slots_b == timed_b.size(),
-                    "encoder output size changed across pair calls");
+    if (work_unit == EncodingWorkUnit::LegacyAOnly) {
+        static_cast<void>(EncodeEndpointWorkUnit(
+            EncodingWorkUnit::LegacyAOnly, signature_a, endpoint_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return encode(signature);
+            }));
+        std::vector<double> elapsed_ms;
+        elapsed_ms.reserve(args.trials);
+        for (uint32_t trial = 0; trial < args.trials; ++trial) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto timed = EncodeEndpointWorkUnit(
+                EncodingWorkUnit::LegacyAOnly, signature_a, endpoint_b,
+                [&](const std::vector<uint64_t>& signature) {
+                    return encode(signature);
+                });
+            const auto stop = std::chrono::steady_clock::now();
+            elapsed_ms.push_back(std::chrono::duration<double, std::milli>(
+                stop - start).count());
+            if (trial == 0) slots_a = timed.a.size();
+            else Require(slots_a == timed.a.size(),
+                         "legacy encoder output size changed across calls");
         }
-    }
-
-    // One independent correctness call checks both endpoint encodings.
-    const auto correctness_a = encode(signature_a);
-    const auto correctness_b = encode(signature_b);
-    if (onehot_encoder) {
-        VerifyDecoded(onehot_encoder->Decode(correctness_a), signature_a, args.m);
-        VerifyDecoded(onehot_encoder->Decode(correctness_b), signature_b, args.m);
+        const auto correctness = EncodeEndpointWorkUnit(
+            EncodingWorkUnit::LegacyAOnly, signature_a, endpoint_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return encode(signature);
+            });
+        if (onehot_encoder) {
+            VerifyDecoded(onehot_encoder->Decode(correctness.a), signature_a, args.m);
+        } else {
+            VerifyDecoded(sqrt_encoder->Decode(correctness.a), signature_a, args.m);
+        }
+        mean_a = std::accumulate(elapsed_ms.begin(), elapsed_ms.end(), 0.0) /
+                 static_cast<double>(elapsed_ms.size());
+        mean_pair = mean_a;
     } else {
-        VerifyDecoded(sqrt_encoder->Decode(correctness_a), signature_a, args.m);
-        VerifyDecoded(sqrt_encoder->Decode(correctness_b), signature_b, args.m);
+        static_cast<void>(EncodeEndpointWorkUnit(
+            EncodingWorkUnit::VersionedPair, signature_a, endpoint_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return encode(signature);
+            }));
+        std::vector<double> encode_a_ms;
+        std::vector<double> encode_b_ms;
+        encode_a_ms.reserve(args.trials);
+        encode_b_ms.reserve(args.trials);
+        for (uint32_t trial = 0; trial < args.trials; ++trial) {
+            const auto timed = EncodeEndpointWorkUnit(
+                EncodingWorkUnit::VersionedPair, signature_a, endpoint_b,
+                [&](const std::vector<uint64_t>& signature) {
+                    const auto start = std::chrono::steady_clock::now();
+                    auto feature = encode(signature);
+                    const auto stop = std::chrono::steady_clock::now();
+                    return TimedEncoding{
+                        std::move(feature),
+                        std::chrono::duration<double, std::milli>(
+                            stop - start).count()};
+                });
+            if (!timed.b.has_value()) {
+                throw std::logic_error("versioned encoding omitted endpoint B");
+            }
+            encode_a_ms.push_back(timed.a.elapsed_ms);
+            encode_b_ms.push_back(timed.b->elapsed_ms);
+            if (trial == 0) {
+                slots_a = timed.a.feature.size();
+                slots_b = timed.b->feature.size();
+            } else {
+                Require(slots_a == timed.a.feature.size() &&
+                            slots_b == timed.b->feature.size(),
+                        "encoder output size changed across pair calls");
+            }
+        }
+        const auto correctness = EncodeEndpointWorkUnit(
+            EncodingWorkUnit::VersionedPair, signature_a, endpoint_b,
+            [&](const std::vector<uint64_t>& signature) {
+                return encode(signature);
+            });
+        if (!correctness.b.has_value()) {
+            throw std::logic_error("versioned encoding omitted endpoint B");
+        }
+        if (onehot_encoder) {
+            VerifyDecoded(onehot_encoder->Decode(correctness.a), signature_a, args.m);
+            VerifyDecoded(onehot_encoder->Decode(*correctness.b), endpoint_b, args.m);
+        } else {
+            VerifyDecoded(sqrt_encoder->Decode(correctness.a), signature_a, args.m);
+            VerifyDecoded(sqrt_encoder->Decode(*correctness.b), endpoint_b, args.m);
+        }
+        mean_a = std::accumulate(encode_a_ms.begin(), encode_a_ms.end(), 0.0) /
+                 static_cast<double>(encode_a_ms.size());
+        mean_b = std::accumulate(encode_b_ms.begin(), encode_b_ms.end(), 0.0) /
+                 static_cast<double>(encode_b_ms.size());
+        mean_pair = mean_a + mean_b;
     }
-
-    auto mean = [](const std::vector<double>& values) {
-        if (values.empty()) throw std::logic_error("no encoding timing samples");
-        return std::accumulate(values.begin(), values.end(), 0.0) /
-               static_cast<double>(values.size());
-    };
-    const double mean_a = mean(encode_a_ms);
-    const double mean_b = mean(encode_b_ms);
-    const double mean_pair = mean_a + mean_b;
 
     const std::string workload = legacy_profile
         ? EncodingWorkload(dataset_sha, pair.id, args, hash_seed, slots_a)
