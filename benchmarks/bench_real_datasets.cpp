@@ -16,6 +16,7 @@
 #include "real_timing_driver.h"
 #include "revision_matrix.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <limits>
