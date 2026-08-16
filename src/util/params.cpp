@@ -6,6 +6,13 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+// The calibration file is included below from inside namespace piccard, so any
+// standard header it needs must be pulled in here, at file scope. The v2
+// wrapper (scripts/templates/noise_calibration_wrapper.inc) uses std::optional;
+// including it from there lands std:: inside piccard::(anonymous) and breaks
+// libstdc++ on Linux, while libc++ hides the bug behind an earlier transitive
+// include.
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>

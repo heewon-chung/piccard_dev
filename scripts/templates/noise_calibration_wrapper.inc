@@ -2,7 +2,11 @@
 // during the Phase-5 cutover; keep the legacy and expanded tables disjoint.
 #define PICCARD_PRE_THRESHOLD_CALIBRATION_V2 1
 
-#include <optional>
+// NOTE: no #include here. This file is pulled in from inside
+// namespace piccard { namespace { ... } } (src/util/params.cpp), so a standard
+// header included at this point would be nested in that namespace — which
+// libstdc++ rejects outright. std::optional is required below and is included
+// at file scope by params.cpp instead.
 
 struct LegacyNoiseCalibration {
     Circuit circuit;
