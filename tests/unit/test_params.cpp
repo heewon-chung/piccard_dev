@@ -1342,7 +1342,8 @@ TEST(PiccardParams, ValidateSqrtPreservesCustomHashSeed) {
 
 // Extreme seeds must not make expansion throw or produce a degenerate family.
 TEST(PiccardParams, ExtremeHashSeedsAreAccepted) {
-    for (uint64_t seed : {0ULL, UINT64_MAX}) {
+    const uint64_t seeds[] = {0ULL, UINT64_MAX};
+    for (uint64_t seed : seeds) {
         PiccardParams params;
         params.hash_seed = seed;
         EXPECT_NO_THROW(params.Validate());
