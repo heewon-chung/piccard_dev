@@ -76,7 +76,10 @@ TEST(ThresholdProfileCompat, SpecUsesSeparateVersionedSuccessorHeader) {
     EXPECT_NE(successor.find("residual_capacity_status"), std::string::npos);
 }
 
-TEST(ThresholdProfileCompat, Std128MissingCalibrationFailsClosed) {
+// k=256 is now a measured configuration: the paper run added the
+// (Threshold, STD128, 16384, natural depth 21) row to the calibration table,
+// so this profile must select a context instead of failing closed.
+TEST(ThresholdProfileCompat, Std128K256SelectsMeasuredCalibration) {
     PiccardParams params;
     params.k = 256;
     params.m = 64;
@@ -84,12 +87,26 @@ TEST(ThresholdProfileCompat, Std128MissingCalibrationFailsClosed) {
     params.threshold_mode = true;
     params.threshold_tau = 128;
 
+    ASSERT_NO_THROW(params.Validate());
+    EXPECT_EQ(params.ring_dim, 16384u);
+    EXPECT_EQ(params.natural_mult_depth, 21u);
+}
+
+// Adding the k=256 row must not weaken the guard itself. k=512 drives the
+// Paterson-Stockmeyer natural depth past every measured STD128 threshold row,
+// so an unmeasured configuration still has to fail closed rather than borrow.
+TEST(ThresholdProfileCompat, Std128MissingCalibrationFailsClosed) {
+    PiccardParams params;
+    params.k = 512;
+    params.m = 64;
+    params.security = SecurityLevel::STD128;
+    params.threshold_mode = true;
+    params.threshold_tau = 256;
+
     try {
         params.Validate();
         FAIL() << "threshold profile unexpectedly selected a context";
     } catch (const std::invalid_argument& error) {
-        EXPECT_EQ(params.ring_dim, 16384u);
-        EXPECT_EQ(params.natural_mult_depth, 21u);
         EXPECT_NE(std::string(error.what()).find(
                       "missing threshold legacy calibration"),
                   std::string::npos);

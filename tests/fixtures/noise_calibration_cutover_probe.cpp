@@ -97,6 +97,9 @@ std::vector<piccard::LegacyCalibrationSelectionKey> FrozenLegacyKeys() {
         Key{Circuit::Threshold, SecurityLevel::STD128, 8192, 12},
         Key{Circuit::Threshold, SecurityLevel::STD128, 8192, 15},
         Key{Circuit::Threshold, SecurityLevel::STD128, 16384, 15},
+        // k=256 measurement probe (feature_dim 16384 -> Paterson-Stockmeyer
+        // natural depth 21); see the threshold row added for the paper run.
+        Key{Circuit::Threshold, SecurityLevel::STD128, 16384, 21},
         Key{Circuit::Threshold, SecurityLevel::STD128, 32768, 15},
     };
 }
@@ -258,12 +261,12 @@ int main() {
         Require(!inactive.active, "legacy build reported schema-v2 active");
         const auto legacy =
             piccard::InspectLegacyCalibrationTableCoverage();
-        Require(legacy.rows == 303, "legacy row scope is incomplete");
+        Require(legacy.rows == 304, "legacy row scope is incomplete");
         Require(
-            legacy.distinct_selection_keys == 32,
+            legacy.distinct_selection_keys == 33,
             "legacy selection-key scope is incomplete");
         Require(
-            legacy.toy_rows == 254 && legacy.threshold_rows == 132,
+            legacy.toy_rows == 254 && legacy.threshold_rows == 133,
             "legacy role scope is incomplete");
         Require(
             legacy.invalid_role_rows == 0,
