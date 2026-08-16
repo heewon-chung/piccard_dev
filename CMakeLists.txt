@@ -1518,20 +1518,14 @@ if(BUILD_TESTS)
             PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
 
-    # Cross-work approval-record verifier: pure Python standard library, so it
-    # is registered independently of GTest. The suite imports itself as
-    # tests.scripts.test_verify_work_approval, hence the source-tree WORKING_DIRECTORY.
-    #
-    # Python3 is REQUIRED here rather than optional: this suite *is* the approval
-    # gate, so a build tree that quietly dropped it would still report
-    # "100% tests passed" -- the one outcome a gate must never produce. With
-    # BUILD_TESTS=ON, a missing interpreter is a configuration error.
+    # The paper benchmark orchestration tests are pure Python and are
+    # registered independently of GTest.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(NOT Python3_Interpreter_FOUND)
         message(FATAL_ERROR
                 "BUILD_TESTS=ON requires a Python3 interpreter for the "
-                "VerifyWorkApproval approval gate. Install Python 3 or configure "
-                "with -DBUILD_TESTS=OFF; the gate must not be silently skipped.")
+                "paper benchmark orchestration tests. Install Python 3 or "
+                "configure with -DBUILD_TESTS=OFF.")
     endif()
     add_test(
         NAME DeletionSurvivalCli
@@ -1539,110 +1533,29 @@ if(BUILD_TESTS)
                 ${CMAKE_SOURCE_DIR}/tests/scripts/test_bench_deletion_survival.py
                 $<TARGET_FILE:bench_deletion_survival>
     )
-    add_test(NAME VerifyWorkApproval
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_verify_work_approval
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME ThresholdPipeline
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_threshold_pipeline
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME Work7StateGuard
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_work7_state_guard
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME Work7ClaimContract
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_work7_claim_contract
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME Work7IntegrationRunner
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_work7_integration_runner
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME Work7ResponseCandidate
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_work7_response_candidate
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME SanitizerRunnerForwarding
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_sanitizer_runner_forwarding
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME NoiseProfileRunner
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_noise_profiles
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME ScriptInventory
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_script_inventory
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME CalibrationTableGenerator
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_make_calibration_table
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME CalibrationCutover
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_apply_calibration_cutover
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME CalibrationArchive
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_make_calibration_archive
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME ReportingTaxonomy
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_reporting_taxonomy
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME PreThresholdProfileRunner
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_run_pre_threshold_profiles
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME RunStdSecurityEvidence
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_run_std_security_evidence
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME RunWork5Benchmarks
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_run_work5_benchmarks
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME VerifyWork5Benchmarks
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_verify_work5_benchmarks
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME SummarizeStdSecurityEvidence
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_summarize_std_security_evidence
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME ThresholdSpecProducerContract
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_phase8_threshold_provenance
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME VerifyReviewComparison
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_verify_review_comparison
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME VerifyBenchmarkProvenance
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_verify_benchmark_provenance
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME CheckWork6Scope
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_check_work6_scope
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME VerifySJ16Extrapolation
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_verify_sj16_extrapolation
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME RealDatasetPreprocess
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_real_dataset_preprocess
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    # Work 5 Phase 6: runner + fail-fast verifier for the real-dataset
-    # benchmark matrix. Hermetic against a fake bench_real_datasets (never
-    # builds/links OpenFHE), so it is registered here unconditionally
-    # alongside the other pure-Python suites rather than inside the
-    # bench_real_datasets BUILD_BENCHMARKS block below.
-    add_test(NAME RunRealDatasets
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_run_real_datasets
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    add_test(NAME RealThresholdPipeline
-             COMMAND ${Python3_EXECUTABLE} -m unittest -v
-                     tests.scripts.test_real_threshold_pipeline
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME RevisionMatrixPython
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
@@ -2016,14 +1929,6 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
                     $<TARGET_FILE:bench_fhe_ind>
         )
         set_tests_properties(FheIndCli PROPERTIES TIMEOUT 600)
-        add_test(
-            NAME Work5ContextPreflight
-            COMMAND ${Python3_EXECUTABLE}
-                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_work5_context_preflight.py
-                    $<TARGET_FILE:bench_std_security_evidence>
-                    $<TARGET_FILE:bench_fhe_ind>
-        )
-        set_tests_properties(Work5ContextPreflight PROPERTIES TIMEOUT 300)
     endif()
     if(BUILD_TESTS)
         if(TARGET test_main)

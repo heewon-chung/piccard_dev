@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fail-fast, non-circular verifier for `scripts/run_real_datasets.sh` output
-(Work 5, master Task 9B).
+"""Shared real-dataset verification primitives for the revision campaign.
 
-`verify_real_dataset_outputs.py <results-root>` parses the exact
+The canonical revision verifier imports the processed-manifest and threshold
+artifact checks from this module.  Its compatibility CLI parses the exact
 `run_metadata.tsv` schema the runner writes (`piccard-real-run-v1`),
 resolves every recorded input/output path against its role-scoped canonical
 root, independently recomputes every argv/manifest/input/output SHA-256 and
@@ -419,8 +419,9 @@ def _parse_roots(values: dict, results_root: Path, evidence_mode: str) -> dict:
         # residual. Adversarial defense beyond that rests on the fixture
         # fingerprints and the external approval records, not on
         # run_metadata self-description.
-        for required in ("run_real_datasets.sh", "prepare_real_datasets.py",
-                         "summarize_real_datasets.py"):
+        for required in ("prepare_real_datasets.py",
+                         "summarize_real_datasets.py",
+                         "verify_real_dataset_outputs.py"):
             candidate = committed / "scripts" / required
             anchor = _SCRIPT_DIR / required
             if not candidate.is_file():

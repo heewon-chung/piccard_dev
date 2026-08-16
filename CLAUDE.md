@@ -37,27 +37,14 @@ Two build-time constraints that fail hard rather than degrade:
 
 - **OpenSSL is `REQUIRED`** (SHA-256 MinHash and the baselines need it).
 - **Evidence builds require real Git provenance.** `CMakeLists.txt` calls `git rev-parse HEAD` and `git status --porcelain` and raises `FATAL_ERROR` without a full 40-char commit, then hashes every tracked source file into a `PICCARD_CONFIGURED_BUILD_ID` baked into `build_info.h`. Configure from a real clone; an exported tarball will not build.
-- `scripts/verify_work5_benchmarks.py` pins `DYNAMIC_OPENFHE_VERSION = "1.5.0"`; a different OpenFHE version passes the build but fails the provenance gates.
+- Paper benchmark verification records and checks the exact OpenFHE version
+  through `scripts/verify_revision_benchmarks.py`.
 
 The tree builds 16 `bench_*` executables and 59 test executables; `ctest` also drives Python contract tests under `tests/scripts/`.
 
 ## Benchmarks
 
-Two entry points, for two different purposes.
-
-**Ad-hoc / smoke runs** — the legacy shell runner:
-
-```bash
-./scripts/run_benchmarks.sh --quick    # smoke test: TOY security, 2 timing / 5 accuracy trials
-./scripts/run_benchmarks.sh            # STD128, 30 timing / 50 accuracy trials, includes --sj16
-./scripts/run_core_benchmarks.sh       # core only (no dynamic/threshold)
-DRY_RUN=1 ./scripts/run_benchmarks.sh  # print the resolved command plan, no side effects
-python3 scripts/summarize_results.py scripts/results/latest/csv --latex --ci
-```
-
-Output lands in `scripts/results/YYYY-MM-DD_HHMMSS_TAG/` (csv/, tables/, system_info.txt, run_metadata.txt, run.log) with a `latest` symlink. `.gitignore` excludes these; only `scripts/results/calibration/` is tracked. The runner pins `OMP_NUM_THREADS=8` and `OMP_DYNAMIC=FALSE` — a value chosen for a 10-core measuring host, and it must match across Piccard and the baselines or the R2-W1 same-conditions comparison is void.
-
-**Paper-grade runs** — the matrix orchestrator, which is what produces citable evidence:
+The matrix orchestrator is the single supported benchmark entry point:
 
 ```bash
 python3 scripts/run_revision_benchmarks.py --mode=dry-run --build-dir=build \
@@ -67,9 +54,9 @@ python3 scripts/run_revision_benchmarks.py --mode=paper ... --authorize-paper-ru
     --paper-dblp-manifest=... --paper-enron-u65536-manifest=... --paper-enron-u1048576-manifest=...
 ```
 
-It walks eight phases (`preflight → synthetic → comparison → real-fixtures → dynamic-deletion → threshold → verification → seal`), emits per-cell JSONL receipts, and never constructs an FHE context itself. `--mode=paper` refuses to run without `--authorize-paper-run` and without bound dataset manifests. A large family of `scripts/verify_*.py` gates then checks the artifacts against the matrix.
+It walks eight phases (`preflight → synthetic → comparison → real-fixtures → dynamic-deletion → threshold → verification → seal`), emits per-cell JSONL receipts, and never constructs an FHE context itself. `--mode=paper` refuses to run without `--authorize-paper-run` and without bound dataset manifests. `scripts/verify_revision_benchmarks.py` checks the resulting artifacts against the matrix before `scripts/seal_revision_benchmarks.py` seals the run.
 
-**Benchmark binaries start a full run the moment they are invoked.** There is no working help screen — `bench_piccard --help` prints the config banner and then executes the entire sweep. Flags are `--key=value` (see `BenchmarkConfig::ParseArgs` in `benchmarks/benchmark_utils.h`). They emit CSV rows to stdout interleaved with human-readable progress lines; `summarize_results.py` skips the non-CSV lines. The heaviest single item is the SJ16 sweep (~19.5 min/query at |U|=2^16, single-threaded — see `docs/superpowers/specs/2026-07-24-sj16-baseline-design.md`), so a full `paper-v1` pass is on the order of a day.
+**Do not invoke benchmark binaries directly for paper measurements.** The revision runner supplies their exact `--key=value` arguments, captures stdout/stderr, and binds raw timing sidecars to the matrix cell. The heaviest single item is the SJ16 sweep (~19.5 min/query at |U|=2^16, single-threaded), so a full `paper-v1` pass is on the order of a day.
 
 ## Architecture
 

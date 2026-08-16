@@ -601,9 +601,8 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
             "then python3 scripts/make_calibration_table.py "
             "--manifest=<finalized-manifest> --emit-rows="
             "include/util/noise_calibration_pre_threshold_rows.inc "
-            "--out=<matrix summary path>, "
-            "then python3 scripts/apply_calibration_cutover.py ... "
-            "--dest=include/util/noise_calibration.inc, and rebuild.");
+            "--out=<matrix summary path>, review the generated rows, and "
+            "rebuild.");
     }
 
     throw std::invalid_argument(

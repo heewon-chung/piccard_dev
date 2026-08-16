@@ -40,10 +40,10 @@ namespace benchmark {
 // ============================================================================
 //
 // Paper-grade runs (STD128/192/256) sweep the full parameter arrays. The TOY
-// security level is used only for quick smoke tests (./run_benchmarks.sh
-// --quick), where the goal is to exercise the full pipeline in a few minutes,
-// not to produce publication numbers. For TOY we keep only the `keep` smallest
-// (cheapest) points of each sweep; every other security level is unchanged.
+// security level is used only for the revision runner's readiness-toy profile,
+// where the goal is to exercise the full pipeline quickly, not to produce
+// publication numbers. For TOY we keep only the `keep` smallest (cheapest)
+// points of each sweep; every other security level is unchanged.
 template <typename T>
 inline std::vector<T> QuickSweep(std::vector<T> full,
                                  SecurityLevel security,

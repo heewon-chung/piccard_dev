@@ -281,51 +281,6 @@ class ReviewComparisonCliTest(unittest.TestCase):
                                          "encoding-only-diagnostic")
                         self.assertEqual(row["cost_scope"], "encoding-only")
                         self.assertEqual(row["secure_division_included"], "false")
-                    # Bind the verifier to exactly the direct producer stdout.
-                    (root / "rows.csv").write_text(result.stdout, encoding="utf-8")
-                    verifier = subprocess.run(
-                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
-                                        "scripts" / "verify_review_comparison.py"),
-                         f"--csv={root / 'rows.csv'}",
-                         f"--workload={root / 'workload.bin'}",
-                         f"--execution-trace={root / 'trace.bin'}"],
-                        text=True, capture_output=True, check=False, env=environment)
-                    self.assertEqual(verifier.returncode, 0, verifier.stderr)
-
-                    # The independent semantic parser must reject both a
-                    # taxonomy lie and an injected FHE timing column.
-                    fields = list(rows[0])
-                    bad_taxonomy = [dict(row) for row in rows]
-                    bad_taxonomy[0]["cost_scope"] = "primitive-only"
-                    with (root / "rows.csv").open("w", newline="") as stream:
-                        writer = csv.DictWriter(stream, fieldnames=fields)
-                        writer.writeheader()
-                        writer.writerows(bad_taxonomy)
-                    rejected = subprocess.run(
-                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
-                                        "scripts" / "verify_review_comparison.py"),
-                         f"--csv={root / 'rows.csv'}",
-                         f"--workload={root / 'workload.bin'}",
-                         f"--execution-trace={root / 'trace.bin'}"],
-                        text=True, capture_output=True, check=False, env=environment)
-                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
-                    self.assertIn("cost_scope", rejected.stderr)
-
-                    forged_fields = [*fields, "phase_encrypt_ms"]
-                    with (root / "rows.csv").open("w", newline="") as stream:
-                        writer = csv.DictWriter(stream, fieldnames=forged_fields)
-                        writer.writeheader()
-                        for row in rows:
-                            writer.writerow({**row, "phase_encrypt_ms": "0.1"})
-                    rejected = subprocess.run(
-                        ["python3", str(pathlib.Path(__file__).resolve().parents[2] /
-                                        "scripts" / "verify_review_comparison.py"),
-                         f"--csv={root / 'rows.csv'}",
-                         f"--workload={root / 'workload.bin'}",
-                         f"--execution-trace={root / 'trace.bin'}"],
-                        text=True, capture_output=True, check=False, env=environment)
-                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
-                    self.assertIn("schema", rejected.stderr)
 
     def test_versioned_encoding_profile_times_both_endpoints_and_audits_pairs(self):
         with tempfile.TemporaryDirectory() as tmp:
