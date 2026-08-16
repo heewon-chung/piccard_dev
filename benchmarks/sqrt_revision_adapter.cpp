@@ -50,9 +50,12 @@ void RequireSeen(const std::set<std::string>& seen, const char* name) {
 }
 
 std::string RoleForAxis(const std::string& axis) {
-    if (axis == "timing_m") return "timing";
+    if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
+        axis == "timing_km") {
+        return "timing";
+    }
     if (axis == "accuracy_m") return "accuracy";
-    if (axis == "ciphertext_m") return "ciphertext";
+    if (axis == "ciphertext_m" || axis == "ciphertext_km") return "ciphertext";
     if (axis == "crossover_m") return "crossover";
     Reject("unsupported canonical sqrt axis");
 }

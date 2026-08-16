@@ -474,6 +474,16 @@ std::set<std::string> ExpectedIds() {
     for (const auto& axis : {"timing_m", "accuracy_m", "ciphertext_m", "crossover_m"}) {
         for (const auto& value : m) ids.insert("paper-v1::sqrt_comparison::" + std::string(axis) + "=" + value);
     }
+    for (const auto& value : {"16", "32", "64", "256", "512"}) {
+        ids.insert("paper-v1::sqrt_comparison::timing_k=" + std::string(value));
+    }
+    for (const auto& value : {"100", "10000", "100000"}) {
+        ids.insert("paper-v1::sqrt_comparison::timing_n=" + std::string(value));
+    }
+    ids.insert("paper-v1::sqrt_comparison::timing_km=k256_m256");
+    for (const auto& value : {"k256_m64", "k512_m64", "k256_m256"}) {
+        ids.insert("paper-v1::sqrt_comparison::ciphertext_km=" + std::string(value));
+    }
     for (const auto& value : {"primary40", "sensitivity64", "feasibility128"}) ids.insert("paper-v1::flooding::profile=" + std::string(value));
     for (const auto& family : {"dynamic_timing", "dynamic_accuracy"}) {
         AddExpected(ids, family, "k", k);
@@ -541,7 +551,7 @@ const std::map<std::string, size_t>& ExpectedFamilyCounts() {
     static const std::map<std::string, size_t> values = {
         {"piccard_std128", 20}, {"piccard_std192_encoding", 20}, {"fhe_ind", 9},
         {"bcg12_minhash", 11}, {"bcg12_exact", 5}, {"sj16", 11},
-        {"estimator_accuracy", 17}, {"sqrt_comparison", 20}, {"flooding", 3},
+        {"estimator_accuracy", 17}, {"sqrt_comparison", 32}, {"flooding", 3},
         {"dynamic_timing", 16}, {"dynamic_accuracy", 16}, {"dynamic_refresh", 1},
         {"deletion_exact", 1}, {"deletion_mc", 1}, {"threshold_timing", 5},
         {"threshold_spec", 5}, {"threshold_agreement", 5},
@@ -616,7 +626,10 @@ std::string ExpectedProducer(const RevisionCell& cell) {
     }
     if (cell.family == "estimator_accuracy") return "bench_estimator_bias";
     if (cell.family == "sqrt_comparison") {
-        if (cell.axis == "timing_m") return "bench_onehot_sqrt";
+        if (cell.axis == "timing_m" || cell.axis == "timing_k" ||
+            cell.axis == "timing_n" || cell.axis == "timing_km") {
+            return "bench_onehot_sqrt";
+        }
         if (cell.axis == "accuracy_m") return "bench_sqrt_comparison";
         return "bench_crossover";
     }
@@ -648,7 +661,10 @@ std::string ExpectedUniverse(const RevisionCell& cell) {
         return {};
     }
     if (cell.axis == "u") return cell.axis_value;
-    if (cell.axis == "n" && cell.axis_value == "100000") return "262144";
+    if ((cell.axis == "n" || cell.axis == "timing_n") &&
+        cell.axis_value == "100000") {
+        return "262144";
+    }
     return "65536";
 }
 
@@ -678,7 +694,17 @@ std::map<std::string, std::string> ExpectedAxes(const RevisionCell& cell) {
         // dedicated noise_profile field; the numeric workload axes remain
         // the complete runner geometry.
     } else if (cell.family == "sqrt_comparison") {
-        axes["m"] = cell.axis_value;
+        if (cell.axis == "timing_k") {
+            axes["k"] = cell.axis_value;
+        } else if (cell.axis == "timing_n") {
+            axes["n"] = cell.axis_value;
+        } else if (cell.axis == "timing_km" || cell.axis == "ciphertext_km") {
+            const auto separator = cell.axis_value.find("_m");
+            axes["k"] = cell.axis_value.substr(1, separator - 1);
+            axes["m"] = cell.axis_value.substr(separator + 2);
+        } else {
+            axes["m"] = cell.axis_value;
+        }
     } else if (cell.family == "threshold_synthetic_fpfn") {
         axes["k"] = OptionalAttribute(cell.attributes, "point_k");
         axes["grid_index"] = OptionalAttribute(cell.attributes, "grid_index");
@@ -737,7 +763,9 @@ bool RequiresRawTiming(const RevisionCell& cell, const RevisionRow& row) {
                   cell.axis_value == "1048576"));
     }
     if (cell.family == "sqrt_comparison" &&
-        (cell.axis == "timing_m" || cell.axis == "crossover_m")) {
+        (cell.axis == "timing_m" || cell.axis == "crossover_m" ||
+         cell.axis == "timing_k" || cell.axis == "timing_n" ||
+         cell.axis == "timing_km")) {
         return row.row_id == "onehot" ||
                (row.row_id == "sqrt" && IsSquareRootApplicable(cell));
     }
@@ -817,11 +845,14 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     if (cell.producer != ExpectedProducer(cell)) {
         throw std::invalid_argument("revision matrix producer/family binding mismatch");
     }
-    const bool extended_timeout =
-        cell.family == "sj16" && cell.axis == "fit" &&
-        cell.axis_value == "per_element";
+    const bool long_timeout =
+        (cell.family == "sj16" &&
+         !(cell.axis == "u" && (cell.axis_value == "262144" ||
+                                cell.axis_value == "1048576"))) ||
+        (cell.family == "bcg12_exact" && cell.axis == "n" &&
+         cell.axis_value == "100000");
     if (cell.profile != "paper-v1" ||
-        cell.timeout_class != (extended_timeout ? "extended" : "standard")) {
+        cell.timeout_class != (long_timeout ? "long" : "standard")) {
         throw std::invalid_argument("revision matrix profile/timeout mismatch");
     }
     if (cell.expected_artifact_schema != ExpectedArtifactSchema(cell)) {
@@ -1034,7 +1065,8 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     if (cell.family == "sqrt_comparison") {
         const bool square = IsSquareRootApplicable(cell);
         uint64_t trials = cell.axis == "accuracy_m" ? 50
-                          : (cell.axis == "ciphertext_m" ? 1 : 30);
+                          : ((cell.axis == "ciphertext_m" ||
+                              cell.axis == "ciphertext_km") ? 1 : 30);
         RequireEligibility(cell, "TABLE_ELIGIBLE", true, true);
         RequireCounts(cell, trials, 1, trials, 1,
                       {{"onehot", trials}, {"sqrt", square ? trials : 0}},
@@ -1136,7 +1168,8 @@ void ValidateFamilyCell(const RevisionCell& cell) {
         const bool timing = cell.family == "threshold_timing";
         const bool agreement = cell.family == "threshold_agreement";
         const uint64_t trials = timing ? 30 : (agreement ? 50 : 0);
-        RequireEligibility(cell, agreement || timing ? "TABLE_ELIGIBLE" : "DIAGNOSTIC_ONLY",
+        RequireEligibility(cell,
+                           agreement || timing ? "TABLE_ELIGIBLE" : "DIAGNOSTIC_ONLY",
                            agreement || timing, agreement || timing);
         RequireCounts(cell, trials, 1, trials, 1,
                       {{timing ? "timing" : (agreement ? "agreement" : "spec"), trials}},
@@ -1231,7 +1264,8 @@ void ValidateRow(const RevisionRow& row) {
     if ((row.status == "MEASURED" || row.status == "DIAGNOSTIC") && !row.reason.empty()) {
         throw std::invalid_argument("measured/diagnostic row has an unexplained reason");
     }
-    if (row.status == "NOT_APPLICABLE" && row.reason != "sqrt-m-not-perfect-square") {
+    if (row.status == "NOT_APPLICABLE" &&
+        row.reason != "sqrt-m-not-perfect-square") {
         throw std::invalid_argument("NOT_APPLICABLE row has invalid reason");
     }
     if (row.status == "NOT_APPLICABLE" || row.status == "EXTRAPOLATED") {
@@ -1263,8 +1297,8 @@ void ValidateRevisionMatrix(const RevisionMatrix& matrix) {
         matrix.id_grammar != "paper-v1::<family>::<axis>=<value>") {
         throw std::invalid_argument("revision matrix schema/version/grammar mismatch");
     }
-    if (matrix.cell_count != 263 || matrix.cells.size() != 263) {
-        throw std::invalid_argument("revision matrix must contain exactly 263 cells");
+    if (matrix.cell_count != 275 || matrix.cells.size() != 275) {
+        throw std::invalid_argument("revision matrix must contain exactly 275 cells");
     }
     if (matrix.family_counts != std::map<std::string, uint64_t>(
             ExpectedFamilyCounts().begin(), ExpectedFamilyCounts().end())) {

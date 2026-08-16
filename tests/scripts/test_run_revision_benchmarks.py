@@ -43,7 +43,7 @@ class RevisionRunnerContractTest(unittest.TestCase):
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["mode"], "dry-run")
             self.assertEqual(manifest["spawned_processes"], 0)
-            self.assertEqual(manifest["cell_count"], 263)
+            self.assertEqual(manifest["cell_count"], 275)
 
     def test_dry_run_binds_sj16_timeout_class_and_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -63,13 +63,14 @@ class RevisionRunnerContractTest(unittest.TestCase):
                      (root / "planned_argv.jsonl").read_text().splitlines()]
             sj16 = [plan for plan in plans if plan["family"] == "sj16"]
             self.assertEqual(len(sj16), 11)
+            no_spawn_ids = {"paper-v1::sj16::u=262144",
+                            "paper-v1::sj16::u=1048576"}
             for plan in sj16:
-                expected_extended = plan["cell_id"] == \
-                    "paper-v1::sj16::fit=per_element"
+                expected_standard = plan["cell_id"] in no_spawn_ids
                 self.assertEqual(plan["timeout_class"],
-                                 "extended" if expected_extended else "standard")
+                                 "standard" if expected_standard else "long")
                 self.assertEqual(plan["timeout_seconds"],
-                                 3600 if expected_extended else 600)
+                                 600 if expected_standard else 64800)
 
     def test_dry_run_process_boundary_is_zero_child_including_metadata(self) -> None:
         """The complete in-process dry planner must not create any child.
@@ -100,8 +101,8 @@ class RevisionRunnerContractTest(unittest.TestCase):
                 self.assertEqual(runner.run(parsed), 0)
 
             manifest = json.loads((results / "run.json").read_text())
-            self.assertEqual(manifest["cell_count"], 263)
-            self.assertEqual(manifest["planned_processes"], 261)
+            self.assertEqual(manifest["cell_count"], 275)
+            self.assertEqual(manifest["planned_processes"], 273)
             self.assertEqual(manifest["spawned_processes"], 0)
             self.assertEqual(manifest["source"]["schema"],
                              "piccard-revision-dry-run-metadata-v1")

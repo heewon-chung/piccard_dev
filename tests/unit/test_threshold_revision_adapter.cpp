@@ -54,6 +54,10 @@ TEST(ThresholdRevisionAdapter,
             SCOPED_TRACE(cell->cell_id);
             const RevisionInvocationPlan expected =
                 PlanThresholdRevisionCell(*cell, mode);
+            if (cell->invocation_status == "NO_SPAWN") {
+                EXPECT_TRUE(expected.argv.empty());
+                continue;
+            }
             const auto request = ParseThresholdRevisionArgs(expected.argv);
             const auto selection =
                 SelectThresholdRevisionCell(matrix, request, mode);
@@ -89,6 +93,10 @@ TEST(ThresholdRevisionAdapter,
     for (const RevisionCell* cell : cells) {
         const auto argv =
             PlanThresholdRevisionCell(*cell, RevisionRunMode::Toy).argv;
+        if (cell->invocation_status == "NO_SPAWN") {
+            EXPECT_TRUE(argv.empty());
+            continue;
+        }
         const auto executions = PlanThresholdExecutionSpy(argv, matrix);
         ASSERT_EQ(executions.size(), 1u);
         EXPECT_EQ(executions.front().selection.cell.cell_id, cell->cell_id);

@@ -248,12 +248,19 @@ def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
 
 def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
     """Independently bind matrix timeout classes to lifecycle budgets."""
-    timeout_class = (
-        "extended"
-        if cell.get("family") == "sj16" and cell.get("axis") == "fit" and
-        str(cell.get("axis_value")) == "per_element"
-        else "standard")
-    return timeout_class, 3600 if timeout_class == "extended" else 600
+    if cell.get("family") == "sj16":
+        timeout_class = (
+            "standard"
+            if cell.get("axis") == "u" and
+            str(cell.get("axis_value")) in {"262144", "1048576"}
+            else "long")
+    elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
+          str(cell.get("axis_value")) == "100000"):
+        timeout_class = "long"
+    else:
+        timeout_class = "standard"
+    return timeout_class, {"standard": 600, "extended": 3600,
+                           "long": 64800}[timeout_class]
 
 
 def _check_plans(root: Path, mode: str, cells: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1247,9 +1254,16 @@ def _raw_require_stat(actual_text: str, actual: float | None,
         if actual is not None or expected is not None:
             fail(f"raw timing aggregate {field} N/A mismatch for {cid}")
         return
-    expected_text = format(expected, ".17g")
-    if actual_text != expected_text:
-        fail(f"raw timing aggregate {field} mismatch for {cid}")
+    if actual_text == format(expected, ".17g"):
+        return
+    # Release codegen may reorder the producer's sum/sum_sq reductions
+    # (vectorized/pairwise vs serial vs FMA), so the recomputed statistic can
+    # differ from the recorded one in the last ulps. Accept a tight band;
+    # anything beyond it is real corruption. (Plan erratum E4.)
+    if math.isfinite(actual) and math.isfinite(expected) and \
+            abs(actual - expected) <= max(1e-12, 1e-9 * max(abs(actual), abs(expected))):
+        return
+    fail(f"raw timing aggregate {field} mismatch for {cid}")
 
 
 def _raw_check_primary(producer: str, primary_rows: list[dict[str, str]],
@@ -1641,6 +1655,20 @@ def _raw_bind_command_profile(
             else "paper-std128-t40-v1"
         if profiles != [expected_cli]:
             fail(f"real timing CLI profile binding mismatch for {cid}")
+        return
+    if producer in {"bench_onehot_sqrt", "bench_crossover"}:
+        # These producers register the STD128 t40 CLI profile and derive the
+        # raw sidecar profile ("paper-v1") from it internally
+        # (RawTimingProfileId); their commands carry no separate raw profile
+        # option, so bind the CLI profile to the registered name instead.
+        if (_command_value(command, "--raw-timing-profile=") or
+                _command_value(command, "--raw_timing_profile=")):
+            fail(f"raw timing profile binding mismatch for {cid}")
+        profiles = _command_value(command, "--profile=")
+        expected_cli = "readiness-toy-v1" if mode == "toy" \
+            else "paper-std128-t40-v1"
+        if profiles != [expected_cli]:
+            fail(f"raw timing CLI profile binding mismatch for {cid}")
         return
     if producer == "bench_sj16_calibrate":
         raw_profiles = _command_value(command, "--raw_timing_profile=")
@@ -3864,7 +3892,7 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 _check_terminal_ids(stderr, cell,
                                     {"sqrt"} if na else set(),
                                     reason="sqrt-m-not-perfect-square")
-            elif axis == "timing_m":
+            elif axis in {"timing_m", "timing_k", "timing_n", "timing_km"}:
                 rows = _csv_table(stdout, _SQRT_TIMING_HEADER,
                                   f"sqrt timing {cid}")
                 _bind_cell_shape(rows, cell, plan, cid, mode)
@@ -3925,10 +3953,16 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
             expected_count = int(cell["expected_rows"][0]["toy_measured_count"]
                                  if mode == "toy" else cell["expected_rows"][0]["paper_measured_count"])
             if cell["family"] == "threshold_agreement":
-                labels = [f"{cid}::trial={index}" for index in range(expected_count)]
-                if len(rows) != expected_count or [row.get("label") for row in rows] != labels or \
+                labels = [
+                    f"{cid}::overlap_index={overlap_index}::trial={trial_index}"
+                    for overlap_index in range(11)
+                    for trial_index in range(expected_count)
+                ]
+                if len(rows) != 11 * expected_count or \
+                        [row.get("label") for row in rows] != labels or \
                         any(_int_field(row, "trials", cid) != 0 or
-                            _int_field(row, "accuracy_trials", cid) != 1
+                            _int_field(row, "accuracy_trials", cid) != 1 or
+                            _int_field(row, "fhe_agrees", cid) != 1
                             for row in rows):
                     fail(f"threshold agreement row/trial topology mismatch for {cid}")
             else:

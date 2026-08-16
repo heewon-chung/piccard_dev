@@ -1,5 +1,5 @@
 {
-  "cell_count": 263,
+  "cell_count": 275,
   "cells": [
     {
       "artifact_schema": "review-comparison-csv-v1",
@@ -284,7 +284,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7627,7 +7627,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7694,7 +7694,7 @@
       ],
       "table_eligible": false,
       "threads": 2,
-      "timeout_class": "extended",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "enc_iters": 1,
@@ -7756,7 +7756,7 @@
       "profile": "paper-v1",
       "table_eligible": false,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7807,7 +7807,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7857,7 +7857,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7907,7 +7907,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7957,7 +7957,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -8058,7 +8058,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -8159,7 +8159,7 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "threads": 2,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -8446,6 +8446,180 @@
       },
       "paper_trials": 50,
       "producer": "bench_sqrt_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 256,
+        "m": 256,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "ciphertext_km",
+      "axis_value": "k256_m256",
+      "cell_id": "paper-v1::sqrt_comparison::ciphertext_km=k256_m256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 1,
+          "method": "onehot",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        },
+        {
+          "measured_count": 1,
+          "method": "sqrt",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 1,
+      "paper_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "paper_trials": 1,
+      "producer": "bench_crossover",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 256,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "ciphertext_km",
+      "axis_value": "k256_m64",
+      "cell_id": "paper-v1::sqrt_comparison::ciphertext_km=k256_m64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 1,
+          "method": "onehot",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        },
+        {
+          "measured_count": 1,
+          "method": "sqrt",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 1,
+      "paper_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "paper_trials": 1,
+      "producer": "bench_crossover",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 512,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "ciphertext_km",
+      "axis_value": "k512_m64",
+      "cell_id": "paper-v1::sqrt_comparison::ciphertext_km=k512_m64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 1,
+          "method": "onehot",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        },
+        {
+          "measured_count": 1,
+          "method": "sqrt",
+          "paper_measured_count": 1,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 1,
+      "paper_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "paper_trials": 1,
+      "producer": "bench_crossover",
       "profile": "paper-v1",
       "table_eligible": true,
       "timeout_class": "standard",
@@ -9047,6 +9221,366 @@
     {
       "artifact_schema": "sqrt-comparison-csv-v1",
       "axes": {
+        "k": 16,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_k",
+      "axis_value": 16,
+      "cell_id": "paper-v1::sqrt_comparison::timing_k=16",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 256,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_k",
+      "axis_value": 256,
+      "cell_id": "paper-v1::sqrt_comparison::timing_k=256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 32,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_k",
+      "axis_value": 32,
+      "cell_id": "paper-v1::sqrt_comparison::timing_k=32",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 512,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_k",
+      "axis_value": 512,
+      "cell_id": "paper-v1::sqrt_comparison::timing_k=512",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 64,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_k",
+      "axis_value": 64,
+      "cell_id": "paper-v1::sqrt_comparison::timing_k=64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 256,
+        "m": 256,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_km",
+      "axis_value": "k256_m256",
+      "cell_id": "paper-v1::sqrt_comparison::timing_km=k256_m256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
         "k": 128,
         "m": 128,
         "n": 1000,
@@ -9293,6 +9827,186 @@
       "axis": "timing_m",
       "axis_value": 64,
       "cell_id": "paper-v1::sqrt_comparison::timing_m=64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 100,
+        "u": 65536
+      },
+      "axis": "timing_n",
+      "axis_value": 100,
+      "cell_id": "paper-v1::sqrt_comparison::timing_n=100",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 10000,
+        "u": 65536
+      },
+      "axis": "timing_n",
+      "axis_value": 10000,
+      "cell_id": "paper-v1::sqrt_comparison::timing_n=10000",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 100000,
+        "u": 262144
+      },
+      "axis": "timing_n",
+      "axis_value": 100000,
+      "cell_id": "paper-v1::sqrt_comparison::timing_n=100000",
       "comparison_eligible": true,
       "dataset": "synthetic",
       "eligibility": "TABLE_ELIGIBLE",
@@ -14407,7 +15121,7 @@
     "piccard_std192_encoding": 20,
     "real_dataset": 12,
     "sj16": 11,
-    "sqrt_comparison": 20,
+    "sqrt_comparison": 32,
     "threshold_agreement": 5,
     "threshold_dblp_fpfn": 1,
     "threshold_spec": 5,

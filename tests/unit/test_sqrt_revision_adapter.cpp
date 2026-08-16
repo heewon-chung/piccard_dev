@@ -26,7 +26,7 @@ TEST(SqrtRevisionAdapter,
      SelectsExactlyOneCanonicalCellAndPreservesArmTerminalRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = Cells(matrix);
-    ASSERT_EQ(cells.size(), 20u);
+    ASSERT_EQ(cells.size(), 32u);
 
     for (const RevisionRunMode mode : {RevisionRunMode::Paper,
                                        RevisionRunMode::Toy,
@@ -40,11 +40,13 @@ TEST(SqrtRevisionAdapter,
             EXPECT_EQ(execution.selection.plan.argv, plan.argv);
             EXPECT_EQ(execution.selected_point_count, 1u);
             EXPECT_FALSE(execution.native_sweep);
-            EXPECT_EQ(execution.point.k, 128u);
+            EXPECT_EQ(execution.point.k, std::stoul(cell->axes.at("k")));
             EXPECT_EQ(execution.point.m,
                       std::stoul(cell->axes.at("m")));
-            EXPECT_EQ(execution.point.set_size, 1000u);
-            EXPECT_EQ(execution.point.universe_size, 65536u);
+            EXPECT_EQ(execution.point.set_size,
+                      std::stoul(cell->axes.at("n")));
+            EXPECT_EQ(execution.point.universe_size,
+                      std::stoul(cell->axes.at("u")));
             EXPECT_EQ(execution.onehot_runs,
                       mode == RevisionRunMode::Toy ? 1u :
                       cell->expected_rows.at(0).paper_measured_count);

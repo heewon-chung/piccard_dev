@@ -415,6 +415,53 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True)
             self.assertNotEqual(check.returncode, 0)
 
+    def test_raw_profile_binding_accepts_std128_cli_for_sqrt_producers(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (RevisionContractError,
+                                                _raw_bind_command_profile)
+
+        for producer in ("bench_onehot_sqrt", "bench_crossover"):
+            _raw_bind_command_profile(
+                {"command": ["--profile=paper-std128-t40-v1"]},
+                producer, "paper", "kat")
+            _raw_bind_command_profile(
+                {"command": ["--profile=readiness-toy-v1"]},
+                producer, "toy", "kat")
+            with self.assertRaises(RevisionContractError):
+                _raw_bind_command_profile(
+                    {"command": ["--profile=paper-v1"]},
+                    producer, "paper", "kat")
+            with self.assertRaises(RevisionContractError):
+                _raw_bind_command_profile(
+                    {"command": ["--profile=paper-std128-t40-v1",
+                                 "--raw-timing-profile=paper-v1"]},
+                    producer, "paper", "kat")
+        # The generic branch still binds CLI profile == raw profile.
+        _raw_bind_command_profile(
+            {"command": ["--profile=paper-v1"]},
+            "bench_review_comparison", "paper", "kat")
+        with self.assertRaises(RevisionContractError):
+            _raw_bind_command_profile(
+                {"command": ["--profile=paper-std128-t40-v1"]},
+                "bench_review_comparison", "paper", "kat")
+
+    def test_raw_require_stat_accepts_ulp_noise_and_rejects_corruption(self) -> None:
+        import math
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (RevisionContractError,
+                                                _raw_require_stat)
+
+        for expected in (0.0, 1e-8, 1.0, 1e5):
+            near = math.nextafter(expected, math.inf)
+            near_text = format(near, ".17g")
+            _raw_require_stat(near_text, near, expected, "sample_sd_ms", "kat")
+
+            corrupt = 1e-6 if expected == 0.0 else expected * (1 + 1e-3)
+            corrupt_text = format(corrupt, ".17g")
+            with self.assertRaises(RevisionContractError):
+                _raw_require_stat(corrupt_text, corrupt, expected,
+                                  "sample_sd_ms", "kat")
+
     def test_verifier_rejects_coordinated_materialized_count_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.make_dry_root(temporary)
@@ -1378,6 +1425,60 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 finally:
                     import shutil
                     shutil.rmtree(root)
+
+    def test_threshold_agreement_requires_eleven_points_and_fhe_agreement(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from revision_benchmark_common import cell_output, file_inventory
+        from verify_revision_benchmarks import (
+            _THRESHOLD_HEADER, _check_family_artifacts, RevisionContractError)
+
+        cell = self.matrix_cell("threshold-csv-v1",
+                                family="threshold_agreement",
+                                axis="k", axis_value="64")
+        cid = cell["cell_id"]
+
+        def build(disagreement: bool = False) -> tuple[Path, dict]:
+            root = Path(tempfile.mkdtemp())
+            output = cell_output(root, cid)
+            output.mkdir(parents=True)
+            rows = []
+            for overlap_index in range(11):
+                values = {
+                    "label": f"{cid}::overlap_index={overlap_index}::trial=0",
+                    "k": "64", "m": "64", "set_size": "1000",
+                    "trials": "0", "accuracy_trials": "1",
+                    "fhe_agrees": "0" if disagreement and overlap_index == 5 else "1",
+                }
+                rows.append(self.csv_row(_THRESHOLD_HEADER, **values))
+            (output / "stdout.log").write_text(
+                _THRESHOLD_HEADER + "\n".join(rows) + "\n", encoding="utf-8")
+            (output / "stderr.log").write_text("", encoding="utf-8")
+            (output / "receipt.json").write_text(
+                json.dumps({"artifact_inventory": file_inventory(
+                    output, exclude={"stdout.log", "stderr.log", "receipt.json"})}) + "\n",
+                encoding="utf-8")
+            command = [
+                f"--revision-cell={cid}", "--profile=readiness-toy-v1",
+                "--mode=accuracy", "--cell=agreement", "--security=TOY",
+                "--k=64", "--m=64", "--set_size=1000", "--trials=1",
+                "--seed=7",
+            ]
+            return root, {cid: {"command": command}}
+
+        root, plan = build()
+        try:
+            _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
+
+        root, plan = build(disagreement=True)
+        try:
+            with self.assertRaises(RevisionContractError):
+                _check_family_artifacts(root, "toy", [cell], plan)
+        finally:
+            import shutil
+            shutil.rmtree(root)
 
     def test_raw_phase_v1_real_manifest_bound_pair_identity_all_variants(self) -> None:
         """Real timing must bind the raw cell to the canonical processed data.

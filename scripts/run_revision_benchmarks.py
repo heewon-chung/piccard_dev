@@ -272,6 +272,8 @@ def _timeout_seconds(timeout_class: str) -> int:
         return 600
     if timeout_class == "extended":
         return 3600
+    if timeout_class == "long":
+        return 64800
     _fail(f"unsupported revision timeout class: {timeout_class}")
 
 

@@ -591,30 +591,47 @@ std::string DeletionProfileForMode(RevisionRunMode mode) {
 
 bool IsSqrtAxis(const std::string& axis) {
     return axis == "timing_m" || axis == "accuracy_m" ||
-           axis == "ciphertext_m" || axis == "crossover_m";
+           axis == "ciphertext_m" || axis == "crossover_m" ||
+           axis == "timing_k" || axis == "timing_n" ||
+           axis == "timing_km" || axis == "ciphertext_km";
+}
+
+bool IsSqrtRawTimingAxis(const std::string& axis) {
+    return axis == "timing_m" || axis == "crossover_m" ||
+           axis == "timing_k" || axis == "timing_n" || axis == "timing_km";
 }
 
 std::string SqrtProducer(const std::string& axis) {
-    if (axis == "timing_m") return "bench_onehot_sqrt";
+    if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
+        axis == "timing_km") {
+        return "bench_onehot_sqrt";
+    }
     if (axis == "accuracy_m") return "bench_sqrt_comparison";
-    if (axis == "ciphertext_m" || axis == "crossover_m") {
+    if (axis == "ciphertext_m" || axis == "crossover_m" ||
+        axis == "ciphertext_km") {
         return "bench_crossover";
     }
     RejectSqrt("unsupported sqrt selector axis");
 }
 
 std::string SqrtMode(const std::string& axis) {
-    if (axis == "timing_m") return "timing";
+    if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
+        axis == "timing_km") {
+        return "timing";
+    }
     if (axis == "accuracy_m") return "accuracy";
-    if (axis == "ciphertext_m") return "ciphertext";
+    if (axis == "ciphertext_m" || axis == "ciphertext_km") return "ciphertext";
     if (axis == "crossover_m") return "crossover";
     RejectSqrt("unsupported sqrt selector axis");
 }
 
 uint64_t SqrtPaperTrials(const std::string& axis) {
-    if (axis == "timing_m" || axis == "crossover_m") return 30;
+    if (axis == "timing_m" || axis == "crossover_m" || axis == "timing_k" ||
+        axis == "timing_n" || axis == "timing_km") {
+        return 30;
+    }
     if (axis == "accuracy_m") return 50;
-    if (axis == "ciphertext_m") return 1;
+    if (axis == "ciphertext_m" || axis == "ciphertext_km") return 1;
     RejectSqrt("unsupported sqrt selector axis");
 }
 
@@ -647,16 +664,49 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         RejectSqrt("sqrt cell must be table/comparison eligible");
     }
     if (cell.axes.size() != 4u) RejectSqrt("sqrt cells require k,m,n,u axes");
+    const uint64_t k = Axis(cell, "k");
     const uint64_t m = Axis(cell, "m");
+    const uint64_t n = Axis(cell, "n");
     if (!IsOneOf(m, {16, 32, 64, 128, 256}) ||
-        cell.axis_value != std::to_string(m) ||
         cell.cell_id != "paper-v1::sqrt_comparison::" + cell.axis + "=" +
                             cell.axis_value) {
         RejectSqrt("sqrt m selector identity mismatch");
     }
-    RequireAxisValue(cell, "k", 128);
-    RequireAxisValue(cell, "n", 1000);
-    RequireAxisValue(cell, "u", 65536);
+    if (cell.axis == "timing_k") {
+        if (!IsOneOf(k, {16, 32, 64, 256, 512}) ||
+            cell.axis_value != std::to_string(k)) {
+            RejectSqrt("invalid sqrt k selector");
+        }
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+    } else if (cell.axis == "timing_n") {
+        if (!IsOneOf(n, {100, 10000, 100000}) ||
+            cell.axis_value != std::to_string(n)) {
+            RejectSqrt("invalid sqrt n selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+    } else if (cell.axis == "timing_km" || cell.axis == "ciphertext_km") {
+        const bool known_point =
+            (cell.axis_value == "k256_m64" && k == 256 && m == 64) ||
+            (cell.axis_value == "k512_m64" && k == 512 && m == 64) ||
+            (cell.axis_value == "k256_m256" && k == 256 && m == 256);
+        if (!known_point ||
+            (cell.axis == "timing_km" && cell.axis_value != "k256_m256")) {
+            RejectSqrt("invalid sqrt km selector");
+        }
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+    } else {
+        if (cell.axis_value != std::to_string(m)) {
+            RejectSqrt("sqrt m selector identity mismatch");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+    }
 
     const uint64_t paper_trials = SqrtPaperTrials(cell.axis);
     const bool square = IsPerfectSquareM(m);
@@ -687,7 +737,7 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         onehot.toy_measured_count != 1 || !onehot.attributes.empty() ||
         !onehot.list_attributes.empty() || !onehot.timing_contract.empty() ||
         onehot.raw_timing_contract !=
-            ((cell.axis == "timing_m" || cell.axis == "crossover_m")
+            (IsSqrtRawTimingAxis(cell.axis)
                  ? "raw-phase-v1" : "") || !onehot.phase.empty() ||
         !onehot.pattern.empty() || !onehot.variant.empty() ||
         !onehot.fit_authority.empty()) {
@@ -707,7 +757,7 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         !sqrt.attributes.empty() || !sqrt.list_attributes.empty() ||
         !sqrt.timing_contract.empty() ||
         sqrt.raw_timing_contract !=
-            ((cell.axis == "timing_m" || cell.axis == "crossover_m") && square
+            (IsSqrtRawTimingAxis(cell.axis) && square
                  ? "raw-phase-v1" : "") ||
         !sqrt.phase.empty() || !sqrt.pattern.empty() ||
         !sqrt.variant.empty() || !sqrt.fit_authority.empty()) {
@@ -1064,20 +1114,20 @@ void ValidateThresholdFheCell(const RevisionCell& cell) {
     RequireAxisValue(cell, "n", 1000);
     RequireAxisValue(cell, "u", 65536);
 
-    const uint64_t paper_trials = kind == "timing" ? 30 :
-                                  (kind == "spec" ? 0 : 50);
-    const std::string expected_eligibility = kind == "spec"
-                                                 ? "DIAGNOSTIC_ONLY"
-                                                 : "TABLE_ELIGIBLE";
+    const uint64_t paper_trials =
+        kind == "timing" ? 30 : (kind == "spec" ? 0 : 50);
+    const uint64_t toy_trials = 1;
+    const std::string expected_eligibility =
+        kind == "spec" ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
     const bool eligible = kind != "spec";
     if (cell.eligibility != expected_eligibility ||
         cell.table_eligible != eligible || cell.comparison_eligible != eligible) {
         RejectThreshold("eligibility contract mismatch");
     }
-    if (cell.paper_count != paper_trials || cell.toy_count != 1 ||
-        cell.paper_trials != paper_trials || cell.toy_trials != 1 ||
+    if (cell.paper_count != paper_trials || cell.toy_count != toy_trials ||
+        cell.paper_trials != paper_trials || cell.toy_trials != toy_trials ||
         cell.paper_counts != std::map<std::string, uint64_t>{{kind, paper_trials}} ||
-        cell.toy_counts != std::map<std::string, uint64_t>{{kind, 1}}) {
+        cell.toy_counts != std::map<std::string, uint64_t>{{kind, toy_trials}}) {
         RejectThreshold("paper/toy count contract mismatch");
     }
     const auto cell_k = cell.attributes.find("k");
@@ -1091,14 +1141,15 @@ void ValidateThresholdFheCell(const RevisionCell& cell) {
         RejectThreshold("threshold cells require one expected row");
     }
     const RevisionRow& row = cell.expected_rows.front();
-    const std::string expected_status = kind == "spec" ? "DIAGNOSTIC" : "MEASURED";
+    const std::string expected_status =
+        kind == "spec" ? "DIAGNOSTIC" : "MEASURED";
     const auto row_k = row.attributes.find("k");
     if (row.row_id != kind || row.status != expected_status ||
         row.terminal_status != expected_status || row.method != kind ||
         !row.reason.empty() || !row.reason_code.empty() ||
         row.measured_count != paper_trials ||
         row.paper_measured_count != paper_trials ||
-        row.toy_measured_count != 1 || row.attributes.size() != 1u ||
+        row.toy_measured_count != toy_trials || row.attributes.size() != 1u ||
         (kind == "timing" ? row.raw_timing_contract != "raw-phase-v1"
                            : !row.raw_timing_contract.empty()) ||
         row_k == row.attributes.end() || row_k->second != std::to_string(k) ||
@@ -1457,15 +1508,15 @@ RevisionInvocationPlan PlanSqrtRevisionCell(const RevisionCell& cell,
         "--cell=" + axis,
         "--mode=" + SqrtMode(axis),
         std::string("--security=") + (toy ? "TOY" : "STD128"),
-        "--k=128",
+        "--k=" + cell.axes.at("k"),
         "--m=" + cell.axes.at("m"),
-        "--set_size=1000",
-        "--universe=65536",
+        "--set_size=" + cell.axes.at("n"),
+        "--universe=" + cell.axes.at("u"),
         std::string("--trials=") +
             (toy ? "1" : std::to_string(paper_trials)),
         "--seed={seed}",
     };
-    if (axis == "timing_m" || axis == "crossover_m") {
+    if (IsSqrtRawTimingAxis(axis)) {
         plan.argv.push_back("--raw_timing_dir={output}/raw");
     }
     plan.expected_rows = cell.expected_rows;
@@ -1727,13 +1778,13 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (cell.dataset != "synthetic") {
         RejectSj16("dataset must be synthetic");
     }
-    const bool per_element_timeout =
-        cell.axis == "fit" && cell.axis_value == "per_element";
-    if (cell.timeout_class !=
-        (per_element_timeout ? "extended" : "standard")) {
-        RejectSj16(per_element_timeout
-                       ? "per-element fit timeout class must be extended"
-                       : "timeout class must be standard");
+    const bool no_spawn_timeout =
+        cell.axis == "u" &&
+        (cell.axis_value == "262144" || cell.axis_value == "1048576");
+    if (cell.timeout_class != (no_spawn_timeout ? "standard" : "long")) {
+        RejectSj16(no_spawn_timeout
+                       ? "extrapolated cell timeout class must be standard"
+                       : "executable SJ16 timeout class must be long");
     }
     ValidateSj16Geometry(cell);
 
@@ -2601,6 +2652,12 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
     plan.producer = cell.producer;
     plan.concrete_profile = profile;
     plan.invocation_status = cell.invocation_status;
+    plan.expected_rows = cell.expected_rows;
+    for (auto& row : plan.expected_rows) {
+        row.measured_count = toy ? row.toy_measured_count
+                                 : row.paper_measured_count;
+    }
+    if (cell.invocation_status == "NO_SPAWN") return plan;
     plan.argv = {
         "--revision-cell=" + cell.cell_id,
         "--profile=" + profile,
@@ -2615,12 +2672,6 @@ RevisionInvocationPlan PlanThresholdRevisionCell(const RevisionCell& cell,
     };
     if (kind == "timing") {
         plan.argv.push_back("--raw_timing_dir={output}/raw");
-    }
-
-    plan.expected_rows = cell.expected_rows;
-    for (auto& row : plan.expected_rows) {
-        row.measured_count = toy ? row.toy_measured_count
-                                 : row.paper_measured_count;
     }
     return plan;
 }

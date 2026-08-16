@@ -495,7 +495,8 @@ def _toy(mode: str) -> bool:
 def _profile(mode: str, family: str) -> str:
     if mode == "toy":
         return TOY_PROFILE
-    if family == "piccard_std128":
+    if family in {"piccard_std128", "sqrt_comparison", "dynamic_timing",
+                  "dynamic_accuracy", "dynamic_refresh"}:
         return PAPER_STD128_PROFILE
     if family == "piccard_std192_encoding":
         return PAPER_STD192_PROFILE
@@ -550,16 +551,20 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
         ]
     if family == "sqrt_comparison":
         axis = cell["axis"]
-        paper = 50 if axis == "accuracy_m" else (1 if axis == "ciphertext_m" else 30)
+        paper = 50 if axis == "accuracy_m" else (
+            1 if axis in {"ciphertext_m", "ciphertext_km"} else 30)
         mode_arg = {"timing_m": "timing", "accuracy_m": "accuracy",
-                    "ciphertext_m": "ciphertext", "crossover_m": "crossover"}[axis]
+                    "ciphertext_m": "ciphertext", "crossover_m": "crossover",
+                    "timing_k": "timing", "timing_n": "timing",
+                    "timing_km": "timing", "ciphertext_km": "ciphertext"}[axis]
         args = [
             f"--revision-cell={cid}", f"--profile={profile}", f"--cell={axis}",
             f"--mode={mode_arg}", f"--security={'TOY' if toy else 'STD128'}",
-            "--k=128", f"--m={_axis(cell, 'm')}", "--set_size=1000",
-            "--universe=65536", f"--trials={trials(paper)}", "--seed={seed}",
+            f"--k={k}", f"--m={m}", f"--set_size={n}",
+            f"--universe={universe}", f"--trials={trials(paper)}", "--seed={seed}",
         ]
-        if axis in {"timing_m", "crossover_m"}:
+        if axis in {"timing_m", "crossover_m", "timing_k", "timing_n",
+                    "timing_km"}:
             args.append("--raw_timing_dir={output}/raw")
         return args
     if family == "piccard_std192_encoding":
@@ -633,7 +638,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--revision-cell={cid}", f"--run-profile={'readiness-toy-v1' if toy else 'paper-v1'}",
             f"--profile={cell['axis_value']}",
             f"--repetitions={trials(5)}", "--results-root={output}",
-            "--seed={seed}", "--threads={threads}",
+            "--seed={seed}", "--threads=2",
         ]
     if family == "real_dataset":
         variant = _axis(cell, "variant")

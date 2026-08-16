@@ -1823,6 +1823,14 @@ if(BUILD_BENCHMARKS AND OpenFHE_FOUND AND HAVE_PICCARD_FHE)
         PRIVATE
             PICCARD_REVISION_MATRIX_PATH="${CMAKE_SOURCE_DIR}/benchmarks/revision_matrix.json"
     )
+    if(BUILD_TESTS)
+        add_test(
+            NAME ThresholdRevisionAgreementCli
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/scripts/test_threshold_revision_agreement_cli.py
+                    $<TARGET_FILE:bench_threshold>
+        )
+    endif()
 
     add_executable(bench_sqrt_comparison benchmarks/bench_sqrt_comparison.cpp)
     target_link_libraries(

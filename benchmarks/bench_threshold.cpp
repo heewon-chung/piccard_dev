@@ -916,11 +916,17 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
                         " (mult_depth=" + std::to_string(out_params.mult_depth) + ")";
             return nullptr;
         }
-        // Also reject if mult_depth is so high that OpenFHE will internally
-        // expand ring_dim beyond what the plaintext modulus supports.
-        // Conservative limit: if mult_depth > 21 at STD128, ring_dim
-        // will be 65536+ which exceeds p=65537's constraint.
-        if (out_params.mult_depth > 21 && security == SecurityLevel::STD128) {
+        // The measured k=256/m=64 calibration realizes depth 22 at N=32768;
+        // OpenFHE 1.5.0 initialized and evaluated this exact context without
+        // growing N. Keep the old conservative rejection for every other
+        // unmeasured depth>21 configuration.
+        const bool measured_k256 =
+            k == 256 && m == 64 && out_params.natural_mult_depth == 21 &&
+            out_params.mult_depth == 22 && out_params.ring_dim == 16384 &&
+            out_params.SelectedCalibratedRingDim() == 32768 &&
+            out_params.plaintext_mod == 65537;
+        if (out_params.mult_depth > 21 && security == SecurityLevel::STD128 &&
+            !measured_k256) {
             out_error = "mult_depth " + std::to_string(out_params.mult_depth) +
                         " too high for STD128 (max supported: 21)";
             return nullptr;
@@ -1166,13 +1172,10 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
     std::vector<uint32_t> k_values = selected_k.has_value()
         ? std::vector<uint32_t>{*selected_k}
         : QuickSweep<uint32_t>({16, 32, 64, 128, 256, 512}, config.security_level);
-    // The revision agreement cell is a one-point successor of this legacy
-    // path.  Keep the same engine->Run/MakeTruthContext calculation, but
-    // suppress the historical k/overlap sweep when a cell selector is bound.
-    const std::vector<double> overlaps = selected_k.has_value()
-        ? std::vector<double>{0.5}
-        : std::vector<double>{0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
-                              0.6, 0.7, 0.8, 0.9, 1.0};
+    // The revision agreement cell selects one k while preserving the paper's
+    // complete eleven-point overlap sweep and per-point trial count.
+    const std::vector<double> overlaps = {
+        0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
 
     for (uint32_t k : k_values) {
         uint32_t tau = static_cast<uint32_t>(0.6 * k);
@@ -1190,7 +1193,9 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
         size_t total_count = 0;
         size_t total_fp = 0, total_fn = 0, total_disagree = 0;
 
-        for (double frac : overlaps) {
+        for (size_t overlap_index = 0; overlap_index < overlaps.size();
+             ++overlap_index) {
+            const double frac = overlaps[overlap_index];
             for (size_t t = 0; t < config.trials; t++) {
                 std::mt19937_64 rng(benchmark::TrialSeed(config.seed, t, frac));
                 auto [sa, sb] = benchmark::MakeRandomSetsWithOverlap(
@@ -1226,7 +1231,9 @@ static void BenchAccuracyVaryK(const BenchmarkConfig& config,
 
                 ThresholdResult tr;
                 tr.label = selected_k.has_value()
-                    ? revision_cell + "::trial=" + std::to_string(t)
+                    ? revision_cell + "::overlap_index=" +
+                          std::to_string(overlap_index) + "::trial=" +
+                          std::to_string(t)
                     : "accuracy_k" + std::to_string(k) +
                       "_" + std::to_string(frac) +
                       "_t" + std::to_string(t);

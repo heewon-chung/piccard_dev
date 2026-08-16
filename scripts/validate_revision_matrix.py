@@ -25,7 +25,7 @@ FAMILY_COUNTS = {
     "bcg12_exact": 5,
     "sj16": 11,
     "estimator_accuracy": 17,
-    "sqrt_comparison": 20,
+    "sqrt_comparison": 32,
     "flooding": 3,
     "dynamic_timing": 16,
     "dynamic_accuracy": 16,
@@ -116,6 +116,13 @@ def expected_ids() -> set[str]:
     for axis in ("timing_m", "accuracy_m", "ciphertext_m", "crossover_m"):
         ids.update(f"paper-v1::sqrt_comparison::{axis}={value}"
                    for value in M_VALUES)
+    ids.update(f"paper-v1::sqrt_comparison::timing_k={value}"
+               for value in ("16", "32", "64", "256", "512"))
+    ids.update(f"paper-v1::sqrt_comparison::timing_n={value}"
+               for value in ("100", "10000", "100000"))
+    ids.add("paper-v1::sqrt_comparison::timing_km=k256_m256")
+    ids.update(f"paper-v1::sqrt_comparison::ciphertext_km={value}"
+               for value in ("k256_m64", "k512_m64", "k256_m256"))
     ids.update(f"paper-v1::flooding::profile={value}"
                for value in ("primary40", "sensitivity64", "feasibility128"))
     for family in ("dynamic_timing", "dynamic_accuracy"):
@@ -162,7 +169,7 @@ def _expected_universe(cell: dict[str, Any]) -> int:
                 "enron_u1048576": 1048576}[cell["axes"].get("variant")]
     if axis == "u":
         return int(cell["axis_value"])
-    if axis == "n" and _text(cell["axis_value"]) == "100000":
+    if axis in {"n", "timing_n"} and _text(cell["axis_value"]) == "100000":
         return 262144
     return 65536
 
@@ -186,7 +193,16 @@ def _expected_axes(cell: dict[str, Any]) -> dict[str, Any]:
     elif family == "flooding":
         pass
     elif family == "sqrt_comparison":
-        axes["m"] = int(value)
+        if axis == "timing_k":
+            axes["k"] = int(value)
+        elif axis == "timing_n":
+            axes["n"] = int(value)
+        elif axis in {"timing_km", "ciphertext_km"}:
+            k_text, m_text = _text(value).split("_")
+            axes["k"] = int(k_text[1:])
+            axes["m"] = int(m_text[1:])
+        else:
+            axes["m"] = int(value)
     elif family == "threshold_synthetic_fpfn":
         axes["k"] = cell.get("point_k")
         axes["grid_index"] = cell.get("grid_index")
@@ -273,7 +289,8 @@ def _requires_raw_timing(cell: dict[str, Any], row_id: str) -> bool:
     if family == "sj16":
         return not (cell["axis"] == "u" and
                     _text(cell["axis_value"]) in {"262144", "1048576"})
-    if family == "sqrt_comparison" and cell["axis"] in {"timing_m", "crossover_m"}:
+    if family == "sqrt_comparison" and cell["axis"] in {
+            "timing_m", "crossover_m", "timing_k", "timing_n", "timing_km"}:
         return row_id == "onehot" or (
             row_id == "sqrt" and _text(cell["axes"].get("m")) in SQRT_M)
     if family == "real_dataset":
@@ -338,7 +355,8 @@ def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
                           method="estimator", toy_trials=1, trials=500)]
     if family == "sqrt_comparison":
         ok = str(axes.get("m")) in SQRT_M
-        count = 50 if cell["axis"] == "accuracy_m" else (1 if cell["axis"] == "ciphertext_m" else 30)
+        count = 50 if cell["axis"] == "accuracy_m" else (
+            1 if cell["axis"] in {"ciphertext_m", "ciphertext_km"} else 30)
         return [_row_spec("onehot", "MEASURED", "", count, 1, method="onehot"),
                 _row_spec("sqrt", "MEASURED" if ok else "NOT_APPLICABLE",
                           "" if ok else "sqrt-m-not-perfect-square", count if ok else 0,
@@ -397,7 +415,10 @@ def _expected_producer(cell: dict[str, Any]) -> str:
     if family == "estimator_accuracy": return "bench_estimator_bias"
     if family == "sqrt_comparison":
         return {"timing_m": "bench_onehot_sqrt", "accuracy_m": "bench_sqrt_comparison",
-                "ciphertext_m": "bench_crossover", "crossover_m": "bench_crossover"}[cell["axis"]]
+                "ciphertext_m": "bench_crossover", "crossover_m": "bench_crossover",
+                "timing_k": "bench_onehot_sqrt", "timing_n": "bench_onehot_sqrt",
+                "timing_km": "bench_onehot_sqrt",
+                "ciphertext_km": "bench_crossover"}[cell["axis"]]
     if family == "flooding": return "bench_noise"
     if family in {"dynamic_timing", "dynamic_accuracy", "dynamic_refresh"}: return "bench_dynamic"
     if family in {"deletion_exact", "deletion_mc"}: return "bench_deletion_survival"
@@ -431,7 +452,8 @@ def _expected_counts(cell: dict[str, Any]) -> tuple[int, int, int, int, dict[str
         trials = 50 if axis == "j" else 500
         return trials, 1, trials, 1, {"trials": trials}, {"trials": 1}
     if family == "sqrt_comparison":
-        trials = 50 if axis == "accuracy_m" else (1 if axis == "ciphertext_m" else 30)
+        trials = 50 if axis == "accuracy_m" else (
+            1 if axis in {"ciphertext_m", "ciphertext_km"} else 30)
         sqrt = 1 if _text(cell["axes"].get("m")) in SQRT_M else 0
         return trials, 1, trials, 1, {"onehot": trials, "sqrt": trials * sqrt}, {"onehot": 1, "sqrt": sqrt}
     if family == "flooding":
@@ -508,11 +530,17 @@ def _validate_cell(cell: Any, index: int) -> None:
              f"{label} ID/family/axis binding mismatch")
     _require(cell["profile"] == "paper-v1", f"{label} profile must be paper-v1")
     _require(cell["producer"] == _expected_producer(cell), f"{label} producer binding mismatch")
-    expected_timeout_class = (
-        "extended"
-        if cell["family"] == "sj16" and cell["axis"] == "fit" and
-        _text(cell["axis_value"]) == "per_element"
-        else "standard")
+    if cell["family"] == "sj16":
+        expected_timeout_class = (
+            "standard"
+            if cell["axis"] == "u" and
+            _text(cell["axis_value"]) in {"262144", "1048576"}
+            else "long")
+    elif (cell["family"] == "bcg12_exact" and cell["axis"] == "n" and
+          _text(cell["axis_value"]) == "100000"):
+        expected_timeout_class = "long"
+    else:
+        expected_timeout_class = "standard"
     _require(cell["timeout_class"] == expected_timeout_class,
              f"{label} timeout class contract mismatch")
     _require(isinstance(cell["axes"], dict), f"{label}.axes must be an object")
@@ -619,8 +647,8 @@ def validate_document(document: dict[str, Any], fixture_root: pathlib.Path | str
     _require(document.get("version") == 1, "matrix version mismatch")
     _require(document.get("id_grammar") == "paper-v1::<family>::<axis>=<value>", "matrix ID grammar mismatch")
     cells = document.get("cells")
-    _require(isinstance(cells, list) and len(cells) == 263, "matrix must contain exactly 263 cells")
-    _require(document.get("cell_count") == 263, "matrix cell_count mismatch")
+    _require(isinstance(cells, list) and len(cells) == 275, "matrix must contain exactly 275 cells")
+    _require(document.get("cell_count") == 275, "matrix cell_count mismatch")
     _require(document.get("families") == FAMILY_COUNTS, "matrix family count table mismatch")
     ids = [cell.get("cell_id") if isinstance(cell, dict) else None for cell in cells]
     _require(ids == sorted(ids), "matrix cell IDs must be sorted")
@@ -634,7 +662,7 @@ def validate_document(document: dict[str, Any], fixture_root: pathlib.Path | str
         paper = (fixture_root / "paper_cell_ids.txt").read_text(encoding="ascii").splitlines()
         toy = (fixture_root / "toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
         executable = (fixture_root / "executable_toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
-        _require(ids == paper and len(paper) == 263, "paper ID golden mismatch")
+        _require(ids == paper and len(paper) == 275, "paper ID golden mismatch")
         expected_toy = sorted(REPRESENTATIVE_TOY_IDS)
         _require(toy == expected_toy and len(toy) == 20,
                  "toy ID golden representative selection mismatch")
@@ -655,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixtures", default="tests/fixtures/revision_matrix")
     args = parser.parse_args(argv)
     validate_file(args.matrix, args.fixtures)
-    print("revision matrix: valid (263 cells; 20 representative toy; 104 executable toy)")
+    print("revision matrix: valid (275 cells; 20 representative toy; 104 executable toy)")
     return 0
 
 

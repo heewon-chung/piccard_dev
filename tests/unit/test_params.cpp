@@ -1208,6 +1208,24 @@ TEST(PiccardParams, ThresholdMultDepth) {
     }
 }
 
+TEST(PiccardParams, ThresholdK256Std128SelectsMeasuredProvisionedDepth) {
+    PiccardParams params;
+    params.k = 256;
+    params.m = 64;
+    params.security = SecurityLevel::STD128;
+    params.threshold_mode = true;
+    params.threshold_tau = 153;
+
+    ASSERT_NO_THROW(params.Validate());
+    EXPECT_EQ(params.natural_mult_depth, 21u);
+    EXPECT_EQ(params.mult_depth, 22u);
+    EXPECT_EQ(params.ring_dim, 16384u);
+    EXPECT_EQ(params.ring_dim_natural, 32768u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 32768u);
+    EXPECT_EQ(params.scaling_mod_size, 45u);
+    EXPECT_EQ(params.eval_noise_bits, 713u);
+}
+
 TEST(PiccardParams, NonThresholdMultDepthIsOne) {
     // Without threshold_mode, the circuit needs exactly one multiplication
     RecordProperty("input_threshold_mode", "false");

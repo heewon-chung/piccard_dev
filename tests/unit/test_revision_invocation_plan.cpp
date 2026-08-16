@@ -623,10 +623,10 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 }
 
-TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllThirtyTwoSqrtCells) {
     const RevisionMatrix matrix = Load();
     const auto cells = SqrtCells(matrix);
-    ASSERT_EQ(cells.size(), 20u);
+    ASSERT_EQ(cells.size(), 32u);
 
     std::set<std::vector<std::string>> paper_argv;
     std::set<std::vector<std::string>> toy_argv;
@@ -640,29 +640,39 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
             PlanSqrtRevisionCell(*cell, RevisionRunMode::DryRun);
 
         const std::string axis = cell->axis;
-        const std::string mode = axis.substr(0, axis.size() - 2u);
+        const bool timing_axis =
+            axis == "timing_m" || axis == "timing_k" ||
+            axis == "timing_n" || axis == "timing_km";
+        const std::string mode =
+            timing_axis ? "timing"
+                        : (axis == "accuracy_m"
+                               ? "accuracy"
+                               : ((axis == "ciphertext_m" ||
+                                   axis == "ciphertext_km")
+                                      ? "ciphertext"
+                                      : "crossover"));
         const std::string producer =
-            axis == "timing_m"
-                ? "bench_onehot_sqrt"
-                : (axis == "accuracy_m" ? "bench_sqrt_comparison"
-                                         : "bench_crossover");
+            timing_axis ? "bench_onehot_sqrt"
+                        : (axis == "accuracy_m" ? "bench_sqrt_comparison"
+                                                 : "bench_crossover");
         const uint64_t m = std::stoull(cell->axes.at("m"));
         const bool square = m == 16 || m == 64 || m == 256;
         const std::string paper_profile = "paper-std128-t40-v1";
         const std::string paper_trials =
-            axis == "timing_m" ? "30"
-            : (axis == "accuracy_m" ? "50"
-                                     : (axis == "ciphertext_m" ? "1" : "30"));
+            axis == "accuracy_m"
+                ? "50"
+                : ((axis == "ciphertext_m" || axis == "ciphertext_km")
+                       ? "1" : "30");
         std::vector<std::string> expected_paper = {
             "--revision-cell=" + cell->cell_id,
             "--profile=" + paper_profile,
             "--cell=" + axis,
             "--mode=" + mode,
             "--security=STD128",
-            "--k=128",
+            "--k=" + cell->axes.at("k"),
             "--m=" + cell->axes.at("m"),
-            "--set_size=1000",
-            "--universe=65536",
+            "--set_size=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
             "--trials=" + paper_trials,
             "--seed={seed}",
         };
@@ -672,15 +682,15 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
             "--cell=" + axis,
             "--mode=" + mode,
             "--security=TOY",
-            "--k=128",
+            "--k=" + cell->axes.at("k"),
             "--m=" + cell->axes.at("m"),
-            "--set_size=1000",
-            "--universe=65536",
+            "--set_size=" + cell->axes.at("n"),
+            "--universe=" + cell->axes.at("u"),
             "--trials=1",
             "--seed={seed}",
         };
 
-        if (axis == "timing_m" || axis == "crossover_m") {
+        if (timing_axis || axis == "crossover_m") {
             expected_paper.push_back("--raw_timing_dir={output}/raw");
             expected_toy.push_back("--raw_timing_dir={output}/raw");
         }
@@ -732,7 +742,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentySqrtCells) {
         EXPECT_EQ(dry_run.expected_rows.at(1).measured_count,
                   paper.expected_rows.at(1).measured_count);
         EXPECT_EQ(HasArg(paper, "--raw"),
-                  axis == "timing_m" || axis == "crossover_m");
+                  timing_axis || axis == "crossover_m");
 
         paper_argv.insert(paper.argv);
         toy_argv.insert(toy.argv);
@@ -747,7 +757,7 @@ TEST(RevisionInvocationPlan,
      RejectsInvalidSqrtIdentityGeometryCountsAndRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = SqrtCells(matrix);
-    ASSERT_EQ(cells.size(), 20u);
+    ASSERT_EQ(cells.size(), 32u);
     const RevisionCell timing = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->cell_id ==
@@ -1978,11 +1988,11 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
         EXPECT_EQ(toy.invocation_status, cell->invocation_status);
         EXPECT_EQ(dry_run.invocation_status, cell->invocation_status);
         EXPECT_EQ(paper.timeout_class,
-                  per_element ? "extended" : "standard");
+                  no_spawn ? "standard" : "long");
         EXPECT_EQ(toy.timeout_class,
-                  per_element ? "extended" : "standard");
+                  no_spawn ? "standard" : "long");
         EXPECT_EQ(dry_run.timeout_class,
-                  per_element ? "extended" : "standard");
+                  no_spawn ? "standard" : "long");
         ASSERT_EQ(paper.expected_rows.size(), 1u);
         ASSERT_EQ(toy.expected_rows.size(), 1u);
         ASSERT_EQ(dry_run.expected_rows.size(), 1u);
@@ -2226,7 +2236,7 @@ TEST(RevisionInvocationPlan,
 
     const RevisionInvocationPlan per_element_plan =
         PlanSj16RevisionCell(per_element, RevisionRunMode::Paper);
-    EXPECT_EQ(per_element_plan.timeout_class, "extended");
+    EXPECT_EQ(per_element_plan.timeout_class, "long");
     cell = per_element;
     cell.timeout_class = "standard";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
@@ -3758,7 +3768,7 @@ TEST(RevisionInvocationPlan,
 TEST(RevisionInvocationPlan,
      DispatchesEveryValidatedCellAcrossPaperAndDryRunWithoutSpawning) {
     const RevisionMatrix matrix = Load();
-    ASSERT_EQ(matrix.cells.size(), 263u);
+    ASSERT_EQ(matrix.cells.size(), 275u);
 
     std::set<std::string> paper_ids;
     std::set<std::string> dry_run_ids;
@@ -3811,8 +3821,11 @@ TEST(RevisionInvocationPlan,
                     EXPECT_EQ(planned_row.measured_count,
                               source_row.paper_measured_count);
                 } else {
-                    EXPECT_EQ(planned_row.status, "EXTRAPOLATED");
-                    EXPECT_EQ(planned_row.terminal_status, "EXTRAPOLATED");
+                    EXPECT_EQ(planned_row.status, source_row.status);
+                    EXPECT_EQ(planned_row.terminal_status,
+                              source_row.terminal_status);
+                    EXPECT_TRUE(source_row.status == "EXTRAPOLATED" ||
+                                source_row.status == "NOT_APPLICABLE");
                     EXPECT_EQ(planned_row.measured_count, 0u);
                 }
             }
@@ -3854,10 +3867,10 @@ TEST(RevisionInvocationPlan,
         }
     }
 
-    EXPECT_EQ(run_count, 261u);
+    EXPECT_EQ(run_count, 273u);
     EXPECT_EQ(no_spawn_count, 2u);
-    EXPECT_EQ(paper_ids.size(), 263u);
-    EXPECT_EQ(dry_run_ids.size(), 263u);
+    EXPECT_EQ(paper_ids.size(), 275u);
+    EXPECT_EQ(dry_run_ids.size(), 275u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -3966,7 +3979,9 @@ TEST(RevisionInvocationPlan, RawTimingFlagsAreCellLocalAndTimingOnly) {
                          (cell.axis_value == "262144" ||
                           cell.axis_value == "1048576"));
         } else if (cell.family == "sqrt_comparison" &&
-                   (cell.axis == "timing_m" || cell.axis == "crossover_m")) {
+                   (cell.axis == "timing_m" || cell.axis == "crossover_m" ||
+                    cell.axis == "timing_k" || cell.axis == "timing_n" ||
+                    cell.axis == "timing_km")) {
             expected = true;
         }
         const bool has_raw = HasArg(plan, "--raw_timing_dir=") ||

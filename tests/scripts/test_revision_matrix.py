@@ -24,7 +24,7 @@ class RevisionMatrixTest(unittest.TestCase):
 
     def test_exact_263_20_104_cardinalities_and_sorted_goldens(self):
         cells = self.document["cells"]
-        self.assertEqual(len(cells), 263)
+        self.assertEqual(len(cells), 275)
         ids = [cell["cell_id"] for cell in cells]
         self.assertEqual(ids, sorted(ids))
         paper = (FIXTURES / "paper_cell_ids.txt").read_text().splitlines()
@@ -60,10 +60,25 @@ class RevisionMatrixTest(unittest.TestCase):
         sj_fit = next(c for c in self.document["cells"]
                       if c["cell_id"] == "paper-v1::sj16::fit=per_element")
         self.assertEqual(sj_fit["invocation_status"], "RUN")
-        self.assertEqual(sj_fit["timeout_class"], "extended")
+        self.assertEqual(sj_fit["timeout_class"], "long")
         for sj_cell in self.document["cells"]:
             if sj_cell["family"] == "sj16" and sj_cell is not sj_fit:
-                self.assertEqual(sj_cell["timeout_class"], "standard")
+                expected = ("standard"
+                            if sj_cell["invocation_status"] == "NO_SPAWN"
+                            else "long")
+                self.assertEqual(sj_cell["timeout_class"], expected)
+
+        bcg12_long = next(c for c in self.document["cells"]
+                          if c["cell_id"] == "paper-v1::bcg12_exact::n=100000")
+        self.assertEqual(bcg12_long["timeout_class"], "long")
+        for family in ("threshold_timing", "threshold_agreement",
+                       "threshold_spec"):
+            k256 = next(c for c in self.document["cells"]
+                        if c["cell_id"] == f"paper-v1::{family}::k=256")
+            self.assertEqual(k256["invocation_status"], "RUN")
+            self.assertEqual(k256["timeout_class"], "standard")
+            self.assertNotEqual(k256["expected_rows"][0]["status"],
+                                "NOT_APPLICABLE")
 
     def test_raw_phase_contract_covers_timing_rows_only(self):
         """The matrix is the allow-list for independent raw timing evidence."""
@@ -83,18 +98,25 @@ class RevisionMatrixTest(unittest.TestCase):
                 raw = True
             elif family == "sj16":
                 raw = not (axis == "u" and value in {"262144", "1048576"})
-            elif family == "sqrt_comparison" and axis in {"timing_m", "crossover_m"}:
+            elif family == "sqrt_comparison" and axis in {"timing_m", "crossover_m",
+                                                          "timing_k", "timing_n",
+                                                          "timing_km"}:
                 # A non-square m has no sqrt producer row, hence no sqrt raw
                 # artifact; the onehot timing row remains contract-bound.
                 raw = True
+            if cell["invocation_status"] != "RUN":
+                raw = False
 
             rows = cell["expected_rows"]
             for row in rows:
                 row_key = (cell["cell_id"], row["row_id"])
                 has_contract = row.get("raw_timing_contract") == "raw-phase-v1"
-                if family == "sqrt_comparison" and axis in {"timing_m", "crossover_m"}:
+                if family == "sqrt_comparison" and axis in {"timing_m", "crossover_m",
+                                                            "timing_k", "timing_n",
+                                                            "timing_km"}:
                     expected_row = row["row_id"] == "onehot" or (
-                        row["row_id"] == "sqrt" and value in {"16", "64", "256"})
+                        row["row_id"] == "sqrt" and
+                        str(cell["axes"].get("m")) in {"16", "64", "256"})
                     self.assertEqual(has_contract, expected_row, row_key)
                 elif family == "piccard_std128":
                     self.assertEqual(has_contract,
@@ -110,6 +132,7 @@ class RevisionMatrixTest(unittest.TestCase):
         self.assertNotIn(("paper-v1::sqrt_comparison::accuracy_m=64", "onehot"), expected)
         self.assertNotIn(("paper-v1::sqrt_comparison::ciphertext_m=64", "onehot"), expected)
         self.assertNotIn(("paper-v1::threshold_spec::k=64", "spec"), expected)
+        self.assertIn(("paper-v1::threshold_timing::k=256", "timing"), expected)
         self.assertNotIn(("paper-v1::real_dataset::enron_u65536_artifact=std192_encoding",
                           "std192_encoding"), expected)
 

@@ -355,6 +355,7 @@ constexpr NoiseCalibration kNoiseCalibration[] = {
     {Circuit::Threshold, SecurityLevel::STD128, 16384, 15, 32768, 17, 40, 528, 624.0},  // carries lambda_s + margin <= 94.0
     {Circuit::Threshold, SecurityLevel::STD128, 16384, 15, 32768, 17, 52, 541, 660.0},  // carries lambda_s + margin <= 117.0
     {Circuit::Threshold, SecurityLevel::STD128, 16384, 15, 32768, 17, 58, 547, 680.0},  // carries lambda_s + margin <= 131.0
+    {Circuit::Threshold, SecurityLevel::STD128, 16384, 21, 32768, 22, 45, 713, 794.0},  // measured k=256 probe; carries lambda_s + margin <= 79.0
     {Circuit::Threshold, SecurityLevel::STD128, 32768, 15, 32768, 15, 40, 531, 544.0},  // carries lambda_s + margin <= 11.0
     {Circuit::Threshold, SecurityLevel::STD128, 32768, 15, 32768, 15, 52, 541, 556.0},  // carries lambda_s + margin <= 13.0
     {Circuit::Threshold, SecurityLevel::STD128, 32768, 15, 32768, 15, 58, 545, 564.0},  // carries lambda_s + margin <= 17.0

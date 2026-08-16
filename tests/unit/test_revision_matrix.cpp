@@ -55,13 +55,13 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const RevisionMatrix matrix = Load();
     ASSERT_EQ(matrix.schema, "piccard-revision-matrix-v1");
     ASSERT_EQ(matrix.version, 1u);
-    ASSERT_EQ(matrix.cell_count, 263u);
-    ASSERT_EQ(matrix.cells.size(), 263u);
+    ASSERT_EQ(matrix.cell_count, 275u);
+    ASSERT_EQ(matrix.cells.size(), 275u);
 
     const std::map<std::string, size_t> expected = {
         {"piccard_std128", 20}, {"piccard_std192_encoding", 20},
         {"fhe_ind", 9}, {"bcg12_minhash", 11}, {"bcg12_exact", 5},
-        {"sj16", 11}, {"estimator_accuracy", 17}, {"sqrt_comparison", 20},
+        {"sj16", 11}, {"estimator_accuracy", 17}, {"sqrt_comparison", 32},
         {"flooding", 3}, {"dynamic_timing", 16},
         {"dynamic_accuracy", 16}, {"dynamic_refresh", 1},
         {"deletion_exact", 1}, {"deletion_mc", 1},
@@ -76,7 +76,7 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const auto ids = RevisionMatrixCellIds(matrix);
     EXPECT_TRUE(std::is_sorted(ids.begin(), ids.end()));
     EXPECT_EQ(ids, Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN));
-    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 263u);
+    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 275u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_TOY_GOLDEN).size(), 20u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN).size(),
               104u);
@@ -108,6 +108,15 @@ TEST(RevisionMatrix, RequiredTerminalRowsAndProducerBindingsAreLiteral) {
     EXPECT_EQ(fhe_ind.eligibility, "DIAGNOSTIC_ONLY");
     EXPECT_FALSE(fhe_ind.comparison_eligible);
 
+    for (const auto& family : {"threshold_timing", "threshold_spec",
+                               "threshold_agreement"}) {
+        const auto& k256 = Find(
+            matrix, std::string("paper-v1::") + family + "::k=256");
+        EXPECT_EQ(k256.invocation_status, "RUN");
+        ASSERT_EQ(k256.expected_rows.size(), 1u);
+        EXPECT_NE(k256.expected_rows.front().status, "NOT_APPLICABLE");
+    }
+
     const auto& refresh = Find(
         matrix, "paper-v1::dynamic_refresh::control=default");
     EXPECT_EQ(refresh.producer, "bench_dynamic");
@@ -120,9 +129,10 @@ TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
     const RevisionMatrix matrix = Load();
     for (const auto& cell : matrix.cells) {
         if (cell.family != "sj16") continue;
-        const bool per_element = cell.axis == "fit" &&
-                                 cell.axis_value == "per_element";
-        EXPECT_EQ(cell.timeout_class, per_element ? "extended" : "standard")
+        const bool no_spawn =
+            cell.axis == "u" && (cell.axis_value == "262144" ||
+                                 cell.axis_value == "1048576");
+        EXPECT_EQ(cell.timeout_class, no_spawn ? "standard" : "long")
             << cell.cell_id;
         EXPECT_EQ(cell.invocation_status,
                   (cell.axis == "u" &&
