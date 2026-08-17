@@ -6,7 +6,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,52 @@ std::vector<const RevisionCell*> OwnedCells(const RevisionMatrix& matrix) {
         }
     }
     return cells;
+}
+
+std::string ArgValue(const std::vector<std::string>& args,
+                     const std::string& prefix) {
+    for (const std::string& arg : args) {
+        if (arg.rfind(prefix, 0) == 0) return arg.substr(prefix.size());
+    }
+    ADD_FAILURE() << "concrete review args are missing " << prefix;
+    return "";
+}
+
+std::vector<std::string> SplitCsv(const std::string& value) {
+    std::vector<std::string> parts;
+    size_t begin = 0;
+    while (true) {
+        const size_t comma = value.find(',', begin);
+        parts.push_back(value.substr(begin, comma - begin));
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return parts;
+}
+
+// Mirror of the WorkloadSpec that bench_review_comparison::Run builds from the
+// concrete review argv.  The root seed is supplied by the orchestrator and is
+// not part of the frozen policy, so any value works here.
+WorkloadSpec ConcreteWorkloadSpec(const ReviewRevisionExecutionPlan& execution) {
+    const auto args = MakeConcreteReviewArgs(execution);
+    WorkloadSpec spec;
+    spec.suite = ArgValue(args, "--suite=");
+    spec.profile_id = ArgValue(args, "--profile=");
+    spec.root_seed = 20260729;
+    spec.k = std::stoull(ArgValue(args, "--k="));
+    spec.m = std::stoull(ArgValue(args, "--m="));
+    spec.set_size = std::stoull(ArgValue(args, "--set-size="));
+    spec.universe = std::stoull(ArgValue(args, "--universe="));
+    spec.target_jaccard = ParseExactDecimal(ArgValue(args, "--target-jaccard="));
+    spec.methods = SplitCsv(ArgValue(args, "--methods="));
+    spec.timing_trials =
+        static_cast<uint32_t>(std::stoul(ArgValue(args, "--trials=")));
+    spec.accuracy_trials =
+        static_cast<uint32_t>(std::stoul(ArgValue(args, "--accuracy-trials=")));
+    if (execution.selection.cell.family == "piccard_std192_encoding") {
+        spec.correctness_trials = 1;
+    }
+    return spec;
 }
 
 std::vector<std::string> Replace(std::vector<std::string> argv,
@@ -77,6 +125,57 @@ TEST(ReviewRevisionAdapter,
             EXPECT_EQ(execution.accuracy_trials, 0u);
             EXPECT_FALSE(MakeConcreteReviewArgs(execution).empty());
         }
+    }
+}
+
+// Regression guard: a matrix cell whose concrete method list, profile, or
+// trial topology disagrees with the versioned workload policy only surfaces
+// when the producer generates its manifest, which is hours into a paper run.
+TEST(ReviewRevisionAdapter,
+     EveryOwnedRunCellIsAcceptedByTheVersionedWorkloadPolicy) {
+    const RevisionMatrix matrix = Load();
+    const auto cells = OwnedCells(matrix);
+    ASSERT_EQ(cells.size(), 44u);
+
+    for (const RevisionRunMode mode : {RevisionRunMode::Paper,
+                                       RevisionRunMode::Toy}) {
+        for (const RevisionCell* cell : cells) {
+            SCOPED_TRACE(cell->cell_id);
+            const auto execution = PlanReviewRevisionExecution(
+                matrix, PlanRevisionCell(*cell, mode).argv, mode);
+            EXPECT_NO_THROW(
+                ValidateWorkloadSpecPolicy(ConcreteWorkloadSpec(execution)));
+        }
+    }
+}
+
+TEST(ReviewRevisionAdapter,
+     Sj16PrecomputedProbeCarriesTheSuccessorMethodThroughThePolicy) {
+    const RevisionMatrix matrix = Load();
+    const RevisionCell* probe = nullptr;
+    for (const auto& cell : matrix.cells) {
+        if (cell.cell_id == "paper-v1::sj16::fit=precomputed") probe = &cell;
+    }
+    ASSERT_NE(probe, nullptr);
+
+    for (const RevisionRunMode mode : {RevisionRunMode::Paper,
+                                       RevisionRunMode::Toy}) {
+        const auto execution = PlanReviewRevisionExecution(
+            matrix, PlanRevisionCell(*probe, mode).argv, mode);
+        EXPECT_EQ(execution.concrete_methods,
+                  std::vector<std::string>{"sj16_precomputed"});
+        EXPECT_EQ(execution.concrete_suite, RevisionSuiteForFamily("sj16"));
+        EXPECT_EQ(execution.timing_trials,
+                  mode == RevisionRunMode::Toy ? 1u : 30u);
+
+        const WorkloadSpec spec = ConcreteWorkloadSpec(execution);
+        EXPECT_EQ(spec.methods, std::vector<std::string>{"sj16_precomputed"});
+        EXPECT_NO_THROW(ValidateWorkloadSpecPolicy(spec));
+
+        // The successor method stays pinned to this probe's geometry.
+        WorkloadSpec moved = spec;
+        moved.set_size = 10000;
+        EXPECT_THROW(ValidateWorkloadSpecPolicy(moved), std::invalid_argument);
     }
 }
 

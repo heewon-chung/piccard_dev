@@ -1172,6 +1172,9 @@ if(BUILD_TESTS)
             target_link_libraries(
                 test_review_revision_adapter
                 piccard_review_revision_adapter
+                # Policy coverage replays every owned matrix cell through the
+                # versioned workload validation the producer applies.
+                piccard_comparison_workload
                 test_main
             )
             target_include_directories(

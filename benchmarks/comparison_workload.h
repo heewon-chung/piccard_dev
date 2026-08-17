@@ -108,6 +108,15 @@ struct WorkloadSpec {
     uint32_t correctness_trials = 0;
 };
 
+/**
+ * @brief Apply only the frozen suite policy checks to a manifest spec.
+ *
+ * ComparisonWorkload::Generate runs exactly this validation before it
+ * materializes any trial.  Exposing it separately lets policy coverage sweep
+ * every matrix cell without paying for universe-sized set generation.
+ */
+void ValidateWorkloadSpecPolicy(const WorkloadSpec& spec);
+
 /** @brief Canonical workload bytes plus regenerated, immutable trial records. */
 class ComparisonWorkload {
 public:

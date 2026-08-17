@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -655,6 +656,99 @@ TEST(ComparisonWorkload,
     mutated = spec;
     mutated.correctness_trials = 1;
     EXPECT_THROW(ComparisonWorkload::Generate(mutated), std::invalid_argument);
+}
+
+namespace {
+
+// Geometry of paper-v1::sj16::control=default, which the revision matrix also
+// pins onto the single fit=precomputed DIAGNOSTIC probe.
+WorkloadSpec Sj16RevisionSpec(bool toy) {
+    WorkloadSpec spec;
+    spec.suite = kRevisionSj16Suite;
+    spec.profile_id = toy ? "readiness-toy-v1" : "std128-t40-primary";
+    spec.root_seed = 20260729;
+    spec.k = 128;
+    spec.m = 64;
+    spec.set_size = 1000;
+    spec.universe = 65536;
+    spec.target_jaccard = ParseExactDecimal("0.5");
+    spec.methods = {"sj16"};
+    spec.timing_trials = toy ? 1 : 30;
+    spec.accuracy_trials = 0;
+    spec.correctness_trials = 0;
+    return spec;
+}
+
+}  // namespace
+
+TEST(ComparisonWorkload,
+     VersionedSj16RevisionSuiteAcceptsThePinnedPrecomputedProbe) {
+    for (const bool toy : {false, true}) {
+        SCOPED_TRACE(toy ? "toy" : "paper");
+        const WorkloadSpec measured = Sj16RevisionSpec(toy);
+        EXPECT_NO_THROW(ValidateWorkloadSpecPolicy(measured));
+
+        WorkloadSpec probe = measured;
+        probe.methods = {"sj16_precomputed"};
+        EXPECT_NO_THROW(ValidateWorkloadSpecPolicy(probe));
+    }
+
+    // Exercise the full wire path once on the cheap toy trial count.
+    WorkloadSpec probe = Sj16RevisionSpec(true);
+    probe.methods = {"sj16_precomputed"};
+    const auto workload = ComparisonWorkload::Generate(probe);
+    EXPECT_EQ(workload.Spec().methods, probe.methods);
+    EXPECT_EQ(ComparisonWorkload::ParseAndVerify(workload.Bytes()).Bytes(),
+              workload.Bytes());
+
+    const auto rows = ExpectedAggregateIdentities(workload);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows.front().method, "sj16_precomputed");
+    EXPECT_EQ(rows.front().measurement_kind, "ahe-timing");
+    EXPECT_EQ(rows.front().evidence_arm, "timing");
+    EXPECT_EQ(rows.front().precomputation_mode, "randomizers-precomputed");
+    EXPECT_TRUE(rows.front().exact_estimator);
+}
+
+TEST(ComparisonWorkload,
+     VersionedSj16RevisionSuiteRejectsPrecomputedOutsideThePinnedProbe) {
+    const WorkloadSpec control = Sj16RevisionSpec(false);
+
+    // Every other SJ16 revision cell keeps its geometry but must still carry
+    // exactly {"sj16"}; the successor method is not accepted there.
+    WorkloadSpec scaled = control;
+    scaled.set_size = 10000;
+    EXPECT_NO_THROW(ValidateWorkloadSpecPolicy(scaled));
+    scaled.methods = {"sj16_precomputed"};
+    EXPECT_THROW(ValidateWorkloadSpecPolicy(scaled), std::invalid_argument);
+
+    for (const auto& methods : std::vector<std::vector<std::string>>{
+             {"sj16", "sj16_precomputed"},
+             {"sj16_precomputed", "sj16"},
+             {"piccard"},
+             {"bcg12_exact_ec"}}) {
+        WorkloadSpec mutated = control;
+        mutated.methods = methods;
+        EXPECT_THROW(ValidateWorkloadSpecPolicy(mutated), std::invalid_argument);
+    }
+
+    WorkloadSpec probe = control;
+    probe.methods = {"sj16_precomputed"};
+    EXPECT_NO_THROW(ValidateWorkloadSpecPolicy(probe));
+
+    for (const auto& mutate : std::vector<std::function<void(WorkloadSpec&)>>{
+             [](WorkloadSpec& spec) { spec.k = 64; },
+             [](WorkloadSpec& spec) { spec.m = 32; },
+             [](WorkloadSpec& spec) { spec.set_size = 100; },
+             [](WorkloadSpec& spec) { spec.universe = 262144; },
+             [](WorkloadSpec& spec) { spec.profile_id = "std128-t64-sensitivity"; },
+             [](WorkloadSpec& spec) { spec.timing_trials = 1; },
+             [](WorkloadSpec& spec) { spec.accuracy_trials = 1; },
+             [](WorkloadSpec& spec) { spec.correctness_trials = 1; }}) {
+        WorkloadSpec mutated = probe;
+        mutate(mutated);
+        EXPECT_THROW(ValidateWorkloadSpecPolicy(mutated), std::invalid_argument);
+    }
 }
 
 TEST(ComparisonWorkload,

@@ -212,6 +212,23 @@ const RevisionSuitePolicy* FindRevisionSuite(const std::string& suite) {
     return nullptr;
 }
 
+// Geometry of the paper-v1 SJ16 control point.  The revision matrix pins its
+// single fit=precomputed DIAGNOSTIC probe to exactly this k/m/n/u, so the
+// successor method list is accepted there and nowhere else: every other SJ16
+// revision cell must still carry exactly {"sj16"}.
+constexpr uint64_t kSj16ControlK = 128;
+constexpr uint64_t kSj16ControlM = 64;
+constexpr uint64_t kSj16ControlSetSize = 1000;
+constexpr uint64_t kSj16ControlUniverse = 65536;
+
+bool IsSj16PrecomputedProbe(const WorkloadSpec& spec) {
+    return spec.methods.size() == 1u &&
+           spec.methods.front() == "sj16_precomputed" &&
+           spec.k == kSj16ControlK && spec.m == kSj16ControlM &&
+           spec.set_size == kSj16ControlSetSize &&
+           spec.universe == kSj16ControlUniverse;
+}
+
 bool IsPerfectSquare(uint64_t value) {
     if (value == 0) return false;
     uint64_t root = 1;
@@ -253,7 +270,9 @@ void ValidateRevisionSuite(const WorkloadSpec& spec,
     } else if (revision.family == std::string("bcg12_exact")) {
         expected_methods = {"bcg12_exact_ec", "bcg12_exact_ff"};
     } else if (revision.family == std::string("sj16")) {
-        expected_methods = {"sj16"};
+        expected_methods = IsSj16PrecomputedProbe(spec)
+            ? std::vector<std::string>{"sj16_precomputed"}
+            : std::vector<std::string>{"sj16"};
     } else if (revision.family == std::string("piccard_std192_encoding")) {
         expected_methods = {"piccard_encode"};
         if (IsPerfectSquare(spec.m)) {
@@ -715,6 +734,8 @@ bool SameTrial(const ComparisonTrial& lhs, const ComparisonTrial& rhs) {
 }
 
 }  // namespace
+
+void ValidateWorkloadSpecPolicy(const WorkloadSpec& spec) { ValidateSpec(spec); }
 
 bool operator==(const ExactRational& lhs, const ExactRational& rhs) {
     return lhs.numerator == rhs.numerator && lhs.denominator == rhs.denominator;
