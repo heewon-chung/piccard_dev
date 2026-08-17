@@ -922,7 +922,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -1989,7 +1989,7 @@
       "producer": "bench_dynamic",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "delete": 1,
@@ -3053,7 +3053,7 @@
       "producer": "bench_dynamic",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "delete": 1,
@@ -4136,7 +4136,7 @@
       "producer": "bench_fhe_ind",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -5511,7 +5511,7 @@
       "producer": "bench_piccard",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "accuracy": 1,
@@ -6715,7 +6715,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "correctness": 1,
@@ -10048,7 +10048,7 @@
       "producer": "bench_onehot_sqrt",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "onehot": 1,

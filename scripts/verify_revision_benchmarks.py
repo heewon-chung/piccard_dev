@@ -257,6 +257,12 @@ def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
     elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
           str(cell.get("axis_value")) == "100000"):
         timeout_class = "long"
+    elif (cell.get("axis") in {"n", "timing_n"} and
+          str(cell.get("axis_value")) == "100000"):
+        # Top of every family's set-size sweep: real FHE circuit work.
+        # Measured there: piccard_std128 759 s, piccard_std192_encoding 693 s,
+        # both past the 600 s standard stop.
+        timeout_class = "extended"
     else:
         timeout_class = "standard"
     return timeout_class, {"standard": 600, "extended": 3600,

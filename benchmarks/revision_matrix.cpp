@@ -824,6 +824,36 @@ void RequireEligibility(const RevisionCell& cell, const char* eligibility,
     }
 }
 
+// paper-v1 is measured as a single non-resumable campaign, so a timeout is a
+// safety stop rather than a budget: overshooting one costs nothing, while
+// undershooting one aborts the entire matrix.  Every family is swept up to a
+// 100000-element set, and that top point is where the homomorphic work stops
+// being cheap, so the whole top row is provisioned above the standard stop.
+//
+//   - SJ16 (Paillier-3072) and the exact BCG12 baseline keep the 18 h `long`
+//     stop; SJ16's precomputed fit is serial, so 1 h was already too tight.
+//   - The remaining top-row producers evaluate real FHE circuits at n=100000.
+//     Measured on the c8i campaign host at 16 threads, piccard_std128 needs
+//     759 s there and piccard_std192_encoding 693 s, both past the 600 s
+//     `standard` stop, so the row takes the 1 h `extended` stop.
+std::string ExpectedTimeoutClass(const RevisionCell& cell) {
+    if (cell.family == "sj16") {
+        const bool extrapolated =
+            cell.axis == "u" && (cell.axis_value == "262144" ||
+                                 cell.axis_value == "1048576");
+        return extrapolated ? "standard" : "long";
+    }
+    if (cell.family == "bcg12_exact" && cell.axis == "n" &&
+        cell.axis_value == "100000") {
+        return "long";
+    }
+    if ((cell.axis == "n" || cell.axis == "timing_n") &&
+        cell.axis_value == "100000") {
+        return "extended";
+    }
+    return "standard";
+}
+
 void ValidateFamilyCell(const RevisionCell& cell) {
     const auto profile_separator = cell.cell_id.find("::");
     const auto family_separator = profile_separator == std::string::npos
@@ -845,14 +875,8 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     if (cell.producer != ExpectedProducer(cell)) {
         throw std::invalid_argument("revision matrix producer/family binding mismatch");
     }
-    const bool long_timeout =
-        (cell.family == "sj16" &&
-         !(cell.axis == "u" && (cell.axis_value == "262144" ||
-                                cell.axis_value == "1048576"))) ||
-        (cell.family == "bcg12_exact" && cell.axis == "n" &&
-         cell.axis_value == "100000");
     if (cell.profile != "paper-v1" ||
-        cell.timeout_class != (long_timeout ? "long" : "standard")) {
+        cell.timeout_class != ExpectedTimeoutClass(cell)) {
         throw std::invalid_argument("revision matrix profile/timeout mismatch");
     }
     if (cell.expected_artifact_schema != ExpectedArtifactSchema(cell)) {

@@ -513,6 +513,31 @@ def _expected_eligibility(cell: dict[str, Any]) -> tuple[str, bool, bool, str]:
     raise ValueError(f"unknown eligibility family: {family}")
 
 
+def _expected_timeout_class(cell: dict[str, Any]) -> str:
+    """Bind each cell to a timeout stop; see ExpectedTimeoutClass in C++.
+
+    paper-v1 is measured as a single non-resumable campaign, so a timeout is a
+    safety stop rather than a budget.  The 100000-element point tops every
+    family's set-size sweep and is where homomorphic work stops being cheap:
+    SJ16 and the exact BCG12 baseline need the 18 h ``long`` stop, and the
+    remaining top-row producers evaluate real FHE circuits there -- measured
+    on the campaign host, piccard_std128 needs 759 s and
+    piccard_std192_encoding 693 s, both past the 600 s standard stop.
+    """
+    if cell["family"] == "sj16":
+        return ("standard"
+                if cell["axis"] == "u" and
+                _text(cell["axis_value"]) in {"262144", "1048576"}
+                else "long")
+    if (cell["family"] == "bcg12_exact" and cell["axis"] == "n" and
+            _text(cell["axis_value"]) == "100000"):
+        return "long"
+    if (cell["axis"] in {"n", "timing_n"} and
+            _text(cell["axis_value"]) == "100000"):
+        return "extended"
+    return "standard"
+
+
 def _validate_cell(cell: Any, index: int) -> None:
     label = f"cell[{index}]"
     _require(isinstance(cell, dict), f"{label} must be an object")
@@ -530,18 +555,7 @@ def _validate_cell(cell: Any, index: int) -> None:
              f"{label} ID/family/axis binding mismatch")
     _require(cell["profile"] == "paper-v1", f"{label} profile must be paper-v1")
     _require(cell["producer"] == _expected_producer(cell), f"{label} producer binding mismatch")
-    if cell["family"] == "sj16":
-        expected_timeout_class = (
-            "standard"
-            if cell["axis"] == "u" and
-            _text(cell["axis_value"]) in {"262144", "1048576"}
-            else "long")
-    elif (cell["family"] == "bcg12_exact" and cell["axis"] == "n" and
-          _text(cell["axis_value"]) == "100000"):
-        expected_timeout_class = "long"
-    else:
-        expected_timeout_class = "standard"
-    _require(cell["timeout_class"] == expected_timeout_class,
+    _require(cell["timeout_class"] == _expected_timeout_class(cell),
              f"{label} timeout class contract mismatch")
     _require(isinstance(cell["axes"], dict), f"{label}.axes must be an object")
     _require(cell["axis_value"] != "", f"{label}.axis_value must be explicit")

@@ -80,6 +80,40 @@ class RevisionMatrixTest(unittest.TestCase):
             self.assertNotEqual(k256["expected_rows"][0]["status"],
                                 "NOT_APPLICABLE")
 
+    def test_largest_set_size_cells_outrank_the_standard_timeout(self):
+        """No cell at the top of a set-size sweep may keep the 600 s stop.
+
+        paper-v1 is one non-resumable run, so a cell that overruns its stop
+        aborts the whole matrix.  Measured on the campaign host,
+        piccard_std128::n=100000 needs 759 s and
+        piccard_std192_encoding::n=100000 needs 693 s against the 600 s
+        standard stop, so every 100000-element point
+        is provisioned above standard: the SJ16/BCG12-exact baselines keep
+        ``long`` and the remaining FHE producers take ``extended``.
+        """
+        top_of_sweep = [cell for cell in self.document["cells"]
+                        if cell["axis"] in {"n", "timing_n"}
+                        and str(cell["axis_value"]) == "100000"]
+        self.assertEqual(len(top_of_sweep), 9)
+        expected = {
+            "paper-v1::sj16::n=100000": "long",
+            "paper-v1::bcg12_exact::n=100000": "long",
+            "paper-v1::bcg12_minhash::n=100000": "extended",
+            "paper-v1::dynamic_accuracy::n=100000": "extended",
+            "paper-v1::dynamic_timing::n=100000": "extended",
+            "paper-v1::fhe_ind::n=100000": "extended",
+            "paper-v1::piccard_std128::n=100000": "extended",
+            "paper-v1::piccard_std192_encoding::n=100000": "extended",
+            "paper-v1::sqrt_comparison::timing_n=100000": "extended",
+        }
+        self.assertEqual({cell["cell_id"] for cell in top_of_sweep},
+                         set(expected))
+        for cell in top_of_sweep:
+            self.assertEqual(cell["timeout_class"], expected[cell["cell_id"]],
+                             cell["cell_id"])
+            self.assertNotEqual(cell["timeout_class"], "standard",
+                                cell["cell_id"])
+
     def test_raw_phase_contract_covers_timing_rows_only(self):
         """The matrix is the allow-list for independent raw timing evidence."""
         expected = set()

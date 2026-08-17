@@ -2055,8 +2055,14 @@ void ValidateDynamicCell(const RevisionCell& cell) {
     if (cell.dataset != "synthetic") {
         RejectDynamic("dataset must be synthetic");
     }
-    if (cell.timeout_class != "standard") {
-        RejectDynamic("timeout class must be standard");
+    // n=100000 tops the set-size sweep and evaluates real FHE circuits there,
+    // so it takes the extended stop; every other dynamic cell stays standard.
+    const bool dynamic_top_of_sweep =
+        cell.axis == "n" && cell.axis_value == "100000";
+    if (cell.timeout_class != (dynamic_top_of_sweep ? "extended" : "standard")) {
+        RejectDynamic(dynamic_top_of_sweep
+                          ? "n=100000 dynamic timeout class must be extended"
+                          : "timeout class must be standard");
     }
     if (cell.expected_artifact_schema != "dynamic-benchmark-csv-v1") {
         RejectDynamic("unexpected dynamic artifact schema");

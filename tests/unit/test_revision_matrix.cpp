@@ -144,6 +144,37 @@ TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
     }
 }
 
+TEST(RevisionMatrix, LargestSetSizeCellsOutrankTheStandardTimeout) {
+    // paper-v1 is one non-resumable run, so a cell that overruns its stop
+    // aborts the whole matrix.  Measured on the campaign host, piccard_std128
+    // needs 759 s at n=100000 and piccard_std192_encoding 693 s, both past the
+    // 600 s standard stop, so no 100000-element point may sit at standard:
+    // the slow baselines keep `long`, the rest take `extended`.
+    const RevisionMatrix matrix = Load();
+    size_t top_of_sweep = 0;
+    for (const auto& cell : matrix.cells) {
+        if ((cell.axis != "n" && cell.axis != "timing_n") ||
+            cell.axis_value != "100000") {
+            continue;
+        }
+        ++top_of_sweep;
+        const bool slow_baseline =
+            cell.family == "sj16" || cell.family == "bcg12_exact";
+        EXPECT_EQ(cell.timeout_class, slow_baseline ? "long" : "extended")
+            << cell.cell_id;
+    }
+    EXPECT_EQ(top_of_sweep, 9u);
+}
+
+TEST(RevisionMatrix, StandardTimeoutAtTheTopOfTheSweepFailsClosed) {
+    RevisionMatrix matrix = Load();
+    for (auto& cell : matrix.cells) {
+        if (cell.cell_id != "paper-v1::piccard_std128::n=100000") continue;
+        cell.timeout_class = "standard";
+    }
+    EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument);
+}
+
 TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
     const RevisionMatrix matrix = Load();
     for (const auto& family : {"piccard_std128", "piccard_std192_encoding",
