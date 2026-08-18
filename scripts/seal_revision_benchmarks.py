@@ -122,6 +122,12 @@ def create_seal(root: Path) -> dict[str, Any]:
         performance_status = "PAPER_PERFORMANCE_PENDING"
     identity = _identity(root)
     entries = inventory(root)
+    # A resumed run is a disclosed fact of the sealed artifact, never an
+    # implementation detail.  The runner refuses to resume across any change of
+    # source, scripts, tools, or producer binaries, so ``provenance_sha256``
+    # pins the single build every cell in this root came from; recording it
+    # here makes that claim checkable without reopening run.json.
+    resume = run.get("resume") if isinstance(run.get("resume"), dict) else {}
     seal_payload: dict[str, Any] = {
         "schema": SEAL_SCHEMA,
         "version": 1,
@@ -133,6 +139,10 @@ def create_seal(root: Path) -> dict[str, Any]:
         "cell_count": run.get("cell_count"),
         "readiness_status": readiness_status,
         "performance_status": performance_status,
+        "resumed": bool(resume.get("resumed", False)),
+        "resume_count": int(resume.get("resume_count", 0)),
+        "resume_attempts": resume.get("attempts", []),
+        "provenance_sha256": resume.get("provenance_sha256"),
         "inventory": entries,
         "inventory_sha256": _inventory_digest(entries),
         "excluded_from_inventory": [SEAL_NAME, CHECKSUM_NAME],
