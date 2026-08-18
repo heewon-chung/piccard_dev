@@ -8,6 +8,13 @@ bottom structure discards evicted originals permanently, so probing and
 then undoing the probes can leave a hash function's row empty, aborting
 the process. This test pins the fix: probes must run on a scratch copy so
 the signature-bearing structure stays untouched.
+
+Coverage limit: every invocation here is `--security=TOY`, and TOY forces
+`RunTimedDynamic`'s probe batch down to `num_ops == 1` (bench_dynamic.cpp).
+A single insert/delete round trip can never empty a depth-d row, so this
+file structurally cannot exercise the 100-op paper batch or the rebuild
+path it needs. That path is covered by the plaintext unit test
+`tests/unit/test_dynamic_probe_workload.cpp` (ctest: DynamicProbeWorkload).
 """
 
 import csv

@@ -1,5 +1,6 @@
 #include "benchmark_utils.h"
 #include "dynamic_revision_adapter.h"
+#include "dynamic_probe_workload.h"
 #include "dynamic_refresh_benchmark.h"
 #include "raw_timing_schema.h"
 #include "protocol/dynamic_piccard.h"
@@ -303,33 +304,34 @@ static DynamicResult RunTimedDynamic(
     auto bottom_y = engine.InitSet(set_y);
     dr.phase_init_ms = timer.ElapsedMs();
 
-    // Phase 2: Insert throughput — batch of inserts (plaintext only).
+    // Phases 2 and 3: Insert and Delete throughput (plaintext only).
     // Probes run on a scratch copy: the d-depth bottom structure discards
     // evicted originals permanently, so probing the signature-bearing
     // structure can empty it once the probes are deleted again (and, on a
     // hash collision, can drop a shared entry). The copy sits outside the
     // timed region; its rows start at capacity==size, so the first
     // displacing insert costs one reallocation per hash function.
+    //
+    // Emptying a row of the *scratch* copy is still possible, and legal: it
+    // arms BottomStructure's rebuild flag, after which every operation throws
+    // by design. RunProbeWorkload performs the protocol's own owner-side
+    // Initialize at that point and excludes its cost from the delete phase;
+    // see dynamic_probe_workload.cpp for the rebuild-set and timer-accounting
+    // rationale.
     BottomStructure probe_structure = *bottom_x;
     // The TOY profile is a correctness smoke, not a throughput measurement.
     // A single round trip exercises Insert/Delete without exhausting a small
     // depth-d scratch structure. Paper/legacy profiles keep the 100-op batch.
     const size_t num_ops =
         engine.GetParams().security == SecurityLevel::TOY ? 1 : 100;
-    timer.Start();
-    for (size_t i = 0; i < num_ops; i++) {
-        probe_structure.Insert(3000000 + i);
-    }
-    dr.phase_insert_ms = timer.ElapsedMs();
+    const ProbeWorkloadTiming probe_timing = RunProbeWorkload(
+        probe_structure, set_x, kDynamicProbeBase, num_ops);
+
+    dr.phase_insert_ms = probe_timing.insert_ms;
     dr.ops_insert_per_sec = (dr.phase_insert_ms > 0)
         ? (num_ops / (dr.phase_insert_ms / 1000.0)) : 0.0;
 
-    // Phase 3: Delete throughput — undo the inserts (plaintext only)
-    timer.Start();
-    for (size_t i = 0; i < num_ops; i++) {
-        probe_structure.Delete(3000000 + i);
-    }
-    dr.phase_delete_ms = timer.ElapsedMs();
+    dr.phase_delete_ms = probe_timing.delete_ms;
     dr.ops_delete_per_sec = (dr.phase_delete_ms > 0)
         ? (num_ops / (dr.phase_delete_ms / 1000.0)) : 0.0;
 
