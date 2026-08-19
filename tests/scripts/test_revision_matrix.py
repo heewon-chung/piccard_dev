@@ -71,12 +71,15 @@ class RevisionMatrixTest(unittest.TestCase):
         bcg12_long = next(c for c in self.document["cells"]
                           if c["cell_id"] == "paper-v1::bcg12_exact::n=100000")
         self.assertEqual(bcg12_long["timeout_class"], "long")
-        for family in ("threshold_timing", "threshold_agreement",
-                       "threshold_spec"):
+        # k=256 tops the threshold sweep: agreement runs 2886 s there and
+        # timing 157 s, so only the 6.1 s spec cell keeps the standard stop.
+        for family, timeout_class in (("threshold_timing", "extended"),
+                                      ("threshold_agreement", "long"),
+                                      ("threshold_spec", "standard")):
             k256 = next(c for c in self.document["cells"]
                         if c["cell_id"] == f"paper-v1::{family}::k=256")
             self.assertEqual(k256["invocation_status"], "RUN")
-            self.assertEqual(k256["timeout_class"], "standard")
+            self.assertEqual(k256["timeout_class"], timeout_class)
             self.assertNotEqual(k256["expected_rows"][0]["status"],
                                 "NOT_APPLICABLE")
 
@@ -113,6 +116,105 @@ class RevisionMatrixTest(unittest.TestCase):
                              cell["cell_id"])
             self.assertNotEqual(cell["timeout_class"], "standard",
                                 cell["cell_id"])
+
+    def test_threshold_phase_cells_outrank_the_standard_timeout(self):
+        """Every measurement-bearing threshold family is above the 600 s stop.
+
+        The fourth paper-v1 attempt was the first to reach this phase and was
+        killed at ``threshold_agreement::k=128`` after 600.1 s, 21 h 51 m into
+        a non-resumable run.  Re-measured to natural completion on hardware
+        that tracks the campaign host to within 5%, the phase is far slower
+        than the standard stop allows::
+
+            threshold_agreement   k=16/32/64/128/256  138/160/881/1455/2886 s
+            threshold_timing      worst point (k=128)                 202.8 s
+            threshold_synthetic_fpfn worst point (k512_j-10)          391.8 s
+            threshold_dblp_fpfn   control=default                     237.9 s
+            threshold_spec        worst point (k=256)                   6.1 s
+
+        Only threshold_spec still clears a 3x margin under ``standard``, so it
+        is the one threshold family left there; the other four move as whole
+        families, and the two agreement points whose measurements pass
+        3600/3 s take ``long``.
+        """
+        expected = {}
+        for k in (16, 32, 64):
+            expected[f"paper-v1::threshold_agreement::k={k}"] = "extended"
+        for k in (128, 256):
+            expected[f"paper-v1::threshold_agreement::k={k}"] = "long"
+        for k in (16, 32, 64, 128, 256):
+            expected[f"paper-v1::threshold_timing::k={k}"] = "extended"
+            expected[f"paper-v1::threshold_spec::k={k}"] = "standard"
+        for k in (64, 128, 256, 512):
+            for grid in range(-10, 11):
+                expected[
+                    f"paper-v1::threshold_synthetic_fpfn::point=k{k}_j{grid}"
+                ] = "extended"
+        expected["paper-v1::threshold_dblp_fpfn::control=default"] = "extended"
+        self.assertEqual(len(expected), 100)
+
+        threshold = [cell for cell in self.document["cells"]
+                     if cell["family"].startswith("threshold_")]
+        self.assertEqual({cell["cell_id"] for cell in threshold}, set(expected))
+        for cell in threshold:
+            self.assertEqual(cell["timeout_class"], expected[cell["cell_id"]],
+                             cell["cell_id"])
+            if cell["family"] != "threshold_spec":
+                self.assertNotEqual(cell["timeout_class"], "standard",
+                                    cell["cell_id"])
+
+    def test_every_timeout_class_keeps_a_threefold_measured_margin(self):
+        """No cell with a measured runtime may sit within 3x of its stop.
+
+        Measurements are the slowest natural completion observed for the cell:
+        the threshold phase from the post-mortem re-runs, the top of the
+        set-size sweep from the campaign host.  A stop is a safety net for a
+        hang, not a budget, so the matrix must leave the measurement at most a
+        third of its stop.
+        """
+        seconds = {"standard": 600, "extended": 3600, "long": 64800}
+        measured = {
+            "paper-v1::threshold_agreement::k=16": 138.0,
+            "paper-v1::threshold_agreement::k=32": 160.0,
+            "paper-v1::threshold_agreement::k=64": 881.0,
+            "paper-v1::threshold_agreement::k=128": 1455.0,
+            "paper-v1::threshold_agreement::k=256": 2886.0,
+            "paper-v1::threshold_timing::k=128": 202.8,
+            "paper-v1::threshold_timing::k=256": 157.0,
+            "paper-v1::threshold_spec::k=256": 6.1,
+            "paper-v1::threshold_synthetic_fpfn::point=k512_j-10": 391.8,
+            "paper-v1::threshold_synthetic_fpfn::point=k256_j-10": 199.6,
+            "paper-v1::threshold_dblp_fpfn::control=default": 237.9,
+            "paper-v1::piccard_std128::n=100000": 759.0,
+            "paper-v1::piccard_std192_encoding::n=100000": 693.0,
+            "paper-v1::dynamic_accuracy::n=100000": 384.4,
+            "paper-v1::dynamic_timing::n=100000": 241.7,
+        }
+        cells = {cell["cell_id"]: cell for cell in self.document["cells"]}
+        self.assertEqual(set(measured) - set(cells), set())
+        for cell_id, duration in measured.items():
+            stop = seconds[cells[cell_id]["timeout_class"]]
+            self.assertGreaterEqual(stop, 3.0 * duration, cell_id)
+
+    def test_lowered_threshold_timeout_classes_fail_closed(self):
+        for cell_id in ("paper-v1::threshold_agreement::k=256",
+                        "paper-v1::threshold_agreement::k=64",
+                        "paper-v1::threshold_timing::k=128",
+                        "paper-v1::threshold_synthetic_fpfn::point=k512_j0",
+                        "paper-v1::threshold_dblp_fpfn::control=default"):
+            lowered = copy.deepcopy(self.document)
+            for cell in lowered["cells"]:
+                if cell["cell_id"] == cell_id:
+                    cell["timeout_class"] = "standard"
+            with self.assertRaises(ValueError, msg=cell_id):
+                validate_revision_matrix.validate_document(lowered, FIXTURES)
+
+        demoted = copy.deepcopy(self.document)
+        for cell in demoted["cells"]:
+            if cell["cell_id"] == "paper-v1::threshold_agreement::k=128":
+                cell["timeout_class"] = "extended"
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(demoted, FIXTURES)
 
     def test_raw_phase_contract_covers_timing_rows_only(self):
         """The matrix is the allow-list for independent raw timing evidence."""

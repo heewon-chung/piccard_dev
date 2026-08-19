@@ -10096,7 +10096,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "agreement": 1
@@ -10143,7 +10143,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "agreement": 1
@@ -10190,7 +10190,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
         "agreement": 1
@@ -10237,7 +10237,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "agreement": 1
@@ -10284,7 +10284,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "agreement": 1
@@ -10334,7 +10334,7 @@
       "producer": "bench_real_datasets",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "held_out": 1
@@ -10625,7 +10625,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10676,7 +10676,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10727,7 +10727,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10778,7 +10778,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10829,7 +10829,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10880,7 +10880,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10931,7 +10931,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -10982,7 +10982,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11033,7 +11033,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11084,7 +11084,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11135,7 +11135,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11186,7 +11186,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11237,7 +11237,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11288,7 +11288,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11339,7 +11339,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11390,7 +11390,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11441,7 +11441,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11492,7 +11492,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11543,7 +11543,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11594,7 +11594,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11645,7 +11645,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11696,7 +11696,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11747,7 +11747,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11798,7 +11798,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11849,7 +11849,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11900,7 +11900,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -11951,7 +11951,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12002,7 +12002,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12053,7 +12053,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12104,7 +12104,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12155,7 +12155,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12206,7 +12206,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12257,7 +12257,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12308,7 +12308,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12359,7 +12359,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12410,7 +12410,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12461,7 +12461,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12512,7 +12512,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12563,7 +12563,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12614,7 +12614,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12665,7 +12665,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12716,7 +12716,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12767,7 +12767,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12818,7 +12818,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12869,7 +12869,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12920,7 +12920,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -12971,7 +12971,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13022,7 +13022,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13073,7 +13073,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13124,7 +13124,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13175,7 +13175,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13226,7 +13226,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13277,7 +13277,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13328,7 +13328,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13379,7 +13379,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13430,7 +13430,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13481,7 +13481,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13532,7 +13532,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13583,7 +13583,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13634,7 +13634,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13685,7 +13685,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13736,7 +13736,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13787,7 +13787,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13838,7 +13838,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13889,7 +13889,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13940,7 +13940,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -13991,7 +13991,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14042,7 +14042,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14093,7 +14093,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14144,7 +14144,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14195,7 +14195,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14246,7 +14246,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14297,7 +14297,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14348,7 +14348,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14399,7 +14399,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14450,7 +14450,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14501,7 +14501,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14552,7 +14552,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14603,7 +14603,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14654,7 +14654,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14705,7 +14705,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14756,7 +14756,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14807,7 +14807,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14858,7 +14858,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "trials": 1
@@ -14906,7 +14906,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -14954,7 +14954,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -15002,7 +15002,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -15050,7 +15050,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -15098,7 +15098,7 @@
       "producer": "bench_threshold",
       "profile": "paper-v1",
       "table_eligible": true,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1

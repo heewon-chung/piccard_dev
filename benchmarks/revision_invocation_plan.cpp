@@ -1114,6 +1114,18 @@ void ValidateThresholdFheCell(const RevisionCell& cell) {
     RequireAxisValue(cell, "n", 1000);
     RequireAxisValue(cell, "u", 65536);
 
+    // Agreement is the family that killed the fourth paper-v1 attempt: it
+    // takes 881/1455/2886 s at k=64/128/256, so its two largest points need
+    // the 18 h stop and the rest of the family the 1 h one.  threshold_timing
+    // peaks at 202.8 s, inside 3x of the standard stop, so it moves as well;
+    // only threshold_spec (6.1 s at its worst point) stays where it was.
+    const std::string expected_timeout =
+        kind == "spec" ? "standard"
+                       : (kind == "agreement" && k >= 128 ? "long" : "extended");
+    if (cell.timeout_class != expected_timeout) {
+        RejectThreshold("unexpected threshold FHE timeout class");
+    }
+
     const uint64_t paper_trials =
         kind == "timing" ? 30 : (kind == "spec" ? 0 : 50);
     const uint64_t toy_trials = 1;
@@ -1177,7 +1189,7 @@ void ValidateThresholdSyntheticCell(const RevisionCell& cell) {
     if (cell.invocation_status != "RUN") {
         RejectThreshold("cell is not RUN");
     }
-    if (cell.timeout_class != "standard") {
+    if (cell.timeout_class != "extended") {
         RejectThreshold("unexpected threshold FPFN timeout class");
     }
 
@@ -1266,7 +1278,7 @@ void ValidateRealThresholdCell(const RevisionCell& cell) {
     if (cell.invocation_status != "RUN") {
         RejectThreshold("cell is not RUN");
     }
-    if (cell.timeout_class != "standard") {
+    if (cell.timeout_class != "extended") {
         RejectThreshold("unexpected real threshold timeout class");
     }
 

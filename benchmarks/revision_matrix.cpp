@@ -826,9 +826,13 @@ void RequireEligibility(const RevisionCell& cell, const char* eligibility,
 
 // paper-v1 is measured as a single non-resumable campaign, so a timeout is a
 // safety stop rather than a budget: overshooting one costs nothing, while
-// undershooting one aborts the entire matrix.  Every family is swept up to a
-// 100000-element set, and that top point is where the homomorphic work stops
-// being cheap, so the whole top row is provisioned above the standard stop.
+// undershooting one aborts the entire matrix.  Every class below therefore
+// leaves at least a 3x margin over the slowest measured natural completion of
+// the cells it covers.
+//
+// Set-size sweep.  Every family is swept up to a 100000-element set, and that
+// top point is where the homomorphic work stops being cheap, so the whole top
+// row is provisioned above the standard stop.
 //
 //   - SJ16 (Paillier-3072) and the exact BCG12 baseline keep the 18 h `long`
 //     stop; SJ16's precomputed fit is serial, so 1 h was already too tight.
@@ -836,6 +840,17 @@ void RequireEligibility(const RevisionCell& cell, const char* eligibility,
 //     Measured on the c8i campaign host at 16 threads, piccard_std128 needs
 //     759 s there and piccard_std192_encoding 693 s, both past the 600 s
 //     `standard` stop, so the row takes the 1 h `extended` stop.
+//
+// Threshold phase.  The campaign reached this phase for the first time on its
+// fourth attempt and was killed at threshold_agreement::k=128 after 600.1 s.
+// Re-measured to natural completion, the phase is far slower than `standard`
+// allows: agreement runs 138/160/881/1455/2886 s at k=16/32/64/128/256,
+// threshold_timing peaks at 202.8 s (k=128), the synthetic FP/FN sweep peaks
+// at 391.8 s (k=512), and the DBLP FP/FN control takes 237.9 s.  Only
+// threshold_spec (6.1 s at its worst point) still clears 3x under `standard`,
+// so every other threshold family is classified as a whole -- one rule per
+// family rather than per measured point -- at no less than `extended`, and the
+// two agreement cells whose measurements pass 3600/3 s take `long`.
 std::string ExpectedTimeoutClass(const RevisionCell& cell) {
     if (cell.family == "sj16") {
         const bool extrapolated =
@@ -846,6 +861,17 @@ std::string ExpectedTimeoutClass(const RevisionCell& cell) {
     if (cell.family == "bcg12_exact" && cell.axis == "n" &&
         cell.axis_value == "100000") {
         return "long";
+    }
+    if (cell.family == "threshold_agreement") {
+        const bool past_extended =
+            cell.axis == "k" &&
+            (cell.axis_value == "128" || cell.axis_value == "256");
+        return past_extended ? "long" : "extended";
+    }
+    if (cell.family == "threshold_timing" ||
+        cell.family == "threshold_synthetic_fpfn" ||
+        cell.family == "threshold_dblp_fpfn") {
+        return "extended";
     }
     if ((cell.axis == "n" || cell.axis == "timing_n") &&
         cell.axis_value == "100000") {

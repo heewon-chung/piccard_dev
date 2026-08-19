@@ -257,6 +257,20 @@ def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
     elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
           str(cell.get("axis_value")) == "100000"):
         timeout_class = "long"
+    elif cell.get("family") == "threshold_agreement":
+        # Killed the fourth paper-v1 attempt at k=128 after 600.1 s.  Natural
+        # completions: 138/160/881/1455/2886 s at k=16/32/64/128/256.
+        timeout_class = (
+            "long"
+            if cell.get("axis") == "k" and
+            str(cell.get("axis_value")) in {"128", "256"}
+            else "extended")
+    elif cell.get("family") in {"threshold_timing", "threshold_synthetic_fpfn",
+                                "threshold_dblp_fpfn"}:
+        # Under 3x margin on the standard stop: threshold_timing peaks at
+        # 202.8 s, the synthetic FP/FN sweep at 391.8 s, DBLP FP/FN at 237.9 s.
+        # threshold_spec (6.1 s worst) is excluded and stays standard.
+        timeout_class = "extended"
     elif (cell.get("axis") in {"n", "timing_n"} and
           str(cell.get("axis_value")) == "100000"):
         # Top of every family's set-size sweep: real FHE circuit work.

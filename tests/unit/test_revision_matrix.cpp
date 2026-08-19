@@ -6,7 +6,9 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -173,6 +175,97 @@ TEST(RevisionMatrix, StandardTimeoutAtTheTopOfTheSweepFailsClosed) {
         cell.timeout_class = "standard";
     }
     EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument);
+}
+
+TEST(RevisionMatrix, ThresholdPhaseCellsOutrankTheStandardTimeout) {
+    // The fourth paper-v1 attempt was the first run to reach the threshold
+    // phase and was killed at threshold_agreement::k=128 after 600.1 s.
+    // Re-measured to natural completion: agreement 138/160/881/1455/2886 s at
+    // k=16/32/64/128/256, threshold_timing 202.8 s at its worst point, the
+    // synthetic FP/FN sweep 391.8 s at its worst point, and the DBLP FP/FN
+    // control 237.9 s.  Only threshold_spec (6.1 s) still clears 3x under the
+    // standard stop, so it is the one threshold family left there.
+    const RevisionMatrix matrix = Load();
+    size_t agreement = 0, timing = 0, spec = 0, synthetic = 0, dblp = 0;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family == "threshold_agreement") {
+            ++agreement;
+            const bool past_extended =
+                cell.axis_value == "128" || cell.axis_value == "256";
+            EXPECT_EQ(cell.timeout_class, past_extended ? "long" : "extended")
+                << cell.cell_id;
+        } else if (cell.family == "threshold_timing") {
+            ++timing;
+            EXPECT_EQ(cell.timeout_class, "extended") << cell.cell_id;
+        } else if (cell.family == "threshold_synthetic_fpfn") {
+            ++synthetic;
+            EXPECT_EQ(cell.timeout_class, "extended") << cell.cell_id;
+        } else if (cell.family == "threshold_dblp_fpfn") {
+            ++dblp;
+            EXPECT_EQ(cell.timeout_class, "extended") << cell.cell_id;
+        } else if (cell.family == "threshold_spec") {
+            ++spec;
+            EXPECT_EQ(cell.timeout_class, "standard") << cell.cell_id;
+        }
+    }
+    EXPECT_EQ(agreement, 5u);
+    EXPECT_EQ(timing, 5u);
+    EXPECT_EQ(spec, 5u);
+    EXPECT_EQ(synthetic, 84u);
+    EXPECT_EQ(dblp, 1u);
+}
+
+TEST(RevisionMatrix, EveryTimeoutClassKeepsAThreefoldMeasuredMargin) {
+    // Slowest natural completion observed per cell against its stop.  A stop
+    // is a safety net for a hang, not a budget, so a measurement may take at
+    // most a third of it.
+    const std::vector<std::pair<std::string, double>> measured = {
+        {"paper-v1::threshold_agreement::k=16", 138.0},
+        {"paper-v1::threshold_agreement::k=32", 160.0},
+        {"paper-v1::threshold_agreement::k=64", 881.0},
+        {"paper-v1::threshold_agreement::k=128", 1455.0},
+        {"paper-v1::threshold_agreement::k=256", 2886.0},
+        {"paper-v1::threshold_timing::k=128", 202.8},
+        {"paper-v1::threshold_timing::k=256", 157.0},
+        {"paper-v1::threshold_spec::k=256", 6.1},
+        {"paper-v1::threshold_synthetic_fpfn::point=k512_j-10", 391.8},
+        {"paper-v1::threshold_synthetic_fpfn::point=k256_j-10", 199.6},
+        {"paper-v1::threshold_dblp_fpfn::control=default", 237.9},
+        {"paper-v1::piccard_std128::n=100000", 759.0},
+        {"paper-v1::piccard_std192_encoding::n=100000", 693.0},
+        {"paper-v1::dynamic_accuracy::n=100000", 384.4},
+        {"paper-v1::dynamic_timing::n=100000", 241.7},
+    };
+    const RevisionMatrix matrix = Load();
+    for (const auto& entry : measured) {
+        const auto found = std::find_if(
+            matrix.cells.begin(), matrix.cells.end(),
+            [&](const RevisionCell& cell) { return cell.cell_id == entry.first; });
+        ASSERT_NE(found, matrix.cells.end()) << entry.first;
+        const double stop = found->timeout_class == "standard"    ? 600.0
+                            : found->timeout_class == "extended"  ? 3600.0
+                            : found->timeout_class == "long"      ? 64800.0
+                                                                  : 0.0;
+        EXPECT_GE(stop, 3.0 * entry.second) << entry.first;
+    }
+}
+
+TEST(RevisionMatrix, LoweredThresholdTimeoutClassesFailClosed) {
+    const std::vector<std::pair<std::string, std::string>> lowered = {
+        {"paper-v1::threshold_agreement::k=256", "extended"},
+        {"paper-v1::threshold_agreement::k=64", "standard"},
+        {"paper-v1::threshold_timing::k=128", "standard"},
+        {"paper-v1::threshold_synthetic_fpfn::point=k512_j0", "standard"},
+        {"paper-v1::threshold_dblp_fpfn::control=default", "standard"},
+    };
+    for (const auto& entry : lowered) {
+        RevisionMatrix matrix = Load();
+        for (auto& cell : matrix.cells) {
+            if (cell.cell_id == entry.first) cell.timeout_class = entry.second;
+        }
+        EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument)
+            << entry.first;
+    }
 }
 
 TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {

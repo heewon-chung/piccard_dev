@@ -513,16 +513,35 @@ def _expected_eligibility(cell: dict[str, Any]) -> tuple[str, bool, bool, str]:
     raise ValueError(f"unknown eligibility family: {family}")
 
 
+#: Threshold families whose measured runtimes leave under 3x margin against
+#: the 600 s standard stop, so the whole family moves up.  threshold_spec is
+#: deliberately absent: its worst point completes in 6.1 s.
+_EXTENDED_THRESHOLD_FAMILIES = frozenset({
+    "threshold_agreement", "threshold_timing",
+    "threshold_synthetic_fpfn", "threshold_dblp_fpfn",
+})
+
+
 def _expected_timeout_class(cell: dict[str, Any]) -> str:
     """Bind each cell to a timeout stop; see ExpectedTimeoutClass in C++.
 
     paper-v1 is measured as a single non-resumable campaign, so a timeout is a
-    safety stop rather than a budget.  The 100000-element point tops every
-    family's set-size sweep and is where homomorphic work stops being cheap:
-    SJ16 and the exact BCG12 baseline need the 18 h ``long`` stop, and the
-    remaining top-row producers evaluate real FHE circuits there -- measured
-    on the campaign host, piccard_std128 needs 759 s and
-    piccard_std192_encoding 693 s, both past the 600 s standard stop.
+    safety stop rather than a budget, and every class keeps at least a 3x
+    margin over the slowest measured completion it covers.
+
+    The 100000-element point tops every family's set-size sweep and is where
+    homomorphic work stops being cheap: SJ16 and the exact BCG12 baseline need
+    the 18 h ``long`` stop, and the remaining top-row producers evaluate real
+    FHE circuits there -- measured on the campaign host, piccard_std128 needs
+    759 s and piccard_std192_encoding 693 s, both past the 600 s standard stop.
+
+    The threshold phase was first reached on the fourth campaign attempt, which
+    died at ``threshold_agreement::k=128`` after 600.1 s.  Measured to natural
+    completion, agreement takes 138/160/881/1455/2886 s at k=16/32/64/128/256,
+    threshold_timing peaks at 202.8 s, the synthetic FP/FN sweep at 391.8 s and
+    the DBLP FP/FN control at 237.9 s, so those four families move to
+    ``extended`` as whole families and the two agreement points past 3600/3 s
+    take ``long``.
     """
     if cell["family"] == "sj16":
         return ("standard"
@@ -532,6 +551,13 @@ def _expected_timeout_class(cell: dict[str, Any]) -> str:
     if (cell["family"] == "bcg12_exact" and cell["axis"] == "n" and
             _text(cell["axis_value"]) == "100000"):
         return "long"
+    if cell["family"] == "threshold_agreement":
+        return ("long"
+                if cell["axis"] == "k" and
+                _text(cell["axis_value"]) in {"128", "256"}
+                else "extended")
+    if cell["family"] in _EXTENDED_THRESHOLD_FAMILIES:
+        return "extended"
     if (cell["axis"] in {"n", "timing_n"} and
             _text(cell["axis_value"]) == "100000"):
         return "extended"
