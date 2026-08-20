@@ -858,9 +858,12 @@ std::string ExpectedTimeoutClass(const RevisionCell& cell) {
                                  cell.axis_value == "1048576");
         return extrapolated ? "standard" : "long";
     }
-    if (cell.family == "bcg12_exact" && cell.axis == "n" &&
-        cell.axis_value == "100000") {
-        return "long";
+    if (cell.family == "bcg12_exact" && cell.axis == "n") {
+        // The exact baseline is the one family whose n sweep is costly below
+        // its top point.  Measured on the c8i campaign host: 4.3 s at n=100,
+        // 28.6 s at n=1000, 273.5 s at n=10000 and 2739.5 s at n=100000.
+        if (cell.axis_value == "100000") return "long";
+        if (cell.axis_value == "10000") return "extended";
     }
     if (cell.family == "threshold_agreement") {
         const bool past_extended =

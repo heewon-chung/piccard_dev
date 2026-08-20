@@ -534,6 +534,8 @@ def _expected_timeout_class(cell: dict[str, Any]) -> str:
     the 18 h ``long`` stop, and the remaining top-row producers evaluate real
     FHE circuits there -- measured on the campaign host, piccard_std128 needs
     759 s and piccard_std192_encoding 693 s, both past the 600 s standard stop.
+    bcg12_exact is the one family that is also costly one point below the top,
+    at 273.5 s for n=10000, so that point takes ``extended`` as well.
 
     The threshold phase was first reached on the fourth campaign attempt, which
     died at ``threshold_agreement::k=128`` after 600.1 s.  Measured to natural
@@ -548,9 +550,13 @@ def _expected_timeout_class(cell: dict[str, Any]) -> str:
                 if cell["axis"] == "u" and
                 _text(cell["axis_value"]) in {"262144", "1048576"}
                 else "long")
-    if (cell["family"] == "bcg12_exact" and cell["axis"] == "n" and
-            _text(cell["axis_value"]) == "100000"):
-        return "long"
+    if cell["family"] == "bcg12_exact" and cell["axis"] == "n":
+        # The exact baseline is the one family whose n sweep is costly below
+        # its top point: 4.3/28.6/273.5/2739.5 s at n=100/1000/10000/100000.
+        if _text(cell["axis_value"]) == "100000":
+            return "long"
+        if _text(cell["axis_value"]) == "10000":
+            return "extended"
     if cell["family"] == "threshold_agreement":
         return ("long"
                 if cell["axis"] == "k" and

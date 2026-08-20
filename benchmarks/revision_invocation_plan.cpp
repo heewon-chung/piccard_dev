@@ -977,6 +977,15 @@ void ValidateBcg12Geometry(const RevisionCell& cell) {
         RequireAxisValue(cell, "k", 128);
         RequireAxisValue(cell, "m", 64);
         RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+        // Only the exact baseline is costly below the top of the sweep:
+        // 273.5 s at n=10000 against 75.9 s for the MinHash variant.
+        if (cell.family == "bcg12_exact") {
+            const std::string expected_timeout =
+                n == 100000 ? "long" : (n == 10000 ? "extended" : "standard");
+            if (cell.timeout_class != expected_timeout) {
+                RejectBcg12("unexpected exact BCG12 timeout class");
+            }
+        }
         return;
     }
 

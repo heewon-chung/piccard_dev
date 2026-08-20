@@ -226,7 +226,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
-      "timeout_class": "standard",
+      "timeout_class": "extended",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1

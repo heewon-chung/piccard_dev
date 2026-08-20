@@ -185,6 +185,8 @@ class RevisionMatrixTest(unittest.TestCase):
             "paper-v1::threshold_synthetic_fpfn::point=k512_j-10": 391.8,
             "paper-v1::threshold_synthetic_fpfn::point=k256_j-10": 199.6,
             "paper-v1::threshold_dblp_fpfn::control=default": 237.9,
+            "paper-v1::bcg12_exact::n=10000": 273.5,
+            "paper-v1::bcg12_exact::n=100000": 2739.5,
             "paper-v1::piccard_std128::n=100000": 759.0,
             "paper-v1::piccard_std192_encoding::n=100000": 693.0,
             "paper-v1::dynamic_accuracy::n=100000": 384.4,
@@ -215,6 +217,76 @@ class RevisionMatrixTest(unittest.TestCase):
                 cell["timeout_class"] = "extended"
         with self.assertRaises(ValueError):
             validate_revision_matrix.validate_document(demoted, FIXTURES)
+
+    def test_exact_bcg12_sweep_is_classified_point_by_point(self):
+        """bcg12_exact is costly one point below the top of its sweep.
+
+        Every other family's n sweep is cheap until n=100000.  The exact BCG12
+        baseline is not: measured on the campaign host it runs 4.3 s at n=100,
+        28.6 s at n=1000, 273.5 s at n=10000 and 2739.5 s at n=100000, so
+        n=10000 sits at 2.19x under the 600 s standard stop and needs
+        ``extended``.  Its MinHash sibling takes 75.9 s at the same point and
+        stays standard.
+        """
+        expected = {
+            "paper-v1::bcg12_exact::control=default": "standard",
+            "paper-v1::bcg12_exact::n=100": "standard",
+            "paper-v1::bcg12_exact::n=1000": "standard",
+            "paper-v1::bcg12_exact::n=10000": "extended",
+            "paper-v1::bcg12_exact::n=100000": "long",
+        }
+        exact = [cell for cell in self.document["cells"]
+                 if cell["family"] == "bcg12_exact"]
+        self.assertEqual({cell["cell_id"] for cell in exact}, set(expected))
+        for cell in exact:
+            self.assertEqual(cell["timeout_class"], expected[cell["cell_id"]],
+                             cell["cell_id"])
+        minhash = next(c for c in self.document["cells"]
+                       if c["cell_id"] == "paper-v1::bcg12_minhash::n=10000")
+        self.assertEqual(minhash["timeout_class"], "standard")
+
+    def test_aws_campaign_durations_keep_a_threefold_margin(self):
+        """Sweep every real campaign duration against its stop.
+
+        The fourth paper-v1 attempt completed 173 cells before it was killed;
+        their wall-clock times on the c8i host are the authoritative input to
+        timeout classification.  Every one of them must leave a 3x margin,
+        with a single documented exception.
+        """
+        seconds = {"standard": 600, "extended": 3600, "long": 64800}
+        # sj16::fit=precomputed is a serial Paillier-3072 fit that needs
+        # 33610 s against the 64800 s `long` stop -- 1.93x.  There is no
+        # larger class to promote it to, and it is not a hazard: it has
+        # completed in production twice, on attempts 3 and 4, within 0.2% of
+        # the same duration, so the run-to-run variance that would have to
+        # appear for it to overrun is far outside anything observed.
+        known_exceptions = {"paper-v1::sj16::fit=precomputed"}
+        # The kill itself, not a completion: this cell was cut off at its
+        # 600 s standard stop and actually needs 1455 s.
+        truncated = {"paper-v1::threshold_agreement::k=128"}
+
+        path = (ROOT / "tests" / "fixtures" / "revision_timeouts" /
+                "aws_attempt4_durations.txt")
+        durations = {}
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            cell_id, value = line.rsplit(None, 1)
+            durations[cell_id] = float(value)
+        self.assertEqual(len(durations), 174)
+
+        cells = {cell["cell_id"]: cell for cell in self.document["cells"]}
+        self.assertEqual(set(durations) - set(cells), set())
+        violations = []
+        for cell_id, duration in durations.items():
+            if cell_id in truncated:
+                continue
+            stop = seconds[cells[cell_id]["timeout_class"]]
+            if stop < 3.0 * duration:
+                violations.append((cell_id, duration, stop, stop / duration))
+        self.assertEqual({v[0] for v in violations}, known_exceptions,
+                         f"unexpected sub-3x cells: {violations}")
 
     def test_raw_phase_contract_covers_timing_rows_only(self):
         """The matrix is the allow-list for independent raw timing evidence."""

@@ -231,6 +231,8 @@ TEST(RevisionMatrix, EveryTimeoutClassKeepsAThreefoldMeasuredMargin) {
         {"paper-v1::threshold_synthetic_fpfn::point=k512_j-10", 391.8},
         {"paper-v1::threshold_synthetic_fpfn::point=k256_j-10", 199.6},
         {"paper-v1::threshold_dblp_fpfn::control=default", 237.9},
+        {"paper-v1::bcg12_exact::n=10000", 273.5},
+        {"paper-v1::bcg12_exact::n=100000", 2739.5},
         {"paper-v1::piccard_std128::n=100000", 759.0},
         {"paper-v1::piccard_std192_encoding::n=100000", 693.0},
         {"paper-v1::dynamic_accuracy::n=100000", 384.4},
@@ -266,6 +268,38 @@ TEST(RevisionMatrix, LoweredThresholdTimeoutClassesFailClosed) {
         EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument)
             << entry.first;
     }
+}
+
+TEST(RevisionMatrix, ExactBcg12SweepIsClassifiedPointByPoint) {
+    // Every other family's n sweep is cheap until n=100000.  The exact BCG12
+    // baseline is not: measured on the campaign host it runs 4.3 s at n=100,
+    // 28.6 s at n=1000, 273.5 s at n=10000 and 2739.5 s at n=100000, so
+    // n=10000 sits at 2.19x under the standard stop and needs `extended`.
+    // Its MinHash sibling takes 75.9 s at the same point and stays standard.
+    const RevisionMatrix matrix = Load();
+    size_t exact = 0;
+    for (const auto& cell : matrix.cells) {
+        if (cell.family != "bcg12_exact") continue;
+        ++exact;
+        const std::string expected =
+            cell.axis != "n"                ? "standard"
+            : cell.axis_value == "100000"   ? "long"
+            : cell.axis_value == "10000"    ? "extended"
+                                            : "standard";
+        EXPECT_EQ(cell.timeout_class, expected) << cell.cell_id;
+    }
+    EXPECT_EQ(exact, 5u);
+    EXPECT_EQ(Find(matrix, "paper-v1::bcg12_minhash::n=10000").timeout_class,
+              "standard");
+}
+
+TEST(RevisionMatrix, LoweredExactBcg12TimeoutFailsClosed) {
+    RevisionMatrix matrix = Load();
+    for (auto& cell : matrix.cells) {
+        if (cell.cell_id != "paper-v1::bcg12_exact::n=10000") continue;
+        cell.timeout_class = "standard";
+    }
+    EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument);
 }
 
 TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {

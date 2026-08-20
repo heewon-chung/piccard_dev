@@ -255,8 +255,11 @@ def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
             str(cell.get("axis_value")) in {"262144", "1048576"}
             else "long")
     elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
-          str(cell.get("axis_value")) == "100000"):
-        timeout_class = "long"
+          str(cell.get("axis_value")) in {"10000", "100000"}):
+        # The exact baseline is costly below its top point too: measured on
+        # the campaign host at 273.5 s for n=10000 and 2739.5 s for n=100000.
+        timeout_class = (
+            "long" if str(cell.get("axis_value")) == "100000" else "extended")
     elif cell.get("family") == "threshold_agreement":
         # Killed the fourth paper-v1 attempt at k=128 after 600.1 s.  Natural
         # completions: 138/160/881/1455/2886 s at k=16/32/64/128/256.
