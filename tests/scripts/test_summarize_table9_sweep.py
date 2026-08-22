@@ -87,6 +87,44 @@ class AggregateTest(unittest.TestCase):
                 summ.load_aggregates(root)
 
 
+class FlatnessTest(unittest.TestCase):
+    def test_empty_aggregates_do_not_synthesize_a_ratio_from_extrapolation_alone(self) -> None:
+        # With zero real data, the sj16 |U| block has fewer than two measured
+        # rows (the other two are the paper's extrapolation literals), so it
+        # must not print a numeric ratio -- not "4.000" from the two literals,
+        # and not any other invented number.
+        report = summ.flatness({})
+        row = next(line for line in report.splitlines() if line.startswith("| u |"))
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        sj16_cell = cells[1 + summ.PRINTED.index("sj16")]
+        self.assertEqual(sj16_cell, "n/a (insufficient measured rows)")
+
+    def test_axis_the_column_does_not_consume_prints_not_an_input(self) -> None:
+        # bcg12_ec does not consume m (CONSUMED_AXES["bcg12_ec"] == {"n", "k"}), so
+        # every m-block row resolves to the same cell id: the ratio would be a
+        # tautological 1.000.  This must read "not an input", not "1.000".
+        report = summ.flatness({})
+        row = next(line for line in report.splitlines() if line.startswith("| m |"))
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        bcg12_cell = cells[1 + summ.PRINTED.index("bcg12_ec")]
+        self.assertEqual(bcg12_cell, "n/a (not an input)")
+
+    def test_measured_block_prints_the_hand_computed_ratio(self) -> None:
+        # Two distinct piccard k-block cells with known means: the printed
+        # ratio must equal max/min of exactly those two values.
+        aggs = {
+            ("paper-v1::piccard_std128::k=16", "piccard"):
+                summ.Aggregate(100.0, 1.0, 100.0, 1.0, 30, 99.0, 101.0),
+            ("paper-v1::piccard_std128::u=65536", "piccard"):
+                summ.Aggregate(150.0, 1.0, 150.0, 1.0, 30, 149.0, 151.0),
+        }
+        report = summ.flatness(aggs)
+        row = next(line for line in report.splitlines() if line.startswith("| k |"))
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        piccard_cell = cells[1 + summ.PRINTED.index("piccard")]
+        self.assertEqual(piccard_cell, f"{150.0 / 100.0:.3f}")
+
+
 class CliTest(unittest.TestCase):
     def test_partial_renders_sixteen_rows_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -11,8 +11,9 @@ that would only re-measure the same configuration:
   - BCG12Params is {mode, backend, k, minhash_seed} and src/baselines/
     bcg12.cpp never references universe -- no |U| or m
     (include/baselines/bcg12.h:12-18).
-  - FHE-IND's BaselineEngine takes only universe_size/set_size -- no k or m
-    (benchmarks/baseline_engine.h:37,57).
+  - FHE-IND's BaselineEngine takes only universe_size (benchmarks/baseline_engine.h:37,
+    also referenced at 57); the benchmark harness's own Options struct additionally
+    varies set_size (benchmarks/bench_fhe_ind.cpp:70,86-87) -- no k or m in either.
 
 SJ16 at |U| = 2^18 and 2^20 was never executed; those two cells have no
 sidecar at all, and the paper carries a calibrated extrapolation instead
@@ -37,7 +38,7 @@ PRINTED = ("piccard", "piccard_plus", "bcg12_ec", "sj16", "fhe_ind")
 # family -> [(filename needle, phase, column, cell_id suffix in the sidecar header)]
 SOURCES = {
     "piccard_std128": [("bench_piccard__", "total", "piccard", "")],
-    "sqrt_comparison": [("__sqrt__", "total", "piccard_plus", "::sqrt")],   # bench_onehot_sqrt stamps '<cell>::<arm>' (bench_onehot_sqrt.cpp:867)
+    "sqrt_comparison": [("__sqrt__", "total", "piccard_plus", "::sqrt")],   # bench_onehot_sqrt stamps '<cell>::<arm>' (bench_onehot_sqrt.cpp:870,906)
     "bcg12_minhash": [("bcg12_mh_ec", "total", "bcg12_ec", "::bcg12_mh_ec"),
                       ("bcg12_mh_ff", "total", "bcg12_ff", "::bcg12_mh_ff")],
     "sj16": [("__sj16__", "total", "sj16", "::sj16")],
@@ -194,15 +195,42 @@ def missing_cells(aggs: dict[tuple[str, str], Aggregate]) -> list[str]:
 
 
 def flatness(aggs: dict[tuple[str, str], Aggregate]) -> str:
+    """Report max/min of mean_ms within each block, per column, over measured
+    rows only (1.000 = perfectly flat).  A cell reads one of three ways:
+      - a ratio, when the block has two or more distinct measured cells;
+      - "not an input", when every row in the block resolves to the same
+        cell id (per CONSUMED_AXES / cell_for) -- the ratio would be a
+        tautology, one number divided by itself;
+      - "insufficient measured rows", when fewer than two real (non-
+        extrapolated) aggregates are available -- extrapolated rows
+        (measured_count == 0, e.g. EXTRAPOLATED_SJ16) are always excluded
+        from the ratio and, when present, are called out by count.
+    """
     lines = ["# Flatness report", "",
-             "max/min of mean_ms within each block, per column (1.000 = perfectly flat; "
-             "the default point is shared across blocks)", "",
+             "max/min of mean_ms within each block, per column, over MEASURED rows only "
+             "(1.000 = perfectly flat). \"not an input\" = every row in the block is the same "
+             "cell (the axis isn't a protocol input, not a measurement). \"insufficient measured "
+             "rows\" = fewer than two real aggregates; extrapolated rows are always excluded and "
+             "counted when present.", "",
              "| block | " + " | ".join(PRINTED) + " |", "|---|" + "---|" * len(PRINTED)]
     for block in ("u", "n", "k", "m"):
+        rows = [r for r in TABLE_ROWS if r[0] == block]
         cells = []
         for c in PRINTED:
-            vals = [a.mean_ms for a in (_lookup(aggs, r, c) for r in TABLE_ROWS if r[0] == block) if a]
-            cells.append(f"{max(vals) / min(vals):.3f}" if len(vals) >= 2 else "n/a")
+            distinct_ids = {cid for cid in (cell_for(*r, c) for r in rows) if cid is not None}
+            if len(distinct_ids) <= 1:
+                cells.append("n/a (not an input)")
+                continue
+            looked_up = [_lookup(aggs, r, c) for r in rows]
+            extrapolated = [a for a in looked_up if a is not None and a.measured_count == 0]
+            measured = [a.mean_ms for a in looked_up if a is not None and a.measured_count > 0]
+            if len(measured) < 2:
+                cells.append("n/a (insufficient measured rows)")
+            elif extrapolated:
+                ratio = max(measured) / min(measured)
+                cells.append(f"{ratio:.3f} ({len(extrapolated)} of {len(rows)} rows extrapolated, excluded)")
+            else:
+                cells.append(f"{max(measured) / min(measured):.3f}")
         lines.append(f"| {block} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
