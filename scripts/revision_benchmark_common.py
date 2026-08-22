@@ -556,6 +556,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
         mode_arg = {"timing_m": "timing", "accuracy_m": "accuracy",
                     "ciphertext_m": "ciphertext", "crossover_m": "crossover",
                     "timing_k": "timing", "timing_n": "timing",
+                    "timing_u": "timing",
                     "timing_km": "timing", "ciphertext_km": "ciphertext"}[axis]
         args = [
             f"--revision-cell={cid}", f"--profile={profile}", f"--cell={axis}",
@@ -564,7 +565,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--universe={universe}", f"--trials={trials(paper)}", "--seed={seed}",
         ]
         if axis in {"timing_m", "crossover_m", "timing_k", "timing_n",
-                    "timing_km"}:
+                    "timing_u", "timing_km"}:
             args.append("--raw_timing_dir={output}/raw")
         return args
     if family == "piccard_std192_encoding":
@@ -581,7 +582,7 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             f"--revision-cell={cid}", f"--profile={profile}",
             f"--suite={'bcg12-minhash' if minhash else 'bcg12-exact'}",
             f"--methods={'bcg12_mh_ec,bcg12_mh_ff' if minhash else 'bcg12_exact_ec,bcg12_exact_ff'}",
-            f"--k={k}", "--m=64", f"--n={n}", f"--universe={universe}",
+            f"--k={k}", f"--m={m}", f"--n={n}", f"--universe={universe}",
             f"--trials={trials(30)}", "--seed={seed}",
             "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",
@@ -612,8 +613,9 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
             ]
         return [
             f"--revision-cell={cid}", f"--profile={profile}", "--suite=sj16",
-            "--method=sj16", "--k=128", "--m=64", f"--n={n}",
-            f"--universe={universe}", "--key-bits=3072", "--threads=2",
+            "--method=sj16", f"--k={k}", f"--m={m}", f"--n={n}",
+            f"--universe={universe}", "--key-bits=3072",
+            f"--threads={cell['threads']}",
             f"--trials={trials(30)}", "--seed={seed}",
             "--raw_timing_dir={output}/raw",
             "--output={output}/comparison.csv",

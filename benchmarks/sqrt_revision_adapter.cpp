@@ -51,7 +51,7 @@ void RequireSeen(const std::set<std::string>& seen, const char* name) {
 
 std::string RoleForAxis(const std::string& axis) {
     if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
-        axis == "timing_km") {
+        axis == "timing_u" || axis == "timing_km") {
         return "timing";
     }
     if (axis == "accuracy_m") return "accuracy";

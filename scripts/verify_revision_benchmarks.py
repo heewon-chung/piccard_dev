@@ -249,11 +249,7 @@ def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
 def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
     """Independently bind matrix timeout classes to lifecycle budgets."""
     if cell.get("family") == "sj16":
-        timeout_class = (
-            "standard"
-            if cell.get("axis") == "u" and
-            str(cell.get("axis_value")) in {"262144", "1048576"}
-            else "long")
+        timeout_class = "long"
     elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
           str(cell.get("axis_value")) in {"10000", "100000"}):
         # The exact baseline is costly below its top point too: measured on
@@ -3915,7 +3911,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                 _check_terminal_ids(stderr, cell,
                                     {"sqrt"} if na else set(),
                                     reason="sqrt-m-not-perfect-square")
-            elif axis in {"timing_m", "timing_k", "timing_n", "timing_km"}:
+            elif axis in {"timing_m", "timing_k", "timing_n", "timing_u",
+                          "timing_km"}:
                 rows = _csv_table(stdout, _SQRT_TIMING_HEADER,
                                   f"sqrt timing {cid}")
                 _bind_cell_shape(rows, cell, plan, cid, mode)

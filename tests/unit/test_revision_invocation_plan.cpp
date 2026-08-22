@@ -623,10 +623,10 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 }
 
-TEST(RevisionInvocationPlan, ExhaustivelyPlansAllThirtyTwoSqrtCells) {
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllThirtySixSqrtCells) {
     const RevisionMatrix matrix = Load();
     const auto cells = SqrtCells(matrix);
-    ASSERT_EQ(cells.size(), 32u);
+    ASSERT_EQ(cells.size(), 36u);
 
     std::set<std::vector<std::string>> paper_argv;
     std::set<std::vector<std::string>> toy_argv;
@@ -642,7 +642,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllThirtyTwoSqrtCells) {
         const std::string axis = cell->axis;
         const bool timing_axis =
             axis == "timing_m" || axis == "timing_k" ||
-            axis == "timing_n" || axis == "timing_km";
+            axis == "timing_n" || axis == "timing_u" || axis == "timing_km";
         const std::string mode =
             timing_axis ? "timing"
                         : (axis == "accuracy_m"
@@ -757,7 +757,7 @@ TEST(RevisionInvocationPlan,
      RejectsInvalidSqrtIdentityGeometryCountsAndRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = SqrtCells(matrix);
-    ASSERT_EQ(cells.size(), 32u);
+    ASSERT_EQ(cells.size(), 36u);
     const RevisionCell timing = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->cell_id ==
@@ -1725,10 +1725,10 @@ TEST(RevisionInvocationPlan, RejectsInvalidThresholdFamilyGeometryCountsAndRows)
                  std::invalid_argument);
 }
 
-TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyFiveBcg12Cells) {
     const RevisionMatrix matrix = Load();
     const auto cells = Bcg12Cells(matrix);
-    ASSERT_EQ(cells.size(), 16u);
+    ASSERT_EQ(cells.size(), 25u);
 
     std::set<std::vector<std::string>> paper_argv;
     std::set<std::vector<std::string>> toy_argv;
@@ -1754,7 +1754,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
             "--suite=" + suite,
             "--methods=" + methods,
             "--k=" + cell->axes.at("k"),
-            "--m=64",
+            "--m=" + cell->axes.at("m"),
             "--n=" + cell->axes.at("n"),
             "--universe=" + cell->axes.at("u"),
             "--trials=30",
@@ -1768,7 +1768,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllSixteenBcg12Cells) {
             "--suite=" + suite,
             "--methods=" + methods,
             "--k=" + cell->axes.at("k"),
-            "--m=64",
+            "--m=" + cell->axes.at("m"),
             "--n=" + cell->axes.at("n"),
             "--universe=" + cell->axes.at("u"),
             "--trials=1",
@@ -1830,7 +1830,7 @@ TEST(RevisionInvocationPlan,
      RejectsInvalidBcg12IdentityGeometryCountsEligibilityAndRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = Bcg12Cells(matrix);
-    ASSERT_EQ(cells.size(), 16u);
+    ASSERT_EQ(cells.size(), 25u);
 
     const RevisionCell minhash_control = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
@@ -1951,18 +1951,16 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 }
 
-TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyTwoSj16Cells) {
     const RevisionMatrix matrix = Load();
     const auto cells = Sj16Cells(matrix);
-    ASSERT_EQ(cells.size(), 11u);
+    ASSERT_EQ(cells.size(), 22u);
 
     std::set<std::vector<std::string>> run_paper_argv;
     std::set<std::vector<std::string>> run_toy_argv;
     std::set<std::vector<std::string>> run_dry_run_argv;
-    size_t no_spawn_count = 0;
     for (const RevisionCell* cell : cells) {
         SCOPED_TRACE(cell->cell_id);
-        const bool no_spawn = cell->invocation_status == "NO_SPAWN";
         const bool fit = cell->axis == "fit";
         const bool per_element = fit && cell->axis_value == "per_element";
         const bool precomputed = fit && cell->axis_value == "precomputed";
@@ -1984,36 +1982,16 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
         EXPECT_EQ(paper.concrete_profile, "paper-v1");
         EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
         EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
-        EXPECT_EQ(paper.invocation_status, cell->invocation_status);
-        EXPECT_EQ(toy.invocation_status, cell->invocation_status);
-        EXPECT_EQ(dry_run.invocation_status, cell->invocation_status);
-        EXPECT_EQ(paper.timeout_class,
-                  no_spawn ? "standard" : "long");
-        EXPECT_EQ(toy.timeout_class,
-                  no_spawn ? "standard" : "long");
-        EXPECT_EQ(dry_run.timeout_class,
-                  no_spawn ? "standard" : "long");
+        EXPECT_EQ(cell->invocation_status, "RUN");
+        EXPECT_EQ(paper.invocation_status, "RUN");
+        EXPECT_EQ(toy.invocation_status, "RUN");
+        EXPECT_EQ(dry_run.invocation_status, "RUN");
+        EXPECT_EQ(paper.timeout_class, "long");
+        EXPECT_EQ(toy.timeout_class, "long");
+        EXPECT_EQ(dry_run.timeout_class, "long");
         ASSERT_EQ(paper.expected_rows.size(), 1u);
         ASSERT_EQ(toy.expected_rows.size(), 1u);
         ASSERT_EQ(dry_run.expected_rows.size(), 1u);
-
-        if (no_spawn) {
-            ++no_spawn_count;
-            EXPECT_TRUE(paper.argv.empty());
-            EXPECT_TRUE(toy.argv.empty());
-            EXPECT_TRUE(dry_run.argv.empty());
-            EXPECT_EQ(paper.expected_rows.front().status, "EXTRAPOLATED");
-            EXPECT_EQ(paper.expected_rows.front().reason,
-                      "sj16-paillier3072-calibration-bound-v1");
-            EXPECT_EQ(paper.expected_rows.front().fit_authority,
-                      "per_element");
-            EXPECT_EQ(paper.expected_rows.front().measured_count, 0u);
-            EXPECT_EQ(toy.expected_rows.front().measured_count, 0u);
-            EXPECT_EQ(dry_run.expected_rows.front().measured_count, 0u);
-            EXPECT_EQ(paper.expected_rows.front().paper_measured_count, 0u);
-            EXPECT_EQ(paper.expected_rows.front().toy_measured_count, 0u);
-            continue;
-        }
 
         const std::string paper_trials = "30";
         const std::string toy_trials = "1";
@@ -2069,12 +2047,12 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
                 "--profile=paper-v1",
                 "--suite=sj16",
                 "--method=sj16",
-                "--k=128",
-                "--m=64",
+                "--k=" + cell->axes.at("k"),
+                "--m=" + cell->axes.at("m"),
                 "--n=" + cell->axes.at("n"),
                 "--universe=" + cell->axes.at("u"),
                 "--key-bits=3072",
-                "--threads=2",
+                "--threads=16",
                 "--trials=" + paper_trials,
                 "--seed={seed}",
                 "--raw_timing_dir={output}/raw",
@@ -2113,10 +2091,9 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllElevenSj16Cells) {
             EXPECT_TRUE(paper_row.fit_authority.empty());
         }
     }
-    EXPECT_EQ(no_spawn_count, 2u);
-    EXPECT_EQ(run_paper_argv.size(), 9u);
-    EXPECT_EQ(run_toy_argv.size(), 9u);
-    EXPECT_EQ(run_dry_run_argv.size(), 9u);
+    EXPECT_EQ(run_paper_argv.size(), 22u);
+    EXPECT_EQ(run_toy_argv.size(), 22u);
+    EXPECT_EQ(run_dry_run_argv.size(), 22u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -2150,7 +2127,7 @@ TEST(RevisionInvocationPlan,
         "--n=100000",
         "--universe=262144",
         "--key-bits=3072",
-        "--threads=2",
+        "--threads=16",
         "--trials=30",
         "--seed={seed}",
         "--raw_timing_dir={output}/raw",
@@ -2185,13 +2162,13 @@ TEST(RevisionInvocationPlan,
      RejectsInvalidSj16IdentityGeometryCountsAuthorityAndRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = Sj16Cells(matrix);
-    ASSERT_EQ(cells.size(), 11u);
+    ASSERT_EQ(cells.size(), 22u);
 
     const RevisionCell measured = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->axis == "control";
         });
-    const RevisionCell extrapolated = **std::find_if(
+    const RevisionCell large_universe = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->axis == "u" && cell->axis_value == "262144";
         });
@@ -2255,9 +2232,17 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 
     cell = measured;
-    cell.cell_id = "paper-v1::sj16::k=128";
+    cell.cell_id = "paper-v1::sj16::k=2048";
     cell.axis = "k";
-    cell.axis_value = "128";
+    cell.axis_value = "2048";
+    cell.axes["k"] = "2048";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = measured;
+    cell.cell_id = "paper-v1::sj16::j=0.5";
+    cell.axis = "j";
+    cell.axis_value = "0.5";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
@@ -2306,24 +2291,33 @@ TEST(RevisionInvocationPlan,
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = extrapolated;
-    cell.invocation_status = "RUN";
+    ASSERT_NO_THROW(PlanSj16RevisionCell(large_universe,
+                                         RevisionRunMode::Paper));
+
+    cell = large_universe;
+    cell.invocation_status = "NO_SPAWN";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = extrapolated;
-    cell.paper_count = 30;
+    cell = large_universe;
+    cell.paper_count = 0;
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = extrapolated;
-    cell.expected_rows.front().reason = "wrong-reason";
-    cell.expected_rows.front().reason_code = "wrong-reason";
+    cell = large_universe;
+    cell.expected_rows.front().status = "EXTRAPOLATED";
+    cell.expected_rows.front().terminal_status = "EXTRAPOLATED";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = extrapolated;
-    cell.expected_rows.front().fit_authority.clear();
+    cell = large_universe;
+    cell.expected_rows.front().fit_authority = "per_element";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = large_universe;
+    cell.attributes["threads"] = "2";
+    cell.expected_rows.front().attributes["threads"] = "2";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
@@ -3768,7 +3762,7 @@ TEST(RevisionInvocationPlan,
 TEST(RevisionInvocationPlan,
      DispatchesEveryValidatedCellAcrossPaperAndDryRunWithoutSpawning) {
     const RevisionMatrix matrix = Load();
-    ASSERT_EQ(matrix.cells.size(), 275u);
+    ASSERT_EQ(matrix.cells.size(), 299u);
 
     std::set<std::string> paper_ids;
     std::set<std::string> dry_run_ids;
@@ -3806,7 +3800,8 @@ TEST(RevisionInvocationPlan,
             EXPECT_EQ(plan.executable, expected_executable);
             EXPECT_EQ(plan.environment.at("OMP_DYNAMIC"), "FALSE");
             EXPECT_EQ(plan.environment.at("OMP_NUM_THREADS"),
-                      cell.family == "sj16" ? "2" : "{threads}");
+                      cell.family == "sj16" && cell.axis == "fit"
+                          ? "2" : "{threads}");
             EXPECT_EQ(plan.invocation_status, cell.invocation_status);
             ASSERT_EQ(plan.expected_rows.size(), cell.expected_rows.size());
 
@@ -3867,10 +3862,10 @@ TEST(RevisionInvocationPlan,
         }
     }
 
-    EXPECT_EQ(run_count, 273u);
-    EXPECT_EQ(no_spawn_count, 2u);
-    EXPECT_EQ(paper_ids.size(), 275u);
-    EXPECT_EQ(dry_run_ids.size(), 275u);
+    EXPECT_EQ(run_count, 299u);
+    EXPECT_EQ(no_spawn_count, 0u);
+    EXPECT_EQ(paper_ids.size(), 299u);
+    EXPECT_EQ(dry_run_ids.size(), 299u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -3975,13 +3970,11 @@ TEST(RevisionInvocationPlan, RawTimingFlagsAreCellLocalAndTimingOnly) {
                    cell.axes.at("artifact") == "std128_timing") {
             expected = true;
         } else if (cell.family == "sj16") {
-            expected = !(cell.axis == "u" &&
-                         (cell.axis_value == "262144" ||
-                          cell.axis_value == "1048576"));
+            expected = true;
         } else if (cell.family == "sqrt_comparison" &&
                    (cell.axis == "timing_m" || cell.axis == "crossover_m" ||
                     cell.axis == "timing_k" || cell.axis == "timing_n" ||
-                    cell.axis == "timing_km")) {
+                    cell.axis == "timing_u" || cell.axis == "timing_km")) {
             expected = true;
         }
         const bool has_raw = HasArg(plan, "--raw_timing_dir=") ||

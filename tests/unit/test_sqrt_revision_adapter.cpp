@@ -26,7 +26,7 @@ TEST(SqrtRevisionAdapter,
      SelectsExactlyOneCanonicalCellAndPreservesArmTerminalRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = Cells(matrix);
-    ASSERT_EQ(cells.size(), 32u);
+    ASSERT_EQ(cells.size(), 36u);
 
     for (const RevisionRunMode mode : {RevisionRunMode::Paper,
                                        RevisionRunMode::Toy,

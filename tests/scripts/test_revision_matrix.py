@@ -22,9 +22,9 @@ class RevisionMatrixTest(unittest.TestCase):
         cls.document = validate_revision_matrix.load_document(MATRIX)
         validate_revision_matrix.validate_document(cls.document, FIXTURES)
 
-    def test_exact_263_20_104_cardinalities_and_sorted_goldens(self):
+    def test_exact_299_20_104_cardinalities_and_sorted_goldens(self):
         cells = self.document["cells"]
-        self.assertEqual(len(cells), 275)
+        self.assertEqual(len(cells), 299)
         ids = [cell["cell_id"] for cell in cells]
         self.assertEqual(ids, sorted(ids))
         paper = (FIXTURES / "paper_cell_ids.txt").read_text().splitlines()
@@ -51,22 +51,23 @@ class RevisionMatrixTest(unittest.TestCase):
 
         sj = next(c for c in self.document["cells"]
                   if c["cell_id"] == "paper-v1::sj16::u=262144")
-        self.assertEqual(sj["invocation_status"], "NO_SPAWN")
-        self.assertEqual(sj["expected_rows"][0]["status"], "EXTRAPOLATED")
-        self.assertEqual(
-            sj["expected_rows"][0]["reason"],
-            "sj16-paillier3072-calibration-bound-v1")
+        self.assertEqual(sj["invocation_status"], "RUN")
+        self.assertEqual(sj["expected_rows"][0]["status"], "MEASURED")
+        self.assertEqual(sj["expected_rows"][0]["reason"], "")
+        self.assertEqual(sj["expected_rows"][0]["threads"], 16)
 
         sj_fit = next(c for c in self.document["cells"]
                       if c["cell_id"] == "paper-v1::sj16::fit=per_element")
         self.assertEqual(sj_fit["invocation_status"], "RUN")
         self.assertEqual(sj_fit["timeout_class"], "long")
+        # The whole family takes the 18 h stop; only the serial calibration
+        # fits stay at two threads.
         for sj_cell in self.document["cells"]:
-            if sj_cell["family"] == "sj16" and sj_cell is not sj_fit:
-                expected = ("standard"
-                            if sj_cell["invocation_status"] == "NO_SPAWN"
-                            else "long")
-                self.assertEqual(sj_cell["timeout_class"], expected)
+            if sj_cell["family"] == "sj16":
+                self.assertEqual(sj_cell["invocation_status"], "RUN")
+                self.assertEqual(sj_cell["timeout_class"], "long")
+                self.assertEqual(sj_cell["threads"],
+                                 2 if sj_cell["axis"] == "fit" else 16)
 
         bcg12_long = next(c for c in self.document["cells"]
                           if c["cell_id"] == "paper-v1::bcg12_exact::n=100000")
@@ -305,10 +306,10 @@ class RevisionMatrixTest(unittest.TestCase):
             elif family == "real_dataset" and cell["axes"].get("artifact") == "std128_timing":
                 raw = True
             elif family == "sj16":
-                raw = not (axis == "u" and value in {"262144", "1048576"})
+                raw = True
             elif family == "sqrt_comparison" and axis in {"timing_m", "crossover_m",
                                                           "timing_k", "timing_n",
-                                                          "timing_km"}:
+                                                          "timing_u", "timing_km"}:
                 # A non-square m has no sqrt producer row, hence no sqrt raw
                 # artifact; the onehot timing row remains contract-bound.
                 raw = True
@@ -321,7 +322,7 @@ class RevisionMatrixTest(unittest.TestCase):
                 has_contract = row.get("raw_timing_contract") == "raw-phase-v1"
                 if family == "sqrt_comparison" and axis in {"timing_m", "crossover_m",
                                                             "timing_k", "timing_n",
-                                                            "timing_km"}:
+                                                            "timing_u", "timing_km"}:
                     expected_row = row["row_id"] == "onehot" or (
                         row["row_id"] == "sqrt" and
                         str(cell["axes"].get("m")) in {"16", "64", "256"})
@@ -495,8 +496,17 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c.__setitem__("timeout_class", "extended"))
 
         mutate("paper-v1::sj16::u=262144",
-               lambda c: c["expected_rows"][0].__setitem__(
-                   "reason", ""))
+               lambda c: c.__setitem__("threads", 2))
+        mutate("paper-v1::sj16::u=262144",
+               lambda c: c["expected_rows"][0].__setitem__("threads", 2))
+        mutate("paper-v1::sj16::u=262144",
+               lambda c: c.__setitem__("invocation_status", "NO_SPAWN"))
+        mutate("paper-v1::bcg12_minhash::m=16",
+               lambda c: c["axes"].__setitem__("m", 64))
+        mutate("paper-v1::sj16::k=16",
+               lambda c: c["axes"].__setitem__("k", 128))
+        mutate("paper-v1::sqrt_comparison::timing_u=16384",
+               lambda c: c["axes"].__setitem__("u", 65536))
         mutate("paper-v1::sqrt_comparison::timing_m=32",
                lambda c: c["expected_rows"][1].__setitem__(
                    "status", "MEASURED"))

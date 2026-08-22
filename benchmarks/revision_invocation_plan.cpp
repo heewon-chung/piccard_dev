@@ -38,7 +38,8 @@ RevisionInvocationPlan MakePlan(const RevisionCell& cell,
     plan.executable = ExecutableForCell(cell);
     plan.environment = {
         {"OMP_DYNAMIC", "FALSE"},
-        {"OMP_NUM_THREADS", cell.family == "sj16" ? "2" : "{threads}"},
+        {"OMP_NUM_THREADS",
+         cell.family == "sj16" && cell.axis == "fit" ? "2" : "{threads}"},
     };
     if (mode == RevisionRunMode::DryRun) {
         plan.environment.emplace("PICCARD_REVISION_DRY_RUN", "1");
@@ -592,18 +593,19 @@ std::string DeletionProfileForMode(RevisionRunMode mode) {
 bool IsSqrtAxis(const std::string& axis) {
     return axis == "timing_m" || axis == "accuracy_m" ||
            axis == "ciphertext_m" || axis == "crossover_m" ||
-           axis == "timing_k" || axis == "timing_n" ||
+           axis == "timing_k" || axis == "timing_n" || axis == "timing_u" ||
            axis == "timing_km" || axis == "ciphertext_km";
 }
 
 bool IsSqrtRawTimingAxis(const std::string& axis) {
     return axis == "timing_m" || axis == "crossover_m" ||
-           axis == "timing_k" || axis == "timing_n" || axis == "timing_km";
+           axis == "timing_k" || axis == "timing_n" || axis == "timing_u" ||
+           axis == "timing_km";
 }
 
 std::string SqrtProducer(const std::string& axis) {
     if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
-        axis == "timing_km") {
+        axis == "timing_u" || axis == "timing_km") {
         return "bench_onehot_sqrt";
     }
     if (axis == "accuracy_m") return "bench_sqrt_comparison";
@@ -616,7 +618,7 @@ std::string SqrtProducer(const std::string& axis) {
 
 std::string SqrtMode(const std::string& axis) {
     if (axis == "timing_m" || axis == "timing_k" || axis == "timing_n" ||
-        axis == "timing_km") {
+        axis == "timing_u" || axis == "timing_km") {
         return "timing";
     }
     if (axis == "accuracy_m") return "accuracy";
@@ -627,7 +629,7 @@ std::string SqrtMode(const std::string& axis) {
 
 uint64_t SqrtPaperTrials(const std::string& axis) {
     if (axis == "timing_m" || axis == "crossover_m" || axis == "timing_k" ||
-        axis == "timing_n" || axis == "timing_km") {
+        axis == "timing_n" || axis == "timing_u" || axis == "timing_km") {
         return 30;
     }
     if (axis == "accuracy_m") return 50;
@@ -688,6 +690,15 @@ void ValidateSqrtCell(const RevisionCell& cell) {
         RequireAxisValue(cell, "k", 128);
         RequireAxisValue(cell, "m", 64);
         RequireAxisValue(cell, "u", n == 100000 ? 262144 : 65536);
+    } else if (cell.axis == "timing_u") {
+        const uint64_t u = Axis(cell, "u");
+        if (!IsOneOf(u, {16384, 65536, 262144, 1048576}) ||
+            cell.axis_value != std::to_string(u)) {
+            RejectSqrt("invalid sqrt u selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
     } else if (cell.axis == "timing_km" || cell.axis == "ciphertext_km") {
         const bool known_point =
             (cell.axis_value == "k256_m64" && k == 256 && m == 64) ||
@@ -944,8 +955,10 @@ void ValidateBcg12Geometry(const RevisionCell& cell) {
     }
 
     const uint64_t k = Axis(cell, "k");
+    const uint64_t m = Axis(cell, "m");
     const uint64_t n = Axis(cell, "n");
-    if (Axis(cell, "m") != 64u) {
+    const uint64_t u = Axis(cell, "u");
+    if (cell.axis != "m" && m != 64u) {
         RejectBcg12("BCG12 m geometry must be 64");
     }
 
@@ -966,6 +979,30 @@ void ValidateBcg12Geometry(const RevisionCell& cell) {
         RequireAxisValue(cell, "m", 64);
         RequireAxisValue(cell, "n", 1000);
         RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+
+    if (cell.axis == "m") {
+        if (cell.family != "bcg12_minhash" ||
+            !IsOneOf(m, {16, 32, 64, 128, 256}) ||
+            cell.axis_value != std::to_string(m)) {
+            RejectBcg12("invalid BCG12 MinHash m selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+
+    if (cell.axis == "u") {
+        if (cell.family != "bcg12_minhash" ||
+            !IsOneOf(u, {16384, 65536, 262144, 1048576}) ||
+            cell.axis_value != std::to_string(u)) {
+            RejectBcg12("invalid BCG12 MinHash u selector");
+        }
+        RequireAxisValue(cell, "k", 128);
+        RequireAxisValue(cell, "m", 64);
+        RequireAxisValue(cell, "n", 1000);
         return;
     }
 
@@ -1358,7 +1395,7 @@ std::string ThresholdProfileForMode(RevisionRunMode mode) {
 }  // namespace
 
 namespace {
-bool IsSj16Extrapolated(const RevisionCell& cell);
+std::string Sj16Threads(const RevisionCell& cell);
 void ValidateSj16Cell(const RevisionCell& cell);
 std::string Sj16ProfileForMode(RevisionRunMode mode);
 }  // namespace
@@ -1604,7 +1641,7 @@ RevisionInvocationPlan PlanBcg12RevisionCell(const RevisionCell& cell,
             (minhash ? "bcg12_mh_ec,bcg12_mh_ff"
                      : "bcg12_exact_ec,bcg12_exact_ff"),
         "--k=" + cell.axes.at("k"),
-        "--m=64",
+        "--m=" + cell.axes.at("m"),
         "--n=" + cell.axes.at("n"),
         "--universe=" + cell.axes.at("u"),
         std::string("--trials=") + (toy ? "1" : "30"),
@@ -1628,7 +1665,6 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
     const bool fit = cell.axis == "fit";
     const bool per_element = fit && cell.axis_value == "per_element";
     const bool precomputed = fit && cell.axis_value == "precomputed";
-    const bool extrapolated = !fit && IsSj16Extrapolated(cell);
     const std::string profile = Sj16ProfileForMode(mode);
 
     RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
@@ -1641,8 +1677,6 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
         row.measured_count = toy ? row.toy_measured_count
                                  : row.paper_measured_count;
     }
-
-    if (extrapolated) return plan;
 
     if (per_element) {
         plan.argv = {
@@ -1691,12 +1725,12 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
         "--profile=" + profile,
         "--suite=sj16",
         "--method=sj16",
-        "--k=128",
-        "--m=64",
+        "--k=" + cell.axes.at("k"),
+        "--m=" + cell.axes.at("m"),
         "--n=" + cell.axes.at("n"),
         "--universe=" + cell.axes.at("u"),
         "--key-bits=3072",
-        "--threads=2",
+        "--threads=" + Sj16Threads(cell),
         std::string("--trials=") + (toy ? "1" : "30"),
         "--seed={seed}",
         "--raw_timing_dir={output}/raw",
@@ -1712,10 +1746,12 @@ namespace {
         "invalid SJ16 revision invocation cell: " + reason);
 }
 
-bool IsSj16Extrapolated(const RevisionCell& cell) {
-    const auto it = cell.axes.find("u");
-    return cell.axis == "u" && it != cell.axes.end() &&
-           (it->second == "262144" || it->second == "1048576");
+// The calibration fit cells are deliberately serial; every measured SJ16 cell
+// runs the OpenMP-parallel Paillier encryption at the cell's own thread count.
+std::string Sj16Threads(const RevisionCell& cell) {
+    const auto it = cell.attributes.find("threads");
+    if (it == cell.attributes.end()) RejectSj16("SJ16 cell is missing threads");
+    return it->second;
 }
 
 void ValidateSj16Geometry(const RevisionCell& cell) {
@@ -1726,8 +1762,10 @@ void ValidateSj16Geometry(const RevisionCell& cell) {
     if (cell.axes.size() != 4u) {
         RejectSj16("SJ16 cells require exactly k,m,n,u");
     }
-    RequireAxisValue(cell, "k", 128);
-    RequireAxisValue(cell, "m", 64);
+    if (cell.axis != "k") RequireAxisValue(cell, "k", 128);
+    if (cell.axis != "m") RequireAxisValue(cell, "m", 64);
+    const uint64_t k = Axis(cell, "k");
+    const uint64_t m = Axis(cell, "m");
     const uint64_t n = Axis(cell, "n");
     const uint64_t u = Axis(cell, "u");
 
@@ -1752,6 +1790,24 @@ void ValidateSj16Geometry(const RevisionCell& cell) {
             RejectSj16("invalid SJ16 u selector");
         }
         RequireAxisValue(cell, "n", 1000);
+        return;
+    }
+    if (cell.axis == "k") {
+        if (!IsOneOf(k, {16, 32, 64, 128, 256, 512}) ||
+            cell.axis_value != std::to_string(k)) {
+            RejectSj16("invalid SJ16 k selector");
+        }
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
+        return;
+    }
+    if (cell.axis == "m") {
+        if (!IsOneOf(m, {16, 32, 64, 128, 256}) ||
+            cell.axis_value != std::to_string(m)) {
+            RejectSj16("invalid SJ16 m selector");
+        }
+        RequireAxisValue(cell, "n", 1000);
+        RequireAxisValue(cell, "u", 65536);
         return;
     }
     if (cell.axis == "fit") {
@@ -1799,20 +1855,14 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (cell.dataset != "synthetic") {
         RejectSj16("dataset must be synthetic");
     }
-    const bool no_spawn_timeout =
-        cell.axis == "u" &&
-        (cell.axis_value == "262144" || cell.axis_value == "1048576");
-    if (cell.timeout_class != (no_spawn_timeout ? "standard" : "long")) {
-        RejectSj16(no_spawn_timeout
-                       ? "extrapolated cell timeout class must be standard"
-                       : "executable SJ16 timeout class must be long");
+    if (cell.timeout_class != "long") {
+        RejectSj16("SJ16 timeout class must be long");
     }
     ValidateSj16Geometry(cell);
 
     const bool fit = cell.axis == "fit";
     const bool per_element = fit && cell.axis_value == "per_element";
     const bool precomputed = fit && cell.axis_value == "precomputed";
-    const bool extrapolated = !fit && IsSj16Extrapolated(cell);
 
     const std::string expected_producer =
         per_element ? "bench_sj16_calibrate" : "bench_review_comparison";
@@ -1826,18 +1876,16 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     }
 
     const std::string expected_eligibility =
-        (fit || extrapolated) ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
-    const bool eligible = !fit && !extrapolated;
-    const std::string expected_status = extrapolated ? "NO_SPAWN" : "RUN";
+        fit ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
     if (cell.eligibility != expected_eligibility ||
-        cell.table_eligible != eligible ||
-        cell.comparison_eligible != eligible ||
-        cell.invocation_status != expected_status) {
+        cell.table_eligible != !fit ||
+        cell.comparison_eligible != !fit ||
+        cell.invocation_status != "RUN") {
         RejectSj16("SJ16 eligibility/status contract mismatch");
     }
 
     const std::map<std::string, std::string> regular_attributes = {
-        {"key_bits", "3072"}, {"threads", "2"}};
+        {"key_bits", "3072"}, {"threads", "16"}};
     const std::map<std::string, std::string> per_element_attributes = {
         {"fit_authority", "true"}, {"held_out", "32768"},
         {"key_bits", "3072"}, {"precomputed", "false"},
@@ -1873,14 +1921,6 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (per_element) {
         paper_counts = {{"enc_iters", 30}, {"query_trials", 30}};
         toy_counts = {{"enc_iters", 1}, {"query_trials", 1}};
-    } else if (extrapolated && cell.axis != "n") {
-        paper_count = 0;
-        toy_count = 0;
-        paper_counts = {{"timing", 0}};
-        toy_counts = {{"timing", 0}};
-    } else if (extrapolated) {
-        paper_counts = {{"timing", 30}};
-        toy_counts = {{"timing", 1}};
     } else {
         paper_counts = {{"timing", 30}};
         toy_counts = {{"timing", 1}};
@@ -1919,18 +1959,6 @@ void ValidateSj16Cell(const RevisionCell& cell) {
         if (row.attributes != row_attributes ||
             !row.list_attributes.empty() || !row.fit_authority.empty()) {
             RejectSj16("SJ16 precomputed row metadata mismatch");
-        }
-        return;
-    }
-
-    if (extrapolated) {
-        ValidateSj16RowBase(row, "sj16", "EXTRAPOLATED", "sj16",
-                             "sj16-paillier3072-calibration-bound-v1",
-                             0, 0, false);
-        if (row.fit_authority != "per_element" ||
-            row.attributes != regular_attributes ||
-            !row.list_attributes.empty()) {
-            RejectSj16("SJ16 extrapolated row metadata mismatch");
         }
         return;
     }

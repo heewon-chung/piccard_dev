@@ -1,5 +1,5 @@
 {
-  "cell_count": 275,
+  "cell_count": 299,
   "cells": [
     {
       "artifact_schema": "review-comparison-csv-v1",
@@ -701,6 +701,296 @@
       "artifact_schema": "review-comparison-csv-v1",
       "axes": {
         "k": 128,
+        "m": 128,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 128,
+      "cell_id": "paper-v1::bcg12_minhash::m=128",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 16,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 16,
+      "cell_id": "paper-v1::bcg12_minhash::m=16",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 256,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 256,
+      "cell_id": "paper-v1::bcg12_minhash::m=256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 32,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 32,
+      "cell_id": "paper-v1::bcg12_minhash::m=32",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 64,
+      "cell_id": "paper-v1::bcg12_minhash::m=64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
         "m": 64,
         "n": 100,
         "u": 65536
@@ -923,6 +1213,238 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "timeout_class": "extended",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 1048576
+      },
+      "axis": "u",
+      "axis_value": 1048576,
+      "cell_id": "paper-v1::bcg12_minhash::u=1048576",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 16384
+      },
+      "axis": "u",
+      "axis_value": 16384,
+      "cell_id": "paper-v1::bcg12_minhash::u=16384",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 262144
+      },
+      "axis": "u",
+      "axis_value": 262144,
+      "cell_id": "paper-v1::bcg12_minhash::u=262144",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "u",
+      "axis_value": 65536,
+      "cell_id": "paper-v1::bcg12_minhash::u=65536",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ec",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ec",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "bcg12_mh_ff",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "bcg12_mh_ff",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "bcg12_minhash",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
         "timing": 1
@@ -7610,7 +8132,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -7626,7 +8148,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -7769,6 +8291,556 @@
       "axes": {
         "k": 128,
         "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 128,
+      "cell_id": "paper-v1::sj16::k=128",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 16,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 16,
+      "cell_id": "paper-v1::sj16::k=16",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 256,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 256,
+      "cell_id": "paper-v1::sj16::k=256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 32,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 32,
+      "cell_id": "paper-v1::sj16::k=32",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 512,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 512,
+      "cell_id": "paper-v1::sj16::k=512",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 64,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "k",
+      "axis_value": 64,
+      "cell_id": "paper-v1::sj16::k=64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 128,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 128,
+      "cell_id": "paper-v1::sj16::m=128",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 16,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 16,
+      "cell_id": "paper-v1::sj16::m=16",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 256,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 256,
+      "cell_id": "paper-v1::sj16::m=256",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 32,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 32,
+      "cell_id": "paper-v1::sj16::m=32",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "m",
+      "axis_value": 64,
+      "cell_id": "paper-v1::sj16::m=64",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "review-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "key_bits": 3072,
+          "measured_count": 30,
+          "method": "sj16",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sj16",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sj16",
+      "invocation_status": "RUN",
+      "key_bits": 3072,
+      "paper_count": 30,
+      "paper_counts": {
+        "timing": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_review_comparison",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
+      "toy_counts": {
+        "timing": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "review-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
         "n": 100,
         "u": 65536
       },
@@ -7790,7 +8862,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -7806,7 +8878,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -7840,7 +8912,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -7856,7 +8928,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -7890,7 +8962,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -7906,7 +8978,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -7940,7 +9012,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -7956,7 +9028,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -7975,44 +9047,44 @@
       "axis": "u",
       "axis_value": 1048576,
       "cell_id": "paper-v1::sj16::u=1048576",
-      "comparison_eligible": false,
+      "comparison_eligible": true,
       "dataset": "synthetic",
-      "eligibility": "DIAGNOSTIC_ONLY",
+      "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "review-comparison-csv-v1",
       "expected_rows": [
         {
-          "fit_authority": "per_element",
           "key_bits": 3072,
-          "measured_count": 0,
+          "measured_count": 30,
           "method": "sj16",
-          "paper_measured_count": 0,
-          "reason": "sj16-paillier3072-calibration-bound-v1",
-          "reason_code": "sj16-paillier3072-calibration-bound-v1",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
           "row_id": "sj16",
-          "status": "EXTRAPOLATED",
-          "terminal_status": "EXTRAPOLATED",
-          "threads": 2,
-          "toy_measured_count": 0
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
         }
       ],
       "family": "sj16",
-      "invocation_status": "NO_SPAWN",
+      "invocation_status": "RUN",
       "key_bits": 3072,
-      "paper_count": 0,
+      "paper_count": 30,
       "paper_counts": {
-        "timing": 0
+        "timing": 30
       },
-      "paper_trials": 0,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
-      "table_eligible": false,
-      "threads": 2,
-      "timeout_class": "standard",
-      "toy_count": 0,
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
       "toy_counts": {
-        "timing": 0
+        "timing": 1
       },
-      "toy_trials": 0
+      "toy_trials": 1
     },
     {
       "artifact_schema": "review-comparison-csv-v1",
@@ -8041,7 +9113,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -8057,7 +9129,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -8076,44 +9148,44 @@
       "axis": "u",
       "axis_value": 262144,
       "cell_id": "paper-v1::sj16::u=262144",
-      "comparison_eligible": false,
+      "comparison_eligible": true,
       "dataset": "synthetic",
-      "eligibility": "DIAGNOSTIC_ONLY",
+      "eligibility": "TABLE_ELIGIBLE",
       "expected_artifact_schema": "review-comparison-csv-v1",
       "expected_rows": [
         {
-          "fit_authority": "per_element",
           "key_bits": 3072,
-          "measured_count": 0,
+          "measured_count": 30,
           "method": "sj16",
-          "paper_measured_count": 0,
-          "reason": "sj16-paillier3072-calibration-bound-v1",
-          "reason_code": "sj16-paillier3072-calibration-bound-v1",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
           "row_id": "sj16",
-          "status": "EXTRAPOLATED",
-          "terminal_status": "EXTRAPOLATED",
-          "threads": 2,
-          "toy_measured_count": 0
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "threads": 16,
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
         }
       ],
       "family": "sj16",
-      "invocation_status": "NO_SPAWN",
+      "invocation_status": "RUN",
       "key_bits": 3072,
-      "paper_count": 0,
+      "paper_count": 30,
       "paper_counts": {
-        "timing": 0
+        "timing": 30
       },
-      "paper_trials": 0,
+      "paper_trials": 30,
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
-      "table_eligible": false,
-      "threads": 2,
-      "timeout_class": "standard",
-      "toy_count": 0,
+      "table_eligible": true,
+      "threads": 16,
+      "timeout_class": "long",
+      "toy_count": 1,
       "toy_counts": {
-        "timing": 0
+        "timing": 1
       },
-      "toy_trials": 0
+      "toy_trials": 1
     },
     {
       "artifact_schema": "review-comparison-csv-v1",
@@ -8142,7 +9214,7 @@
           "row_id": "sj16",
           "status": "MEASURED",
           "terminal_status": "MEASURED",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "raw_timing_contract": "raw-phase-v1"
         }
@@ -8158,7 +9230,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": true,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {
@@ -10049,6 +11121,246 @@
       "profile": "paper-v1",
       "table_eligible": true,
       "timeout_class": "extended",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 1048576
+      },
+      "axis": "timing_u",
+      "axis_value": 1048576,
+      "cell_id": "paper-v1::sqrt_comparison::timing_u=1048576",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 16384
+      },
+      "axis": "timing_u",
+      "axis_value": 16384,
+      "cell_id": "paper-v1::sqrt_comparison::timing_u=16384",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 262144
+      },
+      "axis": "timing_u",
+      "axis_value": 262144,
+      "cell_id": "paper-v1::sqrt_comparison::timing_u=262144",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
+      "toy_count": 1,
+      "toy_counts": {
+        "onehot": 1,
+        "sqrt": 1
+      },
+      "toy_trials": 1
+    },
+    {
+      "artifact_schema": "sqrt-comparison-csv-v1",
+      "axes": {
+        "k": 128,
+        "m": 64,
+        "n": 1000,
+        "u": 65536
+      },
+      "axis": "timing_u",
+      "axis_value": 65536,
+      "cell_id": "paper-v1::sqrt_comparison::timing_u=65536",
+      "comparison_eligible": true,
+      "dataset": "synthetic",
+      "eligibility": "TABLE_ELIGIBLE",
+      "expected_artifact_schema": "sqrt-comparison-csv-v1",
+      "expected_rows": [
+        {
+          "measured_count": 30,
+          "method": "onehot",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "onehot",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        },
+        {
+          "measured_count": 30,
+          "method": "sqrt",
+          "paper_measured_count": 30,
+          "reason": "",
+          "reason_code": "",
+          "row_id": "sqrt",
+          "status": "MEASURED",
+          "terminal_status": "MEASURED",
+          "toy_measured_count": 1,
+          "raw_timing_contract": "raw-phase-v1"
+        }
+      ],
+      "family": "sqrt_comparison",
+      "invocation_status": "RUN",
+      "paper_count": 30,
+      "paper_counts": {
+        "onehot": 30,
+        "sqrt": 30
+      },
+      "paper_trials": 30,
+      "producer": "bench_onehot_sqrt",
+      "profile": "paper-v1",
+      "table_eligible": true,
+      "timeout_class": "standard",
       "toy_count": 1,
       "toy_counts": {
         "onehot": 1,
@@ -15108,7 +16420,7 @@
   ],
   "families": {
     "bcg12_exact": 5,
-    "bcg12_minhash": 11,
+    "bcg12_minhash": 20,
     "deletion_exact": 1,
     "deletion_mc": 1,
     "dynamic_accuracy": 16,
@@ -15120,8 +16432,8 @@
     "piccard_std128": 20,
     "piccard_std192_encoding": 20,
     "real_dataset": 12,
-    "sj16": 11,
-    "sqrt_comparison": 32,
+    "sj16": 22,
+    "sqrt_comparison": 36,
     "threshold_agreement": 5,
     "threshold_dblp_fpfn": 1,
     "threshold_spec": 5,

@@ -57,13 +57,13 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const RevisionMatrix matrix = Load();
     ASSERT_EQ(matrix.schema, "piccard-revision-matrix-v1");
     ASSERT_EQ(matrix.version, 1u);
-    ASSERT_EQ(matrix.cell_count, 275u);
-    ASSERT_EQ(matrix.cells.size(), 275u);
+    ASSERT_EQ(matrix.cell_count, 299u);
+    ASSERT_EQ(matrix.cells.size(), 299u);
 
     const std::map<std::string, size_t> expected = {
         {"piccard_std128", 20}, {"piccard_std192_encoding", 20},
-        {"fhe_ind", 9}, {"bcg12_minhash", 11}, {"bcg12_exact", 5},
-        {"sj16", 11}, {"estimator_accuracy", 17}, {"sqrt_comparison", 32},
+        {"fhe_ind", 9}, {"bcg12_minhash", 20}, {"bcg12_exact", 5},
+        {"sj16", 22}, {"estimator_accuracy", 17}, {"sqrt_comparison", 36},
         {"flooding", 3}, {"dynamic_timing", 16},
         {"dynamic_accuracy", 16}, {"dynamic_refresh", 1},
         {"deletion_exact", 1}, {"deletion_mc", 1},
@@ -78,7 +78,7 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const auto ids = RevisionMatrixCellIds(matrix);
     EXPECT_TRUE(std::is_sorted(ids.begin(), ids.end()));
     EXPECT_EQ(ids, Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN));
-    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 275u);
+    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 299u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_TOY_GOLDEN).size(), 20u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN).size(),
               104u);
@@ -97,13 +97,14 @@ TEST(RevisionMatrix, RequiredTerminalRowsAndProducerBindingsAreLiteral) {
     EXPECT_EQ(sqrt_row->reason, "sqrt-m-not-perfect-square");
     EXPECT_EQ(sqrt_invalid.producer, "bench_onehot_sqrt");
 
-    const auto& extrapolated = Find(
+    const auto& large_universe = Find(
         matrix, "paper-v1::sj16::u=262144");
-    ASSERT_EQ(extrapolated.invocation_status, "NO_SPAWN");
-    ASSERT_EQ(extrapolated.expected_rows.size(), 1u);
-    EXPECT_EQ(extrapolated.expected_rows.front().status, "EXTRAPOLATED");
-    EXPECT_EQ(extrapolated.expected_rows.front().reason,
-              "sj16-paillier3072-calibration-bound-v1");
+    ASSERT_EQ(large_universe.invocation_status, "RUN");
+    ASSERT_EQ(large_universe.expected_rows.size(), 1u);
+    EXPECT_EQ(large_universe.expected_rows.front().status, "MEASURED");
+    EXPECT_TRUE(large_universe.expected_rows.front().reason.empty());
+    EXPECT_EQ(large_universe.expected_rows.front().attributes.at("threads"),
+              "16");
 
     const auto& fhe_ind = Find(matrix, "paper-v1::fhe_ind::n=1000");
     EXPECT_EQ(fhe_ind.producer, "bench_fhe_ind");
@@ -129,21 +130,19 @@ TEST(RevisionMatrix, RequiredTerminalRowsAndProducerBindingsAreLiteral) {
 
 TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
     const RevisionMatrix matrix = Load();
+    size_t seen = 0;
     for (const auto& cell : matrix.cells) {
         if (cell.family != "sj16") continue;
-        const bool no_spawn =
-            cell.axis == "u" && (cell.axis_value == "262144" ||
-                                 cell.axis_value == "1048576");
-        EXPECT_EQ(cell.timeout_class, no_spawn ? "standard" : "long")
-            << cell.cell_id;
-        EXPECT_EQ(cell.invocation_status,
-                  (cell.axis == "u" &&
-                           (cell.axis_value == "262144" ||
-                            cell.axis_value == "1048576"))
-                      ? "NO_SPAWN"
-                      : "RUN")
+        ++seen;
+        EXPECT_EQ(cell.timeout_class, "long") << cell.cell_id;
+        EXPECT_EQ(cell.invocation_status, "RUN") << cell.cell_id;
+        // The two calibration fits are deliberately serial; every measured
+        // cell runs the OpenMP-parallel encryption at 16 threads.
+        EXPECT_EQ(cell.attributes.at("threads"),
+                  cell.axis == "fit" ? "2" : "16")
             << cell.cell_id;
     }
+    EXPECT_EQ(seen, 22u);
 }
 
 TEST(RevisionMatrix, LargestSetSizeCellsOutrankTheStandardTimeout) {
@@ -346,7 +345,7 @@ TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
     EXPECT_EQ(sj_terminal.paper_count, 30u);
 }
 
-TEST(RevisionMatrix, Sj16N100000IsMeasuredAndOnlyLargeUCellsExtrapolate) {
+TEST(RevisionMatrix, Sj16SweepIsMeasuredIncludingTheLargestUniverses) {
     const RevisionMatrix matrix = Load();
     const auto& n100000 = Find(matrix, "paper-v1::sj16::n=100000");
     ASSERT_EQ(n100000.axes.at("k"), "128");
@@ -365,16 +364,17 @@ TEST(RevisionMatrix, Sj16N100000IsMeasuredAndOnlyLargeUCellsExtrapolate) {
     EXPECT_EQ(n100000.expected_rows.front().paper_measured_count, 30u);
     EXPECT_EQ(n100000.expected_rows.front().toy_measured_count, 1u);
 
-    for (const auto& value : {"262144", "1048576"}) {
+    for (const auto& value : {"16384", "65536", "262144", "1048576"}) {
         const auto& cell = Find(
             matrix, std::string("paper-v1::sj16::u=") + value);
-        EXPECT_EQ(cell.invocation_status, "NO_SPAWN") << cell.cell_id;
+        EXPECT_EQ(cell.invocation_status, "RUN") << cell.cell_id;
         ASSERT_EQ(cell.expected_rows.size(), 1u);
-        EXPECT_EQ(cell.expected_rows.front().status, "EXTRAPOLATED")
+        EXPECT_EQ(cell.expected_rows.front().status, "MEASURED")
             << cell.cell_id;
-        EXPECT_EQ(cell.expected_rows.front().reason,
-                  "sj16-paillier3072-calibration-bound-v1")
+        EXPECT_TRUE(cell.expected_rows.front().reason.empty()) << cell.cell_id;
+        EXPECT_EQ(cell.expected_rows.front().paper_measured_count, 30u)
             << cell.cell_id;
+        EXPECT_EQ(cell.paper_count, 30u) << cell.cell_id;
     }
 }
 
@@ -500,9 +500,18 @@ TEST(RevisionMatrix, ValidationRejectsRunnerContractMutations) {
     expect_rejected(matrix);
 
     matrix = Load();
-    auto& extrapolated = MutableFind(matrix, "paper-v1::sj16::u=262144");
-    extrapolated.expected_rows[0].reason.clear();
-    extrapolated.expected_rows[0].reason_code.clear();
+    MutableFind(matrix, "paper-v1::sj16::u=262144")
+        .expected_rows[0].attributes["threads"] = "2";
+    expect_rejected(matrix);
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::u=262144").attributes["threads"] = "2";
+    expect_rejected(matrix);
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::bcg12_minhash::m=16").axes["m"] = "64";
+    expect_rejected(matrix);
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sqrt_comparison::timing_u=16384")
+        .axes["u"] = "65536";
     expect_rejected(matrix);
     matrix = Load();
     MutableFind(matrix, "paper-v1::sqrt_comparison::timing_m=32").expected_rows[1].status = "MEASURED";

@@ -96,7 +96,7 @@ TEST(ReviewRevisionAdapter,
      SelectsEveryOwnedRunCellAndPreservesPlannerBytesForPaperAndToy) {
     const RevisionMatrix matrix = Load();
     const auto cells = OwnedCells(matrix);
-    ASSERT_EQ(cells.size(), 44u);
+    ASSERT_EQ(cells.size(), 66u);
 
     for (const RevisionRunMode mode : {RevisionRunMode::Paper,
                                        RevisionRunMode::Toy}) {
@@ -135,7 +135,7 @@ TEST(ReviewRevisionAdapter,
      EveryOwnedRunCellIsAcceptedByTheVersionedWorkloadPolicy) {
     const RevisionMatrix matrix = Load();
     const auto cells = OwnedCells(matrix);
-    ASSERT_EQ(cells.size(), 44u);
+    ASSERT_EQ(cells.size(), 66u);
 
     for (const RevisionRunMode mode : {RevisionRunMode::Paper,
                                        RevisionRunMode::Toy}) {
@@ -368,16 +368,37 @@ TEST(ReviewRevisionAdapter,
                             }));
 }
 
-TEST(ReviewRevisionAdapter, RejectsNoSpawnSj16ExtrapolationBeforeProducer) {
+// The large-universe SJ16 points are measured cells now; the adapter must plan
+// them like any other owned cell, and still refuse a cell the orchestrator has
+// marked NO_SPAWN.
+TEST(ReviewRevisionAdapter, PlansLargeUniverseSj16AndStillRejectsNoSpawn) {
     const RevisionMatrix matrix = Load();
-    const RevisionCell* no_spawn = nullptr;
+    const RevisionCell* large_universe = nullptr;
     for (const auto& cell : matrix.cells) {
-        if (cell.cell_id == "paper-v1::sj16::u=262144") no_spawn = &cell;
+        if (cell.cell_id == "paper-v1::sj16::u=262144") large_universe = &cell;
     }
-    ASSERT_NE(no_spawn, nullptr);
-    const auto plan = PlanSj16RevisionCell(*no_spawn, RevisionRunMode::Paper);
-    EXPECT_TRUE(plan.argv.empty());
-    EXPECT_THROW(PlanReviewRevisionExecution(matrix, plan.argv,
+    ASSERT_NE(large_universe, nullptr);
+    EXPECT_EQ(large_universe->invocation_status, "RUN");
+    const auto plan =
+        PlanSj16RevisionCell(*large_universe, RevisionRunMode::Paper);
+    ASSERT_FALSE(plan.argv.empty());
+    EXPECT_NE(std::find(plan.argv.begin(), plan.argv.end(), "--threads=16"),
+              plan.argv.end());
+    EXPECT_NE(std::find(plan.argv.begin(), plan.argv.end(),
+                        "--universe=262144"),
+              plan.argv.end());
+    const auto execution = PlanReviewRevisionExecution(
+        matrix, plan.argv, RevisionRunMode::Paper);
+    EXPECT_EQ(execution.selection.cell.cell_id, large_universe->cell_id);
+    EXPECT_TRUE(execution.producer_must_spawn);
+
+    RevisionMatrix mutated = matrix;
+    for (auto& cell : mutated.cells) {
+        if (cell.cell_id == "paper-v1::sj16::u=262144") {
+            cell.invocation_status = "NO_SPAWN";
+        }
+    }
+    EXPECT_THROW(PlanReviewRevisionExecution(mutated, plan.argv,
                                               RevisionRunMode::Paper),
                  std::invalid_argument);
 }
