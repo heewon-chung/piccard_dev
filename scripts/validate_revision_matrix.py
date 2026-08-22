@@ -679,6 +679,14 @@ def _validate_cell(cell: Any, index: int) -> None:
         for key, value in contract.items():
             _require(observed.get(key) == value,
                      f"{label}.expected_rows[{row_index}] {key} contract mismatch")
+        # The calibration fit only ever backed the EXTRAPOLATED rows. A row
+        # the matrix now declares MEASURED is its own authority, so a
+        # surviving fit_authority claim on it is stale extrapolation
+        # provenance that the matrix must reject rather than pass on.
+        if cell["family"] == "sj16" and observed.get("status") == "MEASURED":
+            _require(not observed.get("fit_authority"),
+                     f"{label}.expected_rows[{row_index}] SJ16 measured row "
+                     "fit authority mismatch")
         expected_raw = "raw-phase-v1" if _requires_raw_timing(
             cell, str(observed.get("row_id", ""))) else ""
         _require(observed.get("raw_timing_contract", "") == expected_raw,

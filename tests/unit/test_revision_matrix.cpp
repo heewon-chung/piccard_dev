@@ -510,6 +510,18 @@ TEST(RevisionMatrix, ValidationRejectsRunnerContractMutations) {
     matrix = Load();
     MutableFind(matrix, "paper-v1::sj16::u=262144").attributes["threads"] = "2";
     expect_rejected(matrix);
+    // The calibration fit only ever backed the EXTRAPOLATED rows, so the two
+    // large-|U| cells that are now measured must not carry the fit's
+    // authority forward on their rows: that would be stale extrapolation
+    // provenance riding along on a directly measured number.
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::u=262144")
+        .expected_rows[0].fit_authority = "per_element";
+    expect_rejected(matrix);
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::u=1048576")
+        .expected_rows[0].fit_authority = "per_element";
+    expect_rejected(matrix);
     // fit=precomputed runs bench_review_comparison, which ignores --threads
     // and is governed by OMP_NUM_THREADS like the rest of the family (F-6):
     // its stale threads=2 claim is now rejected the same as any other

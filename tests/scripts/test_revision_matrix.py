@@ -507,6 +507,16 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c["expected_rows"][0].__setitem__("threads", 2))
         mutate("paper-v1::sj16::u=262144",
                lambda c: c.__setitem__("invocation_status", "NO_SPAWN"))
+        # The calibration fit only ever backed the EXTRAPOLATED rows, so the
+        # two large-|U| cells that are now measured must not carry the fit's
+        # authority forward on their rows: that would be stale extrapolation
+        # provenance riding along on a directly measured number.
+        mutate("paper-v1::sj16::u=262144",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "fit_authority", "per_element"))
+        mutate("paper-v1::sj16::u=1048576",
+               lambda c: c["expected_rows"][0].__setitem__(
+                   "fit_authority", "per_element"))
         # fit=precomputed runs bench_review_comparison, which ignores
         # --threads and is governed by OMP_NUM_THREADS like the rest of the
         # family (F-6): its stale threads=2 claim is now rejected the same

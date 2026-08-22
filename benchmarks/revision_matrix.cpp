@@ -1021,6 +1021,15 @@ void ValidateFamilyCell(const RevisionCell& cell) {
         return;
     }
     if (cell.family == "sj16") {
+        // The calibration fit only ever backed the EXTRAPOLATED rows. A row
+        // the matrix now declares MEASURED is its own authority, so a
+        // surviving fit_authority claim on it is stale extrapolation
+        // provenance that the matrix must reject rather than pass on.
+        for (const auto& sj16_row : cell.expected_rows) {
+            if (sj16_row.status == "MEASURED" && !sj16_row.fit_authority.empty()) {
+                throw std::invalid_argument("SJ16 measured row fit authority mismatch");
+            }
+        }
         // The distinction that matters is the producer, not the axis name:
         // fit=per_element runs bench_sj16_calibrate, which genuinely honors
         // its own --threads via omp_set_num_threads and stays pinned at 2.
