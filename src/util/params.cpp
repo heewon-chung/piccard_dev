@@ -259,6 +259,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                m,
                security,
                threshold_mode,
+               giant_step,
                transcript_stat_bits,
                max_queries,
                flood_margin_bits,
@@ -286,6 +287,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                other.m,
                other.security,
                other.threshold_mode,
+               other.giant_step,
                other.transcript_stat_bits,
                other.max_queries,
                other.flood_margin_bits,
@@ -317,6 +319,7 @@ PiccardParams::CurrentValidationSnapshot() const {
         m,
         security,
         threshold_mode,
+        giant_step,
         transcript_stat_bits,
         max_queries,
         flood_margin_bits,
@@ -636,6 +639,51 @@ void PiccardParams::ClearFloodingSelection() {
     ring_dim_natural = 0;
 }
 
+namespace {
+
+struct PsShape {
+    uint32_t s = 1;
+    uint32_t baby_depth = 0;
+    uint32_t num_chunks = 0;
+};
+
+// s = ceil(sqrt(degree+1)), ell = ceil((degree+1)/s); baby depth is the
+// depth of x^s under EvalPolyBFV's power tree (even j -> square, odd j -> *x).
+PsShape ComputePsShape(uint32_t degree) {
+    PsShape shape;
+    while (shape.s * shape.s < degree + 1) shape.s++;
+    for (uint32_t v = shape.s; v > 1;) {
+        shape.baby_depth++;
+        if (v % 2 == 1) v--; else v /= 2;
+    }
+    shape.num_chunks = (degree + shape.s) / shape.s;
+    return shape;
+}
+
+uint32_t CeilLog2(uint32_t n) {
+    uint32_t d = 0;
+    while ((1u << d) < n) d++;
+    return d;
+}
+
+}  // namespace
+
+uint32_t PatersonStockmeyerNaturalDepth(uint32_t degree, GiantStepMode mode) {
+    const PsShape shape = ComputePsShape(degree);
+    const uint32_t giant_depth =
+        mode == GiantStepMode::Tree ? CeilLog2(shape.num_chunks)
+                                    : shape.num_chunks - 1;
+    return 1 + shape.baby_depth + giant_depth;  // +1: ct_x * ct_y
+}
+
+uint32_t PatersonStockmeyerGiantMults(uint32_t degree, GiantStepMode mode) {
+    const PsShape shape = ComputePsShape(degree);
+    const uint32_t ell = shape.num_chunks;
+    if (ell <= 1) return 0;
+    if (mode == GiantStepMode::Tree) return (ell - 1) + (CeilLog2(ell) - 1);
+    return ell - 1;
+}
+
 void PiccardParams::DeriveWithoutFlooding() {
     ClearFloodingSelection();
     if (k == 0) throw std::invalid_argument("k must be > 0");
@@ -654,30 +702,8 @@ void PiccardParams::DeriveWithoutFlooding() {
 
     mult_depth = 1;
     if (threshold_mode) {
-        // Paterson-Stockmeyer baby-step/giant-step for degree-k polynomial.
-        // Must match EvalPolyBFV's step-size calculation exactly.
-        uint32_t degree = k;
-        uint32_t s = 1;
-        while (s * s < degree + 1) s++;
-
-        // Baby-step depth: mirrors the power tree in EvalPolyBFV
-        // (even j → square, odd j → multiply by x)
-        uint32_t baby_depth = 0;
-        {
-            uint32_t v = s;
-            while (v > 1) {
-                baby_depth++;
-                if (v % 2 == 1) v--;
-                else v /= 2;
-            }
-        }
-
-        // Giant-step multiplications (Horner over num_chunks)
-        uint32_t num_chunks = (degree + s) / s;
-        uint32_t giant_mults = num_chunks - 1;
-
-        // +1 for the initial ct_x * ct_y in ComputeThresholdResult
-        mult_depth = 1 + baby_depth + giant_mults;
+        // Must match BFVContext::EvalPolyBFV for the selected giant_step.
+        mult_depth = PatersonStockmeyerNaturalDepth(k, giant_step);
     }
     natural_mult_depth = mult_depth;
 }

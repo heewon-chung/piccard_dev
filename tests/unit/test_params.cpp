@@ -1349,3 +1349,45 @@ TEST(PiccardParams, ExtremeHashSeedsAreAccepted) {
         EXPECT_NO_THROW(params.Validate());
     }
 }
+
+TEST(PiccardParams, ThresholdMultDepthTree) {
+    // Tree giant step: depth = 1 + baby_depth + ceil(log2(num_chunks)).
+    struct Case { uint32_t k; uint32_t expected_depth; uint32_t expected_giant_mults; };
+    Case cases[] = {
+        {4, 4, 1}, {8, 5, 3}, {16, 6, 4}, {32, 7, 7},
+        {64, 8, 9}, {128, 9, 13}, {256, 10, 18},
+    };
+    for (auto& c : cases) {
+        PiccardParams params;
+        params.k = c.k;
+        params.m = 64;
+        params.security = SecurityLevel::STD128;
+        params.threshold_mode = true;
+        params.threshold_tau = c.k / 2;
+        params.giant_step = GiantStepMode::Tree;
+        CalibrationAccess::Derive(params);  // derive only: tree has no table rows
+        EXPECT_EQ(params.natural_mult_depth, c.expected_depth) << "k=" << c.k;
+        EXPECT_EQ(PatersonStockmeyerNaturalDepth(c.k, GiantStepMode::Tree),
+                  c.expected_depth) << "k=" << c.k;
+        EXPECT_EQ(PatersonStockmeyerGiantMults(c.k, GiantStepMode::Tree),
+                  c.expected_giant_mults) << "k=" << c.k;
+    }
+    EXPECT_EQ(PatersonStockmeyerNaturalDepth(128, GiantStepMode::Horner), 15u);
+    EXPECT_EQ(PatersonStockmeyerNaturalDepth(256, GiantStepMode::Horner), 21u);
+    EXPECT_EQ(PatersonStockmeyerGiantMults(128, GiantStepMode::Horner), 10u);
+}
+
+TEST(PiccardParams, GiantStepMutationAfterValidateIsDetected) {
+    // giant_step is part of the validation snapshot: flipping it after a
+    // successful selection must be caught by the fail-closed revalidation.
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.threshold_mode = true;
+    params.threshold_tau = 8;
+    params.Validate();  // Horner, TOY row exists
+    ASSERT_TRUE(params.FloodingSized());
+    params.giant_step = GiantStepMode::Tree;
+    EXPECT_THROW(params.FloodNoiseBits(), std::logic_error);
+}

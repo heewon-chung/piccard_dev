@@ -36,6 +36,23 @@ PiccardParams SelectPreThresholdCalibration(
     const PreThresholdCalibrationRequest& request,
     const std::vector<PreThresholdCalibrationRow>& candidates);
 
+// Giant-step structure of the Paterson-Stockmeyer threshold evaluator.
+//   Horner: result = result * x^s + chunk   (ell-1 sequential ct-ct mults,
+//           giant depth ell-1).
+//   Tree:   chunks are combined pairwise with precomputed x^{s*2^j}
+//           (ell-1 combine mults + ceil(log2 ell)-1 squarings, giant depth
+//           ceil(log2 ell)).
+// PiccardParams::DeriveWithoutFlooding, BFVContext::EvalPolyBFV and the
+// bench_threshold spec dump must all derive the same depth from this value.
+enum class GiantStepMode : uint8_t { Horner = 0, Tree = 1 };
+
+// Natural multiplicative depth of the whole threshold circuit for a degree-k
+// polynomial: 1 (initial ct_x * ct_y) + baby-step depth + giant-step depth.
+uint32_t PatersonStockmeyerNaturalDepth(uint32_t degree, GiantStepMode mode);
+
+// Number of ciphertext-ciphertext multiplications spent in the giant step.
+uint32_t PatersonStockmeyerGiantMults(uint32_t degree, GiantStepMode mode);
+
 struct PiccardParams {
     // User-configurable
     uint32_t k = 128;                          // Number of MinHash functions
@@ -156,6 +173,11 @@ struct PiccardParams {
     uint64_t plaintext_mod = 0;                // Prime p > k, p ≡ 1 mod 2N
     uint32_t mult_depth = 1;                   // 1 for basic/dynamic, higher for threshold
 
+    // Threshold variant only. Horner is the frozen default measured in the
+    // 2026-08-20 revision run; Tree is the PoC comparison (review item D-10).
+    // Tree requires threshold_calibration_override (Task 3); Horner forbids it.
+    GiantStepMode giant_step = GiantStepMode::Horner;
+
     // Derived by ValidateSqrt() — base-√m encoding
     uint32_t sqrt_base = 0;                    // √m (power of 2)
     uint32_t sqrt_feature_dim = 0;             // k * 2 * √m
@@ -169,6 +191,7 @@ private:
         uint32_t m;
         SecurityLevel security;
         bool threshold_mode;
+        GiantStepMode giant_step;
         uint32_t transcript_stat_bits;
         uint64_t max_queries;
         uint32_t flood_margin_bits;
