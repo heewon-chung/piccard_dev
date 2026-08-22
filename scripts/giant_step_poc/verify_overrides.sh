@@ -52,9 +52,13 @@ while IFS= read -r line; do
   logd=$(awk -F, 'NR==2{printf "%d", $15}' "$f")
   ring=$(awk -F, 'NR==2{print $5}' "$f")
   mdep=$(awk -F, 'NR==2{print $9}' "$f")
-  vary=$(awk -F, -v l="$logd" -v r="$ring" 'NR>1 && (int($15)!=l || $5!=r)' "$f" | wc -l | tr -d ' ')
-  if [ "$ring" != "$wring" ] || [ "$mdep" != "$depth" ] || [ "$vary" != "0" ]; then
-    echo "  MISMATCH k=$k: realized ring=$ring depth=$mdep (override $wring/$depth), inconsistent_rows=$vary"; fail=1; continue
+  rsms=$(awk -F, 'NR==2{print $11}' "$f")
+  vary=$(awk -F, -v l="$logd" -v r="$ring" -v m="$mdep" -v x="$rsms" \
+         'NR>1 && (int($15)!=l || $5!=r || $9!=m || $11!=x)' "$f" | wc -l | tr -d ' ')
+  # The override feeds mult_depth, scaling_mod_size, ring_dim and log_delta
+  # straight into the deployed context, so each must be what this box realized.
+  if [ "$ring" != "$wring" ] || [ "$mdep" != "$depth" ] || [ "$rsms" != "$sms" ] || [ "$vary" != "0" ]; then
+    echo "  MISMATCH k=$k: realized ring=$ring depth=$mdep sms=$rsms (override $wring/$depth/$sms), inconsistent_rows=$vary"; fail=1; continue
   fi
   if [ "$logd" != "$wlogd" ]; then
     echo "  NOTE k=$k: realized log2(q/t)=$logd differs from override $wlogd; gating on the realized value"
@@ -70,7 +74,7 @@ while IFS= read -r line; do
     echo "  INFEASIBLE k=$k: measured eval_noise=$got, need $need > realized log2(q/t)=$logd, bad_rows=$bad"; fail=1
   else
     drift=$((got - want))
-    echo "  ok k=$k: eval_noise=$got (override $want, drift $drift), $need <= realized $logd, N=$ring depth=$mdep, bad_rows=0"
+    echo "  ok k=$k: eval_noise=$got (override $want, drift $drift), $need <= realized $logd, N=$ring depth=$mdep sms=$rsms, bad_rows=0"
   fi
 done < "$OVR"
 if [ "$fail" = 0 ]; then echo "all overrides verified on this machine"
