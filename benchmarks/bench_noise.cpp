@@ -73,6 +73,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -507,6 +508,11 @@ static uint64_t FindCandidatePlaintextModulus(
 // the default, so every existing invocation is unaffected.
 static GiantStepMode g_giant_step = GiantStepMode::Horner;
 
+// Defined below BuildParams, which it calls with derive_only_threshold = true.
+static uint32_t DiscoverThresholdProbeRingDimension(
+    SecurityLevel sec, uint32_t k, uint32_t m,
+    uint32_t depth_delta, uint32_t sms);
+
 static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t k, uint32_t m,
                                  uint32_t depth_delta, uint32_t sms,
@@ -514,7 +520,8 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t natural_ring_dim = 0,
                                  uint32_t calibrated_ring_dim = 0,
                                  uint32_t* natural_depth_out = nullptr,
-                                 uint32_t candidate_max_k = 0) {
+                                 uint32_t candidate_max_k = 0,
+                                 bool derive_only_threshold = false) {
     PiccardParams params;
     params.k = k;
     params.m = m;
@@ -572,6 +579,38 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                 params.mult_depth,
                 params.scaling_mod_size,
                 0,
+                1.0e9,
+            });
+    }
+
+    // The threshold measurement runs through Piccard, whose KeyGen adopts the
+    // runtime ring dimension and so demands a sized flooding term. Neither the
+    // block above nor the frozen table can supply one here: the sanitizer
+    // selector rejects the threshold circuit outright, and a frozen row would
+    // be chosen on its own provisioned depth and limb size, silently replacing
+    // the (depth_delta, sms) pair this call was asked to probe. Arm with a
+    // permissive placeholder row instead, the same trick as above. The
+    // placeholder sizes only the flooding term; RunThreshold measures through
+    // EvaluateRaw, so it is never applied, and the reported eval_noise_bits and
+    // log_delta both come from the live context via Finish().
+    if (circuit == Circuit::Threshold && !derive_only_threshold) {
+        params.flood_margin_bits = 0;
+        CalibrationAccess::ArmThresholdProbe(
+            params,
+            ThresholdCalibrationOverride{
+                // Depth and limb size actually being probed. Validate() clears
+                // both and the selector restores them from this row, so they
+                // have to be carried here rather than left on `params`.
+                params.mult_depth,
+                sms,
+                // Smallest value the override validator accepts; it rejects 0.
+                1,
+                // Must equal the dimension OpenFHE will realise: the adoption
+                // guard compares the runtime N against this exact value.
+                DiscoverThresholdProbeRingDimension(
+                    sec, k, m, depth_delta, sms),
+                // Large enough that the placeholder always clears
+                // eval_noise + 64 + flood_margin + 2 <= log_delta.
                 1.0e9,
             });
     }
@@ -729,6 +768,42 @@ static uint32_t DiscoverNaturalRingDimensionContextOnly(
     BFVContext context(params);
     context.InitializeContextOnly();
     return context.GetSlotCount();
+}
+
+// The dimension OpenFHE realises for the threshold configuration actually being
+// probed, i.e. at the provisioned depth and limb size, not at the circuit's own
+// natural pair. AdoptVerifiedRuntimeRingDim compares the runtime N against the
+// ring_dim_natural of the armed row, so the probe has to know this value before
+// it arms itself. Derive-only params carry no flooding, so BFVContext builds the
+// context without touching the adoption guard -- which is the whole reason this
+// discovery is possible at all.
+//
+// Memoised: BuildParams is called once per cell (plus once per baseline), and
+// context construction at STD128 is not cheap. giant_step is part of the key
+// because it changes the natural depth.
+static uint32_t DiscoverThresholdProbeRingDimension(
+    SecurityLevel sec, uint32_t k, uint32_t m,
+    uint32_t depth_delta, uint32_t sms) {
+    using Key = std::tuple<int, int, uint32_t, uint32_t, uint32_t, uint32_t>;
+    static std::map<Key, uint32_t> cache;
+    const Key key{static_cast<int>(sec), static_cast<int>(g_giant_step),
+                  k, m, depth_delta, sms};
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    PiccardParams params = BuildParams(
+        Circuit::Threshold, sec, k, m, depth_delta, sms,
+        /*pre_threshold_evidence=*/false,
+        /*natural_ring_dim=*/0,
+        /*calibrated_ring_dim=*/0,
+        /*natural_depth_out=*/nullptr,
+        /*candidate_max_k=*/0,
+        /*derive_only_threshold=*/true);
+    BFVContext context(params);
+    context.InitializeContextOnly();
+    const uint32_t realized = context.GetSlotCount();
+    cache.emplace(key, realized);
+    return realized;
 }
 
 // ============================================================================

@@ -216,6 +216,38 @@ ExplicitRingCandidateSet BuildExplicitRingCandidateSet(
 struct CalibrationAccess {
     static void Derive(PiccardParams& params) { params.DeriveWithoutFlooding(); }
     static void DeriveSqrt(PiccardParams& params) { params.DeriveSqrtWithoutFlooding(); }
+
+    /**
+     * @brief Arms the threshold noise probe with a caller-supplied row.
+     *
+     * The derive-only entry points above are not enough for the threshold
+     * circuit: its measurement runs through Piccard, which adopts the runtime
+     * ring dimension and therefore demands a sized flooding term. The probe
+     * cannot obtain one the production way. Under GiantStepMode::Tree the
+     * frozen table holds no valid row by construction (commit b98f937), and
+     * under GiantStepMode::Horner the table's rows are selected on their own
+     * provisioned depth and limb size, which would silently replace the
+     * (mult_depth, scaling_mod_size) pair the probe was asked to measure.
+     *
+     * So the probe supplies a permissive placeholder row here, exactly as the
+     * pre-threshold probe supplies a permissive CalibrationCandidate to
+     * SelectSanitizerCandidate. This waives one rule and one rule only: that
+     * GiantStepMode::Horner must not carry an override. Everything else still
+     * applies, namely the override's own validity checks, the feasibility
+     * inequality (eval_noise + 64 + flood_margin + 2 <= log_delta), the
+     * revalidation snapshot (which covers the waiver itself, so it cannot be
+     * switched on or off after selection), and BFVContext's live-context
+     * verification.
+     *
+     * The placeholder sizes only the flooding term, which the probe never
+     * applies: it measures through EvaluateRaw and reports the live context's
+     * log2(q/t) and its own measured noise.
+     *
+     * @throws std::invalid_argument unless params.threshold_mode is set, or if
+     *         the supplied row fails the unchanged feasibility checks.
+     */
+    static void ArmThresholdProbe(PiccardParams& params,
+                                  const ThresholdCalibrationOverride& row);
 };
 
 } // namespace piccard

@@ -277,6 +277,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                threshold_mode,
                giant_step,
                threshold_calibration_override,
+               threshold_probe_arming,
                transcript_stat_bits,
                max_queries,
                flood_margin_bits,
@@ -306,6 +307,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                other.threshold_mode,
                other.giant_step,
                other.threshold_calibration_override,
+               other.threshold_probe_arming,
                other.transcript_stat_bits,
                other.max_queries,
                other.flood_margin_bits,
@@ -339,6 +341,7 @@ PiccardParams::CurrentValidationSnapshot() const {
         threshold_mode,
         giant_step,
         threshold_calibration_override,
+        threshold_probe_arming_,
         transcript_stat_bits,
         max_queries,
         flood_margin_bits,
@@ -480,6 +483,16 @@ void PiccardParams::AdoptVerifiedRuntimeRingDim(uint32_t runtime_n) {
 }
 
 void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth) {
+    // Fail closed if the harness waiver ever reaches a circuit or a state it
+    // was not meant for. It only ever waives the Horner half of the threshold
+    // pairing rule below, and only with a row actually supplied.
+    if (threshold_probe_arming_ &&
+        (circuit != Circuit::Threshold ||
+         !threshold_calibration_override.has_value())) {
+        throw std::invalid_argument(
+            "threshold probe arming requires the threshold circuit and a "
+            "supplied calibration override");
+    }
     bool key_exists = false;
     double best_capacity = -std::numeric_limits<double>::infinity();
     std::string best_infeasible;
@@ -528,8 +541,17 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
         // (k=32) and 9 (k=128) collide with rows that were measured on the
         // Horner circuit. Adopting one of those would size the flooding term
         // against evaluation noise the tree circuit never produced.
+        //
+        // threshold_probe_arming_ waives ONLY the Horner half, and only for a
+        // caller holding util/params_calibration.h: the bench_noise probe that
+        // produces these rows has to measure both giant steps, so under Horner
+        // it cannot use the frozen table (which would silently substitute its
+        // own depth and limb size for the ones being probed) and it has no
+        // measurement to supply yet either. See
+        // CalibrationAccess::ArmThresholdProbe.
         if (giant_step == GiantStepMode::Horner &&
-            threshold_calibration_override.has_value()) {
+            threshold_calibration_override.has_value() &&
+            !threshold_probe_arming_) {
             throw std::invalid_argument(
                 "threshold calibration override is only accepted with "
                 "GiantStepMode::Tree");

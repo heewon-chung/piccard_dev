@@ -518,4 +518,20 @@ ExplicitRingCandidateSet BuildExplicitRingCandidateSet(
     };
 }
 
+void CalibrationAccess::ArmThresholdProbe(
+    PiccardParams& params,
+    const ThresholdCalibrationOverride& row) {
+    if (!params.threshold_mode) {
+        throw std::invalid_argument(
+            "threshold probe arming requires threshold_mode");
+    }
+    params.threshold_calibration_override = row;
+    params.threshold_probe_arming_ = true;
+    // Validate() re-derives and then runs the unchanged threshold selector,
+    // which validates `row`, applies the feasibility inequality, sizes the
+    // flooding term and captures the revalidation snapshot. That snapshot is
+    // exactly what AdoptVerifiedRuntimeRingDim requires.
+    params.Validate();
+}
+
 }  // namespace piccard

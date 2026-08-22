@@ -1602,3 +1602,124 @@ TEST(PiccardParams, HornerAbsentOverrideRevalidatesCleanly) {
     EXPECT_NO_THROW(params.AdoptVerifiedRuntimeRingDim(
         params.SelectedCalibratedRingDim()));
 }
+
+// ── CalibrationAccess::ArmThresholdProbe (Task 4b) ──────────────────────
+//
+// The bench_noise threshold probe measures the very rows the selector looks up,
+// for BOTH giant steps, so it can satisfy neither half of the Tree/Horner
+// pairing rule. It arms itself through the harness-only door instead. These
+// tests pin what that door does and, more importantly, what it still refuses.
+
+// The load-bearing one. Under Horner the frozen table DOES hold rows for
+// (Threshold, STD128, requested 8192, natural 15) -- mult_depth {15,16,17},
+// scaling_mod_size {40,45,52,58}, ring_dim_natural 32768 -- so an
+// implementation that "armed" Horner by simply letting Validate() find a
+// frozen row would also leave FloodingSized() true and adoption working. Every
+// value asserted here is therefore one no such row carries: if the door fell
+// through to the table, or if it did not exist at all, this test fails.
+TEST(PiccardParams, ArmThresholdProbeArmsHornerWithoutTheFrozenTable) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;  // natural depth 15
+    params.flood_margin_bits = 0;
+    CalibrationAccess::ArmThresholdProbe(
+        params,
+        ThresholdCalibrationOverride{19, 33, 500, 65536, 900.0});
+
+    EXPECT_EQ(params.natural_mult_depth, 15u);
+    EXPECT_EQ(params.mult_depth, 19u);          // table offers 15, 16, 17
+    EXPECT_EQ(params.scaling_mod_size, 33u);    // table offers 40, 45, 52, 58
+    EXPECT_EQ(params.eval_noise_bits, 500u);    // table offers 527..546
+    EXPECT_EQ(params.ring_dim_natural, 65536u); // table offers 32768
+    EXPECT_EQ(params.RequestedRingDim(), 8192u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 65536u);
+    ASSERT_TRUE(params.FloodingSized());
+    EXPECT_EQ(params.FloodNoiseBits(), 500u + 64u);
+    // The point of the whole exercise: Piccard::InitializeContextOnly can now
+    // adopt the dimension OpenFHE realises.
+    EXPECT_NO_THROW(params.AdoptVerifiedRuntimeRingDim(65536u));
+}
+
+TEST(PiccardParams, ArmThresholdProbeArmsTree) {
+    PiccardParams params = MakeTreeStd128(128);  // natural depth 9
+    params.flood_margin_bits = 0;
+    CalibrationAccess::ArmThresholdProbe(
+        params,
+        ThresholdCalibrationOverride{11, 33, 500, 65536, 900.0});
+    EXPECT_EQ(params.natural_mult_depth, 9u);
+    EXPECT_EQ(params.mult_depth, 11u);
+    ASSERT_TRUE(params.FloodingSized());
+    EXPECT_NO_THROW(params.AdoptVerifiedRuntimeRingDim(65536u));
+}
+
+// The waiver covers the pairing rule and nothing else. A row that does not fit
+// eval_noise + 64 + flood_margin + 2 <= log_delta is still rejected, under both
+// giant steps.
+TEST(PiccardParams, ArmThresholdProbeStillEnforcesFeasibility) {
+    for (GiantStepMode mode : {GiantStepMode::Horner, GiantStepMode::Tree}) {
+        PiccardParams params = MakeTreeStd128(128);
+        params.giant_step = mode;
+        params.flood_margin_bits = 0;
+        // 500 + 64 + 0 + 2 = 566 > 565.
+        EXPECT_THROW(
+            CalibrationAccess::ArmThresholdProbe(
+                params,
+                ThresholdCalibrationOverride{19, 33, 500, 65536, 565.0}),
+            std::invalid_argument)
+            << "mode=" << static_cast<int>(mode);
+    }
+}
+
+// ... and the override's own validity checks still run: a provisioned depth
+// below the natural depth is refused even through the harness door.
+TEST(PiccardParams, ArmThresholdProbeStillRejectsDepthBelowNatural) {
+    PiccardParams params = MakeTreeStd128(128);  // Tree, natural depth 9
+    params.flood_margin_bits = 0;
+    EXPECT_THROW(
+        CalibrationAccess::ArmThresholdProbe(
+            params,
+            ThresholdCalibrationOverride{8, 33, 500, 65536, 900.0}),
+        std::invalid_argument);
+}
+
+// The door is threshold-only. Without this, arming a non-threshold profile
+// would run the onehot/sqrt selector with an override silently ignored.
+TEST(PiccardParams, ArmThresholdProbeRejectsNonThresholdProfile) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.threshold_mode = false;
+    EXPECT_THROW(
+        CalibrationAccess::ArmThresholdProbe(
+            params,
+            ThresholdCalibrationOverride{19, 33, 500, 65536, 900.0}),
+        std::invalid_argument);
+}
+
+// Containment. The waiver lives behind CalibrationAccess; a caller that only
+// sets the public fields -- which is every production caller, none of which
+// includes util/params_calibration.h -- still hits the b98f937 guard. This is
+// the assertion that would break if the Horner rejection had simply been
+// deleted instead of gated.
+TEST(PiccardParams, ProductionValidateStillRejectsHornerWithOverride) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;
+    params.flood_margin_bits = 0;
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{19, 33, 500, 65536, 900.0};
+    EXPECT_THROW(params.Validate(), std::invalid_argument);
+}
+
+// Arming does not stick to the profile as a laundering device: a re-Validate()
+// of an armed profile is still the armed profile, and dropping the override
+// from an armed profile fails closed rather than falling back to the table.
+TEST(PiccardParams, ArmedProfileDroppingItsOverrideFailsClosed) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;
+    params.flood_margin_bits = 0;
+    CalibrationAccess::ArmThresholdProbe(
+        params,
+        ThresholdCalibrationOverride{19, 33, 500, 65536, 900.0});
+    ASSERT_TRUE(params.FloodingSized());
+
+    params.threshold_calibration_override = std::nullopt;
+    EXPECT_THROW(params.FloodNoiseBits(), std::logic_error);
+    EXPECT_THROW(params.Validate(), std::invalid_argument);
+}

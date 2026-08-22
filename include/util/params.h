@@ -225,6 +225,9 @@ private:
         // without one. Both belong under the same fail-closed revalidation.
         std::optional<ThresholdCalibrationOverride>
             threshold_calibration_override;
+        // Under revalidation too, so the harness waiver cannot be switched on
+        // or off after a selection has been captured.
+        bool threshold_probe_arming;
         uint32_t transcript_stat_bits;
         uint64_t max_queries;
         uint32_t flood_margin_bits;
@@ -282,6 +285,17 @@ private:
     std::shared_ptr<const PreThresholdCalibrationRow>
         selected_pre_threshold_calibration_;
     bool runtime_adopted_ = false;
+
+    // Harness-only waiver of the Tree/Horner override pairing rule, settable
+    // only through CalibrationAccess::ArmThresholdProbe in
+    // util/params_calibration.h. The bench_noise threshold probe measures the
+    // very calibration rows SelectFloodingParams looks up, and it has to
+    // measure BOTH giant steps, so it can satisfy neither half of the pairing
+    // rule. It waives nothing else: the supplied row still goes through the
+    // unchanged feasibility inequality, the snapshot revalidation, and
+    // BFVContext's live-context checks. Like the override itself this is
+    // input, so ClearFloodingSelection() leaves it alone.
+    bool threshold_probe_arming_ = false;
     bool validation_snapshot_valid_ = false;
     ValidationSnapshot validation_snapshot_{};
 
