@@ -260,8 +260,9 @@ class RevisionMatrixTest(unittest.TestCase):
         with a single documented exception.
         """
         seconds = {"standard": 600, "extended": 3600, "long": 64800}
-        # sj16::fit=precomputed is a serial Paillier-3072 fit that needs
-        # 33610 s against the 64800 s `long` stop -- 1.93x.  There is no
+        # sj16::fit=precomputed runs bench_review_comparison at the family's
+        # 16 threads (F-6) and needs 33610 s against the 64800 s `long`
+        # stop -- 1.93x.  There is no
         # larger class to promote it to, and it is not a hazard: it has
         # completed in production twice, on attempts 3 and 4, within 0.2% of
         # the same duration, so the run-to-run variance that would have to
