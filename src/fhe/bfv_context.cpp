@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -543,7 +544,10 @@ BFVContext::EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
     // Baby-step/giant-step (Paterson-Stockmeyer) polynomial evaluation.
     // For polynomial c_0 + c_1*x + ... + c_d*x^d:
     //   1. Baby step: compute x, x^2, ..., x^s (s = ceil(sqrt(d+1)))
-    //   2. Giant step: group into chunks of s, evaluate via Horner on x^s
+    //   2. Giant step: group into chunks of s; combine with Horner on x^s
+    //      (params_.giant_step == Horner) or with a balanced tree over
+    //      x^{s*2^j} (params_.giant_step == Tree). The depth formula lives in
+    //      PatersonStockmeyerNaturalDepth (util/params.h) and must match.
 
     if (coeffs.empty()) {
         throw std::invalid_argument("Polynomial must have at least one coefficient");
@@ -624,16 +628,41 @@ BFVContext::EvalPolyBFV(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
         chunks.push_back(chunk);
     }
 
-    // Combine chunks using Horner's method on x^s:
-    // result = chunks[n-1]
-    // for i = n-2 downto 0: result = result * x^s + chunks[i]
-    auto result = chunks[num_chunks - 1];
-    for (int i = static_cast<int>(num_chunks) - 2; i >= 0; i--) {
-        result = Multiply(result, powers[s]);
-        result = Add(result, chunks[i]);
+    if (params_.giant_step == GiantStepMode::Horner) {
+        // result = chunks[n-1]; for i = n-2 downto 0: result = result*x^s + chunks[i]
+        auto result = chunks[num_chunks - 1];
+        for (int i = static_cast<int>(num_chunks) - 2; i >= 0; i--) {
+            result = Multiply(result, powers[s]);
+            result = Add(result, chunks[i]);
+        }
+        return result;
     }
 
-    return result;
+    // Tree giant step (GiantStepMode::Tree).
+    // giant[j] = x^{s * 2^j}; giant[0] = x^s, giant[j] = giant[j-1]^2.
+    // Combine(lo, hi) splits [lo, hi) at h = largest power of two < size:
+    //   Combine(lo, lo+h) + x^{s*h} * Combine(lo+h, hi)
+    // The output depth is bounded by baby_depth + ceil(log2(num_chunks)):
+    // every combine multiplies a sub-result of depth <= baby+j by giant[j]
+    // (depth baby+j), and chunks themselves only use x^1..x^{s-1}.
+    std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>> giant;
+    giant.push_back(powers[s]);
+    for (uint32_t span = 2; span < num_chunks; span *= 2) {
+        giant.push_back(Multiply(giant.back(), giant.back()));
+    }
+
+    std::function<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>(uint32_t, uint32_t)>
+        combine = [&](uint32_t lo, uint32_t hi)
+            -> lbcrypto::Ciphertext<lbcrypto::DCRTPoly> {
+        const uint32_t size = hi - lo;
+        if (size == 1) return chunks[lo];
+        uint32_t h = 1, level = 0;
+        while (h * 2 < size) { h *= 2; level++; }
+        auto left = combine(lo, lo + h);
+        auto right = combine(lo + h, hi);
+        return Add(left, Multiply(right, giant[level]));
+    };
+    return combine(0, num_chunks);
 }
 
 lbcrypto::Ciphertext<lbcrypto::DCRTPoly>

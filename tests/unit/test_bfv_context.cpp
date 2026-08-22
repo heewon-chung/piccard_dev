@@ -506,6 +506,80 @@ TEST_F(BFVContextPolyTest, EvalPolyQuadratic) {
     EXPECT_EQ(result[0], 45);  // 1 + 3*4 + 2*16
 }
 
+namespace {
+// Unsized TOY context in Tree mode; provisioned at the tree's own natural
+// depth (k=16 -> 6) so the test also proves the depth formula is sufficient.
+PiccardParams MakeTreeToyParams() {
+    PiccardParams p;
+    p.k = 16;
+    p.m = 8;
+    p.security = SecurityLevel::TOY;
+    p.threshold_mode = true;
+    p.threshold_tau = 8;
+    p.giant_step = GiantStepMode::Tree;
+    CalibrationAccess::Derive(p);
+    return p;
+}
+}  // namespace
+
+TEST(BFVContextTree, EvalPolyTreeMatchesPlaintext) {
+    // Degrees 4 (ell=2), 7 (ell=3), 11 (s=4, ell=3), 16 (ell=4): power-of-two
+    // and non-power-of-two chunk counts.
+    PiccardParams params = MakeTreeToyParams();
+    ASSERT_EQ(params.natural_mult_depth, 6u);
+    BFVContext ctx(params);
+    ctx.Initialize();
+
+    const uint32_t degrees[] = {4, 7, 11, 16};
+    for (uint32_t degree : degrees) {
+        const uint32_t tau = degree / 2;
+        auto poly = BuildThresholdPoly(tau, degree, params.plaintext_mod);
+        ASSERT_EQ(poly.size(), degree + 1);
+        for (int64_t x = 0; x <= static_cast<int64_t>(degree); x++) {
+            std::vector<int64_t> input(ctx.GetSlotCount(), x);
+            auto ct = ctx.Encrypt(input);
+            auto result = ctx.Decrypt(ctx.EvalPolyBFV(ct, poly));
+            const int64_t expected = (x >= static_cast<int64_t>(tau)) ? 1 : 0;
+            EXPECT_EQ(result[0], expected) << "degree=" << degree << " x=" << x;
+        }
+    }
+}
+
+TEST(BFVContextTree, EvalPolyTreeGeneralCoefficients) {
+    // P(x) = 1 + 3x + 2x^2 + 5x^3 + 7x^4 + x^5 at x = 3 -> 973
+    PiccardParams params = MakeTreeToyParams();
+    BFVContext ctx(params);
+    ctx.Initialize();
+    std::vector<int64_t> coeffs = {1, 3, 2, 5, 7, 1};
+    std::vector<int64_t> input(ctx.GetSlotCount(), 3);
+    auto result = ctx.Decrypt(ctx.EvalPolyBFV(ctx.Encrypt(input), coeffs));
+    EXPECT_EQ(result[0], 973 % static_cast<int64_t>(params.plaintext_mod));
+}
+
+TEST(BFVContextTree, EvalPolyTreeSpendsFewerLevelsThanHorner) {
+    // Degrees 4..16 fit under either giant step, so they cannot tell the two
+    // apart. Degree 24 (s=5, ell=5) can: the tree spends baby(3) + ceil(log2 5)
+    // = 6 ciphertext-ciphertext levels, while Horner spends baby(3) + (5-1) = 7
+    // and therefore exhausts this depth-6 context. Forcing the Horner branch
+    // here decrypts to garbage, so this case fails if the tree stops running.
+    EXPECT_EQ(PatersonStockmeyerNaturalDepth(24, GiantStepMode::Horner), 8u);
+    EXPECT_EQ(PatersonStockmeyerNaturalDepth(24, GiantStepMode::Tree), 7u);
+    EXPECT_EQ(PatersonStockmeyerGiantMults(24, GiantStepMode::Tree), 6u);
+
+    PiccardParams params = MakeTreeToyParams();
+    ASSERT_EQ(params.natural_mult_depth, 6u);
+    BFVContext ctx(params);
+    ctx.Initialize();
+
+    auto poly = BuildThresholdPoly(12, 24, params.plaintext_mod);
+    ASSERT_EQ(poly.size(), 25u);
+    for (int64_t x : {0, 5, 11, 12, 13, 24}) {
+        std::vector<int64_t> input(ctx.GetSlotCount(), x);
+        auto result = ctx.Decrypt(ctx.EvalPolyBFV(ctx.Encrypt(input), poly));
+        EXPECT_EQ(result[0], (x >= 12) ? 1 : 0) << "x=" << x;
+    }
+}
+
 TEST_F(BFVContextTest, ChainedMultiplyThenAdd) {
     // (a * b) + c should work correctly
     RecordProperty("input_a", "[2, 3, 0, ...]");
