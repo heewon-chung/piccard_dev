@@ -1208,7 +1208,7 @@ Two entries are known to be sitting there and must be resolved **deliberately**,
 - `.gitignore` and the `_dynamic_raw_timing_sidecar` ULP-tolerance hunk in `scripts/verify_revision_benchmarks.py` belong to another effort. Read `git diff` for each, confirm with the user that they are that effort's and not this plan's, then either let their owner commit them or stash them yourself.
 - `aws-guide.md` is untracked. Decide with the user whether it belongs in the repository; do not delete it.
 
-Record in the run's `aws.md` what you did with each entry and who confirmed it. If you cannot get that confirmation, stop and ask rather than guessing which changes are safe to leave behind.
+Write down, as you resolve each entry, what it was, what you did with it, and who confirmed — into a scratch note on the Mac (the run's results directory does not exist yet, so it cannot go there). Step 5 copies that note into `results/piccard-table9-<date>/aws.md` **before** the results commit is staged, so the record ships with the evidence rather than trailing after it. If you cannot get the confirmation, stop and ask rather than guessing which changes are safe to leave behind.
 
 On the instance — paste that SHA into `SHA=` and run the block as a whole:
 ```bash
@@ -1299,10 +1299,22 @@ rsync -a ubuntu@13.216.211.115:~/piccard-table9-$DATE/ ~/Documents/04-Dev/01-res
 cd ~/Documents/04-Dev/01-research/active/piccard
 du -sh results/piccard-table9-$DATE
 ssh -i ~/.ssh/piccard-bench.pem ubuntu@13.216.211.115 "du -sh ~/piccard-table9-$DATE"   # sizes must agree
+```
+
+**Write `results/piccard-table9-$DATE/aws.md` now, before staging anything** — it is part of the evidence, so it has to be inside the commit, not added afterwards. It records:
+
+- the instance id and type, and the deployed SHA;
+- start and stop times, and the observed wall time;
+- the idle-gate evidence: the process listing you saw immediately before launching, and the one you saw after the first cell completed;
+- **the Step 1 tree resolution**: for each entry that was dirty or untracked before the deploy, what it was, what you did with it, and who confirmed. Copy this from the scratch note you kept in Step 1; the record cannot be reconstructed later.
+
+Then stage and commit, with `aws.md` included:
+```bash
 git add -f results/piccard-table9-$DATE
+git status --short results/piccard-table9-$DATE | grep -q "aws.md" || { echo "REFUSE: aws.md is not staged"; exit 1; }
 git commit -m "results(table9): 42-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
 ```
-Keep `workload.bin`/`trace.bin` — the sidecars do not bind them and they are the only record of the workload. Write `results/piccard-table9-<date>/aws.md` with the instance id, the start/stop times, the observed wall time, and the idle-gate evidence (the process listing you saw before launching).
+Keep `workload.bin`/`trace.bin` — the sidecars do not bind them and they are the only record of the workload.
 
 - [ ] **Step 6: Do NOT terminate the instance**
 
