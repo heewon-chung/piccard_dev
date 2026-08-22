@@ -1187,23 +1187,28 @@ On the Mac — push, then prove the remote actually has the commit:
 ```bash
 set -euo pipefail
 cd ~/Documents/04-Dev/01-research/active/piccard
-# Refuse to deploy if anything this plan has touched is uncommitted.
-# The set is derived from the plan's own commits, not hand-written: a
-# path allowlist (or a stash keyed on paths) would also set aside this
-# plan's uncommitted work in a file it shares with another effort.
-PLAN_BASE=a1ee975                                   # the commit this plan started from
-PLAN_FILES=$(git diff --name-only "$PLAN_BASE"..HEAD | sort -u)
-DIRTY=$(git status --porcelain --untracked-files=no | cut -c4- | sort -u)
-OVERLAP=$(comm -12 <(echo "$PLAN_FILES") <(echo "$DIRTY"))
-test -z "$OVERLAP" || { echo "REFUSE: this plan's files have uncommitted changes:"; echo "$OVERLAP"; exit 1; }
+# The tree must be completely clean -- tracked and untracked alike.
+# Do not classify the dirt.  Every attempt to decide automatically which
+# changes are "this plan's" fails: a path allowlist and a path-scoped
+# stash both sweep away this plan's own work in a shared file, and a set
+# derived from the plan's commits cannot see a new file it has not
+# committed yet or a file it has not touched yet.
+git status --porcelain
+test -z "$(git status --porcelain)" \
+  || { echo "REFUSE: the tree is not clean; resolve every entry above, then re-run"; exit 1; }
 git push origin main
 SHA=$(git rev-parse HEAD)
 test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SHA" || { echo "REFUSE: remote main is not $SHA"; exit 1; }
 echo "deploy $SHA"
 ```
-The gate compares two sets it computes itself: the files this plan's commits changed, and the files currently dirty. Any overlap aborts. Dirt in a file this plan never touched (`.gitignore`) is irrelevant to whether the deployed commit is complete, so it passes; dirt in a file this plan *did* touch cannot be waved through, no matter whose change it is.
+No classification, no allowlist, no derived set — the deployed commit is complete exactly when nothing is left outside it. Untracked files count: a new script or test this plan needs but has not committed is invisible to every "which files are dirty" heuristic, and shipping without it is the failure this gate exists to prevent.
 
-`scripts/verify_revision_benchmarks.py` is in both sets right now: this plan committed several hunks into it, and another effort's ULP-tolerance hunk sits uncommitted in the same file. The gate will therefore refuse, and that is correct — nothing can determine automatically that the remaining hunk is the unrelated one. Resolve it deliberately before deploying: ask whoever owns that hunk to commit it, or stash it yourself after confirming with `git diff scripts/verify_revision_benchmarks.py` that what you are setting aside is only the `_dynamic_raw_timing_sidecar` ULP change and nothing of this plan's. Record which you did in the run's `aws.md`.
+Two entries are known to be sitting there and must be resolved **deliberately**, once, before the deploy — not swept aside by this procedure:
+
+- `.gitignore` and the `_dynamic_raw_timing_sidecar` ULP-tolerance hunk in `scripts/verify_revision_benchmarks.py` belong to another effort. Read `git diff` for each, confirm with the user that they are that effort's and not this plan's, then either let their owner commit them or stash them yourself.
+- `aws-guide.md` is untracked. Decide with the user whether it belongs in the repository; do not delete it.
+
+Record in the run's `aws.md` what you did with each entry and who confirmed it. If you cannot get that confirmation, stop and ask rather than guessing which changes are safe to leave behind.
 
 On the instance — paste that SHA into `SHA=` and run the block as a whole:
 ```bash
