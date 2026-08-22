@@ -112,6 +112,27 @@ def _git_porcelain() -> str:
                           text=True, check=False).stdout.strip()
 
 
+def _cpu_model() -> str:
+    """Best-effort CPU model string, so a resume cannot silently cross to a
+    materially different machine without that showing up in provenance.
+    """
+    try:
+        out = subprocess.run(["lscpu"], capture_output=True, text=True, timeout=5, check=False).stdout
+        for line in out.splitlines():
+            if line.startswith("Model name:"):
+                return line.split(":", 1)[1].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                             text=True, timeout=5, check=False).stdout.strip()
+        if out:
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unavailable"
+
+
 def plan(document: dict[str, Any], build_dir: Path, root: Path, *, seed: int,
          threads: int) -> list[dict[str, Any]]:
     by_id = {c["cell_id"]: c for c in document["cells"]}
@@ -150,6 +171,7 @@ def _provenance(build_dir: Path, cells: list[dict[str, Any]], matrix_sha: str,
     return {"source": source_metadata(ROOT), "tools": tools,
             "binaries": binaries, "matrix_sha256": matrix_sha,
             "seed": seed, "threads": threads, "build_dir": str(build_dir),
+            "host": {"machine": platform.machine(), "cpu_count": os.cpu_count(), "cpu_model": _cpu_model()},
             "runner_sha256": sha256_file(Path(__file__)),
             "common_sha256": sha256_file(ROOT / "scripts" / "revision_benchmark_common.py")}
 
@@ -188,8 +210,30 @@ def _provenance_diff(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _archive_failed_attempt(output: Path, root: Path, cell_id: str) -> None:
+    """Move a stale cell directory aside before re-running into a fresh one.
+
+    Some producers refuse to overwrite their own artifacts on a second run
+    into the same directory -- comparison_workload.cpp:648 publishes an
+    immutable workload.bin, raw_timing_schema.cpp:535 refuses to write when
+    the target .tsv or its .tmp already exists -- so a cell that failed
+    after either artifact appeared would otherwise fail again instantly on
+    every resume, precisely the case resume exists for.  The old directory
+    is never deleted: its stdout/stderr is the evidence for why it failed.
+    A first attempt with nothing there yet does not create an .attempt-0.
+    """
+    if not output.exists():
+        return
+    existing = list(output.parent.glob(f"{output.name}.attempt-*"))
+    archived = output.parent / f"{output.name}.attempt-{1 + len(existing)}"
+    output.rename(archived)
+    append_jsonl(root / "events.jsonl", {"event": "RETRY", "cell_id": cell_id,
+                                         "archived_to": str(archived), "time": _now()})
+
+
 def _run_one(p: dict[str, Any], root: Path, sequence: int, provenance_id: str) -> dict[str, Any]:
     output = Path(p["output_dir"])
+    _archive_failed_attempt(output, root, p["cell_id"])
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(p["env"])
@@ -225,6 +269,57 @@ def _run_one(p: dict[str, Any], root: Path, sequence: int, provenance_id: str) -
                                     "duration_s", "started_at", "finished_at", "provenance_id")}
 
 
+def _write_manifest(path: Path, value: dict[str, Any]) -> None:
+    """Write run.json atomically: serialize to a temp file in the same
+    directory, fsync it, then os.replace() into place.  run.json is
+    rewritten after every cell, so a crash mid-write must never leave it
+    truncated -- a reader sees either the old manifest or the new one,
+    never a half-written one.  Local to this script rather than a change to
+    the shared ``write_json``, which the orchestrator also uses.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f"{path.name}.tmp"
+    payload = canonical_json(value)
+    with tmp.open("wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, path)
+
+
+def _rebuild_manifest_from_receipts(plans: list[dict[str, Any]], provenance: dict[str, Any],
+                                    provenance_id: str, *, dirty_allowed: bool) -> dict[str, Any]:
+    """Reconstruct a run.json skeleton from per-cell receipt.json files when
+    the manifest itself is corrupt or truncated (e.g. a crash mid-write).
+
+    Receipts are the authoritative per-cell record -- the resume
+    revalidation loop re-checks each one independently anyway -- so no
+    completed work is actually lost; only the manifest's own bookkeeping
+    (provenance_history, the original started_at) is.  The rebuilt
+    manifest's own provenance is the one computed for *this* invocation;
+    if a recovered cell's own provenance_id disagrees, that is exactly what
+    the mixed_provenance check below is for.
+    """
+    cells: list[dict[str, Any]] = []
+    for p in plans:
+        try:
+            receipt = json.loads((Path(p["output_dir"]) / "receipt.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if receipt.get("cell_id") != p["cell_id"] or receipt.get("execution_status") != "COMPLETED":
+            continue
+        cells.append({k: receipt[k] for k in ("cell_id", "family", "execution_status", "exit_code",
+                                              "duration_s", "started_at", "finished_at", "provenance_id")
+                      if k in receipt})
+    return {"schema": RUN_SCHEMA, "version": 1, "started_at": _now(), "state": "STARTED",
+            "mode": "paper", "dirty_allowed": dirty_allowed,
+            "platform": platform.platform(), "cpu_count": os.cpu_count(),
+            "provenance": provenance, "provenance_id": provenance_id,
+            "cell_ids": [p["cell_id"] for p in plans],
+            "planned_processes": len(plans), "cells": cells,
+            "rebuilt_from_receipts": True, "rebuilt_at": _now()}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", required=True, choices=("dry-run", "run"))
@@ -240,9 +335,20 @@ def main(argv: list[str] | None = None) -> int:
                              "old provenance is preserved in run.json's provenance_history, never overwritten silently")
     args = parser.parse_args(argv)
 
-    root = Path(args.results_root)
-    build_dir = Path(args.build_dir)
-    document, matrix_sha = load_matrix(Path(args.matrix))
+    # Resolve every path argument to an absolute path immediately, before
+    # anything hashes a binary or spawns a subprocess under one of them:
+    # binary_metadata() would otherwise hash a relative build_dir against
+    # *this process's* cwd while subprocess.run() executes cells with
+    # cwd=ROOT, so an unresolved relative --build-dir invoked from outside
+    # the repo silently hashes one binary and runs another.  --results-root
+    # keeps its own "must be absolute in run mode" business rule below,
+    # checked against the flag exactly as the operator typed it -- resolving
+    # first would make that check vacuous (Path.resolve() is always
+    # absolute), so the check reads args.results_root, not the resolved root.
+    results_root_was_relative = not Path(args.results_root).is_absolute()
+    build_dir = Path(args.build_dir).resolve()
+    root = Path(args.results_root).resolve()
+    document, matrix_sha = load_matrix(Path(args.matrix).resolve())
     plans = plan(document, build_dir, root, seed=args.seed, threads=args.threads)
 
     if args.mode == "dry-run":
@@ -253,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"dry-run: {len(plans)} cells planned -> {root / 'planned_argv.jsonl'}")
         return 0
 
-    if not root.is_absolute():
+    if results_root_was_relative:
         print("--results-root must be absolute in run mode", file=sys.stderr)
         return 2
     dirty = _git_porcelain()
@@ -269,44 +375,66 @@ def main(argv: list[str] | None = None) -> int:
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "run.json"
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-        if manifest.get("provenance") != provenance:
-            diffs = _provenance_diff(manifest.get("provenance", {}), provenance)
-            if not args.accept_provenance_change:
-                print("resume refused: provenance differs from the recorded run "
-                      "(source, tools, binaries, matrix, seed, threads, or scripts changed):\n"
-                      + "\n".join(diffs), file=sys.stderr)
-                return 2
-            # Never overwrite provenance silently: the prior record is kept in
-            # provenance_history (with its own id) so an operator can always
-            # see what changed and when, rather than losing hours of completed
-            # cells to hand-editing.  Cells already measured keep the OLD
-            # provenance_id in their own receipt/manifest record forever --
-            # only cells run from this point on carry the new id -- so the
-            # override never misattributes evidence that was gathered before
-            # it.  The original planned_argv.jsonl is therefore left
-            # untouched (it is still exactly what the P1 cells ran under);
-            # the new plan goes to a file named after the new provenance_id.
-            old_id = manifest.get("provenance_id") or _provenance_id(manifest["provenance"])
-            manifest.setdefault("provenance_history", []).append(
-                {"replaced_at": _now(), "provenance_id": old_id, "provenance": manifest["provenance"]})
-            manifest["provenance"] = provenance
-            manifest["provenance_id"] = provenance_id
-            new_plan_path = root / f"planned_argv.{provenance_id}.jsonl"
-            with new_plan_path.open("w") as handle:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError as error:
+            # A crash mid-write (before the atomic-write fix below existed,
+            # or from any other cause) can leave run.json truncated.  Do not
+            # raise: the per-cell receipts are the authoritative record
+            # regardless (see the revalidation loop below), so rebuild the
+            # manifest from them instead of losing hours of completed work
+            # to an unreadable bookkeeping file.  provenance_history and the
+            # original started_at are not recoverable and are not invented.
+            print(f"run.json is corrupt or truncated ({error}); rebuilding the manifest from "
+                  "per-cell receipt.json files -- no completed work is lost, only run-level "
+                  "bookkeeping (provenance_history, original timestamps) is reset", file=sys.stderr)
+            manifest = _rebuild_manifest_from_receipts(plans, provenance, provenance_id,
+                                                        dirty_allowed=bool(args.allow_dirty))
+            with (root / "planned_argv.jsonl").open("w") as handle:
                 for p in plans:
                     handle.write(json.dumps(p, sort_keys=True) + "\n")
-            append_jsonl(root / "events.jsonl", {"event": "PROVENANCE_CHANGE", "time": _now(), "diff": diffs,
-                                                 "provenance_id": provenance_id,
-                                                 "planned_argv_file": new_plan_path.name})
-            print("provenance changed, accepted via --accept-provenance-change "
-                  f"(new plan recorded at {new_plan_path.name}):\n" + "\n".join(diffs))
+            _write_manifest(manifest_path, manifest)
+            append_jsonl(root / "events.jsonl", {"event": "REBUILD", "time": _now(), "reason": str(error),
+                                                 "recovered_cells": len(manifest["cells"])})
         else:
-            recorded = [json.loads(l) for l in (root / "planned_argv.jsonl").read_text().splitlines()]
-            if [r["command"] for r in recorded] != [p["command"] for p in plans]:
-                print("resume refused: planned argv differs from the recorded plan (provenance)", file=sys.stderr)
-                return 2
-        append_jsonl(root / "events.jsonl", {"event": "RESUME", "time": _now()})
+            if manifest.get("provenance") != provenance:
+                diffs = _provenance_diff(manifest.get("provenance", {}), provenance)
+                if not args.accept_provenance_change:
+                    print("resume refused: provenance differs from the recorded run "
+                          "(source, tools, binaries, matrix, seed, threads, or scripts changed):\n"
+                          + "\n".join(diffs), file=sys.stderr)
+                    return 2
+                # Never overwrite provenance silently: the prior record is kept in
+                # provenance_history (with its own id) so an operator can always
+                # see what changed and when, rather than losing hours of completed
+                # cells to hand-editing.  Cells already measured keep the OLD
+                # provenance_id in their own receipt/manifest record forever --
+                # only cells run from this point on carry the new id -- so the
+                # override never misattributes evidence that was gathered before
+                # it.  The original planned_argv.jsonl is therefore left
+                # untouched (it is still exactly what the P1 cells ran under);
+                # the new plan goes to a file named after the new provenance_id.
+                old_id = manifest.get("provenance_id") or _provenance_id(manifest["provenance"])
+                manifest.setdefault("provenance_history", []).append(
+                    {"replaced_at": _now(), "provenance_id": old_id, "provenance": manifest["provenance"]})
+                manifest["provenance"] = provenance
+                manifest["provenance_id"] = provenance_id
+                new_plan_path = root / f"planned_argv.{provenance_id}.jsonl"
+                with new_plan_path.open("w") as handle:
+                    for p in plans:
+                        handle.write(json.dumps(p, sort_keys=True) + "\n")
+                append_jsonl(root / "events.jsonl", {"event": "PROVENANCE_CHANGE", "time": _now(), "diff": diffs,
+                                                     "provenance_id": provenance_id,
+                                                     "planned_argv_file": new_plan_path.name})
+                print("provenance changed, accepted via --accept-provenance-change "
+                      f"(new plan recorded at {new_plan_path.name}):\n" + "\n".join(diffs))
+            else:
+                recorded = [json.loads(l) for l in (root / "planned_argv.jsonl").read_text().splitlines()]
+                if [r["command"] for r in recorded] != [p["command"] for p in plans]:
+                    print("resume refused: planned argv differs from the recorded plan (provenance)",
+                          file=sys.stderr)
+                    return 2
+            append_jsonl(root / "events.jsonl", {"event": "RESUME", "time": _now()})
     else:
         manifest = {"schema": RUN_SCHEMA, "version": 1, "started_at": _now(), "state": "STARTED",
                     "mode": "paper", "dirty_allowed": bool(args.allow_dirty),
@@ -317,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
         with (root / "planned_argv.jsonl").open("w") as handle:
             for p in plans:
                 handle.write(json.dumps(p, sort_keys=True) + "\n")
-        write_json(manifest_path, manifest)
+        _write_manifest(manifest_path, manifest)
 
     plan_by_id = {p["cell_id"]: p for p in plans}
     valid_completed: list[dict[str, Any]] = []
@@ -360,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         ran += 1
         failed += record["execution_status"] != "COMPLETED"
         manifest["state"] = "RUNNING"
-        write_json(manifest_path, manifest)
+        _write_manifest(manifest_path, manifest)
         print(f"[{len(manifest['cells'])}/{len(plans)}] {p['cell_id']} {record['execution_status']} "
               f"exit={record['exit_code']} {record['duration_s']}s", flush=True)
 
@@ -372,9 +500,15 @@ def main(argv: list[str] | None = None) -> int:
     # accepted override mid-sweep) must say so loudly: nobody should read a
     # mixed run as homogeneous without noticing.  The receipts remain the
     # authoritative per-cell record; this is just the manifest-level index.
-    provenance_ids_seen = sorted({c["provenance_id"] for c in manifest["cells"] if c.get("provenance_id")})
+    # "Mixed" covers both shapes: cells disagree with each other, AND cells
+    # all agree with each other but disagree with *this run's* provenance --
+    # the latter happens when an override resume finds every cell already
+    # complete (zero re-runs), which would otherwise silently relabel a run
+    # measured under one provenance (e.g. 8 threads) as another (16 threads).
+    cell_ids_seen = {c["provenance_id"] for c in manifest["cells"] if c.get("provenance_id")}
     state_label = manifest["state"]
-    if len(provenance_ids_seen) > 1:
+    if cell_ids_seen and cell_ids_seen != {provenance_id}:
+        all_ids_seen = sorted(cell_ids_seen | {provenance_id})
         manifest["mixed_provenance"] = True
         provenance_cells: dict[str, list[str]] = {}
         for c in manifest["cells"]:
@@ -382,9 +516,9 @@ def main(argv: list[str] | None = None) -> int:
             if pid:
                 provenance_cells.setdefault(pid, []).append(c["cell_id"])
         manifest["provenance_cells"] = provenance_cells
-        state_label = f"{manifest['state']} (MIXED PROVENANCE: {len(provenance_ids_seen)} ids)"
+        state_label = f"{manifest['state']} (MIXED PROVENANCE: {len(all_ids_seen)} ids)"
 
-    write_json(manifest_path, manifest)
+    _write_manifest(manifest_path, manifest)
     print(f"run {state_label}: ran {ran}, skipped {len(completed)}, failed {failed}")
     return 1 if failed else 0
 

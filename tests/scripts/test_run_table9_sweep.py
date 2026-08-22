@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,11 +24,63 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 class CellListTest(unittest.TestCase):
+    # The exact ordered 42-cell grid (cheap producers first, SJ16 last; see
+    # run_table9_sweep.py's module docstring). Family counts and exclusion
+    # lists alone let a wrong id silently replace a required one (e.g. an
+    # existing k=32 cell swapped in for a required k=64 cell keeps every
+    # count and exclusion true) -- pinning the literal sequence is the only
+    # check that catches that substitution.
+    EXPECTED_TABLE9_CELL_IDS: tuple[str, ...] = (
+        "paper-v1::piccard_std128::u=16384",
+        "paper-v1::piccard_std128::u=65536",
+        "paper-v1::piccard_std128::u=262144",
+        "paper-v1::piccard_std128::u=1048576",
+        "paper-v1::piccard_std128::n=100",
+        "paper-v1::piccard_std128::n=10000",
+        "paper-v1::piccard_std128::k=16",
+        "paper-v1::piccard_std128::k=64",
+        "paper-v1::piccard_std128::k=256",
+        "paper-v1::piccard_std128::k=512",
+        "paper-v1::piccard_std128::m=16",
+        "paper-v1::piccard_std128::m=128",
+        "paper-v1::piccard_std128::m=256",
+        "paper-v1::sqrt_comparison::timing_u=16384",
+        "paper-v1::sqrt_comparison::timing_u=65536",
+        "paper-v1::sqrt_comparison::timing_u=262144",
+        "paper-v1::sqrt_comparison::timing_u=1048576",
+        "paper-v1::sqrt_comparison::timing_n=100",
+        "paper-v1::sqrt_comparison::timing_n=10000",
+        "paper-v1::sqrt_comparison::timing_k=16",
+        "paper-v1::sqrt_comparison::timing_k=64",
+        "paper-v1::sqrt_comparison::timing_k=256",
+        "paper-v1::sqrt_comparison::timing_k=512",
+        "paper-v1::sqrt_comparison::timing_m=16",
+        "paper-v1::sqrt_comparison::timing_m=256",
+        "paper-v1::bcg12_minhash::u=65536",
+        "paper-v1::bcg12_minhash::n=100",
+        "paper-v1::bcg12_minhash::n=10000",
+        "paper-v1::bcg12_minhash::k=16",
+        "paper-v1::bcg12_minhash::k=64",
+        "paper-v1::bcg12_minhash::k=256",
+        "paper-v1::bcg12_minhash::k=512",
+        "paper-v1::fhe_ind::u=16384",
+        "paper-v1::fhe_ind::u=65536",
+        "paper-v1::fhe_ind::u=262144",
+        "paper-v1::fhe_ind::u=1048576",
+        "paper-v1::fhe_ind::n=100",
+        "paper-v1::fhe_ind::n=10000",
+        "paper-v1::sj16::u=16384",
+        "paper-v1::sj16::u=65536",
+        "paper-v1::sj16::n=100",
+        "paper-v1::sj16::n=10000",
+    )
+
     def test_42_ids_exist_in_matrix_and_are_run_cells(self) -> None:
         document, _ = common.load_matrix(MATRIX)
         by_id = {c["cell_id"]: c for c in document["cells"]}
         self.assertEqual(len(sweep.TABLE9_CELL_IDS), 42)
         self.assertEqual(len(set(sweep.TABLE9_CELL_IDS)), 42)
+        self.assertEqual(sweep.TABLE9_CELL_IDS, self.EXPECTED_TABLE9_CELL_IDS)
         for cid in sweep.TABLE9_CELL_IDS:
             self.assertIn(cid, by_id, cid)
             self.assertEqual(by_id[cid]["invocation_status"], "RUN", cid)
@@ -65,6 +118,44 @@ class CellListTest(unittest.TestCase):
                                         "PICCARD_REVISION_CELL": p["cell_id"],
                                         "PICCARD_REVISION_MODE": "paper"})
             self.assertEqual(p["timeout_seconds"], {"standard": 600, "extended": 3600, "long": 64800}[p["timeout_class"]])
+
+    def test_materialized_command_equals_orchestrator_command_for_every_family(self) -> None:
+        # The checks above only spot-check a few flags in isolation, which
+        # lets an unrelated argv divergence (a missing flag, a wrong value,
+        # a different ordering) slip through undetected as long as the
+        # spot-checked flags still happen to be present. Rebuild each
+        # sampled cell's command through the orchestrator's own
+        # _materialized_command (scripts/run_revision_benchmarks.py) --
+        # same producer/root/build_dir/seed/threads inputs -- and require
+        # the two full command lists to be identical, not merely overlapping.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from run_revision_benchmarks import _materialized_command
+
+        document, _ = common.load_matrix(MATRIX)
+        by_id = {c["cell_id"]: c for c in document["cells"]}
+        # One representative cell from each of the five families the sweep covers.
+        sample_ids = (
+            "paper-v1::piccard_std128::u=16384",
+            "paper-v1::sqrt_comparison::timing_u=16384",
+            "paper-v1::bcg12_minhash::k=16",
+            "paper-v1::fhe_ind::u=16384",
+            "paper-v1::sj16::u=16384",
+        )
+        for cid in sample_ids:
+            self.assertIn(cid, sweep.TABLE9_CELL_IDS, cid)
+        self.assertEqual({by_id[cid]["family"] for cid in sample_ids},
+                         {"piccard_std128", "sqrt_comparison", "bcg12_minhash", "fhe_ind", "sj16"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "r"
+            build_dir = Path(tmp) / "b"
+            plans = sweep.plan(document, build_dir, root, seed=20260729, threads=16)
+            plan_by_id = {p["cell_id"]: p for p in plans}
+            for cid in sample_ids:
+                _, orchestrator_command = _materialized_command(
+                    by_id[cid], "paper", root=root, build_dir=build_dir,
+                    seed=20260729, threads=16, variant_manifests=None, dblp_manifest=None)
+                self.assertEqual(orchestrator_command, plan_by_id[cid]["command"], cid)
 
 
 class DryRunTest(unittest.TestCase):
@@ -116,6 +207,36 @@ class RunModeTest(unittest.TestCase):
             self.assertNotEqual(r2.returncode, 0)          # binary changed -> provenance refusal
             self.assertIn("provenance", r2.stderr)
 
+    def test_failed_cell_retry_archives_the_old_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            flag = t / "fail_once"
+            flag.write_text("")
+            # fhe_ind fails while the flag file exists, succeeds after it is removed; binary bytes never change.
+            (build / "bench_fhe_ind").write_text(f"#!/bin/sh\nif [ -e {flag} ]; then exit 3; fi\nexit 0\n")
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 1, r1.stderr)
+            target_dir = root / "cells" / common.slug("paper-v1::fhe_ind::n=100")
+            self.assertTrue((target_dir / "stdout.log").exists())          # a stale artifact is present
+            flag.unlink()
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            archived = root / "cells" / (common.slug("paper-v1::fhe_ind::n=100") + ".attempt-1")
+            self.assertTrue(archived.exists())
+            self.assertTrue((archived / "stdout.log").exists())          # the failed attempt's evidence survives
+            self.assertTrue(target_dir.exists())                          # fresh directory for the successful retry
+            receipt = json.loads((target_dir / "receipt.json").read_text())
+            self.assertEqual(receipt["execution_status"], "COMPLETED")
+            events = [json.loads(l) for l in (root / "events.jsonl").read_text().splitlines()]
+            retry_events = [e for e in events if e["event"] == "RETRY"]
+            self.assertEqual(len(retry_events), 6)          # all 6 fhe_ind cells had a stale directory
+            self.assertIn("paper-v1::fhe_ind::n=100", {e["cell_id"] for e in retry_events})
+            # a cell that never ran before must not get an .attempt-0
+            self.assertFalse((root / "cells" /
+                              (common.slug("paper-v1::piccard_std128::u=16384") + ".attempt-0")).exists())
+
     def test_resume_reruns_failed_cells_when_provenance_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
@@ -151,6 +272,7 @@ class RunModeTest(unittest.TestCase):
             self.assertEqual(r1.returncode, 0, r1.stderr)
             manifest_before = json.loads((root / "run.json").read_text())
             old_binary_sha = manifest_before["provenance"]["binaries"]["bench_piccard"]["sha256"]
+            old_id = manifest_before["provenance_id"]
             (build / "bench_piccard").write_text("#!/bin/sh\necho changed\nexit 0\n")
             (build / "bench_piccard").chmod(0o755)
             r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
@@ -165,6 +287,15 @@ class RunModeTest(unittest.TestCase):
             old_provenance = manifest["provenance_history"][0]["provenance"]
             self.assertEqual(old_provenance["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
             self.assertNotEqual(manifest["provenance"]["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
+            # J-2: every cell's receipt still matched (nothing needed a re-run), but the
+            # run's *current* provenance no longer matches what any cell was measured
+            # under -- that must still be flagged, not silently presented as homogeneous.
+            new_id = manifest["provenance_id"]
+            self.assertNotEqual(new_id, old_id)
+            self.assertTrue(manifest["mixed_provenance"])
+            self.assertIn("MIXED PROVENANCE", r3.stdout)
+            self.assertEqual(set(manifest["provenance_cells"][old_id]), {c["cell_id"] for c in manifest["cells"]})
+            self.assertNotIn(new_id, manifest["provenance_cells"])
 
     def test_override_resume_attributes_provenance_per_cell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,6 +337,43 @@ class RunModeTest(unittest.TestCase):
             # The original plan is never overwritten under an accepted provenance change.
             self.assertEqual((root / "planned_argv.jsonl").read_bytes(), old_planned_bytes)
             self.assertTrue((root / f"planned_argv.{new_id}.jsonl").exists())
+
+    def test_relative_build_dir_resolves_against_the_actual_invocation_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            other_cwd = t / "elsewhere"
+            other_cwd.mkdir()
+            rel_build = os.path.relpath(build, other_cwd)          # e.g. "../build"; not reachable from ROOT
+            root = t / "results"
+            r = subprocess.run([sys.executable, str(RUNNER), "--mode=run", f"--build-dir={rel_build}",
+                               f"--results-root={root}", "--allow-dirty"],
+                              cwd=other_cwd, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            manifest = json.loads((root / "run.json").read_text())
+            # provenance must bind the SAME absolute directory the command actually executes,
+            # regardless of which relative path or cwd the operator invoked from.
+            self.assertEqual(manifest["provenance"]["build_dir"], str(build.resolve()))
+            self.assertTrue(all(c["execution_status"] == "COMPLETED" for c in manifest["cells"]))
+
+    def test_corrupt_manifest_is_rebuilt_from_receipts_instead_of_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            # simulate a crash mid-write: run.json is truncated to invalid JSON.
+            (root / "run.json").write_text('{"schema": "piccard-table9-sweep-run-v1", "cells": [')
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)          # does not raise
+            self.assertIn("rebuild", r2.stderr.lower())
+            manifest = json.loads((root / "run.json").read_text())
+            self.assertTrue(manifest.get("rebuilt_from_receipts"))
+            self.assertEqual(len(manifest["cells"]), 42)
+            self.assertTrue(all(c["execution_status"] == "COMPLETED" for c in manifest["cells"]))
+            events = [json.loads(l) for l in (root / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(e["event"] == "REBUILD" for e in events), 1)
 
     def test_normal_resume_has_single_provenance_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
