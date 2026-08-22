@@ -1177,45 +1177,85 @@ Same instance class and AMI as `aws-guide.md` Phase B (`c8i.8xlarge`, CoreCount=
 
 Re-check the idle gate immediately before launching, not only once at the start of the task.
 
-- [ ] **Step 1: Push and sync** — the user authorized the push and the AWS run for this task on 2026-08-22 (no further confirmation needed):
+- [ ] **Step 1: Push, then build in an isolated checkout**
+
+The push was authorized by the user on 2026-08-22. **The instance is shared with the running D-10 campaign, which owns `~/piccard`.** Never `git reset`, `git checkout`, `cmake` or write anything inside `~/piccard`; use a separate clone.
+
 ```bash
 git push origin main
-# on the instance
-cd ~/piccard && git fetch && git checkout main && git reset --hard origin/main && git status --short --branch
-cmake -S . -B build && cmake --build build -j16 2>&1 | tail -1 && (cd build && ctest --output-on-failure 2>&1 | tail -3)
-python3 scripts/validate_revision_matrix.py benchmarks/revision_matrix.json
+# on the instance — a NEW checkout, never ~/piccard
+cd ~ && git clone ~/piccard ~/piccard-table9 2>/dev/null || (cd ~/piccard-table9 && git fetch origin)
+cd ~/piccard-table9 && git fetch https://github.com/<origin> main 2>/dev/null || git fetch origin
+git checkout -B table9 origin/main && git log --oneline -1 && git status --short --branch
+cmake -S . -B build && cmake --build build -j16 2>&1 | tail -1
+python3 scripts/validate_revision_matrix.py
 ```
-Expected: clean tree; `100% tests passed`; `valid (299 cells; …)`.
+Expected: HEAD equals the reviewed commit; clean tree; `valid (299 cells; 20 representative toy; 104 executable toy)`.
 
-- [ ] **Step 2: Dry run + one real cheap cell**
+Run `ctest` **only while the idle gate below is satisfied** — the suite spawns test binaries and would contend with D-10. If D-10 is active, skip `ctest` here; the Mac already ran 94/94 on this commit and the AWS run does not depend on it.
+
+- [ ] **Step 2: Idle gate — mandatory, and re-checked immediately before launch**
+
 ```bash
-R=$HOME/piccard-table9-$(date +%Y%m%d); python3 scripts/run_table9_sweep.py --mode=dry-run --build-dir=$PWD/build --results-root=$R && wc -l $R/planned_argv.jsonl && rm -rf $R
+ssh ... 'uptime; tmux ls; ps -eo etime,pid,args | grep -E "bench_|ctest|run_revision" | grep -v grep'
+```
+Start only when the process list shows **no** `bench_*`, `ctest`, or `run_revision_benchmarks.py`. tmux sessions may exist and be idle — judge by the process table, not by the session list. **Never kill, signal, or interrupt the other campaign**, and never assume a quiet moment means it is finished: D-10 launches probes back to back, so re-check right before you launch and again after the first cell completes.
+
+- [ ] **Step 3: Dry run and one cheap real cell**
+
+```bash
+cd ~/piccard-table9
+R=$HOME/piccard-table9-$(date +%Y%m%d)
+python3 scripts/run_table9_sweep.py --mode=dry-run --build-dir=$PWD/build --results-root=$R && wc -l $R/planned_argv.jsonl && rm -rf $R
 nproc; lscpu | grep -E "Thread\(s\) per core|Core\(s\) per socket|Model name"
-python3 - <<'EOF'
-import sys; sys.path.insert(0, '.')
+```
+Expected: **42** planned; `Thread(s) per core: 1`; 16 cores.
+
+Then one cheap cell, through the runner's own code path (not a hand-built argv), into a throwaway root:
+```bash
+python3 - <<'PYEOF'
+import sys; sys.path.insert(0, '.'); sys.path.insert(0, 'scripts')
 from pathlib import Path
 from scripts import run_table9_sweep as s
-s.TABLE9_CELL_IDS = ("paper-v1::bcg12_minhash::u=16384", "paper-v1::sj16::u=262144")
+s.TABLE9_CELL_IDS = ("paper-v1::bcg12_minhash::u=65536",)
 sys.exit(s.main(["--mode=run", f"--build-dir={Path('build').resolve()}", "--results-root=/home/ubuntu/t9check"]))
-EOF
-grep -P "^aggregate\t" /home/ubuntu/t9check/cells/*/raw/*.tsv | grep -P "\ttotal\t" | cut -f4,5,6,7,10,11
+PYEOF
+grep -P "^aggregate\t" /home/ubuntu/t9check/cells/*/raw/*ec*.tsv | grep -P "\ttotal\t" | cut -f5,6,7,10,11
+rm -rf /home/ubuntu/t9check
 ```
-Expected: 57 planned; `Thread(s) per core: 1`, 16 cores; bcg12 `total 30 ≈ 103 ms` (2026-08-20: 103.0 ± 0.3); sj16 `u=262144` completes with `measured_count 30` and a per-trial mean well under the 2-thread figure of 285 s. Note its wall time — it predicts the `u=1048576` cell at roughly 4x. Delete `/home/ubuntu/t9check` afterwards so the real run starts from an empty root.
+Expected: `total 30` with a mean near 103 ms (2026-08-20: 103.0 ± 0.3 at |U|=2^16). A materially different figure means the box is contended — go back to the idle gate. Do **not** substitute an SJ16 cell here; the sweep excludes the expensive ones and a probe must stay cheap.
 
-- [ ] **Step 3: Launch**
+- [ ] **Step 4: Launch**
+
 ```bash
-R=$HOME/piccard-table9-$(date +%Y%m%d); nohup python3 scripts/run_table9_sweep.py --mode=run --build-dir=$PWD/build --results-root=$R > $R.log 2>&1 & echo $! > $R.pid
+cd ~/piccard-table9
+R=$HOME/piccard-table9-$(date +%Y%m%d)
+nohup python3 scripts/run_table9_sweep.py --mode=run --build-dir=$PWD/build --results-root=$R > $R.log 2>&1 &
+echo $! > $R.pid
 ```
-Monitor `tail -f $R.log` (`[i/57] <cell> COMPLETED exit=0 <s>s`). Order: 13 piccard, 12 sqrt, 13 bcg12, 6 fhe_ind, 13 sj16 ending with `sj16::u=1048576`. On a non-zero exit: let the run finish, read `cells/<slug>/stderr.log`, fix only environment issues, rerun the same command (resume re-runs non-COMPLETED cells and refuses if provenance changed). Anything else: report to the user.
+Monitor `tail -f $R.log`: lines read `[i/42] <cell> COMPLETED exit=0 <s>s`. Order: 13 piccard, 12 sqrt, 7 bcg12, 6 fhe_ind, 4 sj16, ending with `paper-v1::sj16::n=10000`. Expected wall time ≈ 2.5 h.
 
-- [ ] **Step 4: Summarize, pull, commit**
+On a non-zero exit: let the run finish, read `cells/<slug>/stderr.log`, then rerun the same command — resume re-runs every cell that is not `COMPLETED` and refuses if provenance changed. If a cell fails again immediately, check whether its directory holds a stale `workload.bin` or raw `.tsv` from the interrupted attempt (the producers refuse to overwrite those); the runner clears a cell directory before re-running, so a repeat failure is a real failure, not an artifact collision. Anything you cannot explain: report to the user rather than improvising.
+
+- [ ] **Step 5: Summarize, pull back, commit**
+
 ```bash
-python3 scripts/summarize_table9_sweep.py --results-root=$R --out-dir=$R/summary && cat $R/summary/table9_rows.tex $R/summary/flatness.md
+python3 scripts/summarize_table9_sweep.py --results-root=$R --out-dir=$R/summary
+cat $R/summary/table9_rows.tex $R/summary/flatness.md
+```
+The summarizer must exit 0 with `0 missing` and without `--partial` or `--allow-nonstandard`. If it refuses, read the reason and fix the run — never pass an override to get output.
+
+```bash
 # Mac
-rsync -a ubuntu@<host>:~/piccard-table9-<date>/ ~/Documents/04-Dev/01-research/active/piccard/results/piccard-table9-<date>/
-cd ~/Documents/04-Dev/01-research/active/piccard && du -sh results/piccard-table9-<date> && git add results/piccard-table9-<date> && git commit -m "results(table9): 57-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
+rsync -a ubuntu@13.216.211.115:~/piccard-table9-<date>/ ~/Documents/04-Dev/01-research/active/piccard/results/piccard-table9-<date>/
+cd ~/Documents/04-Dev/01-research/active/piccard && du -sh results/piccard-table9-<date>
+git add -f results/piccard-table9-<date> && git commit -m "results(table9): 42-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
 ```
-Keep `workload.bin`/`trace.bin` (the sidecars do not bind them; they are the only record of the workload). Record instance id, start/stop, cost in `results/piccard-table9-<date>/aws.md`. Terminate the instance.
+Keep `workload.bin`/`trace.bin` — the sidecars do not bind them and they are the only record of the workload. Write `results/piccard-table9-<date>/aws.md` with the instance id, the start/stop times, the observed wall time, and the idle-gate evidence (the process listing you saw before launching).
+
+- [ ] **Step 6: Do NOT terminate the instance**
+
+The box belongs to the concurrent D-10 campaign. Leave it running, leave `~/piccard` untouched, and remove only `~/piccard-table9-<date>` after the rsync has been verified (compare `du -sh` on both sides). Terminating it would destroy someone else's campaign.
 
 ---
 
@@ -1223,12 +1263,15 @@ Keep `workload.bin`/`trace.bin` (the sidecars do not bind them; they are the onl
 
 **Files:** `~/Documents/03-TeX/01-Paper/01-In_Progress/Private_Jaccard_with_FHE/Revision/Piccard_MR_R1.tex:2098-2146` (`tbl:comp`), `:2324`, and every sentence quoting a Table IX number (grep `17.6`, `71.4`, `103.5`, `211.7`, `285{,}389`, `1{,}141{,}500`, `16-thread`, `ddagger`).
 
-- [ ] **Step 1: Table body** — paste the 16 lines of `summary/table9_rows.tex` over the 16 data rows; wrap changed cells as `\heewondel{old}\heewon{new}` (whole-row del/ins when >3 cells change). Remove every `^{\ddagger}`, `^{\S}`, `^{\ddagger\ddagger}` and the commented legacy footnotes. New footnote:
+- [ ] **Step 1: Table body** — paste the 16 lines of `summary/table9_rows.tex` over the 16 data rows; wrap changed cells as `\heewondel{old}\heewon{new}` (whole-row del/ins when >3 cells change).
+
+**Markers: remove only the ones that are no longer true.** Delete every `$^{\ddagger}$` (the old "independent of this axis, value repeated" marker) and `$^{\S}$`. **Keep `$^{\ddagger\ddagger}$` on the two \textsf{SJ16} cells at $|\U|=2^{18}$ and $2^{20}$** — those two were never executed and still carry the calibrated extrapolation, so the marker and its footnote must survive. Verify against `summary/table9_rows.tex`: those two cells print a bare value with no $\pm$ interval, which is how you can tell them apart from measurements.
+
+New footnote (note what it does and does not claim):
 ```latex
 \multicolumn{9}{@{}p{0.9\textwidth}}{\footnotesize
-Time: mean $\pm$ 95\% CI over 30 runs, ms. \heewon{Every cell is measured on the same machine with 16 threads; the default setting ($|\U|=2^{16}$, $n=1000$, $k=128$, $m=64$) is measured once and repeated in each block. \textsf{FHE-IND} takes only $|\U|$ and $n$ as inputs, so its $k$ and $m$ rows repeat the default-setting measurement.}}
-```
-Keep `$^{\dagger}$` on the FHE-IND header.
+Time: mean $\pm$ 95\% CI over 30 runs, ms. \heewon{All measured cells were run on one machine at 16 threads; the default setting ($|\U|=2^{16}$, $n=1000$, $k=128$, $m=64$) is measured once and repeated in each block. A protocol's cost is measured only along the parameters it actually consumes: \textsf{SJ16} takes neither $k$ nor $m$, \cite{BCG12} takes neither $|\U|$ nor $m$, and \textsf{FHE-IND} takes neither $k$ nor $m$, so those rows repeat the default-setting measurement rather than re-running an identical configuration.}}\newline
+$^{\ddagger\ddagger}$\,\heewon{Not executed; extrapolated from the calibrated per-element cost.}
 
 - [ ] **Step 2: Prose** — update each quoted number with `\heewondel{old}\heewon{new}`; delete the 2^18/2^20 extrapolation remark and the "rescaled to the 16-thread footing" remark. Where the text asserts BCG12/SJ16/FHE-IND independence of k and m (line ~2100), add `\heewon{(measured max/min ratio across the $k$ and $m$ blocks: $X$)}` with the value from `flatness.md` (≥ 1.000 by construction).
 
