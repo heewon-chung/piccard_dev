@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-"""Run the 55 Table IX cells of the revision matrix sequentially with the
+"""Run the 42 Table IX cells of the revision matrix sequentially with the
 orchestrator's exact argv and record provenance.
 
 A deliberately narrow sibling of scripts/run_revision_benchmarks.py: same
 matrix, same canonical argv, same env, same per-cell output layout, but only
 the cells that fill tbl:comp; no phases, no verification, no seal.
 
-Only SJ16's two large-|U| cells are excluded from this runner (2026-08-23,
-user decision): sj16::u=262144 and sj16::u=1048576 are infeasible to
-measure -- the sj16::fit=precomputed cell alone took 9.5 h at |U|=2^16 on
-the 2026-08-20 run -- so the paper keeps their existing extrapolated
-values. Every other SJ16 cell is measured here: the point of the table is
-to show with data that SJ16's time is flat in k and in m, and that needs
-measured cells, not extrapolation. The matrix still contains the two
-excluded cells and plan()/family-keyed logic still handles them for a
-possible future full run; TABLE9_CELL_IDS simply does not include them.
+This runner measures only cells whose varied parameter is a real input to
+the protocol under test (2026-08-23, final user decision, verified in
+source): SJ16 (`Sj16Adapter(method, key_bits, universe, ...)`,
+`bench_review_comparison.cpp:941-950`), BCG12 (`Bcg12Params` has only
+`mode/backend/k/minhash_seed`; `bcg12.cpp` never references `universe`,
+`bcg12.h:12-18`), and FHE-IND (`BaselineEngine` takes only
+`universe_size`/`set_size`, `baseline_engine.h:37,57`) each ignore some of
+the swept axes -- re-running such a cell would measure the same
+configuration again, not a parameter dependence, and the verifier already
+asserts those row fields are blank. SJ16's two large-|U| cells
+(sj16::u=262144, sj16::u=1048576) are additionally excluded as infeasible
+-- the sj16::fit=precomputed cell alone took 9.5 h at |U|=2^16 on the
+2026-08-20 run -- so the paper keeps their existing extrapolated values.
+42 cells: piccard_std128 13, sqrt_comparison 12, bcg12_minhash 7, fhe_ind
+6, sj16 4. The matrix still contains every excluded cell and
+plan()/family-keyed logic still handles them for a possible future full
+run; TABLE9_CELL_IDS simply does not include them. Table rows for
+unconsumed parameters repeat the default-point measurement with a
+footnote citing the implementation.
 
   python3 scripts/run_table9_sweep.py --mode=dry-run --build-dir=build --results-root=/abs/dir
   python3 scripts/run_table9_sweep.py --mode=run     --build-dir=build --results-root=/abs/dir
@@ -60,26 +70,37 @@ def _ids(family: str, prefix: str = "", *, skip_m: tuple[str, ...] = ()) -> list
     return ids
 
 
-# SJ16 cells actually measured by this sweep: every axis point except the
-# two large-|U| cells that stay extrapolated (see module docstring).
+# BCG12 consumes only n and k (no |U|, no m): the u=65536 default point plus
+# both n cells and all four k cells.  See module docstring.
+_BCG12_MINHASH_IDS: tuple[str, ...] = (
+    "paper-v1::bcg12_minhash::u=65536",
+    "paper-v1::bcg12_minhash::n=100", "paper-v1::bcg12_minhash::n=10000",
+    "paper-v1::bcg12_minhash::k=16", "paper-v1::bcg12_minhash::k=64",
+    "paper-v1::bcg12_minhash::k=256", "paper-v1::bcg12_minhash::k=512",
+)
+
+# FHE-IND consumes only |U| and n (no k, no m).  See module docstring.
+_FHE_IND_IDS: tuple[str, ...] = tuple(
+    [f"paper-v1::fhe_ind::u={v}" for v in _U] + [f"paper-v1::fhe_ind::n={v}" for v in _N]
+)
+
+# SJ16 consumes |U| and n (no k, no m); the two large-|U| cells stay
+# extrapolated (infeasible, see module docstring).
 _SJ16_MEASURED_IDS: tuple[str, ...] = (
     "paper-v1::sj16::u=16384", "paper-v1::sj16::u=65536",
     "paper-v1::sj16::n=100", "paper-v1::sj16::n=10000",
-    "paper-v1::sj16::k=16", "paper-v1::sj16::k=64", "paper-v1::sj16::k=256", "paper-v1::sj16::k=512",
-    "paper-v1::sj16::m=16", "paper-v1::sj16::m=128", "paper-v1::sj16::m=256",
 )
 
-# Execution order: cheap producers first, SJ16 last (11 of its 13 cells --
-# the two large-|U| cells are excluded, see module docstring).  The default
-# point is the u=65536 cell of each family.
+# Execution order: cheap producers first, SJ16 last.  The default point is
+# the u=65536 cell of each family.
 TABLE9_CELL_IDS: tuple[str, ...] = tuple(
     _ids("piccard_std128")
     + _ids("sqrt_comparison", "timing_", skip_m=("128",))
-    + _ids("bcg12_minhash")
-    + [f"paper-v1::fhe_ind::u={v}" for v in _U] + [f"paper-v1::fhe_ind::n={v}" for v in _N]
+    + list(_BCG12_MINHASH_IDS)
+    + list(_FHE_IND_IDS)
     + list(_SJ16_MEASURED_IDS)
 )
-assert len(TABLE9_CELL_IDS) == 55 and len(set(TABLE9_CELL_IDS)) == 55
+assert len(TABLE9_CELL_IDS) == 42 and len(set(TABLE9_CELL_IDS)) == 42
 
 
 def _now() -> str:

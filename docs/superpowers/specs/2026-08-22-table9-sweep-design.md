@@ -181,10 +181,13 @@ gpt-5.6-sol high) → 5. AWS run (opus, push and run pre-authorized 2026-08-22) 
 
 ## 9. v2 amendment (2026-08-22, after gpt-5.6-sol plan review)
 
-> **2026-08-23:** `sj16::u=262144` and `sj16::u=1048576` are excluded from
-> the sweep by user decision (infeasible; the paper keeps their
-> extrapolated values). All other SJ16 cells are measured so that flatness
-> in k and m is shown by data. 55 cells.
+> **2026-08-23 (final):** the sweep measures only cells whose varied
+> parameter is a real input to the protocol — verified in source, SJ16
+> takes no k/m, BCG12 takes no |U|/m, FHE-IND takes no k/m — and excludes
+> `sj16::u=262144`/`u=1048576` as infeasible (extrapolation kept). 42
+> cells: piccard 13, sqrt 12, bcg12 7, fhe_ind 6, sj16 4. Table rows for
+> unconsumed parameters repeat the default-point measurement with a
+> footnote citing the implementation.
 
 The review of plan v1 established, with source evidence, that §4–§5 above are
 not implementable: `bench_review_comparison`'s non-matrix CLI is frozen to

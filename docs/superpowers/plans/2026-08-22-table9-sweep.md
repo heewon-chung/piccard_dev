@@ -195,10 +195,13 @@ git commit -m "feat(matrix): Table IX full-grid cells — bcg12 u/m, sj16 k/m, s
 
 ### Task 2: Sweep runner over the 57 Table IX matrix cells (sonnet)
 
-> **2026-08-23:** `sj16::u=262144` and `sj16::u=1048576` are excluded from
-> the sweep by user decision (infeasible; the paper keeps their
-> extrapolated values). All other SJ16 cells are measured so that flatness
-> in k and m is shown by data. 55 cells.
+> **2026-08-23 (final):** the sweep measures only cells whose varied
+> parameter is a real input to the protocol — verified in source, SJ16
+> takes no k/m, BCG12 takes no |U|/m, FHE-IND takes no k/m — and excludes
+> `sj16::u=262144`/`u=1048576` as infeasible (extrapolation kept). 42
+> cells: piccard 13, sqrt 12, bcg12 7, fhe_ind 6, sj16 4. Table rows for
+> unconsumed parameters repeat the default-point measurement with a
+> footnote citing the implementation.
 
 **Files:**
 - Create: `scripts/run_table9_sweep.py`

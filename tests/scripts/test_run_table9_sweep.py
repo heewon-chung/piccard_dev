@@ -23,29 +23,36 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 class CellListTest(unittest.TestCase):
-    def test_55_ids_exist_in_matrix_and_are_run_cells(self) -> None:
+    def test_42_ids_exist_in_matrix_and_are_run_cells(self) -> None:
         document, _ = common.load_matrix(MATRIX)
         by_id = {c["cell_id"]: c for c in document["cells"]}
-        self.assertEqual(len(sweep.TABLE9_CELL_IDS), 55)
-        self.assertEqual(len(set(sweep.TABLE9_CELL_IDS)), 55)
+        self.assertEqual(len(sweep.TABLE9_CELL_IDS), 42)
+        self.assertEqual(len(set(sweep.TABLE9_CELL_IDS)), 42)
         for cid in sweep.TABLE9_CELL_IDS:
             self.assertIn(cid, by_id, cid)
             self.assertEqual(by_id[cid]["invocation_status"], "RUN", cid)
         families = [by_id[c]["family"] for c in sweep.TABLE9_CELL_IDS]
         self.assertEqual(families.count("piccard_std128"), 13)
         self.assertEqual(families.count("sqrt_comparison"), 12)
-        self.assertEqual(families.count("bcg12_minhash"), 13)
+        self.assertEqual(families.count("bcg12_minhash"), 7)
         self.assertEqual(families.count("fhe_ind"), 6)
-        self.assertEqual(families.count("sj16"), 11)
-        # the two large-|U| SJ16 cells stay excluded (infeasible; paper keeps their extrapolated values)
-        self.assertNotIn("paper-v1::sj16::u=262144", sweep.TABLE9_CELL_IDS)
-        self.assertNotIn("paper-v1::sj16::u=1048576", sweep.TABLE9_CELL_IDS)
-        self.assertEqual(sweep.TABLE9_CELL_IDS[-1], "paper-v1::sj16::m=256")
+        self.assertEqual(families.count("sj16"), 4)
+        # BCG12 consumes no |U| beyond its default point, and no m at all
+        for excluded in ("paper-v1::bcg12_minhash::u=16384", "paper-v1::bcg12_minhash::u=262144",
+                         "paper-v1::bcg12_minhash::u=1048576", "paper-v1::bcg12_minhash::m=16",
+                         "paper-v1::bcg12_minhash::m=128", "paper-v1::bcg12_minhash::m=256"):
+            self.assertNotIn(excluded, sweep.TABLE9_CELL_IDS, excluded)
+        # SJ16 consumes no k or m, and its two large-|U| cells stay extrapolated (infeasible)
+        for excluded in ("paper-v1::sj16::k=16", "paper-v1::sj16::k=64", "paper-v1::sj16::k=256",
+                         "paper-v1::sj16::k=512", "paper-v1::sj16::m=16", "paper-v1::sj16::m=128",
+                         "paper-v1::sj16::m=256", "paper-v1::sj16::u=262144", "paper-v1::sj16::u=1048576"):
+            self.assertNotIn(excluded, sweep.TABLE9_CELL_IDS, excluded)
+        self.assertEqual(sweep.TABLE9_CELL_IDS[-1], "paper-v1::sj16::n=10000")
 
     def test_materialized_argv_matches_orchestrator_conventions(self) -> None:
         document, _ = common.load_matrix(MATRIX)
         plans = sweep.plan(document, Path("/b"), Path("/r"), seed=20260729, threads=16)
-        self.assertEqual(len(plans), 55)
+        self.assertEqual(len(plans), 42)
         for p in plans:
             self.assertIn("--trials=30", p["argv"], p["cell_id"])
             self.assertIn(f"--revision-cell={p['cell_id']}", p["argv"])
@@ -66,7 +73,7 @@ class DryRunTest(unittest.TestCase):
             root = Path(tmp) / "out"
             r = run("--mode=dry-run", "--build-dir=/nonexistent", f"--results-root={root}")
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(len((root / "planned_argv.jsonl").read_text().splitlines()), 55)
+            self.assertEqual(len((root / "planned_argv.jsonl").read_text().splitlines()), 42)
             self.assertFalse((root / "cells").exists())
             self.assertFalse((root / "run.json").exists())
 
@@ -96,7 +103,7 @@ class RunModeTest(unittest.TestCase):
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["state"], "FAILED")
             self.assertTrue(manifest["dirty_allowed"])
-            self.assertEqual(len(manifest["cells"]), 55)
+            self.assertEqual(len(manifest["cells"]), 42)
             failed = [c for c in manifest["cells"] if c["execution_status"] != "COMPLETED"]
             self.assertEqual({c["family"] for c in failed}, {"fhe_ind"})
             self.assertEqual(len(failed), 6)
@@ -123,13 +130,13 @@ class RunModeTest(unittest.TestCase):
             flag.unlink()
             r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
             self.assertEqual(r2.returncode, 0, r2.stderr)
-            self.assertIn("ran 6, skipped 49", r2.stdout)
+            self.assertIn("ran 6, skipped 36", r2.stdout)
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["state"], "COMPLETED")
-            self.assertEqual(len(manifest["cells"]), 55)
+            self.assertEqual(len(manifest["cells"]), 42)
             self.assertTrue(all(c["execution_status"] == "COMPLETED" for c in manifest["cells"]))
             events = [json.loads(l) for l in (root / "events.jsonl").read_text().splitlines()]
-            self.assertEqual(sum(e["event"] == "START" for e in events), 55 + 6)
+            self.assertEqual(sum(e["event"] == "START" for e in events), 42 + 6)
             self.assertEqual(sum(e["event"] == "RESUME" for e in events), 1)
             r3 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty", "--threads=8")
             self.assertNotEqual(r3.returncode, 0)
@@ -184,7 +191,7 @@ class RunModeTest(unittest.TestCase):
             self.assertEqual(len(manifest2["provenance_history"]), 1)
             self.assertEqual(manifest2["provenance_history"][0]["provenance_id"], old_id)
             by_id = {c["cell_id"]: c for c in manifest2["cells"]}
-            self.assertEqual(len(by_id), 55)
+            self.assertEqual(len(by_id), 42)
             self.assertEqual(by_id[target_cell]["provenance_id"], new_id)
             for cid, record in by_id.items():
                 if cid != target_cell:
@@ -232,10 +239,10 @@ class RunModeTest(unittest.TestCase):
             target.unlink()
             r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
             self.assertEqual(r2.returncode, 0, r2.stderr)
-            self.assertIn("ran 1, skipped 54", r2.stdout)
+            self.assertIn("ran 1, skipped 41", r2.stdout)
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["state"], "COMPLETED")
-            self.assertEqual(len(manifest["cells"]), 55)
+            self.assertEqual(len(manifest["cells"]), 42)
             self.assertTrue(target.exists())
             events = [json.loads(l) for l in (root / "events.jsonl").read_text().splitlines()]
             self.assertEqual(sum(e["event"] == "REVALIDATE" for e in events), 1)
@@ -253,7 +260,7 @@ class RunModeTest(unittest.TestCase):
             receipt_path.write_text(json.dumps(receipt))
             r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
             self.assertEqual(r2.returncode, 0, r2.stderr)
-            self.assertIn("ran 1, skipped 54", r2.stdout)
+            self.assertIn("ran 1, skipped 41", r2.stdout)
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["state"], "COMPLETED")
             self.assertTrue(all(c["execution_status"] == "COMPLETED" for c in manifest["cells"]))
