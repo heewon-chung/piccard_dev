@@ -1596,6 +1596,14 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_seal_revision_benchmarks
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RunTable9Sweep
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_table9_sweep
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SummarizeTable9Sweep
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_summarize_table9_sweep
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # =============================================================================
