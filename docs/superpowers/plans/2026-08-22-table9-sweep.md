@@ -1177,32 +1177,59 @@ Same instance class and AMI as `aws-guide.md` Phase B (`c8i.8xlarge`, CoreCount=
 
 Re-check the idle gate immediately before launching, not only once at the start of the task.
 
-- [ ] **Step 1: Push, then build in an isolated checkout cloned from the remote**
+- [ ] **Step 1: Push, then build in an isolated checkout, fail-closed**
 
-The push was authorized by the user on 2026-08-22. **The instance is shared with the running D-10 campaign, which owns `~/piccard`.** Never `git reset`, `git checkout`, `git clone`-from, `cmake`, or write anything inside `~/piccard` — clone from the shared remote instead, and pin the exact commit. Both machines already use the same remote (`https://github.com/heewon-chung/piccard_dev.git`); the instance's `~/piccard` has a stale `origin/main`, so fetching from it would build the wrong code.
+The push was authorized by the user on 2026-08-22. **The instance is shared with the running D-10 campaign, which owns `~/piccard`.** Never `git reset`, `git checkout`, `git clone`-from, `cmake`, or write anything inside `~/piccard`. Clone from the shared remote (`https://github.com/heewon-chung/piccard_dev.git`, which both machines use) and pin the exact commit: the instance's `~/piccard` has a stale `origin/main` (`adbf453`), so fetching from it would silently build code without any of this work.
 
-On the Mac, push and record the exact SHA to deploy:
+Every check below must **abort the procedure**, not print a value for a human to eyeball. Two failure modes this guards against, both of which the earlier draft allowed: a build whose failure is hidden because its output is piped to `tail` (the pipeline's status is `tail`'s, not the compiler's), and a reused `~/piccard-table9` directory that is not the repository you think it is.
+
+On the Mac — push, then prove the remote actually has the commit:
 ```bash
+set -euo pipefail
 cd ~/Documents/04-Dev/01-research/active/piccard
+# Two files carry edits that belong to a different effort and must stay uncommitted.
+# Anything else dirty means this plan's work is not fully committed -> abort.
+UNRELATED=$'.gitignore\nscripts/verify_revision_benchmarks.py'
+DIRTY=$(git status --porcelain --untracked-files=no | awk '{print $2}' | sort)
+test "$DIRTY" = "$(echo "$UNRELATED" | sort)" -o -z "$DIRTY" \
+  || { echo "REFUSE: unexpected uncommitted changes:"; echo "$DIRTY"; exit 1; }
 git push origin main
-SHA=$(git rev-parse HEAD); echo "$SHA"
+SHA=$(git rev-parse HEAD)
+test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SHA" || { echo "REFUSE: remote main is not $SHA"; exit 1; }
+echo "deploy $SHA"
 ```
+The two allowed files are `.gitignore` and the ULP-tolerance hunk in `scripts/verify_revision_benchmarks.py`; both pre-date this plan and belong to another effort. Do not commit them to get past the check, and do not widen the allowlist — if a third file is dirty, that is this plan's work sitting uncommitted, and deploying without it is exactly the failure this check exists to catch.
 
-On the instance, clone from the remote and check out that SHA — no fallbacks, no placeholders, every step must succeed on its own:
+On the instance — paste that SHA into `SHA=` and run the block as a whole:
 ```bash
-cd ~
-[ -d ~/piccard-table9 ] || git clone https://github.com/heewon-chung/piccard_dev.git ~/piccard-table9
-cd ~/piccard-table9
-git fetch origin main
-git checkout --detach <SHA>          # the SHA printed above, pasted literally
-git rev-parse HEAD                   # must equal <SHA>
-git status --short --branch          # must be clean
-cmake -S . -B build && cmake --build build -j16 2>&1 | tail -1
-python3 scripts/validate_revision_matrix.py
-```
-Expected: `HEAD` equals the SHA you pushed; clean tree; `valid (299 cells; 20 representative toy; 104 executable toy)`.
+set -euo pipefail
+SHA=<paste the SHA printed above>
+REPO=~/piccard-table9
 
-**Do not run `ctest` on the instance while D-10 is active** — the suite spawns test binaries and would both contend with that campaign and pollute its timings. The Mac already ran 94/94 on this commit, and the dry-run in Step 3 is what proves the deployed build plans the right work. If the box is idle and you want the extra assurance, run it then.
+if [ -e "$REPO" ]; then
+  git -C "$REPO" rev-parse --git-dir >/dev/null           # exists but is not a repo -> abort
+  test "$(git -C "$REPO" remote get-url origin)" = "https://github.com/heewon-chung/piccard_dev.git" \
+    || { echo "REFUSE: $REPO points at another remote"; exit 1; }
+else
+  git clone https://github.com/heewon-chung/piccard_dev.git "$REPO"
+fi
+cd "$REPO"
+git fetch origin main
+git checkout --detach "$SHA"
+test "$(git rev-parse HEAD)" = "$SHA" || { echo "REFUSE: HEAD is not $SHA"; exit 1; }
+test -z "$(git status --porcelain)" || { echo "REFUSE: checkout is dirty"; exit 1; }
+
+cmake -S . -B build                                       # no pipe: its exit status must propagate
+cmake --build build -j16                                  # no pipe, for the same reason
+for b in bench_piccard bench_onehot_sqrt bench_review_comparison bench_fhe_ind; do
+  test -x "build/$b" || { echo "REFUSE: build/$b missing"; exit 1; }
+done
+python3 scripts/validate_revision_matrix.py               # exits non-zero on an invalid matrix
+echo "READY at $SHA"
+```
+The block prints `READY at <SHA>` only if every check passed; anything else means stop and read the message. If the build is noisy and you want to skim it, redirect to a file (`cmake --build build -j16 > /tmp/build.log 2>&1`) — never pipe it, because that discards the compiler's exit status.
+
+**Do not run `ctest` on the instance while D-10 is active** — the suite spawns test binaries, which would contend with that campaign and pollute its timings. The Mac already ran 94/94 on this commit; Step 3's dry-run is what proves the deployed build plans the right work.
 
 - [ ] **Step 2: Idle gate — mandatory, and re-checked immediately before launch**
 
