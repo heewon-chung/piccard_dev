@@ -810,6 +810,53 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     _bind_cell_shape([mutated], cell,
                                      {"command": command}, cell["cell_id"])
 
+    def test_sj16_binds_recorded_thread_count_to_cell_threads(self) -> None:
+        # --threads on the SJ16 argv is parsed but never consumed by
+        # bench_review_comparison; only OMP_NUM_THREADS actually governs
+        # parallelism, so the row's own recorded omp_threads/omp_dynamic
+        # must match the cell's threads value.  This is exactly the check
+        # that would have rejected the 2026-08-20 AWS sj16 artifacts, which
+        # were produced under a matrix that said threads=2 and an argv that
+        # said --threads=2 while the CSV row recorded omp_threads=16.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1", family="sj16",
+                                axis="k", axis_value="16")
+        self.assertEqual(cell["threads"], 16)
+        row = {
+            "suite": "revision-sj16-v1", "scenario": "review-65536",
+            "method": "sj16", "cryptographic_profile": "Paillier-3072",
+            "nominal_security_bits": "128", "security_match": "true",
+            "comparison_eligible": "true",
+            "comparison_scope": "component-lower-bound",
+            "primitive": "paillier-3072",
+            "protocol_model": "sj16-intersection-shares",
+            "output_semantics":
+                "harness-reconstructed-jaccard-with-plaintext-union",
+            "assurance_scope": "intersection-shares-lower-bound",
+            "security_basis":
+                "rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "randomizer-generation-included",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+            "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
+            "omp_threads": "16", "omp_dynamic": "false",
+        }
+        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
+
+        for label, field, value in (("threads", "omp_threads", "2"),
+                                    ("dynamic", "omp_dynamic", "true")):
+            with self.subTest(label=label):
+                mutated = dict(row)
+                mutated[field] = value
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([mutated], cell,
+                                     {"command": command}, cell["cell_id"])
+
     def test_bcg12_minhash_binds_blank_m_and_rejects_populated_value(self) -> None:
         # BCG12 MinHash consumes k but not the one-hot m dimension.  Task 1
         # added bcg12_minhash::m=* cells, so a row echoing a value for the

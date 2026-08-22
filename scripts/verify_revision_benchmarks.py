@@ -2997,6 +2997,20 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
             for field in ("workload_id", "workload_manifest_sha256",
                           "execution_trace_sha256"):
                 _row_value(row, field, cid)
+        # --threads on the SJ16 argv is parsed but never consumed by
+        # bench_review_comparison; only OMP_NUM_THREADS actually governs
+        # parallelism, so the matrix, the argv and the recorded row could
+        # each claim a different thread count with nothing to catch it.
+        # Bind the row's own recorded omp_threads/omp_dynamic to the cell's
+        # threads value (a mismatch is exactly what the pre-fix 275-cell
+        # matrix's stale threads=2 claim against a 16-thread artifact would
+        # have been).  fit=* cells use a different producer/schema and
+        # never reach this block.
+        if cell.get("family") == "sj16" and cell.get("axis") != "fit" and \
+                "threads" in cell:
+            for row in rows:
+                _require_value(row, "omp_threads", cell["threads"], cid)
+                _require_value(row, "omp_dynamic", False, cid)
 
     # The two encoding-only families are intentionally excluded from the
     # end-to-end comparison table.  Their rows still need an explicit,
