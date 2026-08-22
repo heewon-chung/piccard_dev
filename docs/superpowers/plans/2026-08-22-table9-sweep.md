@@ -1303,14 +1303,20 @@ ssh -i ~/.ssh/piccard-bench.pem ubuntu@13.216.211.115 "du -sh ~/piccard-table9-$
 
 **Write `results/piccard-table9-$DATE/aws.md` now, before staging anything** — it is part of the evidence, so it has to be inside the commit, not added afterwards. It records:
 
-- the instance id and type, and the deployed SHA (paste the SHA literally — the staging check greps the index copy for it);
+- the instance id and type, and the deployed SHA (paste the full 40-character SHA literally — the staging check re-reads it from the run's own `run.json` and greps the staged `aws.md` for that exact value, so a typo or an abbreviated SHA fails);
 - start and stop times, and the observed wall time;
 - the **idle gate** evidence (use that phrase): the process listing you saw immediately before launching, and the one you saw after the first cell completed;
 - **the Step 1 tree resolution** (use that exact heading — the staging check looks for it): for each entry that was dirty or untracked before the deploy, what it was, what you did with it, and who confirmed. Copy this from the scratch note you kept in Step 1; the record cannot be reconstructed later.
 
 Then stage and commit, with `aws.md` included. The check reads the file **out of the index** (`git show :path`), so an unstaged or later-edited copy cannot satisfy it, and it looks for the four things the record must contain rather than for the filename:
 ```bash
+set -euo pipefail
 AWS_MD="results/piccard-table9-$DATE/aws.md"
+# Re-derive the deployed SHA from the run's own manifest, never from a shell
+# variable: $SHA is set in Step 1's shell, and in a fresh shell it would be
+# empty, which would turn the grep below into a match-anything no-op.
+SHA=$(python3 -c "import json,sys; print(json.load(open('results/piccard-table9-$DATE/run.json'))['provenance']['source']['commit'])")
+printf '%s\n' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "REFUSE: run.json has no usable source commit"; exit 1; }
 git add -f "results/piccard-table9-$DATE"
 # Exact path, staged, and actually filled in.  A substring match would also
 # accept aws.md.bak, an aws.md in some other directory, or an unstaged one.
