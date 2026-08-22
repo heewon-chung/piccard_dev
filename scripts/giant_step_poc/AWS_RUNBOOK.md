@@ -48,13 +48,23 @@ either have no row, or collide with a row that was measured on the Horner
 circuit. So every tree configuration needs a measured `--ps_override`, and this
 step is where those come from.
 
-**Skip this step when the goal is timing.** Noise is a function of the
-parameters and the seed, not of the machine, and the five overrides below were
-already probed locally and committed as `results/giant-step-poc/overrides.txt`.
-The Step 3 `spec` pass re-derives `eval_noise_bits` on the box and
-`summarize.py` re-checks the capacity inequality, so a box whose noise differs
-from the local probe is caught at the gate rather than silently accepted. Run
-Steps 1–2 only if `summarize.py` fails that check.
+**Skip the full grid when the goal is timing.** The five overrides below were
+already probed locally and are committed as
+`results/giant-step-poc/overrides.txt`. Instead of the 52-cell grid, run the
+targeted check, which re-measures only those five cells on this box
+(~2 min at 16 threads) and fails if any measured noise exceeds the value the
+override was selected with:
+
+```sh
+OMP_NUM_THREADS=16 sh scripts/giant_step_poc/verify_overrides.sh
+```
+
+This is the only real cross-machine noise check. Do **not** rely on the
+Step 3 `spec` pass for it: under an override, `spec` reports the override's
+own `eval_noise_bits` back (the selector copies it from the chosen candidate),
+so `summarize.py`'s capacity inequality is satisfied by construction and
+cannot detect a box whose noise differs. Run the full Steps 1–2 only for a k
+that `verify_overrides.sh` reports as MISMATCH.
 
 ```
 --ps_override=16:8:40:225:16384:304
