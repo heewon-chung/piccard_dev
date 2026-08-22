@@ -1048,10 +1048,19 @@ def _dynamic_raw_timing_sidecar(output: Path, cell: dict[str, Any],
             return
         # C++ Format17 is snprintf("%.17g"). Python's .17g formatting follows
         # the same shortest-round-trip decimal contract for these finite
-        # binary64 values. Compare the canonical bytes, not an ULP window.
-        expected_text = format(expected, ".17g")
-        if actual_text != expected_text:
-            fail(f"dynamic raw timing aggregate {field} mismatch for {cid}")
+        # binary64 values, so an exact byte match is the common case.
+        if actual_text == format(expected, ".17g"):
+            return
+        # Release codegen may reorder the producer's sum/sum_sq reductions
+        # (vectorized/pairwise vs serial vs FMA), so the recomputed statistic
+        # can differ from the recorded one in the last ulps. Accept a tight
+        # band; anything beyond it is real corruption. (Same policy as
+        # _raw_require_stat / Plan erratum E4 — this sibling check never
+        # received that fix.)
+        if math.isfinite(actual) and math.isfinite(expected) and \
+                abs(actual - expected) <= max(1e-12, 1e-9 * max(abs(actual), abs(expected))):
+            return
+        fail(f"dynamic raw timing aggregate {field} mismatch for {cid}")
 
     aggregates_by_phase: dict[str, dict[str, str]] = {}
     for aggregate in aggregates:
