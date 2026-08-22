@@ -1,0 +1,43 @@
+schema_version	piccard-paper-raw-timing-v1
+artifact_type	raw_timing_v1
+producer_id	bench_review_comparison
+profile_id	paper-v1
+cell_id	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec
+warmup_policy	discard_one
+expected_measured	30
+samples
+sample	producer_id	profile_id	cell_id	phase	sample_kind	trial_index	seed	raw_ms
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	discarded_warmup	0	7601088898307989082	13.457742
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	0	2115569678318511413	12.964745000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	1	12838321748745168420	12.938119
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	2	4915525766841658395	12.906999000000003
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	3	3839710434820891927	12.762326
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	4	5296754721884535828	12.963950000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	5	256869953507966382	12.931304000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	6	1796931328000773742	12.964373000000002
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	7	15879010423236829554	13.078726999999999
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	8	2190227332391386272	12.83081
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	9	8749486940148585633	12.881533000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	10	1407742934462042661	12.762851
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	11	2119541850861740441	12.892168
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	12	3280093350985018669	13.110609999999999
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	13	5228361610932074774	12.967204000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	14	13054559637744648332	13.026675000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	15	17062652021990635928	12.946297000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	16	545284885083586826	12.905171000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	17	3968164665547101424	12.9354
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	18	5667146600130658519	12.994885999999999
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	19	7640577073431067644	12.946312000000002
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	20	6091009787842676983	12.975233999999999
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	21	7820479741511205284	12.953408000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	22	16070065271039326570	13.086191999999999
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	23	9692936467628390860	12.914652
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	24	8719557574069266780	12.919814000000001
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	25	4492562627511638580	12.967535
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	26	6439716537363546710	12.983164999999998
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	27	2807136086836921681	12.966575999999998
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	28	3780863477989053841	12.896129
+sample	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	measured	29	4289601158421983641	13.0505
+aggregates
+aggregate	producer_id	profile_id	cell_id	phase	measured_count	mean_ms	sample_sd_ms	median_ms	ci95_low_ms	ci95_high_ms	format_version
+aggregate	bench_review_comparison	paper-v1	paper-v1::bcg12_minhash::k=16::bcg12_mh_ec	total	30	12.947455499999997	0.079675389923739681	12.949860000000001	12.917704220453878	12.977206779546115	17-digit

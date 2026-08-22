@@ -1,0 +1,16 @@
+{
+ "schema": "piccard-table9-sweep-run-v1",
+ "state": "COMPLETED",
+ "dirty_allowed": false,
+ "provenance": {
+  "threads": 16,
+  "seed": 20260729
+ },
+ "cells": [
+  {
+   "cell_id": "paper-v1::piccard_std128::u=16384",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  }
+ ]
+}

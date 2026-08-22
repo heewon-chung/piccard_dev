@@ -1,0 +1,16 @@
+Benchmark Configuration:
+  k:         16
+  m:         64
+  Set size:  1000
+  Trials:    30
+  Mode:      timing
+  Security:  STD128
+  Seed:      20260729
+  Overlap:   0.3
+  Acc trials:100
+  Hash rand: resampled
+  Transcript stat bits: 40
+  Max queries: 1048576
+  Profile:    paper-std128-t40-v1 (primary)
+  Evidence point: no
+  Target Jaccard: 0.5

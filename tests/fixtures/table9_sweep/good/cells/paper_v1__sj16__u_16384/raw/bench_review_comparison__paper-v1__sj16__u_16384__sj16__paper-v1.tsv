@@ -1,0 +1,43 @@
+schema_version	piccard-paper-raw-timing-v1
+artifact_type	raw_timing_v1
+producer_id	bench_review_comparison
+profile_id	paper-v1
+cell_id	paper-v1::sj16::u=16384::sj16
+warmup_policy	discard_one
+expected_measured	30
+samples
+sample	producer_id	profile_id	cell_id	phase	sample_kind	trial_index	seed	raw_ms
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	discarded_warmup	0	7601088898307989082	18188.636052012444
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	0	2115569678318511413	17914.651464000344
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	1	12838321748745168420	18080.013720005751
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	2	4915525766841658395	18078.812038004398
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	3	3839710434820891927	17515.405232012272
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	4	5296754721884535828	17629.875662997365
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	5	256869953507966382	17057.602019011974
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	6	1796931328000773742	17071.179414018989
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	7	15879010423236829554	17067.172400996089
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	8	2190227332391386272	17064.513295009732
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	9	8749486940148585633	17092.38248501718
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	10	1407742934462042661	17077.841898009181
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	11	2119541850861740441	17119.762638002634
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	12	3280093350985018669	17995.772863999009
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	13	5228361610932074774	18228.622778013349
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	14	13054559637744648332	18175.46808797121
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	15	17062652021990635928	17855.882703006268
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	16	545284885083586826	17978.813051983714
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	17	3968164665547101424	17945.220219001174
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	18	5667146600130658519	17322.129719987512
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	19	7640577073431067644	17334.034930020571
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	20	6091009787842676983	17704.896451994777
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	21	7820479741511205284	17782.652799010277
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	22	16070065271039326570	17823.662027984858
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	23	9692936467628390860	18162.772654011846
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	24	8719557574069266780	18162.16568300128
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	25	4492562627511638580	17176.336971014738
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	26	6439716537363546710	17679.017937988043
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	27	2807136086836921681	17496.981079027057
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	28	3780863477989053841	17866.919281005859
+sample	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	measured	29	4289601158421983641	17578.569860994816
+aggregates
+aggregate	producer_id	profile_id	cell_id	phase	measured_count	mean_ms	sample_sd_ms	median_ms	ci95_low_ms	ci95_high_ms	format_version
+aggregate	bench_review_comparison	paper-v1	paper-v1::sj16::u=16384::sj16	total	30	17634.637712236741	406.43273280428792	17691.95719499141	17482.873235628256	17786.402188845226	17-digit

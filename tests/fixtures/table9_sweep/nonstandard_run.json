@@ -1,0 +1,36 @@
+{
+ "schema": "piccard-table9-sweep-run-v1",
+ "state": "FAILED",
+ "dirty_allowed": true,
+ "provenance": {
+  "threads": 16,
+  "seed": 20260729
+ },
+ "cells": [
+  {
+   "cell_id": "paper-v1::piccard_std128::u=16384",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  },
+  {
+   "cell_id": "paper-v1::sqrt_comparison::timing_k=16",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  },
+  {
+   "cell_id": "paper-v1::fhe_ind::u=16384",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  },
+  {
+   "cell_id": "paper-v1::bcg12_minhash::k=16",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  },
+  {
+   "cell_id": "paper-v1::sj16::u=16384",
+   "execution_status": "COMPLETED",
+   "exit_code": 0
+  }
+ ]
+}

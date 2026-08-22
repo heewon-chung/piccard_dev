@@ -28,6 +28,7 @@ EXPECTED_FILES = (
     "run_table9_sweep.py",
     "seal_revision_benchmarks.py",
     "summarize_real_datasets.py",
+    "summarize_table9_sweep.py",
     "templates/noise_calibration_wrapper.inc",
     "validate_revision_matrix.py",
     "verify_benchmark_provenance.py",
