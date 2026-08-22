@@ -1,0 +1,4 @@
+circuit,security,k,m,ring_dim,ring_dim_requested,ring_dim_baseline,ring_dim_grew,mult_depth,natural_mult_depth,scaling_mod_size,num_limbs,plaintext_mod,log_q,log_delta,pattern,eval_noise_bits,headroom_bits,saturated,decrypt_ok,decision_ok,expected,got,ct_bytes,status
+threshold,STD128,16,64,16384,8192,16384,0,9,6,45,8,65537,360.0,344.0,all_match,233.55,109.45,0,1,1,16,16,2099255,ok
+threshold,STD128,16,64,16384,8192,16384,0,9,6,45,8,65537,360.0,344.0,no_match,233.51,109.49,0,1,1,0,0,2099255,ok
+threshold,STD128,16,64,16384,8192,16384,0,9,6,45,8,65537,360.0,344.0,random,233.29,109.71,0,1,1,1,1,2099255,ok

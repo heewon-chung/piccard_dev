@@ -1,0 +1,24 @@
+Benchmark Configuration:
+  k:         128
+  m:         64
+  Set size:  1000
+  Trials:    30
+  Mode:      timing
+  Security:  STD128
+  Seed:      20260729
+  Overlap:   0.3
+  Acc trials:100
+  Hash rand: resampled
+  Transcript stat bits: 40
+  Max queries: 1048576
+  Profile:    legacy (legacy)
+  Evidence point: no
+  Target Jaccard: 0.5
+
+=== Varying k (median of 30 trials) ===
+  k=16 tau=9 depth=8 N=16384 poly_eval=145.121ms total=345.299ms
+  k=32 tau=19 depth=9 N=16384 poly_eval=256.247ms total=508.536ms
+  k=64 tau=38 depth=10 N=16384 poly_eval=419.973ms total=738.836ms
+  k=128 tau=76 depth=11 N=16384 poly_eval=592.227ms total=931.304ms
+  k=256 tau=153 depth=12 N=32768 poly_eval=2443.57ms total=3429.69ms
+  WARNING: Skipped k=512: tree giant step: no --ps_override for k=512
