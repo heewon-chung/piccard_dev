@@ -181,6 +181,9 @@ gpt-5.6-sol high) → 5. AWS run (opus, push and run pre-authorized 2026-08-22) 
 
 ## 9. v2 amendment (2026-08-22, after gpt-5.6-sol plan review)
 
+> **2026-08-23:** SJ16 removed from the sweep by user decision — the
+> 2026-08-20 SJ16 measurements (16 threads) are reused; 44 cells.
+
 The review of plan v1 established, with source evidence, that §4–§5 above are
 not implementable: `bench_review_comparison`'s non-matrix CLI is frozen to
 seven-method suites with 50 accuracy trials (`comparison_workload.cpp:122,
