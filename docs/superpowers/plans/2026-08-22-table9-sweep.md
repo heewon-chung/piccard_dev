@@ -1187,18 +1187,22 @@ On the Mac — push, then prove the remote actually has the commit:
 ```bash
 set -euo pipefail
 cd ~/Documents/04-Dev/01-research/active/piccard
-# Two files carry edits that belong to a different effort and must stay uncommitted.
-# Anything else dirty means this plan's work is not fully committed -> abort.
-UNRELATED=$'.gitignore\nscripts/verify_revision_benchmarks.py'
-DIRTY=$(git status --porcelain --untracked-files=no | awk '{print $2}' | sort)
-test "$DIRTY" = "$(echo "$UNRELATED" | sort)" -o -z "$DIRTY" \
-  || { echo "REFUSE: unexpected uncommitted changes:"; echo "$DIRTY"; exit 1; }
+# Deploy only from a tree with nothing uncommitted.  The two pre-existing
+# edits that belong to another effort are set aside explicitly, not trusted
+# by filename -- an allowlist keyed on a path would also wave through this
+# plan's own uncommitted work in the same file.
+git stash push -m "table9-deploy: set aside unrelated edits" -- .gitignore scripts/verify_revision_benchmarks.py || true
+test -z "$(git status --porcelain --untracked-files=no)" \
+  || { echo "REFUSE: uncommitted work remains:"; git status --porcelain --untracked-files=no; exit 1; }
 git push origin main
 SHA=$(git rev-parse HEAD)
 test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SHA" || { echo "REFUSE: remote main is not $SHA"; exit 1; }
 echo "deploy $SHA"
+git stash pop        # restore the other effort's edits; do this even if a check above aborted
 ```
-The two allowed files are `.gitignore` and the ULP-tolerance hunk in `scripts/verify_revision_benchmarks.py`; both pre-date this plan and belong to another effort. Do not commit them to get past the check, and do not widen the allowlist — if a third file is dirty, that is this plan's work sitting uncommitted, and deploying without it is exactly the failure this check exists to catch.
+The stash is what makes this fail-closed. `.gitignore` and the ULP-tolerance hunk in `scripts/verify_revision_benchmarks.py` pre-date this plan and belong to another effort, so they are set aside for the push and restored immediately after. Everything else must already be committed: if the tree is still dirty after the stash, this plan's own work is uncommitted, and deploying would ship a build without it. Note that `scripts/verify_revision_benchmarks.py` carries *both* efforts' changes — this plan committed several hunks into it — which is exactly why the earlier filename allowlist was unsafe and why the check now looks at what is left rather than at which files are involved.
+
+If `git stash pop` conflicts (because a later commit touched the same lines), resolve it in favour of the other effort's hunk and tell the user; do not discard the stash.
 
 On the instance — paste that SHA into `SHA=` and run the block as a whole:
 ```bash
