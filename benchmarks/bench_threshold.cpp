@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -102,6 +103,112 @@ static void ResolveRawTimingOptions(RawTimingOptions& options,
 }
 
 }  // namespace
+
+// ---- PoC giant-step comparison (review item D-10) --------------------------
+// These flags exist only for the tree-vs-Horner giant-step measurement. They
+// are consumed on the ordinary timing/spec/accuracy path only; the
+// --revision-cell, --mode=fpfn and --raw_timing_dir paths keep their frozen
+// argv contracts and reject them through their own strict parsers.
+static GiantStepMode g_giant_step = GiantStepMode::Horner;
+static std::map<uint32_t, ThresholdCalibrationOverride> g_ps_overrides;
+static std::string g_timing_scenario;  // "" or "vary_k"
+static uint32_t g_override_m = 0;      // geometry the overrides were probed at
+static SecurityLevel g_override_security = SecurityLevel::STD128;
+
+static uint64_t ParseU64Strict(const std::string& s, const char* what) {
+    if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos)
+        throw std::invalid_argument(std::string(what) +
+                                    ": expected unsigned integer, got '" + s +
+                                    "'");
+    return std::stoull(s);
+}
+
+static ThresholdCalibrationOverride ParsePsOverride(const std::string& spec,
+                                                    uint32_t& k_out) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char ch : spec) {
+        if (ch == ':') { parts.push_back(cur); cur.clear(); }
+        else cur.push_back(ch);
+    }
+    parts.push_back(cur);
+    if (parts.size() != 6)
+        throw std::invalid_argument(
+            "--ps_override expects K:DEPTH:SMS:EVAL_NOISE:N:LOG_DELTA, got " +
+            spec);
+    k_out = static_cast<uint32_t>(ParseU64Strict(parts[0], "--ps_override K"));
+    ThresholdCalibrationOverride ov;
+    ov.mult_depth =
+        static_cast<uint32_t>(ParseU64Strict(parts[1], "--ps_override DEPTH"));
+    ov.scaling_mod_size =
+        static_cast<uint32_t>(ParseU64Strict(parts[2], "--ps_override SMS"));
+    ov.eval_noise_bits = static_cast<uint32_t>(
+        ParseU64Strict(parts[3], "--ps_override EVAL_NOISE"));
+    ov.ring_dim_natural =
+        static_cast<uint32_t>(ParseU64Strict(parts[4], "--ps_override N"));
+    size_t consumed = 0;
+    bool log_delta_ok = false;
+    try {
+        ov.log_delta = std::stod(parts[5], &consumed);
+        log_delta_ok = consumed == parts[5].size() &&
+                       std::isfinite(ov.log_delta) && ov.log_delta > 0.0;
+    } catch (const std::exception&) {
+        // std::stod's own message names neither the flag nor the field.
+        log_delta_ok = false;
+    }
+    if (!log_delta_ok)
+        throw std::invalid_argument(
+            "--ps_override LOG_DELTA must be a positive finite number, got '" +
+            parts[5] + "'");
+    return ov;
+}
+
+// Consumes PoC flags; returns the remaining argv (argv[0] kept). Only called
+// on the ordinary timing/spec/accuracy path.
+static std::vector<std::string> ExtractPocArgs(int argc, char** argv) {
+    std::vector<std::string> rest;
+    bool saw_mode = false, saw_scenario = false;
+    for (int i = 0; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (i > 0 && arg.rfind("--giant_step=", 0) == 0) {
+            if (saw_mode) throw std::invalid_argument("duplicate --giant_step");
+            saw_mode = true;
+            const std::string v = arg.substr(13);
+            if (v == "horner") g_giant_step = GiantStepMode::Horner;
+            else if (v == "tree") g_giant_step = GiantStepMode::Tree;
+            else throw std::invalid_argument("--giant_step must be horner or tree");
+            continue;
+        }
+        if (i > 0 && arg.rfind("--ps_override=", 0) == 0) {
+            uint32_t k = 0;
+            auto ov = ParsePsOverride(arg.substr(14), k);
+            if (!g_ps_overrides.emplace(k, ov).second)
+                throw std::invalid_argument("duplicate --ps_override for k=" +
+                                            std::to_string(k));
+            continue;
+        }
+        if (i > 0 && arg.rfind("--timing_scenario=", 0) == 0) {
+            if (saw_scenario)
+                throw std::invalid_argument("duplicate --timing_scenario");
+            saw_scenario = true;
+            g_timing_scenario = arg.substr(18);
+            if (g_timing_scenario != "vary_k")
+                throw std::invalid_argument(
+                    "--timing_scenario supports only vary_k");
+            continue;
+        }
+        rest.push_back(arg);
+    }
+    // --raw_timing_dir may precede or follow the PoC flags, so the two cannot
+    // be checked against each other until the whole argv has been scanned.
+    if (saw_mode || !g_ps_overrides.empty() || saw_scenario) {
+        for (const auto& a : rest)
+            if (a.rfind("--raw_timing_dir=", 0) == 0)
+                throw std::invalid_argument(
+                    "PoC giant-step flags are not allowed with --raw_timing_dir");
+    }
+    return rest;
+}
 
 // ============================================================================
 // Helpers (shared with bench_piccard.cpp)
@@ -792,7 +899,9 @@ static ThresholdResult RunMultiTrialThreshold(
     std::vector<double> v_total, v_minhash, v_encode, v_encrypt;
     std::vector<double> v_multiply, v_rotate, v_mask, v_poly, v_flood, v_decrypt;
     size_t ct_size = 0;
-    int last_result = 0, last_expected = 0, last_correct = 0;
+    int last_result = 0, last_expected = 0;
+    // D-10: correctness columns are conjunctions over all measured trials.
+    bool all_correct = true, all_agree = true;
 
     for (size_t t = 0; t < trials; t++) {
         auto tr = RunTimedThreshold(engine, set_x, set_y, tc, label);
@@ -816,7 +925,8 @@ static ThresholdResult RunMultiTrialThreshold(
         ct_size = tr.ct_size_bytes;
         last_result = tr.threshold_result;
         last_expected = tr.threshold_expected;
-        last_correct = tr.threshold_correct;
+        all_correct = all_correct && (tr.threshold_correct == 1);
+        all_agree = all_agree && (tr.fhe_agrees == 1);
     }
 
     auto d_tot = ComputeDispersion(v_total);
@@ -853,7 +963,8 @@ static ThresholdResult RunMultiTrialThreshold(
     result.trials = trials;
     result.threshold_result = last_result;
     result.threshold_expected = last_expected;
-    result.threshold_correct = last_correct;
+    // D-10: correctness columns are conjunctions over all measured trials.
+    result.threshold_correct = all_correct ? 1 : 0;
     // threshold benchmark has no per-trial jaccard fields in timing mode
     result.rel_error_eligible_n = 0;
 
@@ -863,7 +974,8 @@ static ThresholdResult RunMultiTrialThreshold(
     result.match_count = tc.match_count;
     result.matchcount_expected = tc.matchcount_expected;
     result.outcome = OutcomeName(tc.truth, last_result);
-    result.fhe_agrees = (last_result == tc.matchcount_expected) ? 1 : 0;
+    // D-10: correctness columns are conjunctions over all measured trials.
+    result.fhe_agrees = all_agree ? 1 : 0;
     result.hash_randomness = "fixed";
     result.hash_seed = engine.GetParams().hash_seed;
     result.hash_root_seed = engine.GetParams().hash_seed;
@@ -890,6 +1002,41 @@ static std::unique_ptr<ThresholdPiccard> TryCreateThresholdEngine(
     out_params.threshold_mode = true;
     out_params.threshold_tau = tau;
     out_params.security = security;
+
+    // PoC (review item D-10). Tree needs a measured row for this k, probed at
+    // this exact geometry; Horner must never silently ignore a supplied row.
+    out_params.giant_step = g_giant_step;
+    // The early returns below happen before Validate(), which is what normally
+    // fills natural_mult_depth. Fill it from the same pure formula so a SKIPPED
+    // spec row still reports the circuit's own depth instead of 0. It is never
+    // taken from an override's provisioned mult_depth.
+    out_params.natural_mult_depth =
+        PatersonStockmeyerNaturalDepth(k, g_giant_step);
+    if (g_giant_step == GiantStepMode::Tree) {
+        auto it = g_ps_overrides.find(k);
+        if (it == g_ps_overrides.end()) {
+            out_error = "tree giant step: no --ps_override for k=" +
+                        std::to_string(k);
+            return nullptr;  // SKIPPED row; never adopts a Horner row
+        }
+        if (m != g_override_m || security != g_override_security) {
+            out_error = "tree giant step: --ps_override was probed at m=" +
+                        std::to_string(g_override_m) + "; refusing m=" +
+                        std::to_string(m);
+            return nullptr;
+        }
+        out_params.threshold_calibration_override = it->second;
+    } else if (!g_ps_overrides.empty()) {
+        // Horner + --ps_override. Attach the matching row so the Task 3
+        // selector rejects it by name, and refuse every other k explicitly:
+        // an override that is quietly dropped would look like a clean run.
+        auto it = g_ps_overrides.find(k);
+        if (it == g_ps_overrides.end()) {
+            out_error = "--ps_override supplied without --giant_step=tree";
+            return nullptr;
+        }
+        out_params.threshold_calibration_override = it->second;
+    }
 
     try {
         out_params.Validate();
@@ -1642,7 +1789,20 @@ static void BenchSpecDump(const BenchmarkConfig& config,
             if (v % 2 == 1) v--; else v /= 2;
         }
         uint32_t num_chunks = (k + s) / s;
-        uint32_t giant_mults = num_chunks - 1;
+        // Horner: ell-1 sequential mults. Tree: (ell-1) combines +
+        // (ceil(log2 ell)-1) squarings of x^{s*2^j}.
+        const uint32_t giant_mults = PatersonStockmeyerGiantMults(k, g_giant_step);
+        {
+            uint32_t tree_depth = 0;
+            while ((1u << tree_depth) < num_chunks) tree_depth++;
+            const uint32_t local_depth = 1 + baby_depth +
+                (g_giant_step == GiantStepMode::Tree ? tree_depth
+                                                     : num_chunks - 1);
+            if (local_depth != PatersonStockmeyerNaturalDepth(k, g_giant_step))
+                throw std::logic_error(
+                    "spec-dump PS shape disagrees with "
+                    "PatersonStockmeyerNaturalDepth");
+        }
 
         PiccardParams params;
         std::string error;
@@ -2002,7 +2162,10 @@ int main(int argc, char** argv) {
                   << "  --set_size=N       Size of each party's set (default: 100)\n"
                   << "  --trials=N         Number of trials to run (default: 10)\n"
                   << "  --mode=MODE        'accuracy', 'timing', 'fpfn', or 'spec' (default: timing)\n"
-                  << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n";
+                  << "  --security=LEVEL   'TOY', 'STD128', 'STD192', or 'STD256'\n"
+                  << "  --giant_step=MODE  'horner' (default) or 'tree' giant step (timing/spec/accuracy only)\n"
+                  << "  --ps_override=K:DEPTH:SMS:EVAL_NOISE:N:LOG_DELTA  measured row for k=K (tree only; repeatable)\n"
+                  << "  --timing_scenario=vary_k  run only the varying-k timing sweep\n";
         return 0;
     }
 
@@ -2046,6 +2209,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    // PoC flags are consumed only on the ordinary path. The revision-cell and
+    // fpfn parsers above keep their strict contracts and reject them.
+    std::vector<std::string> poc_filtered;
+    std::vector<char*> poc_argv;
+    try {
+        poc_filtered = ExtractPocArgs(argc, argv);
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
+    }
+    for (auto& s : poc_filtered) poc_argv.push_back(s.data());
+    argc = static_cast<int>(poc_argv.size());
+    argv = poc_argv.data();
+
     BenchmarkConfig config;
     RawTimingOptions raw_options;
     try {
@@ -2063,6 +2240,18 @@ int main(int argc, char** argv) {
     }
     config.Print();
 
+    // --timing_scenario selects among the timing sweeps and has no meaning
+    // elsewhere. Refuse it rather than accept a flag that does nothing.
+    if (!g_timing_scenario.empty() && config.mode != "timing") {
+        std::cerr << "Error: --timing_scenario requires --mode=timing\n";
+        return 1;
+    }
+
+    // The --ps_override rows were probed at one (m, security) geometry only.
+    // TryCreateThresholdEngine refuses to reuse them anywhere else.
+    g_override_m = config.m;
+    g_override_security = config.security_level;
+
     ThresholdCSVWriter csv;
     if (config.mode != "spec") {
         csv.WriteHeader();
@@ -2077,11 +2266,15 @@ int main(int argc, char** argv) {
         std::cerr << "\n=== Varying k (median of " << config.trials << " trials) ===\n";
         BenchVaryK(config, csv);
 
-        std::cerr << "\n=== Varying m (median of " << config.trials << " trials) ===\n";
-        BenchVaryM(config, csv);
+        // --timing_scenario=vary_k keeps the run to the k sweep, which is the
+        // only sweep the giant-step comparison measures.
+        if (g_timing_scenario.empty()) {
+            std::cerr << "\n=== Varying m (median of " << config.trials << " trials) ===\n";
+            BenchVaryM(config, csv);
 
-        std::cerr << "\n=== Varying set size (median of " << config.trials << " trials) ===\n";
-        BenchVarySetSize(config, csv);
+            std::cerr << "\n=== Varying set size (median of " << config.trials << " trials) ===\n";
+            BenchVarySetSize(config, csv);
+        }
     } else if (config.mode == "accuracy") {
         std::cerr << "\n=== Accuracy vs k ===\n";
         BenchAccuracyVaryK(config, csv);

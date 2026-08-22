@@ -502,6 +502,11 @@ static uint64_t FindCandidatePlaintextModulus(
     return plaintext_mod;
 }
 
+// PoC giant-step comparison (review item D-10): the probe that measures the
+// tree circuit's evaluation noise has to build the tree circuit. Horner stays
+// the default, so every existing invocation is unaffected.
+static GiantStepMode g_giant_step = GiantStepMode::Horner;
+
 static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
                                  uint32_t k, uint32_t m,
                                  uint32_t depth_delta, uint32_t sms,
@@ -514,6 +519,8 @@ static PiccardParams BuildParams(Circuit circuit, SecurityLevel sec,
     params.k = k;
     params.m = m;
     params.security = sec;
+    // Set before Derive: the threshold natural depth is a function of it.
+    params.giant_step = g_giant_step;
 
     // Derive only: Validate() would consult the calibration table this harness
     // exists to produce, and would throw for any key not yet measured.
@@ -1900,6 +1907,7 @@ static void PrintUsage() {
         << "  --circuit=C            onehot | sqrt | threshold | all (default: all)\n"
         << "  --security=S           TOY | STD128 (single-point mode; default STD128)\n"
         << "  --k=N --m=N            Single-point parameters (default 128 / 64)\n"
+        << "  --giant_step=MODE      horner (default) | tree giant step for the threshold circuit\n"
         << "  --depth_delta=N        Extra multiplicative depth over the circuit's own\n"
         << "  --sms=N                scaling_mod_size; 0 = OpenFHE default (60)\n"
         << "  --patterns=all|match   Input patterns to run (default: all)\n"
@@ -2039,6 +2047,12 @@ int main(int argc, char** argv) {
             else if (arg.rfind("--margin=", 0) == 0) margin = std::stoul(arg.substr(9));
             else if (arg.rfind("--seed=", 0) == 0) seed = std::stoull(arg.substr(7));
             else if (arg.rfind("--patterns=", 0) == 0) all_patterns = (arg.substr(11) == "all");
+            else if (arg.rfind("--giant_step=", 0) == 0) {
+                const std::string v = arg.substr(13);
+                if (v == "horner") g_giant_step = GiantStepMode::Horner;
+                else if (v == "tree") g_giant_step = GiantStepMode::Tree;
+                else { std::cerr << "Invalid --giant_step: " << v << "\n"; return 1; }
+            }
             else if (arg.rfind("--security=", 0) == 0) {
                 std::string s = arg.substr(11);
                 if (s == "TOY") security = SecurityLevel::TOY;
