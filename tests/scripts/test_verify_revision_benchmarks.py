@@ -895,6 +895,44 @@ class RevisionVerifierContractTest(unittest.TestCase):
             _bind_cell_shape([mutated], cell, {"command": command},
                              cell["cell_id"])
 
+    def test_bcg12_exact_binds_blank_k_and_m_and_rejects_populated_values(self) -> None:
+        # BCG12 exact-cardinality consumes neither MinHash dimension, same
+        # as SJ16 -- a row echoing a value for either must be rejected.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1",
+                                family="bcg12_exact", axis="control",
+                                axis_value="default")
+        row = {
+            "suite": "revision-bcg12-exact-v1",
+            "scenario": "review-65536", "method": "bcg12_exact_ec",
+            "cryptographic_profile": "P-256", "nominal_security_bits": "128",
+            "security_match": "true", "comparison_eligible": "false",
+            "comparison_scope": "matched-cardinality-component",
+            "primitive": "bcg12-ec",
+            "protocol_model": "bcg12-exact-cardinality",
+            "output_semantics": "harness-reconstructed-exact-jaccard",
+            "assurance_scope": "implemented-baseline-parameter-map",
+            "security_basis": "nist-p256-parameter-map",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "crs-and-keys-only",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+            "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
+        }
+        command = ["--k=128", "--m=64", "--n=1000", "--universe=65536"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
+
+        for label, field, value in (("k", "k", "128"), ("m", "m", "64")):
+            with self.subTest(label=label):
+                mutated = dict(row)
+                mutated[field] = value
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([mutated], cell,
+                                     {"command": command}, cell["cell_id"])
+
     def test_toy_real_accuracy_binds_ineligible_without_profile_and_paper_stays_eligible(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import cell_output, file_inventory
