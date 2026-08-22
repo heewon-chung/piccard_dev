@@ -1177,22 +1177,32 @@ Same instance class and AMI as `aws-guide.md` Phase B (`c8i.8xlarge`, CoreCount=
 
 Re-check the idle gate immediately before launching, not only once at the start of the task.
 
-- [ ] **Step 1: Push, then build in an isolated checkout**
+- [ ] **Step 1: Push, then build in an isolated checkout cloned from the remote**
 
-The push was authorized by the user on 2026-08-22. **The instance is shared with the running D-10 campaign, which owns `~/piccard`.** Never `git reset`, `git checkout`, `cmake` or write anything inside `~/piccard`; use a separate clone.
+The push was authorized by the user on 2026-08-22. **The instance is shared with the running D-10 campaign, which owns `~/piccard`.** Never `git reset`, `git checkout`, `git clone`-from, `cmake`, or write anything inside `~/piccard` — clone from the shared remote instead, and pin the exact commit. Both machines already use the same remote (`https://github.com/heewon-chung/piccard_dev.git`); the instance's `~/piccard` has a stale `origin/main`, so fetching from it would build the wrong code.
 
+On the Mac, push and record the exact SHA to deploy:
 ```bash
+cd ~/Documents/04-Dev/01-research/active/piccard
 git push origin main
-# on the instance — a NEW checkout, never ~/piccard
-cd ~ && git clone ~/piccard ~/piccard-table9 2>/dev/null || (cd ~/piccard-table9 && git fetch origin)
-cd ~/piccard-table9 && git fetch https://github.com/<origin> main 2>/dev/null || git fetch origin
-git checkout -B table9 origin/main && git log --oneline -1 && git status --short --branch
+SHA=$(git rev-parse HEAD); echo "$SHA"
+```
+
+On the instance, clone from the remote and check out that SHA — no fallbacks, no placeholders, every step must succeed on its own:
+```bash
+cd ~
+[ -d ~/piccard-table9 ] || git clone https://github.com/heewon-chung/piccard_dev.git ~/piccard-table9
+cd ~/piccard-table9
+git fetch origin main
+git checkout --detach <SHA>          # the SHA printed above, pasted literally
+git rev-parse HEAD                   # must equal <SHA>
+git status --short --branch          # must be clean
 cmake -S . -B build && cmake --build build -j16 2>&1 | tail -1
 python3 scripts/validate_revision_matrix.py
 ```
-Expected: HEAD equals the reviewed commit; clean tree; `valid (299 cells; 20 representative toy; 104 executable toy)`.
+Expected: `HEAD` equals the SHA you pushed; clean tree; `valid (299 cells; 20 representative toy; 104 executable toy)`.
 
-Run `ctest` **only while the idle gate below is satisfied** — the suite spawns test binaries and would contend with D-10. If D-10 is active, skip `ctest` here; the Mac already ran 94/94 on this commit and the AWS run does not depend on it.
+**Do not run `ctest` on the instance while D-10 is active** — the suite spawns test binaries and would both contend with that campaign and pollute its timings. The Mac already ran 94/94 on this commit, and the dry-run in Step 3 is what proves the deployed build plans the right work. If the box is idle and you want the extra assurance, run it then.
 
 - [ ] **Step 2: Idle gate — mandatory, and re-checked immediately before launch**
 
@@ -1246,16 +1256,20 @@ cat $R/summary/table9_rows.tex $R/summary/flatness.md
 The summarizer must exit 0 with `0 missing` and without `--partial` or `--allow-nonstandard`. If it refuses, read the reason and fix the run — never pass an override to get output.
 
 ```bash
-# Mac
-rsync -a ubuntu@13.216.211.115:~/piccard-table9-<date>/ ~/Documents/04-Dev/01-research/active/piccard/results/piccard-table9-<date>/
-cd ~/Documents/04-Dev/01-research/active/piccard && du -sh results/piccard-table9-<date>
-git add -f results/piccard-table9-<date> && git commit -m "results(table9): 42-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
+# Mac — DATE is the same yyyymmdd the instance used for $R
+DATE=$(ssh -i ~/.ssh/piccard-bench.pem ubuntu@13.216.211.115 'ls -d ~/piccard-table9-* | tail -1 | sed "s/.*piccard-table9-//"')
+rsync -a ubuntu@13.216.211.115:~/piccard-table9-$DATE/ ~/Documents/04-Dev/01-research/active/piccard/results/piccard-table9-$DATE/
+cd ~/Documents/04-Dev/01-research/active/piccard
+du -sh results/piccard-table9-$DATE
+ssh -i ~/.ssh/piccard-bench.pem ubuntu@13.216.211.115 "du -sh ~/piccard-table9-$DATE"   # sizes must agree
+git add -f results/piccard-table9-$DATE
+git commit -m "results(table9): 42-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
 ```
 Keep `workload.bin`/`trace.bin` — the sidecars do not bind them and they are the only record of the workload. Write `results/piccard-table9-<date>/aws.md` with the instance id, the start/stop times, the observed wall time, and the idle-gate evidence (the process listing you saw before launching).
 
 - [ ] **Step 6: Do NOT terminate the instance**
 
-The box belongs to the concurrent D-10 campaign. Leave it running, leave `~/piccard` untouched, and remove only `~/piccard-table9-<date>` after the rsync has been verified (compare `du -sh` on both sides). Terminating it would destroy someone else's campaign.
+The box belongs to the concurrent D-10 campaign. Leave it running, leave `~/piccard` untouched, and remove only `~/piccard-table9-<date>` after the rsync has been verified (compare `du -sh` on both sides). Terminating it would destroy someone else's campaign. Removing `~/piccard-table9` itself is also unnecessary — leave the checkout in place unless the user asks for cleanup; it costs nothing and makes a re-run trivial.
 
 ---
 
