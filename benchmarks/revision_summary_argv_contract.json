@@ -28,7 +28,7 @@
       "cell_id": "paper-v1::real_dataset::enron_u65536_artifact=summary"
     }
   ],
-  "matrix_sha256": "e2b6f75b2c710c88479f1ce34e1b545e1d90f46c8abbc9088a908ef1b85b249a",
+  "matrix_sha256": "da2bdfacd38829d01aa51994e5a0205cdc859126a587094f8d3a03d689d62c60",
   "producer": "summarize_real_datasets.py",
   "schema": "piccard-revision-summary-argv-v1",
   "version": 1

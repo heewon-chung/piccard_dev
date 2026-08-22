@@ -3001,15 +3001,40 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
         # parallelism, so the matrix, the argv and the recorded row could
         # each claim a different thread count with nothing to catch it.
         # Bind the row's own recorded omp_threads/omp_dynamic to the cell's
-        # threads value (a mismatch is exactly what the pre-fix 275-cell
-        # matrix's stale threads=2 claim against a 16-thread artifact would
-        # have been).  fit=* cells use a different producer/schema and
-        # never reach this block.
-        if cell.get("family") == "sj16" and cell.get("axis") != "fit" and \
-                "threads" in cell:
+        # threads value.  This block is only ever reached for the
+        # review-comparison-csv-v1 schema, which already excludes
+        # fit=per_element (schema sj16-calibration-v1, whose thread evidence
+        # is instead the threads_requested/threads_observed metadata bound
+        # in _check_sj16_calibration) -- so every sj16 cell that lands here,
+        # including fit=precomputed, is bound.  The distinction that matters
+        # is the producer, not the axis name: bench_review_comparison
+        # ignores --threads, bench_sj16_calibrate honors it.
+        if cell.get("family") == "sj16" and "threads" in cell:
             for row in rows:
                 _require_value(row, "omp_threads", cell["threads"], cid)
                 _require_value(row, "omp_dynamic", False, cid)
+            # --key-bits and --trials are common to every review-comparison-
+            # csv-v1 SJ16 argv (plain and fit=precomputed).  --warmup is
+            # emitted only by fit=precomputed -- the plain SJ16 argv has no
+            # --warmup flag, so requiring it there would reject every
+            # legitimate non-fit SJ16 cell.
+            key_arg = _command_value_once(command, "--key-bits=", cid)
+            if key_arg is None:
+                fail(f"SJ16 review command is missing --key-bits for {cid}")
+            if key_arg != "3072":
+                fail(f"SJ16 review command key size is not canonical for {cid}")
+            trials_arg = _command_value_once(command, "--trials=", cid)
+            expected_trials_arg = "1" if mode == "toy" else "30"
+            if trials_arg is None:
+                fail(f"SJ16 review command is missing --trials for {cid}")
+            if trials_arg != expected_trials_arg:
+                fail(f"SJ16 review command trial count mismatch for {cid}")
+            if cell.get("axis_value") == "precomputed":
+                warmup_arg = _command_value_once(command, "--warmup=", cid)
+                if warmup_arg is None:
+                    fail(f"SJ16 review command is missing --warmup for {cid}")
+                if warmup_arg != "1":
+                    fail(f"SJ16 review command warmup mismatch for {cid}")
 
     # The two encoding-only families are intentionally excluded from the
     # end-to-end comparison table.  Their rows still need an explicit,

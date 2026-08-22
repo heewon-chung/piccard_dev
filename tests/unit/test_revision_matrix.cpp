@@ -136,10 +136,14 @@ TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
         ++seen;
         EXPECT_EQ(cell.timeout_class, "long") << cell.cell_id;
         EXPECT_EQ(cell.invocation_status, "RUN") << cell.cell_id;
-        // The two calibration fits are deliberately serial; every measured
-        // cell runs the OpenMP-parallel encryption at 16 threads.
+        // Only the serial per_element calibration fit is deliberately
+        // single-threaded (bench_sj16_calibrate genuinely honors --threads
+        // via omp_set_num_threads); every other cell -- including
+        // fit=precomputed's bench_review_comparison, which ignores
+        // --threads and is governed by OMP_NUM_THREADS -- runs at 16.
         EXPECT_EQ(cell.attributes.at("threads"),
-                  cell.axis == "fit" ? "2" : "16")
+                  cell.axis == "fit" && cell.axis_value == "per_element"
+                      ? "2" : "16")
             << cell.cell_id;
     }
     EXPECT_EQ(seen, 22u);
@@ -505,6 +509,17 @@ TEST(RevisionMatrix, ValidationRejectsRunnerContractMutations) {
     expect_rejected(matrix);
     matrix = Load();
     MutableFind(matrix, "paper-v1::sj16::u=262144").attributes["threads"] = "2";
+    expect_rejected(matrix);
+    // fit=precomputed runs bench_review_comparison, which ignores --threads
+    // and is governed by OMP_NUM_THREADS like the rest of the family (F-6):
+    // its stale threads=2 claim is now rejected the same as any other
+    // non-fit-per_element SJ16 cell's would be.
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::fit=precomputed")
+        .expected_rows[0].attributes["threads"] = "2";
+    expect_rejected(matrix);
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::fit=precomputed").attributes["threads"] = "2";
     expect_rejected(matrix);
     matrix = Load();
     MutableFind(matrix, "paper-v1::bcg12_minhash::m=16").axes["m"] = "64";

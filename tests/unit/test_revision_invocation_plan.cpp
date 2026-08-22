@@ -2031,7 +2031,7 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyTwoSj16Cells) {
                 "--n=1000",
                 "--universe=65536",
                 "--key-bits=3072",
-                "--threads=2",
+                "--threads=16",
                 "--trials=" + paper_trials,
                 "--warmup=1",
                 "--seed={seed}",
@@ -2358,6 +2358,16 @@ TEST(RevisionInvocationPlan,
 
     cell = precomputed;
     cell.expected_rows.front().method = "wrong";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    // fit=precomputed runs bench_review_comparison, which ignores --threads
+    // and is governed by OMP_NUM_THREADS like the rest of the family: its
+    // stale threads=2 claim (F-6) is now rejected the same way
+    // large_universe's would be.
+    cell = precomputed;
+    cell.attributes["threads"] = "2";
+    cell.expected_rows.front().attributes["threads"] = "2";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
@@ -3800,7 +3810,9 @@ TEST(RevisionInvocationPlan,
             EXPECT_EQ(plan.executable, expected_executable);
             EXPECT_EQ(plan.environment.at("OMP_DYNAMIC"), "FALSE");
             EXPECT_EQ(plan.environment.at("OMP_NUM_THREADS"),
-                      cell.family == "sj16" && cell.axis == "fit"
+                      cell.family == "sj16" &&
+                              cell.expected_artifact_schema ==
+                                  "sj16-calibration-v1"
                           ? "2" : "{threads}");
             EXPECT_EQ(plan.invocation_status, cell.invocation_status);
             ASSERT_EQ(plan.expected_rows.size(), cell.expected_rows.size());

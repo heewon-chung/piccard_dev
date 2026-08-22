@@ -36,10 +36,19 @@ RevisionInvocationPlan MakePlan(const RevisionCell& cell,
     plan.timeout_class = cell.timeout_class;
     plan.expected_artifact_schema = cell.expected_artifact_schema;
     plan.executable = ExecutableForCell(cell);
+    // The distinction that matters is the producer, not the axis name:
+    // bench_sj16_calibrate (schema sj16-calibration-v1, i.e. fit=per_element)
+    // genuinely honors its own thread count via omp_set_num_threads;
+    // bench_review_comparison (every other SJ16 cell, including
+    // fit=precomputed) ignores --threads entirely and is governed by
+    // OMP_NUM_THREADS like the rest of its family.
     plan.environment = {
         {"OMP_DYNAMIC", "FALSE"},
         {"OMP_NUM_THREADS",
-         cell.family == "sj16" && cell.axis == "fit" ? "2" : "{threads}"},
+         cell.family == "sj16" &&
+                 cell.expected_artifact_schema == "sj16-calibration-v1"
+             ? "2"
+             : "{threads}"},
     };
     if (mode == RevisionRunMode::DryRun) {
         plan.environment.emplace("PICCARD_REVISION_DRY_RUN", "1");
@@ -1710,7 +1719,7 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
             "--n=1000",
             "--universe=65536",
             "--key-bits=3072",
-            "--threads=2",
+            "--threads=" + Sj16Threads(cell),
             std::string("--trials=") + (toy ? "1" : "30"),
             "--warmup=1",
             "--seed={seed}",
@@ -1893,7 +1902,7 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     const std::map<std::string, std::string> precomputed_attributes = {
         {"fit_authority", "false"}, {"k", "128"}, {"key_bits", "3072"},
         {"m", "64"}, {"n", "1000"}, {"precomputed", "true"},
-        {"threads", "2"}, {"u", "65536"}};
+        {"threads", "16"}, {"u", "65536"}};
     const std::map<std::string, std::vector<std::string>> per_element_sizes = {
         {"sizes", {"4096", "8192", "16384"}}};
 
@@ -1954,7 +1963,7 @@ void ValidateSj16Cell(const RevisionCell& cell) {
                              "bench_review_comparison", "", 30, 1, true);
         const std::map<std::string, std::string> row_attributes = {
             {"k", "128"}, {"key_bits", "3072"}, {"m", "64"},
-            {"n", "1000"}, {"precomputed", "true"}, {"threads", "2"},
+            {"n", "1000"}, {"precomputed", "true"}, {"threads", "16"},
             {"u", "65536"}, {"warmup_calls", "1"}};
         if (row.attributes != row_attributes ||
             !row.list_attributes.empty() || !row.fit_authority.empty()) {

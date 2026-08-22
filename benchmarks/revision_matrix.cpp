@@ -1021,18 +1021,30 @@ void ValidateFamilyCell(const RevisionCell& cell) {
         return;
     }
     if (cell.family == "sj16") {
+        // The distinction that matters is the producer, not the axis name:
+        // fit=per_element runs bench_sj16_calibrate, which genuinely honors
+        // its own --threads via omp_set_num_threads and stays pinned at 2.
+        // Every other SJ16 cell -- including fit=precomputed -- runs
+        // bench_review_comparison, which ignores --threads entirely and is
+        // governed by OMP_NUM_THREADS like the rest of its family, so it
+        // takes the family's 16.
+        const bool per_element_fit =
+            cell.axis == "fit" && cell.axis_value == "per_element";
         RequireAttribute(cell.attributes, "key_bits", "3072");
         RequireAttribute(cell.attributes, "threads",
-                         cell.axis == "fit" ? "2" : "16");
+                         per_element_fit ? "2" : "16");
         if (cell.axis == "fit") {
+            const std::string expected_fit_threads =
+                per_element_fit ? "2" : "16";
             if (cell.expected_rows.size() != 1 || cell.eligibility != "DIAGNOSTIC_ONLY" ||
                 cell.comparison_eligible || cell.table_eligible ||
                 OptionalAttribute(cell.attributes, "key_bits") != "3072" ||
-                OptionalAttribute(cell.attributes, "threads") != "2") {
+                OptionalAttribute(cell.attributes, "threads") !=
+                    expected_fit_threads) {
                 throw std::invalid_argument("SJ16 fit metadata mismatch");
             }
             const auto& row = cell.expected_rows.front();
-            if (cell.axis_value == "per_element") {
+            if (per_element_fit) {
                 RequireCounts(cell, 30, 1, 30, 1,
                               {{"enc_iters", 30}, {"query_trials", 30}},
                               {{"enc_iters", 1}, {"query_trials", 1}});
@@ -1054,7 +1066,7 @@ void ValidateFamilyCell(const RevisionCell& cell) {
                            "bench_review_comparison");
                 for (const auto& key_value : {std::pair<const char*, const char*>("k", "128"),
                                               {"m", "64"}, {"n", "1000"}, {"u", "65536"},
-                                              {"key_bits", "3072"}, {"threads", "2"},
+                                              {"key_bits", "3072"}, {"threads", "16"},
                                               {"precomputed", "true"}, {"warmup_calls", "1"}}) {
                     RequireRowAttribute(row, key_value.first, key_value.second);
                 }

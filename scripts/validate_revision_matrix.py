@@ -345,7 +345,7 @@ def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
                                   threads=2, warmup_calls=1)]
             return [_row_spec(rid, "DIAGNOSTIC", "", 30, 1,
                               method="bench_review_comparison", k=128, m=64, n=1000,
-                              u=65536, key_bits=3072, precomputed=True, threads=2,
+                              u=65536, key_bits=3072, precomputed=True, threads=16,
                               warmup_calls=1)]
         return [_row_spec("sj16", "MEASURED", "", 30, 1,
                           method="sj16", key_bits=3072, threads=16)]
@@ -648,7 +648,12 @@ def _validate_cell(cell: Any, index: int) -> None:
                  cell.get("grid_index") == cell["axes"]["grid_index"],
                  f"{label} threshold point aliases mismatch")
     if cell["family"] == "sj16":
-        expected_threads = 2 if cell["axis"] == "fit" else 16
+        # bench_sj16_calibrate (fit=per_element) genuinely honors its own
+        # --threads; every other SJ16 cell, including fit=precomputed, runs
+        # bench_review_comparison, which ignores --threads and is governed
+        # by OMP_NUM_THREADS like the rest of the family (F-6).
+        expected_threads = (2 if cell["axis"] == "fit" and
+                            cell["axis_value"] == "per_element" else 16)
         _require(cell.get("key_bits") == 3072 and
                  cell.get("threads") == expected_threads,
                  f"{label} SJ16 key/thread contract mismatch")

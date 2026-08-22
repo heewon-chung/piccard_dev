@@ -60,14 +60,19 @@ class RevisionMatrixTest(unittest.TestCase):
                       if c["cell_id"] == "paper-v1::sj16::fit=per_element")
         self.assertEqual(sj_fit["invocation_status"], "RUN")
         self.assertEqual(sj_fit["timeout_class"], "long")
-        # The whole family takes the 18 h stop; only the serial calibration
-        # fits stay at two threads.
+        # The whole family takes the 18 h stop; only the serial per_element
+        # calibration fit stays at two threads (F-6: bench_sj16_calibrate
+        # genuinely honors --threads; every other cell, including
+        # fit=precomputed's bench_review_comparison, is governed by
+        # OMP_NUM_THREADS like the rest of the family).
         for sj_cell in self.document["cells"]:
             if sj_cell["family"] == "sj16":
                 self.assertEqual(sj_cell["invocation_status"], "RUN")
                 self.assertEqual(sj_cell["timeout_class"], "long")
-                self.assertEqual(sj_cell["threads"],
-                                 2 if sj_cell["axis"] == "fit" else 16)
+                self.assertEqual(
+                    sj_cell["threads"],
+                    2 if sj_cell["axis"] == "fit" and
+                    sj_cell["axis_value"] == "per_element" else 16)
 
         bcg12_long = next(c for c in self.document["cells"]
                           if c["cell_id"] == "paper-v1::bcg12_exact::n=100000")
@@ -501,6 +506,14 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c["expected_rows"][0].__setitem__("threads", 2))
         mutate("paper-v1::sj16::u=262144",
                lambda c: c.__setitem__("invocation_status", "NO_SPAWN"))
+        # fit=precomputed runs bench_review_comparison, which ignores
+        # --threads and is governed by OMP_NUM_THREADS like the rest of the
+        # family (F-6): its stale threads=2 claim is now rejected the same
+        # way u=262144's would be.
+        mutate("paper-v1::sj16::fit=precomputed",
+               lambda c: c.__setitem__("threads", 2))
+        mutate("paper-v1::sj16::fit=precomputed",
+               lambda c: c["expected_rows"][0].__setitem__("threads", 2))
         mutate("paper-v1::bcg12_minhash::m=16",
                lambda c: c["axes"].__setitem__("m", 64))
         mutate("paper-v1::sj16::k=16",

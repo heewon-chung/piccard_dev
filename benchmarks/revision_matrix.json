@@ -8254,7 +8254,7 @@
           "row_id": "sj16_fit_precomputed",
           "status": "DIAGNOSTIC",
           "terminal_status": "DIAGNOSTIC",
-          "threads": 2,
+          "threads": 16,
           "toy_measured_count": 1,
           "u": 65536,
           "warmup_calls": 1,
@@ -8277,7 +8277,7 @@
       "producer": "bench_review_comparison",
       "profile": "paper-v1",
       "table_eligible": false,
-      "threads": 2,
+      "threads": 16,
       "timeout_class": "long",
       "toy_count": 1,
       "toy_counts": {

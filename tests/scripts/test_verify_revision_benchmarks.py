@@ -799,7 +799,8 @@ class RevisionVerifierContractTest(unittest.TestCase):
             "execution_trace_sha256": "b" * 64,
             "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
         }
-        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536"]
+        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536",
+                   "--key-bits=3072", "--trials=30"]
         _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
 
         for label, field, value in (("k", "k", "16"), ("m", "m", "64")):
@@ -845,7 +846,8 @@ class RevisionVerifierContractTest(unittest.TestCase):
             "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
             "omp_threads": "16", "omp_dynamic": "false",
         }
-        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536"]
+        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536",
+                   "--key-bits=3072", "--trials=30"]
         _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
 
         for label, field, value in (("threads", "omp_threads", "2"),
@@ -856,6 +858,59 @@ class RevisionVerifierContractTest(unittest.TestCase):
                 with self.assertRaises(RevisionContractError):
                     _bind_cell_shape([mutated], cell,
                                      {"command": command}, cell["cell_id"])
+
+    def test_sj16_fit_precomputed_binds_family_thread_count_and_command_flags(
+            self) -> None:
+        # F-6: fit=precomputed runs bench_review_comparison, which ignores
+        # --threads and is governed by OMP_NUM_THREADS like the rest of the
+        # family -- its matrix threads value is 16, not the fit=per_element
+        # calibration's 2.  Also covers the folded-in gap: --key-bits/
+        # --trials/--warmup were never checked for presence on this path.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1", family="sj16",
+                                axis="fit", axis_value="precomputed")
+        self.assertEqual(cell["threads"], 16)
+        row = {
+            "suite": "revision-sj16-v1", "scenario": "review-65536",
+            "method": "sj16_precomputed",
+            "cryptographic_profile": "Paillier-3072",
+            "nominal_security_bits": "128", "security_match": "true",
+            "comparison_eligible": "false",
+            "comparison_scope": "component-lower-bound",
+            "primitive": "paillier-3072",
+            "protocol_model": "sj16-intersection-shares",
+            "output_semantics":
+                "harness-reconstructed-jaccard-with-plaintext-union",
+            "assurance_scope": "intersection-shares-lower-bound",
+            "security_basis":
+                "rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+            "cost_scope": "online-query-with-precomputed-randomizers",
+            "precomputation_mode": "randomizers-precomputed",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+            "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
+            "omp_threads": "16", "omp_dynamic": "false",
+        }
+        command = ["--k=128", "--m=64", "--n=1000", "--universe=65536",
+                   "--key-bits=3072", "--trials=1", "--warmup=1"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"],
+                         mode="toy")
+
+        with self.subTest(label="omp_threads still 2"):
+            mutated = dict(row, omp_threads="2")
+            with self.assertRaises(RevisionContractError):
+                _bind_cell_shape([mutated], cell, {"command": command},
+                                 cell["cell_id"], mode="toy")
+
+        for label, index in (("key-bits", 4), ("trials", 5), ("warmup", 6)):
+            with self.subTest(missing=label):
+                flags = command[:index] + command[index + 1:]
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([row], cell, {"command": flags},
+                                     cell["cell_id"], mode="toy")
 
     def test_bcg12_minhash_binds_blank_m_and_rejects_populated_value(self) -> None:
         # BCG12 MinHash consumes k but not the one-hot m dimension.  Task 1
