@@ -664,7 +664,19 @@ Sidecar → column mapping (sidecar `cell_id` header must equal the cell id for 
 | sj16 | `__sj16__` | `total` | sj16 |
 | fhe_ind | `bench_fhe_ind__` | `online_e2e` | fhe_ind |
 
-Row → cell-id mapping: for a row (block, u, n, k, m) and column, the id is `paper-v1::<family>::<axis>=<value>` with the block's axis and varying value (`timing_` prefix for sqrt), **except**: the default point always maps to `<family>::u=65536` (`timing_u=65536`); FHE-IND u-block rows → `fhe_ind::u=<u>`, n-block rows with n≠1000 → `fhe_ind::n=<n>`, all other FHE-IND rows → `fhe_ind::u=65536`.
+Row → cell-id mapping (amended 2026-08-23 for the 42-cell sweep). Base rule: for a row (block, u, n, k, m) and column, the id is `paper-v1::<family>::<axis>=<value>` with the block's axis and varying value (`timing_` prefix for sqrt). The default point (65536, 1000, 128, 64) always maps to `<family>::u=65536` (`timing_u=65536`). On top of that, each column repeats the default-point cell for the axes its protocol does not consume, because the sweep does not measure those cells at all:
+
+| column | measured axes (cell exists) | rows that repeat the default point | rows from the paper's extrapolation |
+|---|---|---|---|
+| `piccard` | u, n, k, m | none | none |
+| `piccard_plus` | u, n, k, m (m=128 is `---`) | none | none |
+| `bcg12_ec` / `bcg12_ff` | n, k | **every u row and every m row** → `bcg12_minhash::u=65536` | none |
+| `sj16` | u=16384, u=65536, n | **every k row and every m row** → `sj16::u=65536` | **u=262144 and u=1048576** |
+| `fhe_ind` | u, n | every k row and every m row → `fhe_ind::u=65536` | none |
+
+Source evidence for the "does not consume" claims, to be cited in the summarizer's module docstring: `Sj16Adapter(method, key_bits, universe, …)` takes no k/m (`benchmarks/bench_review_comparison.cpp:941-950`); `Bcg12Params` is `{mode, backend, k, minhash_seed}` and `src/baselines/bcg12.cpp` never references `universe` (`include/baselines/bcg12.h:12-18`); FHE-IND's `BaselineEngine` takes only `universe_size`/`set_size` (`benchmarks/baseline_engine.h:37,57`).
+
+The two SJ16 large-|U| rows have **no cell and no sidecar**. `cell_for` returns `None` for them and `_lookup` falls back to a literal table of the paper's existing extrapolated values, `EXTRAPOLATED_SJ16 = {262144: (285389.0, None), 1048576: (1141500.0, None)}` (mean in ms, no CI). `format_cell` renders a value with no CI as `$285{,}389$` (no `\pm` part) and the row carries the paper's existing `$^{\ddagger\ddagger}$` marker, which the paper keeps for exactly these two cells.
 
 Formatting (`format_cell`): mean < 10,000 → one decimal for mean and half-width; mean ≥ 10,000 → integers (the current table prints `17{,}635\pm152`, `71{,}428\pm570`); thousands separators `{,}`; `---` for absent cells.
 
@@ -727,8 +739,17 @@ class MappingTest(unittest.TestCase):
         self.assertEqual(summ.cell_for(*d, "piccard"), "paper-v1::piccard_std128::u=65536")
         self.assertEqual(summ.cell_for(*d, "piccard_plus"), "paper-v1::sqrt_comparison::timing_u=65536")
         self.assertEqual(summ.cell_for(*d, "sj16"), "paper-v1::sj16::u=65536")
-        self.assertEqual(summ.cell_for("k", 65536, 1000, 16, 64, "sj16"), "paper-v1::sj16::k=16")
-        self.assertEqual(summ.cell_for("m", 65536, 1000, 128, 256, "bcg12_ec"), "paper-v1::bcg12_minhash::m=256")
+        # k and m are not SJ16/BCG12 inputs, so those rows repeat the default point.
+        self.assertEqual(summ.cell_for("k", 65536, 1000, 16, 64, "sj16"), "paper-v1::sj16::u=65536")
+        self.assertEqual(summ.cell_for("m", 65536, 1000, 128, 256, "bcg12_ec"), "paper-v1::bcg12_minhash::u=65536")
+        self.assertEqual(summ.cell_for("u", 16384, 1000, 128, 64, "bcg12_ec"), "paper-v1::bcg12_minhash::u=65536")
+        # n and k ARE BCG12 inputs; u and n ARE SJ16 inputs.
+        self.assertEqual(summ.cell_for("k", 65536, 1000, 16, 64, "bcg12_ec"), "paper-v1::bcg12_minhash::k=16")
+        self.assertEqual(summ.cell_for("n", 65536, 100, 128, 64, "sj16"), "paper-v1::sj16::n=100")
+        self.assertEqual(summ.cell_for("u", 16384, 1000, 128, 64, "sj16"), "paper-v1::sj16::u=16384")
+        # SJ16 at 2^18 / 2^20 has no cell at all: the paper's extrapolation fills it.
+        self.assertIsNone(summ.cell_for("u", 262144, 1000, 128, 64, "sj16"))
+        self.assertIsNone(summ.cell_for("u", 1048576, 1000, 128, 64, "sj16"))
         self.assertIsNone(summ.cell_for("m", 65536, 1000, 128, 128, "piccard_plus"))
         self.assertEqual(summ.cell_for("u", 16384, 1000, 128, 64, "fhe_ind"), "paper-v1::fhe_ind::u=16384")
         self.assertEqual(summ.cell_for("n", 65536, 100, 128, 64, "fhe_ind"), "paper-v1::fhe_ind::n=100")
@@ -759,6 +780,13 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(summ.format_cell(agg._replace(mean_ms=143.54, ci95_half_ms=2.44)), r"$143.5\pm2.4$")
         self.assertEqual(summ.format_cell(agg._replace(mean_ms=1170.5, ci95_half_ms=4.5)), r"$1{,}170.5\pm4.5$")
         self.assertEqual(summ.format_cell(None), "---")
+
+    def test_extrapolated_sj16_rows_render_without_an_interval(self) -> None:
+        rows = summ.render_rows({}).splitlines()
+        # |U| block rows 3 and 4 are the two extrapolated SJ16 cells.
+        self.assertIn(r"$285{,}389$", rows[2])
+        self.assertIn(r"$1{,}141{,}500$", rows[3])
+        self.assertNotIn(r"285{,}389\pm", rows[2])
 
     def test_short_sidecar_is_rejected(self) -> None:
         with self.assertRaises(summ.SweepError):
@@ -880,18 +908,37 @@ class Aggregate(NamedTuple):
     ci95_high_ms: float
 
 
+# Axes each protocol actually consumes.  A row whose block is not in this set
+# repeats the family's default-point measurement, because the sweep does not
+# measure a cell that would only re-measure the same configuration.  See the
+# module docstring for the source evidence.
+CONSUMED_AXES = {
+    "piccard": {"u", "n", "k", "m"},
+    "piccard_plus": {"u", "n", "k", "m"},
+    "bcg12_ec": {"n", "k"},
+    "bcg12_ff": {"n", "k"},
+    "sj16": {"u", "n"},
+    "fhe_ind": {"u", "n"},
+}
+# SJ16 at these universes was never executed; the paper carries a calibrated
+# extrapolation.  (mean_ms, ci95_half_ms or None when there is no interval.)
+EXTRAPOLATED_SJ16 = {262144: (285389.0, None), 1048576: (1141500.0, None)}
+
+
 def cell_for(block: str, u: int, n: int, k: int, m: int, column: str) -> str | None:
+    """Return the matrix cell whose measurement fills this row, or None.
+
+    None means "no sidecar for this row": either the cell is not applicable
+    (Piccard+ at a non-square m) or the value comes from the paper's
+    extrapolation (SJ16 at |U| = 2^18, 2^20).
+    """
     family = FAMILY_OF[column]
     if column == "piccard_plus" and int(m ** 0.5) ** 2 != m:
         return None
-    if column == "fhe_ind":
-        if block == "u":
-            return f"paper-v1::fhe_ind::u={u}"
-        if block == "n" and n != 1000:
-            return f"paper-v1::fhe_ind::n={n}"
-        return "paper-v1::fhe_ind::u=65536"
+    if column == "sj16" and block == "u" and u in EXTRAPOLATED_SJ16:
+        return None
     prefix = "timing_" if family == "sqrt_comparison" else ""
-    if (u, n, k, m) == DEFAULT:
+    if (u, n, k, m) == DEFAULT or block not in CONSUMED_AXES[column]:
         return f"paper-v1::{family}::{prefix}u=65536"
     value = {"u": u, "n": n, "k": k, "m": m}[block]
     return f"paper-v1::{family}::{prefix}{block}={value}"
@@ -950,10 +997,17 @@ def format_cell(agg: Aggregate | None) -> str:
     if agg is None:
         return "---"
     d = 0 if agg.mean_ms >= 10000 else 1
+    if agg.measured_count == 0 or agg.ci95_half_ms != agg.ci95_half_ms:  # extrapolated: no interval
+        return f"${_num(agg.mean_ms, d)}$"
     return f"${_num(agg.mean_ms, d)}\\pm{_num(agg.ci95_half_ms, d)}$"
 
 
 def _lookup(aggs: dict[tuple[str, str], Aggregate], row: tuple, column: str) -> Aggregate | None:
+    block, u, n, k, m = row
+    if column == "sj16" and block == "u" and u in EXTRAPOLATED_SJ16:
+        mean, half = EXTRAPOLATED_SJ16[u]
+        return Aggregate(mean, 0.0, mean, half if half is not None else float("nan"),
+                         0, 0.0, 0.0)
     cid = cell_for(*row, column)
     return None if cid is None else aggs.get((cid, column))
 
@@ -968,6 +1022,7 @@ def render_rows(aggs: dict[tuple[str, str], Aggregate]) -> str:
 
 
 def missing_cells(aggs: dict[tuple[str, str], Aggregate]) -> list[str]:
+    """Rows whose sidecar is absent.  Extrapolated and N/A rows are not gaps."""
     gaps = set()
     for row in TABLE_ROWS:
         for c in PRINTED:
@@ -1006,17 +1061,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--partial", action="store_true", help="tolerate missing cells (tests only)")
     parser.add_argument("--allow-nonstandard", action="store_true",
-                        help="summarize a run that is not COMPLETED, was dirty, or is not 16 threads / seed 20260729")
+                        help="summarize a run that is not COMPLETED, was dirty, carries mixed provenance, "
+                             "or is not 16 threads / seed 20260729")
     args = parser.parse_args(argv)
     root = Path(args.results_root)
     manifest = json.loads((root / "run.json").read_text())
     prov = manifest.get("provenance", {})
     nonstandard = (manifest.get("state") != "COMPLETED" or manifest.get("dirty_allowed")
+                   or manifest.get("mixed_provenance")
                    or prov.get("threads") != 16 or prov.get("seed") != 20260729
                    or any(c.get("execution_status") != "COMPLETED" for c in manifest.get("cells", [])))
     if nonstandard and not args.allow_nonstandard:
-        print("refusing a nonstandard run (state, dirty tree, threads, seed, or failed cells); "
-              "pass --allow-nonstandard to override", file=sys.stderr)
+        print("refusing a nonstandard run (state, dirty tree, mixed provenance, threads, seed, "
+              "or failed cells); pass --allow-nonstandard to override", file=sys.stderr)
         return 1
     try:
         aggs = load_aggregates(root)
