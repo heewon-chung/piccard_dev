@@ -1,0 +1,24 @@
+Benchmark Configuration:
+  k:         128
+  m:         64
+  Set size:  1000
+  Trials:    30
+  Mode:      timing
+  Security:  STD128
+  Seed:      20260729
+  Overlap:   0.3
+  Acc trials:100
+  Hash rand: resampled
+  Transcript stat bits: 40
+  Max queries: 1048576
+  Profile:    legacy (legacy)
+  Evidence point: no
+  Target Jaccard: 0.5
+
+=== Varying k (median of 30 trials) ===
+  k=16 tau=9 depth=9 N=16384 poly_eval=151.99ms total=391.31ms
+  k=32 tau=19 depth=11 N=16384 poly_eval=196.447ms total=401.224ms
+  k=64 tau=38 depth=14 N=32768 poly_eval=1100.09ms total=2028.54ms
+  k=128 tau=76 depth=16 N=32768 poly_eval=1844.23ms total=2952.39ms
+  k=256 tau=153 depth=22 N=32768 poly_eval=3654.24ms total=5153.87ms
+  WARNING: Skipped k=512: missing threshold legacy calibration for threshold / STD128 / requested N 32768 / natural depth 30

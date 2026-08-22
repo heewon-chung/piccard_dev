@@ -1,0 +1,14 @@
+Noise calibration harness (R2-W6)
+  target lambda_s = 64, margin = 8 bits, seed = 20260729, reps = 5
+
+=== single point ===
+  threshold STD128 (128,64) d=10 sms=48           N= 16384 logq= 384.0 limbs= 8 t=   65537 | all_match  B_eval= 336.56 headroom=  30.44  dec-OK
+  threshold STD128 (128,64) d=10 sms=48           N= 16384 logq= 384.0 limbs= 8 t=   65537 | no_match   B_eval= 337.14 headroom=  29.86  dec-OK
+  threshold STD128 (128,64) d=10 sms=48           N= 16384 logq= 384.0 limbs= 8 t=   65537 | random     B_eval= 336.03 headroom=  30.97  dec-OK
+
+=== summary: cheapest feasible cell per (circuit, N) for lambda_s=64 + margin=8 ===
+
+  *** NO FEASIBLE CELL (needs a parameter decision) ***
+  threshold|0016384       short by 43.14 bits (best: depth=10 sms=48)
+
+Wrote 3 rows to /home/ubuntu/piccard/results/giant-step-poc/probe/k128_d1_s48.csv.tmp

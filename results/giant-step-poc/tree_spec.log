@@ -1,0 +1,24 @@
+Benchmark Configuration:
+  k:         128
+  m:         64
+  Set size:  1000
+  Trials:    10
+  Mode:      spec
+  Security:  STD128
+  Seed:      20260729
+  Overlap:   0.3
+  Acc trials:100
+  Hash rand: resampled
+  Transcript stat bits: 40
+  Max queries: 1048576
+  Profile:    legacy (legacy)
+  Evidence point: no
+  Target Jaccard: 0.5
+
+=== u_tau spec dump ===
+  k=16 depth=6->8 N=16384 log2q=320
+  k=32 depth=7->9 N=16384 log2q=360
+  k=64 depth=8->10 N=16384 log2q=400
+  k=128 depth=9->11 N=16384 log2q=432
+  k=256 depth=10->12 N=32768 log2q=480
+  k=512 SKIPPED: tree giant step: no --ps_override for k=512
