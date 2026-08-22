@@ -12,6 +12,11 @@ SCRIPTS = ROOT / "scripts"
 
 EXPECTED_FILES = (
     "enron_preprocess.py",
+    "giant_step_poc/README.md",
+    "giant_step_poc/probe_tree_noise.sh",
+    "giant_step_poc/run_compare.sh",
+    "giant_step_poc/select_override.py",
+    "giant_step_poc/summarize.py",
     "make_calibration_archive.py",
     "make_calibration_table.py",
     "noise_profiles.json",
