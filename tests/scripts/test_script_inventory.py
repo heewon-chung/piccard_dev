@@ -25,6 +25,7 @@ EXPECTED_FILES = (
     "revision_flooding_adapter.py",
     "run_noise_profiles.sh",
     "run_revision_benchmarks.py",
+    "run_table9_sweep.py",
     "seal_revision_benchmarks.py",
     "summarize_real_datasets.py",
     "templates/noise_calibration_wrapper.inc",
