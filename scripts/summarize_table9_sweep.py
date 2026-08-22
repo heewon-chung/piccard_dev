@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -83,8 +84,63 @@ CONSUMED_AXES = {
     "fhe_ind": {"u", "n"},
 }
 # SJ16 at these universes was never executed; the paper carries a calibrated
-# extrapolation.  (mean_ms, ci95_half_ms or None when there is no interval.)
+# extrapolation from the per-element cost, rescaled to the same 16-thread
+# footing as the measured rows -- the old sj16::n=100000 receipt this value
+# derives from records "--threads=2" in its argv, but that flag is inert for
+# bench_review_comparison (only OMP_NUM_THREADS applies, and that artifact's
+# own omp_threads field records 16), so this is not a mix of thread counts.
+# (mean_ms, ci95_half_ms or None when there is no interval.)
 EXTRAPOLATED_SJ16 = {262144: (285389.0, None), 1048576: (1141500.0, None)}
+
+
+def _manifest_cell_gap(manifest: dict) -> tuple[set[str], set[str]]:
+    """(missing, unexpected): the symmetric difference between the
+    manifest's COMPLETED cell ids and the full TABLE9_CELL_IDS set.
+
+    A run can declare fewer cells than the sweep requires (or cells outside
+    it) while genuine sidecars from an unrelated run or attempt still sit on
+    disk under the same results root.  This binds the printed table to what
+    THIS run's manifest claims to have executed, not merely to what files
+    happen to exist.
+    """
+    completed = {c.get("cell_id") for c in manifest.get("cells", []) if c.get("execution_status") == "COMPLETED"}
+    expected = set(TABLE9_CELL_IDS)
+    return expected - completed, completed - expected
+
+
+def _load_receipt(cell_dir: Path, expected_cell_id: str) -> dict:
+    receipt_path = cell_dir / "receipt.json"
+    if not receipt_path.is_file():
+        raise SweepError(f"{cell_dir}: no receipt.json")
+    receipt = json.loads(receipt_path.read_text())
+    if receipt.get("execution_status") != "COMPLETED":
+        raise SweepError(f"{cell_dir}: receipt execution_status={receipt.get('execution_status')!r}, "
+                         f"expected 'COMPLETED'")
+    if receipt.get("cell_id") != expected_cell_id:
+        raise SweepError(f"{cell_dir}: receipt cell_id {receipt.get('cell_id')!r} != {expected_cell_id!r}")
+    return receipt
+
+
+def _select_sidecar(cell_dir: Path, receipt: dict, needle: str) -> Path:
+    """Pick the one sidecar the cell's own RECEIPT says it produced.
+
+    This is never a filesystem glob or recursive search: a stale file left
+    over from an earlier attempt, or an archived `cells/<slug>.attempt-N/`
+    sibling (never even looked at -- selection only ever reads inside the
+    exact `cell_dir` passed in, and inventory entries under an ".attempt-"
+    path segment are excluded defensively), can't be mistaken for this run's
+    own evidence.
+    """
+    candidates = [entry["path"] for entry in receipt.get("artifact_inventory", [])
+                  if entry.get("path", "").endswith(".tsv") and needle in Path(entry["path"]).name
+                  and ".attempt-" not in entry["path"]]
+    if len(candidates) != 1:
+        raise SweepError(f"{cell_dir}: expected one receipted sidecar containing {needle!r}, "
+                         f"found {len(candidates)}: {candidates}")
+    path = cell_dir / candidates[0]
+    if not path.is_file():
+        raise SweepError(f"{cell_dir}: receipted sidecar {candidates[0]} is missing on disk")
+    return path
 
 
 def cell_for(block: str, u: int, n: int, k: int, m: int, column: str) -> str | None:
@@ -106,21 +162,65 @@ def cell_for(block: str, u: int, n: int, k: int, m: int, column: str) -> str | N
     return f"paper-v1::{family}::{prefix}{block}={value}"
 
 
+# Two-sided 95% Student-t critical value for N=30 (df=29), taken verbatim
+# from the producer's own frozen table rather than recomputed here, so a
+# different libm/statistics implementation could never silently diverge from
+# the CI the producer itself built (benchmarks/raw_timing_schema.cpp:23-53,
+# kStudentT95[29] == 2.045229642132703).
+STUDENT_T95_N30 = 2.045229642132703
+
+# Tolerance for cross-checking a recorded aggregate against the same value
+# recomputed here from its own raw samples (see _parse_sidecar): tight
+# enough to catch a tampered or corrupted field, loose enough to tolerate
+# float round-trip noise from the producer's own text serialization.
+_REL_TOL = 1e-9
+_ABS_TOL = 1e-12
+
+
+def _close(computed: float, recorded: float) -> bool:
+    return abs(computed - recorded) <= max(_ABS_TOL, _REL_TOL * max(abs(computed), abs(recorded)))
+
+
 def _parse_sidecar(path: Path, phase: str, expected_cell_id: str) -> Aggregate:
+    """Parse one raw-timing sidecar and verify it, not just read it.
+
+    The producer's own schema validates and recomputes each aggregate from
+    its samples before ever writing them (benchmarks/raw_timing_schema.cpp);
+    this reader is not allowed to be weaker than that writer, so it
+    recomputes mean/sample-SD/median/95% half-width from the 30 parsed
+    'measured' samples for `phase` and requires them to agree with the
+    recorded aggregate within `_REL_TOL`/`_ABS_TOL` (K-2).
+    """
     header: dict[str, str] = {}
-    samples = 0
-    columns: list[str] = []
+    sample_columns: list[str] = []
+    agg_columns: list[str] = []
+    trial_indices: set[int] = set()
+    raw_values: list[float] = []
+    agg_rows_for_phase = 0
     agg: Aggregate | None = None
     for line in path.read_text().splitlines():
         f = line.split("\t")
         if len(f) == 2:
             header[f[0]] = f[1]
-        elif f[0] == "sample" and len(f) > 5 and f[4] == phase and f[5] == "measured":
-            samples += 1
+        elif f[0] == "sample" and len(f) > 1 and f[1] == "producer_id":
+            sample_columns = f
+        elif f[0] == "sample" and sample_columns and len(f) == len(sample_columns):
+            row = dict(zip(sample_columns, f))
+            if row["phase"] != phase or row["sample_kind"] != "measured":
+                continue
+            if (row["producer_id"], row["profile_id"], row["cell_id"]) != \
+               (header.get("producer_id"), header.get("profile_id"), header.get("cell_id")):
+                raise SweepError(f"{path}: sample metadata disagrees with the file header")
+            idx = int(row["trial_index"])
+            if idx in trial_indices:
+                raise SweepError(f"{path}: duplicate measured trial_index {idx} for phase {phase}")
+            trial_indices.add(idx)
+            raw_values.append(float(row["raw_ms"]))
         elif f[0] == "aggregate" and len(f) > 1 and f[1] == "producer_id":
-            columns = f
-        elif f[0] == "aggregate" and columns and f[columns.index("phase")] == phase:
-            row = dict(zip(columns, f))
+            agg_columns = f
+        elif f[0] == "aggregate" and agg_columns and f[agg_columns.index("phase")] == phase:
+            agg_rows_for_phase += 1
+            row = dict(zip(agg_columns, f))
             low, high = float(row["ci95_low_ms"]), float(row["ci95_high_ms"])
             agg = Aggregate(float(row["mean_ms"]), float(row["sample_sd_ms"]), float(row["median_ms"]),
                             (high - low) / 2.0, int(row["measured_count"]), low, high)
@@ -128,11 +228,33 @@ def _parse_sidecar(path: Path, phase: str, expected_cell_id: str) -> Aggregate:
         raise SweepError(f"{path}: not a paper-v1 raw-timing-v1 sidecar")
     if header.get("cell_id") != expected_cell_id:
         raise SweepError(f"{path}: sidecar cell_id {header.get('cell_id')!r} != {expected_cell_id!r}")
-    if agg is None:
-        raise SweepError(f"{path}: no aggregate for phase {phase}")
-    if header.get("expected_measured") != "30" or samples != 30 or agg.measured_count != 30:
+    if agg_rows_for_phase == 0:
+        raise SweepError(f"{path}: no aggregate row for phase {phase}")
+    if agg_rows_for_phase > 1:
+        raise SweepError(f"{path}: {agg_rows_for_phase} aggregate rows for phase {phase}, expected exactly one")
+    assert agg is not None
+    n = len(raw_values)
+    if header.get("expected_measured") != "30" or n != 30 or agg.measured_count != 30:
         raise SweepError(f"{path}: expected 30 measured samples; header={header.get('expected_measured')} "
-                         f"samples={samples} aggregate={agg.measured_count}")
+                         f"samples={n} aggregate={agg.measured_count}")
+    if trial_indices != set(range(30)):
+        raise SweepError(f"{path}: measured trial indices for phase {phase} must be exactly 0..29, "
+                         f"got {sorted(trial_indices)}")
+    computed_mean = sum(raw_values) / n
+    sorted_vals = sorted(raw_values)
+    computed_median = ((sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2.0
+                        if n % 2 == 0 else sorted_vals[n // 2])
+    sum_sq = sum((v - computed_mean) ** 2 for v in raw_values)
+    computed_sd = math.sqrt(sum_sq / (n - 1))
+    computed_half = STUDENT_T95_N30 * computed_sd / math.sqrt(n)
+    for label, computed, recorded in (("mean_ms", computed_mean, agg.mean_ms),
+                                       ("sample_sd_ms", computed_sd, agg.sd_ms),
+                                       ("median_ms", computed_median, agg.median_ms),
+                                       ("ci95 half-width", computed_half, agg.ci95_half_ms)):
+        if not _close(computed, recorded):
+            raise SweepError(f"{path}: recorded {label}={recorded} for phase {phase} disagrees with the "
+                             f"samples' own recomputed {label}={computed} (tolerance: {_REL_TOL:g} relative "
+                             f"/ {_ABS_TOL:g} absolute)")
     return agg
 
 
@@ -142,12 +264,11 @@ def load_aggregates(root: Path) -> dict[tuple[str, str], Aggregate]:
         cell_dir = root / "cells" / slug(cell_id)
         if not cell_dir.is_dir():
             continue
+        receipt = _load_receipt(cell_dir, cell_id)
         family = cell_id.split("::")[1]
         for needle, phase, column, suffix in SOURCES[family]:
-            matches = [p for p in cell_dir.rglob("*.tsv") if needle in p.name]
-            if len(matches) != 1:
-                raise SweepError(f"{cell_dir}: expected one sidecar containing {needle!r}, found {len(matches)}")
-            out[(cell_id, column)] = _parse_sidecar(matches[0], phase, cell_id + suffix)
+            path = _select_sidecar(cell_dir, receipt, needle)
+            out[(cell_id, column)] = _parse_sidecar(path, phase, cell_id + suffix)
     return out
 
 
@@ -160,7 +281,11 @@ def format_cell(agg: Aggregate | None) -> str:
         return "---"
     d = 0 if agg.mean_ms >= 10000 else 1
     if agg.measured_count == 0 or agg.ci95_half_ms != agg.ci95_half_ms:  # extrapolated: no interval
-        return f"${_num(agg.mean_ms, d)}$"
+        # Synthetic (EXTRAPOLATED_SJ16): carries the paper's existing
+        # double-dagger footnote for these two calibrated, never-executed
+        # cells (Piccard_MR_R1.tex:2115, footnote text at :2141), so the
+        # rendered LaTeX can never read as a measurement.
+        return f"${_num(agg.mean_ms, d)}^{{\\ddagger\\ddagger}}$"
     return f"${_num(agg.mean_ms, d)}\\pm{_num(agg.ci95_half_ms, d)}$"
 
 
@@ -263,6 +388,12 @@ def main(argv: list[str] | None = None) -> int:
     if nonstandard and not args.allow_nonstandard:
         print("refusing a nonstandard run (state, dirty tree, mixed provenance, threads, seed, "
               "or failed cells); pass --allow-nonstandard to override", file=sys.stderr)
+        return 1
+    missing_ids, unexpected_ids = _manifest_cell_gap(manifest)
+    if (missing_ids or unexpected_ids) and not args.partial:
+        print("manifest COMPLETED cell set does not match TABLE9_CELL_IDS -- missing: "
+              + (", ".join(sorted(missing_ids)) or "(none)") + "; unexpected: "
+              + (", ".join(sorted(unexpected_ids)) or "(none)"), file=sys.stderr)
         return 1
     try:
         aggs = load_aggregates(root)

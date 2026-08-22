@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -65,10 +66,17 @@ class AggregateTest(unittest.TestCase):
 
     def test_extrapolated_sj16_rows_render_without_an_interval(self) -> None:
         rows = summ.render_rows({}).splitlines()
-        # |U| block rows 3 and 4 are the two extrapolated SJ16 cells.
-        self.assertIn(r"$285{,}389$", rows[2])
-        self.assertIn(r"$1{,}141{,}500$", rows[3])
+        # |U| block rows 3 and 4 are the two extrapolated SJ16 cells; they
+        # must carry the paper's existing double-dagger marker (K-3) so the
+        # LaTeX is never indistinguishable from a measurement.
+        self.assertIn(r"$285{,}389^{\ddagger\ddagger}$", rows[2])
+        self.assertIn(r"$1{,}141{,}500^{\ddagger\ddagger}$", rows[3])
         self.assertNotIn(r"285{,}389\pm", rows[2])
+
+    def test_no_measured_cell_carries_the_extrapolation_marker(self) -> None:
+        aggs = summ.load_aggregates(FIX / "good")
+        row0 = summ.render_rows(aggs).splitlines()[0]  # |U|=2^14, all real sidecars
+        self.assertNotIn(r"\ddagger", row0)
 
     def test_short_sidecar_is_rejected(self) -> None:
         with self.assertRaises(summ.SweepError):
@@ -125,6 +133,134 @@ class FlatnessTest(unittest.TestCase):
         self.assertEqual(piccard_cell, f"{150.0 / 100.0:.3f}")
 
 
+def _copy_cell_dir(src: Path, dst: Path) -> None:
+    dst.mkdir(parents=True)
+    for f in src.iterdir():
+        if f.is_file():
+            (dst / f.name).write_bytes(f.read_bytes())
+
+
+def _rewrite_aggregate_field(tsv: Path, phase: str, field: str, value: str) -> None:
+    lines = tsv.read_text().splitlines(True)
+    header_idx = next(i for i, l in enumerate(lines) if l.startswith("aggregate\tproducer_id\t"))
+    columns = lines[header_idx].rstrip("\n").split("\t")
+    data_idx = next(i for i, l in enumerate(lines)
+                     if l.startswith("aggregate\t") and i != header_idx
+                     and l.split("\t")[columns.index("phase")] == phase)
+    fields = lines[data_idx].rstrip("\n").split("\t")
+    fields[columns.index(field)] = value
+    lines[data_idx] = "\t".join(fields) + "\n"
+    tsv.write_text("".join(lines))
+
+
+class IntegrityTest(unittest.TestCase):
+    """K-1 (evidence binding via receipt.json / exact sidecar selection) and
+    K-2 (recomputing the aggregate from its own samples) regression tests."""
+
+    def test_attempt_sibling_directory_is_never_consulted(self) -> None:
+        # A "failed attempt" directory (Task 2's resume/retry archiving)
+        # sits next to, but is never, the canonical cell directory.  With no
+        # canonical cells/<slug>/ present, the cell must simply be absent
+        # from the result -- never discovered via the sibling.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sibling = root / "cells" / "paper_v1__piccard_std128__u_16384.attempt-1"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", sibling)
+            aggs = summ.load_aggregates(root)
+            self.assertNotIn(("paper-v1::piccard_std128::u=16384", "piccard"), aggs)
+
+    def test_two_candidate_sidecars_fail_naming_both(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "cells" / "paper_v1__piccard_std128__u_16384"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
+            tsv = next(dst.glob("bench_piccard__*.tsv"))
+            duplicate = dst / ("dup_" + tsv.name)
+            duplicate.write_bytes(tsv.read_bytes())
+            receipt = json.loads((dst / "receipt.json").read_text())
+            receipt["artifact_inventory"].append(
+                {"path": duplicate.name, "sha256": "0" * 64, "size": duplicate.stat().st_size})
+            (dst / "receipt.json").write_text(json.dumps(receipt))
+            with self.assertRaises(summ.SweepError) as ctx:
+                summ.load_aggregates(root)
+            self.assertIn(tsv.name, str(ctx.exception))
+            self.assertIn(duplicate.name, str(ctx.exception))
+
+    def test_receipt_not_completed_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "cells" / "paper_v1__piccard_std128__u_16384"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
+            receipt = json.loads((dst / "receipt.json").read_text())
+            receipt["execution_status"] = "FAILED"
+            (dst / "receipt.json").write_text(json.dumps(receipt))
+            with self.assertRaises(summ.SweepError):
+                summ.load_aggregates(root)
+
+    def test_altered_aggregate_mean_with_intact_samples_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "cells" / "paper_v1__piccard_std128__u_16384"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
+            tsv = next(dst.glob("bench_piccard__*.tsv"))
+            _rewrite_aggregate_field(tsv, "total", "mean_ms", "999999.0")
+            with self.assertRaises(summ.SweepError):
+                summ.load_aggregates(root)
+
+    def test_duplicate_aggregate_row_for_phase_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "cells" / "paper_v1__piccard_std128__u_16384"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
+            tsv = next(dst.glob("bench_piccard__*.tsv"))
+            lines = tsv.read_text().splitlines(True)
+            header_idx = next(i for i, l in enumerate(lines) if l.startswith("aggregate\tproducer_id\t"))
+            columns = lines[header_idx].rstrip("\n").split("\t")
+            data_idx = next(i for i, l in enumerate(lines)
+                             if l.startswith("aggregate\t") and i != header_idx
+                             and l.split("\t")[columns.index("phase")] == "total")
+            lines.insert(data_idx + 1, lines[data_idx])  # duplicate the 'total' aggregate row
+            tsv.write_text("".join(lines))
+            with self.assertRaises(summ.SweepError):
+                summ.load_aggregates(root)
+
+    def test_repeated_trial_index_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "cells" / "paper_v1__piccard_std128__u_16384"
+            _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
+            tsv = next(dst.glob("bench_piccard__*.tsv"))
+            lines = tsv.read_text().splitlines(True)
+            header_idx = next(i for i, l in enumerate(lines) if l.startswith("sample\tproducer_id\t"))
+            columns = lines[header_idx].rstrip("\n").split("\t")
+            measured_idx = [i for i, l in enumerate(lines) if l.startswith("sample\t") and i != header_idx
+                             and l.split("\t")[columns.index("phase")] == "total"
+                             and l.split("\t")[columns.index("sample_kind")] == "measured"]
+            other_trial_index = lines[measured_idx[6]].rstrip("\n").split("\t")[columns.index("trial_index")]
+            fields = lines[measured_idx[5]].rstrip("\n").split("\t")
+            fields[columns.index("trial_index")] = other_trial_index  # now a duplicate of measured_idx[6]'s
+            lines[measured_idx[5]] = "\t".join(fields) + "\n"
+            tsv.write_text("".join(lines))
+            with self.assertRaises(summ.SweepError):
+                summ.load_aggregates(root)
+
+
+class ManifestGapTest(unittest.TestCase):
+    def test_symmetric_difference_against_table9_cell_ids(self) -> None:
+        cell_ids = list(summ.TABLE9_CELL_IDS)
+        missing_id = cell_ids.pop()
+        manifest = {"cells": [{"cell_id": c, "execution_status": "COMPLETED"} for c in cell_ids]
+                     + [{"cell_id": "not-a-real-cell", "execution_status": "COMPLETED"},
+                        {"cell_id": "paper-v1::piccard_std128::u=999", "execution_status": "FAILED"}]}
+        missing, unexpected = summ._manifest_cell_gap(manifest)
+        self.assertEqual(missing, {missing_id})
+        self.assertEqual(unexpected, {"not-a-real-cell"})  # the FAILED entry doesn't count either way
+
+    def test_exact_match_has_no_gap(self) -> None:
+        manifest = {"cells": [{"cell_id": c, "execution_status": "COMPLETED"} for c in summ.TABLE9_CELL_IDS]}
+        self.assertEqual(summ._manifest_cell_gap(manifest), (set(), set()))
+
+
 class CliTest(unittest.TestCase):
     def test_partial_renders_sixteen_rows_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -147,6 +283,27 @@ class CliTest(unittest.TestCase):
                                 f"--out-dir={tmp}"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1)
             self.assertIn("missing", r.stderr)
+
+    def test_manifest_missing_one_expected_cell_is_refused_without_partial(self) -> None:
+        # A COMPLETED manifest whose cell set is not exactly TABLE9_CELL_IDS
+        # (e.g. one id silently dropped) must be refused -- and the missing
+        # id must be named -- unless --partial is passed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            (root / "cells").mkdir(parents=True)
+            cell_ids = list(summ.TABLE9_CELL_IDS)
+            missing_id = cell_ids.pop()
+            manifest = {
+                "schema": "piccard-table9-sweep-run-v1", "state": "COMPLETED", "dirty_allowed": False,
+                "provenance": {"threads": 16, "seed": 20260729},
+                "cells": [{"cell_id": c, "execution_status": "COMPLETED", "exit_code": 0} for c in cell_ids],
+            }
+            (root / "run.json").write_text(json.dumps(manifest))
+            r = subprocess.run([sys.executable, str(SCRIPT), f"--results-root={root}", f"--out-dir={tmp}"],
+                                capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn(missing_id, r.stderr)
+            self.assertIn("missing", r.stderr.lower())
 
     def test_refuses_failed_or_dirty_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
