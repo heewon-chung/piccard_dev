@@ -265,3 +265,34 @@ TEST_F(ThresholdEngineTest, SetHashSeedChangesFamilyKeepsCorrectness) {
     EXPECT_TRUE(decision) << "pre-reseed ciphertexts must still decrypt "
                              "correctly after SetHashSeed";
 }
+
+// TOY end-to-end: Tree k=16 (natural depth 6) with an override copied from
+// the frozen TOY Horner row (1024, nat 7, depth 9, sms 40, eval 211,
+// log_delta 306.4). Deeper provisioning than the tree needs is deliberate:
+// the point is that the Tree + override path constructs, floods, and decides
+// correctly through the real protocol entry points.
+TEST(ThresholdPiccardTree, EndToEndToyDecisionMatchesPlaintext) {
+    PiccardParams params;
+    params.k = 16;
+    params.m = 8;
+    params.security = SecurityLevel::TOY;
+    params.threshold_mode = true;
+    params.threshold_tau = 10;
+    params.giant_step = GiantStepMode::Tree;
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{9, 40, 211, 1024, 306.4};
+    params.Validate();
+    ASSERT_EQ(params.natural_mult_depth, 6u);
+
+    ThresholdPiccard engine(params);
+    engine.KeyGen();
+
+    // Identical sets -> every MinHash slot matches -> above tau.
+    std::vector<uint64_t> a;
+    for (uint64_t i = 0; i < 200; ++i) a.push_back(i);
+    EXPECT_TRUE(engine.Run(a, a));
+    // Disjoint sets -> (almost surely) below tau.
+    std::vector<uint64_t> b;
+    for (uint64_t i = 10000; i < 10200; ++i) b.push_back(i);
+    EXPECT_FALSE(engine.Run(a, b));
+}

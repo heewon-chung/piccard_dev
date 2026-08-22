@@ -1391,3 +1391,165 @@ TEST(PiccardParams, GiantStepMutationAfterValidateIsDetected) {
     params.giant_step = GiantStepMode::Tree;
     EXPECT_THROW(params.FloodNoiseBits(), std::logic_error);
 }
+
+namespace {
+PiccardParams MakeTreeStd128(uint32_t k) {
+    PiccardParams p;
+    p.k = k;
+    p.m = 64;
+    p.security = SecurityLevel::STD128;
+    p.threshold_mode = true;
+    p.threshold_tau = static_cast<uint32_t>(0.6 * k);
+    p.giant_step = GiantStepMode::Tree;
+    return p;
+}
+}  // namespace
+
+TEST(PiccardParams, ThresholdOverrideFeasible) {
+    PiccardParams params = MakeTreeStd128(128);  // natural depth 9
+    // 320 + 64 + 8 + 2 = 394 <= 416 -> feasible.
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 416.0};
+    params.Validate();
+    EXPECT_EQ(params.natural_mult_depth, 9u);
+    EXPECT_EQ(params.mult_depth, 11u);
+    EXPECT_EQ(params.scaling_mod_size, 54u);
+    EXPECT_EQ(params.eval_noise_bits, 320u);
+    EXPECT_EQ(params.ring_dim_natural, 16384u);
+    EXPECT_EQ(params.RequestedRingDim(), 8192u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 16384u);
+    EXPECT_TRUE(params.FloodingSized());
+    EXPECT_EQ(params.FloodNoiseBits(), 320u + 64u + 8u);
+}
+
+TEST(PiccardParams, ThresholdOverrideInfeasible) {
+    PiccardParams params = MakeTreeStd128(128);
+    // 340 + 64 + 8 + 2 = 414 > 400 -> infeasible.
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{10, 40, 340, 16384, 400.0};
+    EXPECT_THROW(params.Validate(), std::invalid_argument);
+}
+
+TEST(PiccardParams, ThresholdOverrideRejectsDepthBelowNatural) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{8, 54, 300, 16384, 416.0};  // 8 < 9
+    EXPECT_THROW(params.Validate(), std::invalid_argument);
+}
+
+TEST(PiccardParams, TreeWithoutOverrideNeverAdoptsHornerRow) {
+    // (8192,7) and (8192,9) exist in the frozen table but were measured on
+    // the Horner circuit; Tree k=32 / k=128 must not silently adopt them.
+    for (uint32_t k : {32u, 128u}) {
+        PiccardParams params = MakeTreeStd128(k);
+        EXPECT_THROW(params.Validate(), std::invalid_argument) << "k=" << k;
+    }
+}
+
+TEST(PiccardParams, HornerRejectsOverride) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{16, 45, 531, 32768, 614.0};
+    EXPECT_THROW(params.Validate(), std::invalid_argument);
+}
+
+TEST(PiccardParams, HornerTablePathUnchanged) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;
+    params.Validate();
+    EXPECT_EQ(params.natural_mult_depth, 15u);
+    EXPECT_EQ(params.RequestedRingDim(), 8192u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 32768u);
+}
+
+// Discrimination guard for ThresholdOverrideFeasible. That test's override
+// values {11, 54, ..., 16384, 416.0} were copied from the frozen (8192, 9)
+// Horner row, so three of its five assertions would also hold if the selector
+// silently ignored the override and read the table. Here every observable
+// field is a value NO Threshold/STD128 (8192, natural 9) table row carries:
+// the table offers mult_depth {9, 10, 11}, scaling_mod_size {40, 50, 54},
+// eval_noise_bits {313, 314, 326, 336} and ring_dim_natural 16384 only.
+TEST(PiccardParams, ThresholdOverrideValuesCannotComeFromTheTable) {
+    PiccardParams params = MakeTreeStd128(128);  // natural depth 9
+    // 300 + 64 + 8 + 2 = 374 <= 410 -> feasible.
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{13, 60, 300, 32768, 410.0};
+    params.Validate();
+    EXPECT_EQ(params.mult_depth, 13u);
+    EXPECT_EQ(params.scaling_mod_size, 60u);
+    EXPECT_EQ(params.eval_noise_bits, 300u);
+    EXPECT_EQ(params.ring_dim_natural, 32768u);
+    EXPECT_EQ(params.SelectedCalibratedRingDim(), 32768u);
+    EXPECT_EQ(params.FloodNoiseBits(), 300u + 64u + 8u);
+}
+
+// Pins the feasibility inequality to the OVERRIDE's log_delta rather than the
+// table row's. The (8192, 9) rows reach log_delta 416.0, so if the table value
+// leaked in, the 393.0 case below would be accepted instead of rejected.
+TEST(PiccardParams, ThresholdOverrideFeasibilityBoundaryUsesOverrideLogDelta) {
+    // required_capacity = 320 + 64 + 8 + 2 = 394.
+    PiccardParams at_boundary = MakeTreeStd128(128);
+    at_boundary.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 394.0};
+    at_boundary.Validate();  // 394 <= 394 -> exactly feasible
+    EXPECT_TRUE(at_boundary.FloodingSized());
+
+    PiccardParams below_boundary = MakeTreeStd128(128);
+    below_boundary.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 393.0};
+    EXPECT_THROW(below_boundary.Validate(), std::invalid_argument);
+}
+
+// The override is caller input, not derived selection state, so the
+// ClearFloodingSelection() that opens every Validate()/derive-only entry point
+// must leave it in place. If it were cleared, the second Validate() would fail
+// closed with "GiantStepMode::Tree requires threshold_calibration_override".
+TEST(PiccardParams, ThresholdOverrideSurvivesRevalidation) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 416.0};
+    params.Validate();
+    CalibrationAccess::Derive(params);  // derive-only: clears the selection
+    EXPECT_FALSE(params.FloodingSized());
+    ASSERT_TRUE(params.threshold_calibration_override.has_value());
+    params.Validate();
+    EXPECT_TRUE(params.FloodingSized());
+    EXPECT_EQ(params.eval_noise_bits, 320u);
+}
+
+// The remaining validation rejections the brief specifies, each of which would
+// otherwise resolve to a feasible row (300 + 64 + 8 + 2 = 374 <= 416).
+TEST(PiccardParams, ThresholdOverrideRejectsMalformedFields) {
+    struct Case {
+        const char* what;
+        ThresholdCalibrationOverride ov;
+    };
+    const Case cases[] = {
+        {"ring_dim_natural not a power of two",
+         ThresholdCalibrationOverride{11, 54, 300, 24576, 416.0}},
+        {"ring_dim_natural below the requested N",
+         ThresholdCalibrationOverride{11, 54, 300, 4096, 416.0}},
+        {"ring_dim_natural zero",
+         ThresholdCalibrationOverride{11, 54, 300, 0, 416.0}},
+        {"eval_noise_bits zero",
+         ThresholdCalibrationOverride{11, 54, 0, 16384, 416.0}},
+        {"log_delta zero",
+         ThresholdCalibrationOverride{11, 54, 300, 16384, 0.0}},
+        {"log_delta negative",
+         ThresholdCalibrationOverride{11, 54, 300, 16384, -1.0}},
+        {"log_delta not finite",
+         ThresholdCalibrationOverride{
+             11, 54, 300, 16384,
+             std::numeric_limits<double>::quiet_NaN()}},
+        {"log_delta infinite",
+         ThresholdCalibrationOverride{
+             11, 54, 300, 16384,
+             std::numeric_limits<double>::infinity()}},
+    };
+    for (const Case& c : cases) {
+        PiccardParams params = MakeTreeStd128(128);
+        params.threshold_calibration_override = c.ov;
+        EXPECT_THROW(params.Validate(), std::invalid_argument) << c.what;
+    }
+}

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace piccard {
@@ -52,6 +53,23 @@ uint32_t PatersonStockmeyerNaturalDepth(uint32_t degree, GiantStepMode mode);
 
 // Number of ciphertext-ciphertext multiplications spent in the giant step.
 uint32_t PatersonStockmeyerGiantMults(uint32_t degree, GiantStepMode mode);
+
+// PoC-only (review item D-10): a measured threshold calibration row supplied
+// by the caller instead of looked up in noise_calibration.inc. Required for
+// GiantStepMode::Tree (the frozen table only holds Horner measurements) and
+// rejected for GiantStepMode::Horner. Values come from
+// `bench_noise --circuit=threshold --giant_step=tree` single-point probes and
+// go through the unchanged feasibility check
+// (eval_noise + 64 + flood_margin + 2 <= log_delta). The live OpenFHE context
+// is still verified at construction (realised N must equal ring_dim_natural;
+// the flooding budget must fit the live log2(q/t)).
+struct ThresholdCalibrationOverride {
+    uint32_t mult_depth;        // provisioned depth (>= natural depth)
+    uint32_t scaling_mod_size;  // RNS limb size used by the probe
+    uint32_t eval_noise_bits;   // ceil of the worst probe eval_noise_bits
+    uint32_t ring_dim_natural;  // ring dimension OpenFHE realised in the probe
+    double   log_delta;         // log2(q/t) reported by the probe
+};
 
 struct PiccardParams {
     // User-configurable
@@ -177,6 +195,11 @@ struct PiccardParams {
     // 2026-08-20 revision run; Tree is the PoC comparison (review item D-10).
     // Tree requires threshold_calibration_override (Task 3); Horner forbids it.
     GiantStepMode giant_step = GiantStepMode::Horner;
+
+    // Caller-supplied measured calibration row for the threshold circuit. It is
+    // input, not derived state: ClearFloodingSelection() must leave it alone.
+    // Mandatory under GiantStepMode::Tree, forbidden under Horner.
+    std::optional<ThresholdCalibrationOverride> threshold_calibration_override;
 
     // Derived by ValidateSqrt() — base-√m encoding
     uint32_t sqrt_base = 0;                    // √m (power of 2)

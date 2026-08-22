@@ -501,11 +501,37 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
     // Threshold remains an exact private coefficient-level compatibility path
     // until its separate branch. It does not claim transcript-level assurance.
     if (circuit == Circuit::Threshold) {
-        for (const auto& row : kNoiseCalibration) {
-            if (row.circuit != circuit) continue;
-            if (row.security != security) continue;
-            if (row.ring_dim_requested != ring_dim) continue;
-            if (row.natural_mult_depth != natural_depth) continue;
+        // PoC (review item D-10): Tree must come with a measured override;
+        // Horner must not. Either violation fails closed.
+        //
+        // Tree cannot fall through to the frozen table: the table is keyed by
+        // (requested N, natural depth) only, and the Tree natural depths 7
+        // (k=32) and 9 (k=128) collide with rows that were measured on the
+        // Horner circuit. Adopting one of those would size the flooding term
+        // against evaluation noise the tree circuit never produced.
+        if (giant_step == GiantStepMode::Horner &&
+            threshold_calibration_override.has_value()) {
+            throw std::invalid_argument(
+                "threshold calibration override is only accepted with "
+                "GiantStepMode::Tree");
+        }
+        if (giant_step == GiantStepMode::Tree &&
+            !threshold_calibration_override.has_value()) {
+            throw std::invalid_argument(
+                "GiantStepMode::Tree requires threshold_calibration_override "
+                "(no frozen calibration row is valid for the tree circuit)");
+        }
+
+        // One feasibility body for both sources. `row` is any type exposing the
+        // NoiseCalibration field names: the frozen table's element type differs
+        // between the production build and the schema-v2 wrapper build
+        // (LegacyNoiseCalibration), so this must stay a template.
+        // Returns true iff the row was selected; the caller then returns.
+        auto consider = [&](const auto& row) -> bool {
+            if (row.circuit != circuit) return false;
+            if (row.security != security) return false;
+            if (row.ring_dim_requested != ring_dim) return false;
+            if (row.natural_mult_depth != natural_depth) return false;
 
             key_exists = true;
             const uint32_t eval_and_coefficient = CheckedAddBits(
@@ -538,7 +564,31 @@ void PiccardParams::SelectFloodingParams(Circuit circuit, uint32_t natural_depth
                 eval_noise_bits = row.eval_noise_bits;
                 ring_dim_natural = row.ring_dim_natural;
                 CaptureValidationSnapshot();
-                return;
+                return true;
+            }
+            return false;
+        };
+
+        if (threshold_calibration_override.has_value()) {
+            const auto& ov = *threshold_calibration_override;
+            const bool pow2 = ov.ring_dim_natural != 0 &&
+                (ov.ring_dim_natural & (ov.ring_dim_natural - 1)) == 0;
+            if (ov.mult_depth < natural_depth || !pow2 ||
+                ov.ring_dim_natural < ring_dim || ov.eval_noise_bits == 0 ||
+                !std::isfinite(ov.log_delta) || ov.log_delta <= 0.0) {
+                throw std::invalid_argument(
+                    "invalid threshold calibration override for natural depth " +
+                    std::to_string(natural_depth) + " / requested N " +
+                    std::to_string(ring_dim));
+            }
+            const NoiseCalibration row{
+                Circuit::Threshold, security, ring_dim, natural_depth,
+                ov.ring_dim_natural, ov.mult_depth, ov.scaling_mod_size,
+                ov.eval_noise_bits, ov.log_delta};
+            if (consider(row)) return;
+        } else {
+            for (const auto& row : kNoiseCalibration) {
+                if (consider(row)) return;
             }
         }
 
