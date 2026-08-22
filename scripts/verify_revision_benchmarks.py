@@ -3332,30 +3332,48 @@ def _check_sj16_calibration(root: Path, output: Path, plan: dict[str, Any],
     for key, expected in expected_keys.items():
         if metadata.get(key) != expected:
             fail(f"SJ16 calibration {key} topology mismatch for {cid}")
+    # This function is reached only for schema "sj16-calibration-v1", which
+    # is exclusively the fit=per_element cell (fit=precomputed carries
+    # "review-comparison-csv-v1" and never lands here).  That cell's argv
+    # (scripts/revision_benchmark_common.py) unconditionally emits every
+    # flag checked below, so presence is required uniformly -- an argv that
+    # merely omits a flag must fail, not verify as if it agreed.
     command = plan.get("command", [])
     key_arg = _command_value_once(command, "--key-bits=", cid)
-    if key_arg not in {None, "3072"}:
+    if key_arg is None:
+        fail(f"SJ16 calibration is missing --key-bits for {cid}")
+    if key_arg != "3072":
         fail(f"SJ16 calibration key size is not canonical for {cid}")
     profile_arg = _command_value_once(command, "--profile=", cid)
-    if profile_arg not in {None, expected_profile}:
+    if profile_arg is None:
+        fail(f"SJ16 calibration is missing --profile for {cid}")
+    if profile_arg != expected_profile:
         fail(f"SJ16 calibration profile mismatch for {cid}")
     for prefix, expected in (("--sizes=", "4096,8192,16384"),
                              ("--held-out=", "32768"),
                              ("--threads=", "2"),
                              ("--warmup=", "1")):
         value = _command_value_once(command, prefix, cid)
-        if value is not None and value != expected:
+        if value is None:
+            fail(f"SJ16 calibration is missing {prefix} for {cid}")
+        if value != expected:
             fail(f"SJ16 calibration {prefix} topology mismatch for {cid}")
     query_trials = (_command_value_once(command, "--query-trials=", cid) or
                     _command_value_once(command, "--trials=", cid))
-    enc_iters = _command_value_once(command, "--enc-iters=", cid)
-    if query_trials is not None and query_trials != str(expected_trials):
+    if query_trials is None:
+        fail(f"SJ16 calibration is missing --query-trials/--trials for {cid}")
+    if query_trials != str(expected_trials):
         fail(f"SJ16 calibration query trial count mismatch for {cid}")
-    if enc_iters is not None and enc_iters != str(expected_trials):
+    enc_iters = _command_value_once(command, "--enc-iters=", cid)
+    if enc_iters is None:
+        fail(f"SJ16 calibration is missing --enc-iters for {cid}")
+    if enc_iters != str(expected_trials):
         fail(f"SJ16 calibration encryption iteration count mismatch for {cid}")
-    if metadata.get("threads_requested") not in {None, "2"} or \
-            metadata.get("threads_observed") not in {None, "2"}:
-        fail(f"SJ16 calibration thread topology mismatch for {cid}")
+    for key in ("threads_requested", "threads_observed"):
+        if key not in metadata:
+            fail(f"SJ16 calibration is missing {key} metadata for {cid}")
+        if metadata[key] != "2":
+            fail(f"SJ16 calibration thread topology mismatch for {cid}")
 
     columns = [index for index, line in enumerate(lines)
                if line.startswith("# columns: ")]

@@ -1922,8 +1922,99 @@ class RevisionVerifierContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             command = self.write_artifact(root, cell, "calibration.csv", text)
+            # The real per_element argv (revision_benchmark_common.py)
+            # always carries these flags; F-5 requires their presence.
+            command = [
+                "--profile=readiness-toy-v1", "--key-bits=3072",
+                "--sizes=4096,8192,16384", "--held-out=32768",
+                "--threads=2", "--query-trials=1", "--enc-iters=1",
+                "--warmup=1",
+            ] + command
             _check_family_artifacts(root, "toy", [cell],
                                     {cell["cell_id"]: {"command": command}})
+
+    def test_sj16_calibration_rejects_absent_command_flags(self) -> None:
+        # F-5 path 1: every check in _check_sj16_calibration's command-flag
+        # block used to treat "flag not present" as agreement ("value is
+        # not None and value != expected").  An argv that simply omits one
+        # of these flags must now be rejected, not verified as if it agreed.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
+                                axis="fit", axis_value="per_element")
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
+        text = self.full_sj16_fixture()
+        full_flags = [
+            "--profile=readiness-toy-v1", "--key-bits=3072",
+            "--sizes=4096,8192,16384", "--held-out=32768",
+            "--threads=2", "--query-trials=1", "--enc-iters=1",
+            "--warmup=1",
+        ]
+        for index, label in enumerate(
+                ("profile", "key-bits", "sizes", "held-out", "threads",
+                 "query-trials", "enc-iters", "warmup")):
+            with self.subTest(missing=label):
+                flags = full_flags[:index] + full_flags[index + 1:]
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    command = self.write_artifact(root, cell,
+                                                   "calibration.csv", text)
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(
+                            root, "toy", [cell],
+                            {cell["cell_id"]: {"command": flags + command}})
+
+        # The real-shaped argv, carrying every flag, still passes.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(root, cell, "calibration.csv", text)
+            _check_family_artifacts(
+                root, "toy", [cell],
+                {cell["cell_id"]: {"command": full_flags + command}})
+
+    def test_sj16_calibration_rejects_absent_thread_metadata(self) -> None:
+        # F-5 path 2: the threads_requested/threads_observed metadata check
+        # used the same absence-as-agreement shape ("not in {None, "2"}").
+        # A calibration artifact that omits either key must now be rejected.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _check_family_artifacts, RevisionContractError)
+        cell = self.matrix_cell("sj16-calibration-v1", family="sj16",
+                                axis="fit", axis_value="per_element")
+        cell = json.loads(json.dumps(cell))
+        for expected_row in cell["expected_rows"]:
+            expected_row.pop("raw_timing_contract", None)
+        full_flags = [
+            "--profile=readiness-toy-v1", "--key-bits=3072",
+            "--sizes=4096,8192,16384", "--held-out=32768",
+            "--threads=2", "--query-trials=1", "--enc-iters=1",
+            "--warmup=1",
+        ]
+        for label, missing_line in (("requested", "threads_requested=2\n"),
+                                    ("observed", "threads_observed=2\n")):
+            with self.subTest(missing=label):
+                text = self.full_sj16_fixture().replace(missing_line, "")
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    command = self.write_artifact(root, cell,
+                                                   "calibration.csv", text)
+                    with self.assertRaises(RevisionContractError):
+                        _check_family_artifacts(
+                            root, "toy", [cell],
+                            {cell["cell_id"]:
+                                 {"command": full_flags + command}})
+
+        # The real-shaped artifact, carrying both metadata keys, still passes.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.write_artifact(
+                root, cell, "calibration.csv", self.full_sj16_fixture())
+            _check_family_artifacts(
+                root, "toy", [cell],
+                {cell["cell_id"]: {"command": full_flags + command}})
 
     def test_family_verifier_accepts_nested_noise_shard_contract(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
