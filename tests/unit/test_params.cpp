@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <limits>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -1552,4 +1553,52 @@ TEST(PiccardParams, ThresholdOverrideRejectsMalformedFields) {
         params.threshold_calibration_override = c.ov;
         EXPECT_THROW(params.Validate(), std::invalid_argument) << c.what;
     }
+}
+
+// The override is the mandatory companion of giant_step under Tree, so it sits
+// in ValidationSnapshot alongside it. These mirror Task 1's
+// GiantStepMutationAfterValidateIsDetected. Both mutate ONLY the override:
+// every other snapshot field (including the derived eval_noise_bits and the
+// private selected_log2_q_over_t_) is left exactly as the selection wrote it,
+// so the detection can only come from the override being compared. Remove the
+// field from the two std::tie lists and both of these fail.
+TEST(PiccardParams, ThresholdOverrideMutationAfterValidateIsDetected) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 416.0};
+    params.Validate();
+    ASSERT_TRUE(params.FloodingSized());
+    ASSERT_NO_THROW(params.FloodNoiseBits());
+
+    // A budget claim inflated after the fact. It changes no derived field --
+    // the selector already copied what it needed -- so nothing but the
+    // snapshot's own copy of the override can catch it.
+    params.threshold_calibration_override->log_delta = 4096.0;
+    EXPECT_THROW(params.FloodNoiseBits(), std::logic_error);
+}
+
+TEST(PiccardParams, ThresholdOverrideRemovalAfterValidateIsDetected) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.threshold_calibration_override =
+        ThresholdCalibrationOverride{11, 54, 320, 16384, 416.0};
+    params.Validate();
+    ASSERT_TRUE(params.FloodingSized());
+    ASSERT_NO_THROW(params.FloodNoiseBits());
+
+    // Tree cannot stand without an override; a set that has dropped one is not
+    // the set the calibration was selected for.
+    params.threshold_calibration_override = std::nullopt;
+    EXPECT_THROW(params.FloodNoiseBits(), std::logic_error);
+}
+
+// The Horner default carries no override, and that absence must round-trip
+// through the snapshot without becoming a spurious mismatch.
+TEST(PiccardParams, HornerAbsentOverrideRevalidatesCleanly) {
+    PiccardParams params = MakeTreeStd128(128);
+    params.giant_step = GiantStepMode::Horner;
+    params.Validate();
+    ASSERT_TRUE(params.FloodingSized());
+    EXPECT_NO_THROW(params.FloodNoiseBits());
+    EXPECT_NO_THROW(params.AdoptVerifiedRuntimeRingDim(
+        params.SelectedCalibratedRingDim()));
 }

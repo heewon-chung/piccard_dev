@@ -69,6 +69,12 @@ struct ThresholdCalibrationOverride {
     uint32_t eval_noise_bits;   // ceil of the worst probe eval_noise_bits
     uint32_t ring_dim_natural;  // ring dimension OpenFHE realised in the probe
     double   log_delta;         // log2(q/t) reported by the probe
+
+    // Needed so the override can live inside PiccardParams::ValidationSnapshot
+    // and be compared there. C++17, so this cannot be `= default`.
+    // log_delta is compared exactly on purpose: the snapshot holds the value
+    // the caller supplied, not one derived by floating-point arithmetic.
+    bool operator==(const ThresholdCalibrationOverride& other) const;
 };
 
 struct PiccardParams {
@@ -215,6 +221,10 @@ private:
         SecurityLevel security;
         bool threshold_mode;
         GiantStepMode giant_step;
+        // giant_step and the override are a pair: Tree cannot be selected
+        // without one. Both belong under the same fail-closed revalidation.
+        std::optional<ThresholdCalibrationOverride>
+            threshold_calibration_override;
         uint32_t transcript_stat_bits;
         uint64_t max_queries;
         uint32_t flood_margin_bits;

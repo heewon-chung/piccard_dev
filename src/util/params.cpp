@@ -252,6 +252,22 @@ uint64_t FindPlaintextModulus(uint32_t min_val, uint32_t modulus) {
     throw std::runtime_error("Failed to find suitable plaintext modulus");
 }
 
+bool ThresholdCalibrationOverride::operator==(
+    const ThresholdCalibrationOverride& other) const {
+    return std::tie(
+               mult_depth,
+               scaling_mod_size,
+               eval_noise_bits,
+               ring_dim_natural,
+               log_delta) ==
+           std::tie(
+               other.mult_depth,
+               other.scaling_mod_size,
+               other.eval_noise_bits,
+               other.ring_dim_natural,
+               other.log_delta);
+}
+
 bool PiccardParams::ValidationSnapshot::operator==(
     const ValidationSnapshot& other) const {
     return std::tie(
@@ -260,6 +276,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                security,
                threshold_mode,
                giant_step,
+               threshold_calibration_override,
                transcript_stat_bits,
                max_queries,
                flood_margin_bits,
@@ -288,6 +305,7 @@ bool PiccardParams::ValidationSnapshot::operator==(
                other.security,
                other.threshold_mode,
                other.giant_step,
+               other.threshold_calibration_override,
                other.transcript_stat_bits,
                other.max_queries,
                other.flood_margin_bits,
@@ -320,6 +338,7 @@ PiccardParams::CurrentValidationSnapshot() const {
         security,
         threshold_mode,
         giant_step,
+        threshold_calibration_override,
         transcript_stat_bits,
         max_queries,
         flood_margin_bits,
