@@ -1168,7 +1168,14 @@ Fix each concrete defect in the owning task's files, re-run that task's tests an
 
 ### Task 6: AWS run (opus)
 
-Same instance class and AMI as `aws-guide.md` Phase B (`c8i.8xlarge`, CoreCount=16, ThreadsPerCore=1, OpenFHE 1.5.0). Nothing else runs on the box.
+Same instance class and AMI as `aws-guide.md` Phase B (`c8i.8xlarge`, CoreCount=16, ThreadsPerCore=1, OpenFHE 1.5.0).
+
+**Amended 2026-08-23 — the instance is shared.** The target box is the already-running `piccard-d10` (`i-09862293d77c81c58`, `c8i.8xlarge`, 13.216.211.115), which is executing the D-10 giant-step campaign in tmux session `d10` out of `~/piccard` (a different branch). Two hard rules follow:
+
+1. **Idle gate.** The sweep starts only when no `bench_*`, `ctest`, or `run_revision_benchmarks.py` process is running and no tmux pane is executing one. Poll; never kill, signal, or interrupt the other campaign, and never assume "the pane looks quiet" — check the process table. A timing cell measured against contention is worse than a late measurement, and the whole point of Table IX is comparable timings.
+2. **Separate checkout.** Do not touch `~/piccard`; the other campaign owns that tree. Clone/fetch this plan's commit into `~/piccard-table9` and build there (`cmake -S . -B build && cmake --build build -j16`). The extra build costs ~10 minutes and removes any chance of disturbing the D-10 working tree or being disturbed by it.
+
+Re-check the idle gate immediately before launching, not only once at the start of the task.
 
 - [ ] **Step 1: Push and sync** — the user authorized the push and the AWS run for this task on 2026-08-22 (no further confirmation needed):
 ```bash
