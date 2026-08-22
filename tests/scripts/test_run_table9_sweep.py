@@ -128,6 +128,11 @@ class CellListTest(unittest.TestCase):
         # _materialized_command (scripts/run_revision_benchmarks.py) --
         # same producer/root/build_dir/seed/threads inputs -- and require
         # the two full command lists to be identical, not merely overlapping.
+        # No resolution adjustment is needed on either side: run_table9_sweep's
+        # main() resolves --build-dir/--results-root/--matrix to absolute paths
+        # *before* calling plan(), and plan() then uses them as given, so
+        # handing both builders the same absolute tempdir paths compares like
+        # with like.
         sys.path.insert(0, str(ROOT / "scripts"))
         from run_revision_benchmarks import _materialized_command
 
