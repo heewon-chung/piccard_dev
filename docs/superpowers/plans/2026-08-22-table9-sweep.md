@@ -1303,15 +1303,21 @@ ssh -i ~/.ssh/piccard-bench.pem ubuntu@13.216.211.115 "du -sh ~/piccard-table9-$
 
 **Write `results/piccard-table9-$DATE/aws.md` now, before staging anything** — it is part of the evidence, so it has to be inside the commit, not added afterwards. It records:
 
-- the instance id and type, and the deployed SHA;
+- the instance id and type, and the deployed SHA (paste the SHA literally — the staging check greps the index copy for it);
 - start and stop times, and the observed wall time;
-- the idle-gate evidence: the process listing you saw immediately before launching, and the one you saw after the first cell completed;
-- **the Step 1 tree resolution**: for each entry that was dirty or untracked before the deploy, what it was, what you did with it, and who confirmed. Copy this from the scratch note you kept in Step 1; the record cannot be reconstructed later.
+- the **idle gate** evidence (use that phrase): the process listing you saw immediately before launching, and the one you saw after the first cell completed;
+- **the Step 1 tree resolution** (use that exact heading — the staging check looks for it): for each entry that was dirty or untracked before the deploy, what it was, what you did with it, and who confirmed. Copy this from the scratch note you kept in Step 1; the record cannot be reconstructed later.
 
-Then stage and commit, with `aws.md` included:
+Then stage and commit, with `aws.md` included. The check reads the file **out of the index** (`git show :path`), so an unstaged or later-edited copy cannot satisfy it, and it looks for the four things the record must contain rather than for the filename:
 ```bash
-git add -f results/piccard-table9-$DATE
-git status --short results/piccard-table9-$DATE | grep -q "aws.md" || { echo "REFUSE: aws.md is not staged"; exit 1; }
+AWS_MD="results/piccard-table9-$DATE/aws.md"
+git add -f "results/piccard-table9-$DATE"
+# Exact path, staged, and actually filled in.  A substring match would also
+# accept aws.md.bak, an aws.md in some other directory, or an unstaged one.
+test -n "$(git diff --cached --name-only -- "$AWS_MD")" || { echo "REFUSE: $AWS_MD is not staged"; exit 1; }
+for required in "$SHA" "instance" "idle gate" "tree resolution"; do
+  git show ":$AWS_MD" | grep -qi -- "$required" || { echo "REFUSE: $AWS_MD does not record: $required"; exit 1; }
+done
 git commit -m "results(table9): 42-cell Table IX sweep, 30 trials, c8i.8xlarge, 16 threads"
 ```
 Keep `workload.bin`/`trace.bin` — the sidecars do not bind them and they are the only record of the workload.
