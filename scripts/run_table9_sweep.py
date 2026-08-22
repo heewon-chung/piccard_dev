@@ -117,6 +117,30 @@ def _provenance(build_dir: Path, cells: list[dict[str, Any]], matrix_sha: str,
             "common_sha256": sha256_file(ROOT / "scripts" / "revision_benchmark_common.py")}
 
 
+def _provenance_diff(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """Name which top-level provenance keys differ (one level deep).
+
+    ``binaries`` is drilled one level further so the operator sees which
+    binary's sha256 moved rather than just "binaries differ" -- the whole
+    point is telling "I rebuilt one binary" apart from "I am pointing at a
+    different matrix".
+    """
+    lines: list[str] = []
+    for key in sorted(set(old) | set(new)):
+        if key == "binaries":
+            old_binaries, new_binaries = old.get("binaries", {}), new.get("binaries", {})
+            for name in sorted(set(old_binaries) | set(new_binaries)):
+                o, n = old_binaries.get(name), new_binaries.get(name)
+                if o != n:
+                    o_sha = o.get("sha256") if o else "absent"
+                    n_sha = n.get("sha256") if n else "absent"
+                    lines.append(f"binaries.{name}.sha256: {o_sha} -> {n_sha}")
+            continue
+        if old.get(key) != new.get(key):
+            lines.append(f"{key}: {old.get(key)!r} -> {new.get(key)!r}")
+    return lines
+
+
 def _run_one(p: dict[str, Any], root: Path, sequence: int) -> dict[str, Any]:
     output = Path(p["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
@@ -163,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--matrix", default=str(MATRIX_DEFAULT))
     parser.add_argument("--allow-dirty", action="store_true",
                         help="permit a dirty git tree; recorded in run.json as dirty_allowed")
+    parser.add_argument("--accept-provenance-change", action="store_true",
+                        help="permit a resume whose provenance differs from the recorded run; the "
+                             "old provenance is preserved in run.json's provenance_history, never overwritten silently")
     args = parser.parse_args(argv)
 
     root = Path(args.results_root)
@@ -195,13 +222,28 @@ def main(argv: list[str] | None = None) -> int:
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         if manifest.get("provenance") != provenance:
-            print("resume refused: provenance differs from the recorded run "
-                  "(source, tools, binaries, matrix, seed, threads, or scripts changed)", file=sys.stderr)
-            return 2
-        recorded = [json.loads(l) for l in (root / "planned_argv.jsonl").read_text().splitlines()]
-        if [r["command"] for r in recorded] != [p["command"] for p in plans]:
-            print("resume refused: planned argv differs from the recorded plan (provenance)", file=sys.stderr)
-            return 2
+            diffs = _provenance_diff(manifest.get("provenance", {}), provenance)
+            if not args.accept_provenance_change:
+                print("resume refused: provenance differs from the recorded run "
+                      "(source, tools, binaries, matrix, seed, threads, or scripts changed):\n"
+                      + "\n".join(diffs), file=sys.stderr)
+                return 2
+            # Never overwrite provenance silently: the prior record is kept in
+            # provenance_history so an operator can always see what changed and
+            # when, rather than losing hours of completed cells to hand-editing.
+            manifest.setdefault("provenance_history", []).append(
+                {"replaced_at": _now(), "provenance": manifest["provenance"]})
+            manifest["provenance"] = provenance
+            with (root / "planned_argv.jsonl").open("w") as handle:
+                for p in plans:
+                    handle.write(json.dumps(p, sort_keys=True) + "\n")
+            append_jsonl(root / "events.jsonl", {"event": "PROVENANCE_CHANGE", "time": _now(), "diff": diffs})
+            print("provenance changed, accepted via --accept-provenance-change:\n" + "\n".join(diffs))
+        else:
+            recorded = [json.loads(l) for l in (root / "planned_argv.jsonl").read_text().splitlines()]
+            if [r["command"] for r in recorded] != [p["command"] for p in plans]:
+                print("resume refused: planned argv differs from the recorded plan (provenance)", file=sys.stderr)
+                return 2
         append_jsonl(root / "events.jsonl", {"event": "RESUME", "time": _now()})
     else:
         manifest = {"schema": RUN_SCHEMA, "version": 1, "started_at": _now(), "state": "STARTED",
@@ -214,8 +256,35 @@ def main(argv: list[str] | None = None) -> int:
                 handle.write(json.dumps(p, sort_keys=True) + "\n")
         write_json(manifest_path, manifest)
 
-    completed = {c["cell_id"] for c in manifest["cells"] if c["execution_status"] == "COMPLETED"}
-    manifest["cells"] = [c for c in manifest["cells"] if c["cell_id"] in completed]
+    plan_by_id = {p["cell_id"]: p for p in plans}
+    valid_completed: list[dict[str, Any]] = []
+    for c in manifest["cells"]:
+        if c["execution_status"] != "COMPLETED":
+            continue
+        # A manifest record saying COMPLETED is not itself evidence: verify the
+        # cell's own receipt still exists, parses, and agrees, so a lost or
+        # truncated artifact (partial rsync, cleanup, interrupted write) causes
+        # a re-run instead of a false COMPLETED claim.
+        receipt_path = Path(plan_by_id[c["cell_id"]]["output_dir"]) / "receipt.json"
+        reason = None
+        try:
+            receipt = json.loads(receipt_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            receipt = None
+            reason = "receipt.json missing or unreadable"
+        if receipt is not None:
+            if receipt.get("cell_id") != c["cell_id"]:
+                reason = "receipt.json cell_id does not match"
+            elif receipt.get("execution_status") != "COMPLETED":
+                reason = f"receipt.json execution_status is {receipt.get('execution_status')!r}, not COMPLETED"
+        if reason is not None:
+            print(f"revalidate: {c['cell_id']} will be re-run ({reason})")
+            append_jsonl(root / "events.jsonl", {"event": "REVALIDATE", "cell_id": c["cell_id"],
+                                                 "reason": reason, "time": _now()})
+            continue
+        valid_completed.append(c)
+    completed = {c["cell_id"] for c in valid_completed}
+    manifest["cells"] = valid_completed
     events_path = root / "events.jsonl"
     sequence = len(events_path.read_text().splitlines()) if events_path.exists() else 0   # monotonic across resumes
     ran = failed = 0

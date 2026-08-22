@@ -130,6 +130,67 @@ class RunModeTest(unittest.TestCase):
             self.assertNotEqual(r3.returncode, 0)
             self.assertIn("provenance", r3.stderr)
 
+    def test_provenance_change_names_the_differing_key_and_can_be_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            manifest_before = json.loads((root / "run.json").read_text())
+            old_binary_sha = manifest_before["provenance"]["binaries"]["bench_piccard"]["sha256"]
+            (build / "bench_piccard").write_text("#!/bin/sh\necho changed\nexit 0\n")
+            (build / "bench_piccard").chmod(0o755)
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertNotEqual(r2.returncode, 0)
+            self.assertIn("provenance", r2.stderr)
+            self.assertIn("bench_piccard", r2.stderr, r2.stderr)          # names the differing key
+            r3 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty",
+                     "--accept-provenance-change")
+            self.assertEqual(r3.returncode, 0, r3.stderr)
+            manifest = json.loads((root / "run.json").read_text())
+            self.assertEqual(len(manifest["provenance_history"]), 1)
+            old_provenance = manifest["provenance_history"][0]["provenance"]
+            self.assertEqual(old_provenance["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
+            self.assertNotEqual(manifest["provenance"]["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
+
+    def test_resume_revalidates_missing_receipt_and_reruns_only_that_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            target = root / "cells" / common.slug("paper-v1::fhe_ind::n=100") / "receipt.json"
+            target.unlink()
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertIn("ran 1, skipped 56", r2.stdout)
+            manifest = json.loads((root / "run.json").read_text())
+            self.assertEqual(manifest["state"], "COMPLETED")
+            self.assertEqual(len(manifest["cells"]), 57)
+            self.assertTrue(target.exists())
+            events = [json.loads(l) for l in (root / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(e["event"] == "REVALIDATE" for e in events), 1)
+
+    def test_resume_revalidates_receipt_reporting_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            receipt_path = root / "cells" / common.slug("paper-v1::fhe_ind::n=100") / "receipt.json"
+            receipt = json.loads(receipt_path.read_text())
+            receipt["execution_status"] = "FAILED"
+            receipt_path.write_text(json.dumps(receipt))
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertIn("ran 1, skipped 56", r2.stdout)
+            manifest = json.loads((root / "run.json").read_text())
+            self.assertEqual(manifest["state"], "COMPLETED")
+            self.assertTrue(all(c["execution_status"] == "COMPLETED" for c in manifest["cells"]))
+
 
 if __name__ == "__main__":
     unittest.main()
