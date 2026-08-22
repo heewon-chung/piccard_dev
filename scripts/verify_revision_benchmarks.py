@@ -2903,6 +2903,22 @@ def _bind_cell_shape(rows: list[dict[str, str]], cell: dict[str, Any],
             for field in ("k", "m"):
                 if field in row and row[field] != "N/A":
                     fail(f"FHE-IND {field} must be N/A for {cid}")
+    # BCG12 MinHash and BCG12 exact-cardinality genuinely never consume the
+    # one-hot m dimension; their serializers must emit it blank, not merely
+    # skip echoing whatever the matrix's m axis happens to be.  A wrong m
+    # smuggled into the row would otherwise verify silently.
+    if cell.get("family") in {"bcg12_minhash", "bcg12_exact"}:
+        for row in rows:
+            if "m" in row and row["m"] != "":
+                fail(f"{cid} row m must be blank (unconsumed dimension), "
+                     f"got {row['m']!r}")
+    # SJ16 consumes neither MinHash dimension; both k and m must be blank.
+    if cell.get("family") == "sj16":
+        for row in rows:
+            for field in ("k", "m"):
+                if field in row and row[field] != "":
+                    fail(f"{cid} row {field} must be blank (unconsumed "
+                         f"dimension), got {row[field]!r}")
     # Matrix aliases are explicit in the schema; bind their exposed CSV names.
     row_fields = {"k": ("k",), "m": ("m",), "n": ("set_size", "n"),
                   "u": ("universe_size", "universe")}

@@ -769,6 +769,85 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     _bind_cell_shape([mutated], cell,
                                      {"command": command}, cell["cell_id"])
 
+    def test_sj16_binds_blank_k_and_m_and_rejects_populated_values(self) -> None:
+        # SJ16 consumes neither MinHash dimension (k, m); its rows must
+        # carry them blank.  A row that echoes a numeric value for the
+        # dimension the cell is named after (Task 1 added sj16::k=* and
+        # sj16::m=* cells) must be rejected rather than pass silently.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1", family="sj16",
+                                axis="k", axis_value="16")
+        row = {
+            "suite": "revision-sj16-v1", "scenario": "review-65536",
+            "method": "sj16", "cryptographic_profile": "Paillier-3072",
+            "nominal_security_bits": "128", "security_match": "true",
+            "comparison_eligible": "true",
+            "comparison_scope": "component-lower-bound",
+            "primitive": "paillier-3072",
+            "protocol_model": "sj16-intersection-shares",
+            "output_semantics":
+                "harness-reconstructed-jaccard-with-plaintext-union",
+            "assurance_scope": "intersection-shares-lower-bound",
+            "security_basis":
+                "rsa-ifc-modulus-size-proxy-not-a-proof-of-equivalent-security",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "randomizer-generation-included",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+            "universe_size": "65536", "set_size": "1000", "k": "", "m": "",
+        }
+        command = ["--k=16", "--m=64", "--n=1000", "--universe=65536"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
+
+        for label, field, value in (("k", "k", "16"), ("m", "m", "64")):
+            with self.subTest(label=label):
+                mutated = dict(row)
+                mutated[field] = value
+                with self.assertRaises(RevisionContractError):
+                    _bind_cell_shape([mutated], cell,
+                                     {"command": command}, cell["cell_id"])
+
+    def test_bcg12_minhash_binds_blank_m_and_rejects_populated_value(self) -> None:
+        # BCG12 MinHash consumes k but not the one-hot m dimension.  Task 1
+        # added bcg12_minhash::m=* cells, so a row echoing a value for the
+        # very axis the cell is named after must be rejected.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from verify_revision_benchmarks import (
+            _bind_cell_shape, RevisionContractError)
+        cell = self.matrix_cell("review-comparison-csv-v1",
+                                family="bcg12_minhash", axis="m",
+                                axis_value="16")
+        row = {
+            "suite": "revision-bcg12-minhash-v1",
+            "scenario": "review-65536", "method": "bcg12_mh_ec",
+            "cryptographic_profile": "P-256", "nominal_security_bits": "128",
+            "security_match": "true", "comparison_eligible": "true",
+            "comparison_scope": "matched-estimator-component",
+            "primitive": "bcg12-ec",
+            "protocol_model": "bcg12-cardinality-on-minhash",
+            "output_semantics": "minhash-collision-jaccard-estimate",
+            "assurance_scope": "implemented-baseline-parameter-map",
+            "security_basis": "nist-p256-parameter-map",
+            "cost_scope": "full-query-excluding-one-time-setup",
+            "precomputation_mode": "crs-and-keys-only",
+            "secure_division_included": "false", "workload_id": "w",
+            "workload_manifest_sha256": "a" * 64,
+            "execution_trace_sha256": "b" * 64,
+            "k": "128", "m": "", "universe_size": "65536",
+            "set_size": "1000",
+        }
+        command = ["--k=128", "--m=16", "--n=1000", "--universe=65536"]
+        _bind_cell_shape([row], cell, {"command": command}, cell["cell_id"])
+
+        mutated = dict(row)
+        mutated["m"] = "16"
+        with self.assertRaises(RevisionContractError):
+            _bind_cell_shape([mutated], cell, {"command": command},
+                             cell["cell_id"])
+
     def test_toy_real_accuracy_binds_ineligible_without_profile_and_paper_stays_eligible(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         from revision_benchmark_common import cell_output, file_inventory
@@ -1142,7 +1221,9 @@ class RevisionVerifierContractTest(unittest.TestCase):
                     "evidence_arm": "timing", "workload_id": f"review-65536-{digest[:16]}",
                     "workload_manifest_sha256": digest,
                     "execution_trace_sha256": trace_digest, "root_seed": "7",
-                    "k": "128", "m": "64", "set_size": "1000",
+                    # m is the unconsumed one-hot dimension: the real
+                    # producer emits it blank, not the workload's m axis.
+                    "k": "128", "m": "", "set_size": "1000",
                     "universe_size": "65536", "timing_trials": "1",
                     "accuracy_trials": "0", "trials": "1",
                     "hash_randomness": "fixed", "hash_seed": str(fixture._hash_seed(7, 1, 0)),
@@ -2315,7 +2396,10 @@ class RevisionVerifierContractTest(unittest.TestCase):
                                 family="bcg12_minhash",
                                 axis="control", axis_value="default")
         base = {
-            "k": "128", "m": "64", "set_size": "1000",
+            # BCG12 MinHash consumes k but not the one-hot m dimension; the
+            # real producer emits m blank (see
+            # _bind_cell_shape's bcg12_minhash/sj16 blank-axis assertion).
+            "k": "128", "m": "", "set_size": "1000",
             "universe_size": "65536",
             "suite": "revision-bcg12-minhash-v1", "scenario": "review-65536",
             "method": "bcg12_mh_ec", "cryptographic_profile": "P-256",
