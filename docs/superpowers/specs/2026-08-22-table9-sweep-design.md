@@ -181,8 +181,10 @@ gpt-5.6-sol high) → 5. AWS run (opus, push and run pre-authorized 2026-08-22) 
 
 ## 9. v2 amendment (2026-08-22, after gpt-5.6-sol plan review)
 
-> **2026-08-23:** SJ16 removed from the sweep by user decision — the
-> 2026-08-20 SJ16 measurements (16 threads) are reused; 44 cells.
+> **2026-08-23:** `sj16::u=262144` and `sj16::u=1048576` are excluded from
+> the sweep by user decision (infeasible; the paper keeps their
+> extrapolated values). All other SJ16 cells are measured so that flatness
+> in k and m is shown by data. 55 cells.
 
 The review of plan v1 established, with source evidence, that §4–§5 above are
 not implementable: `bench_review_comparison`'s non-matrix CLI is frozen to

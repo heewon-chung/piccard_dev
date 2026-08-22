@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Run the 44 Table IX cells of the revision matrix sequentially with the
+"""Run the 55 Table IX cells of the revision matrix sequentially with the
 orchestrator's exact argv and record provenance.
 
 A deliberately narrow sibling of scripts/run_revision_benchmarks.py: same
 matrix, same canonical argv, same env, same per-cell output layout, but only
 the cells that fill tbl:comp; no phases, no verification, no seal.
 
-SJ16 is not selected by this runner (2026-08-23, user decision): the
-sj16::fit=precomputed cell alone took 9.5 h at |U|=2^16 on the 2026-08-20
-run, so re-measuring u=2^18/2^20 is infeasible and repeating the 2^16 rows
-is too costly. The paper reuses the 2026-08-20 SJ16 measurements, which
-were already taken at 16 threads. The matrix still contains the sj16 cells
-and plan()/family-keyed logic still handles them for a possible future full
-run; TABLE9_CELL_IDS simply does not include them.
+Only SJ16's two large-|U| cells are excluded from this runner (2026-08-23,
+user decision): sj16::u=262144 and sj16::u=1048576 are infeasible to
+measure -- the sj16::fit=precomputed cell alone took 9.5 h at |U|=2^16 on
+the 2026-08-20 run -- so the paper keeps their existing extrapolated
+values. Every other SJ16 cell is measured here: the point of the table is
+to show with data that SJ16's time is flat in k and in m, and that needs
+measured cells, not extrapolation. The matrix still contains the two
+excluded cells and plan()/family-keyed logic still handles them for a
+possible future full run; TABLE9_CELL_IDS simply does not include them.
 
   python3 scripts/run_table9_sweep.py --mode=dry-run --build-dir=build --results-root=/abs/dir
   python3 scripts/run_table9_sweep.py --mode=run     --build-dir=build --results-root=/abs/dir
@@ -58,16 +60,26 @@ def _ids(family: str, prefix: str = "", *, skip_m: tuple[str, ...] = ()) -> list
     return ids
 
 
-# Execution order: cheap producers first, FHE-IND last.  The default point
-# is the u=65536 cell of each family.  SJ16 is deliberately not selected --
-# see the module docstring.
+# SJ16 cells actually measured by this sweep: every axis point except the
+# two large-|U| cells that stay extrapolated (see module docstring).
+_SJ16_MEASURED_IDS: tuple[str, ...] = (
+    "paper-v1::sj16::u=16384", "paper-v1::sj16::u=65536",
+    "paper-v1::sj16::n=100", "paper-v1::sj16::n=10000",
+    "paper-v1::sj16::k=16", "paper-v1::sj16::k=64", "paper-v1::sj16::k=256", "paper-v1::sj16::k=512",
+    "paper-v1::sj16::m=16", "paper-v1::sj16::m=128", "paper-v1::sj16::m=256",
+)
+
+# Execution order: cheap producers first, SJ16 last (11 of its 13 cells --
+# the two large-|U| cells are excluded, see module docstring).  The default
+# point is the u=65536 cell of each family.
 TABLE9_CELL_IDS: tuple[str, ...] = tuple(
     _ids("piccard_std128")
     + _ids("sqrt_comparison", "timing_", skip_m=("128",))
     + _ids("bcg12_minhash")
     + [f"paper-v1::fhe_ind::u={v}" for v in _U] + [f"paper-v1::fhe_ind::n={v}" for v in _N]
+    + list(_SJ16_MEASURED_IDS)
 )
-assert len(TABLE9_CELL_IDS) == 44 and len(set(TABLE9_CELL_IDS)) == 44
+assert len(TABLE9_CELL_IDS) == 55 and len(set(TABLE9_CELL_IDS)) == 55
 
 
 def _now() -> str:

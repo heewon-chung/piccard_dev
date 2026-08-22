@@ -195,8 +195,10 @@ git commit -m "feat(matrix): Table IX full-grid cells — bcg12 u/m, sj16 k/m, s
 
 ### Task 2: Sweep runner over the 57 Table IX matrix cells (sonnet)
 
-> **2026-08-23:** SJ16 removed from the sweep by user decision — the
-> 2026-08-20 SJ16 measurements (16 threads) are reused; 44 cells.
+> **2026-08-23:** `sj16::u=262144` and `sj16::u=1048576` are excluded from
+> the sweep by user decision (infeasible; the paper keeps their
+> extrapolated values). All other SJ16 cells are measured so that flatness
+> in k and m is shown by data. 55 cells.
 
 **Files:**
 - Create: `scripts/run_table9_sweep.py`
