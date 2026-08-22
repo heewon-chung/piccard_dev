@@ -159,6 +159,68 @@ class RunModeTest(unittest.TestCase):
             self.assertEqual(old_provenance["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
             self.assertNotEqual(manifest["provenance"]["binaries"]["bench_piccard"]["sha256"], old_binary_sha)
 
+    def test_override_resume_attributes_provenance_per_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            manifest1 = json.loads((root / "run.json").read_text())
+            old_id = manifest1["provenance_id"]
+            old_planned_bytes = (root / "planned_argv.jsonl").read_bytes()
+            target_cell = "paper-v1::fhe_ind::n=100"
+            target_receipt = root / "cells" / common.slug(target_cell) / "receipt.json"
+            target_receipt.unlink()          # force revalidation to re-run exactly this one cell
+            (build / "bench_piccard").write_text("#!/bin/sh\necho changed\nexit 0\n")
+            (build / "bench_piccard").chmod(0o755)          # binary bytes change -> provenance differs
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty",
+                     "--accept-provenance-change")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertIn("MIXED PROVENANCE: 2 ids", r2.stdout)
+            manifest2 = json.loads((root / "run.json").read_text())
+            new_id = manifest2["provenance_id"]
+            self.assertNotEqual(new_id, old_id)
+            self.assertEqual(len(manifest2["provenance_history"]), 1)
+            self.assertEqual(manifest2["provenance_history"][0]["provenance_id"], old_id)
+            by_id = {c["cell_id"]: c for c in manifest2["cells"]}
+            self.assertEqual(len(by_id), 55)
+            self.assertEqual(by_id[target_cell]["provenance_id"], new_id)
+            for cid, record in by_id.items():
+                if cid != target_cell:
+                    self.assertEqual(record["provenance_id"], old_id, cid)
+            self.assertEqual(json.loads(target_receipt.read_text())["provenance_id"], new_id)
+            untouched_receipt = json.loads(
+                (root / "cells" / common.slug("paper-v1::fhe_ind::u=16384") / "receipt.json").read_text())
+            self.assertEqual(untouched_receipt["provenance_id"], old_id)
+            self.assertTrue(manifest2["mixed_provenance"])
+            self.assertEqual(set(manifest2["provenance_cells"][old_id]) | {target_cell}, set(by_id))
+            self.assertEqual(manifest2["provenance_cells"][new_id], [target_cell])
+            # The original plan is never overwritten under an accepted provenance change.
+            self.assertEqual((root / "planned_argv.jsonl").read_bytes(), old_planned_bytes)
+            self.assertTrue((root / f"planned_argv.{new_id}.jsonl").exists())
+
+    def test_normal_resume_has_single_provenance_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            flag = t / "fail_once"
+            flag.write_text("")
+            # fhe_ind fails while the flag file exists, succeeds after it is removed; binary bytes never change.
+            (build / "bench_fhe_ind").write_text(f"#!/bin/sh\nif [ -e {flag} ]; then exit 3; fi\nexit 0\n")
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 1, r1.stderr)
+            flag.unlink()
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertNotIn("MIXED PROVENANCE", r2.stdout)
+            manifest = json.loads((root / "run.json").read_text())
+            self.assertFalse(manifest.get("mixed_provenance", False))
+            ids_seen = {c["provenance_id"] for c in manifest["cells"]}
+            self.assertEqual(len(ids_seen), 1)
+            self.assertEqual(manifest["provenance_id"], next(iter(ids_seen)))
+
     def test_resume_revalidates_missing_receipt_and_reruns_only_that_cell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)

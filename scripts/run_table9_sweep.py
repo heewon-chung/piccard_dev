@@ -36,9 +36,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))   # revision_benchmark_common does `from validate_revision_matrix import ...`
 from scripts.revision_benchmark_common import (  # noqa: E402
-    append_jsonl, binary_metadata, canonical_plan_argv, cell_output,
+    append_jsonl, binary_metadata, canonical_json, canonical_plan_argv, cell_output,
     command_for_cell, dry_run_tool_metadata, load_matrix, materialize_cell_argv,
-    producer_extra_args, sha256_file, source_metadata, tool_metadata, write_json,
+    producer_extra_args, sha256_bytes, sha256_file, source_metadata, tool_metadata, write_json,
 )
 
 RUN_SCHEMA = "piccard-table9-sweep-run-v1"
@@ -133,6 +133,16 @@ def _provenance(build_dir: Path, cells: list[dict[str, Any]], matrix_sha: str,
             "common_sha256": sha256_file(ROOT / "scripts" / "revision_benchmark_common.py")}
 
 
+def _provenance_id(provenance: dict[str, Any]) -> str:
+    """A stable short identity for one provenance record.
+
+    Lets every cell stamp *which* provenance it was measured under, so an
+    accepted provenance change never has to erase that fact for the cells
+    that ran before it.
+    """
+    return sha256_bytes(canonical_json(provenance))[:16]
+
+
 def _provenance_diff(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     """Name which top-level provenance keys differ (one level deep).
 
@@ -157,7 +167,7 @@ def _provenance_diff(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _run_one(p: dict[str, Any], root: Path, sequence: int) -> dict[str, Any]:
+def _run_one(p: dict[str, Any], root: Path, sequence: int, provenance_id: str) -> dict[str, Any]:
     output = Path(p["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -184,13 +194,14 @@ def _run_one(p: dict[str, Any], root: Path, sequence: int) -> dict[str, Any]:
                "duration_s": round(time.monotonic() - t0, 3),
                "started_at": started, "finished_at": _now(),
                "stdout_sha256": sha256_file(output / "stdout.log"),
-               "stderr_sha256": sha256_file(output / "stderr.log")}
+               "stderr_sha256": sha256_file(output / "stderr.log"),
+               "provenance_id": provenance_id}
     write_json(output / "receipt.json", receipt)
     append_jsonl(root / "events.jsonl", {"sequence": sequence + 1, "event": "END",
                                          "cell_id": p["cell_id"], "exit_code": exit_code,
                                          "execution_status": status, "time": _now()})
     return {k: receipt[k] for k in ("cell_id", "family", "execution_status", "exit_code",
-                                    "duration_s", "started_at", "finished_at")}
+                                    "duration_s", "started_at", "finished_at", "provenance_id")}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -233,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     by_id = {c["cell_id"]: c for c in document["cells"]}
     provenance = _provenance(build_dir, [by_id[c] for c in TABLE9_CELL_IDS], matrix_sha,
                              args.seed, args.threads)
+    provenance_id = _provenance_id(provenance)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "run.json"
     if manifest_path.exists():
@@ -245,16 +257,29 @@ def main(argv: list[str] | None = None) -> int:
                       + "\n".join(diffs), file=sys.stderr)
                 return 2
             # Never overwrite provenance silently: the prior record is kept in
-            # provenance_history so an operator can always see what changed and
-            # when, rather than losing hours of completed cells to hand-editing.
+            # provenance_history (with its own id) so an operator can always
+            # see what changed and when, rather than losing hours of completed
+            # cells to hand-editing.  Cells already measured keep the OLD
+            # provenance_id in their own receipt/manifest record forever --
+            # only cells run from this point on carry the new id -- so the
+            # override never misattributes evidence that was gathered before
+            # it.  The original planned_argv.jsonl is therefore left
+            # untouched (it is still exactly what the P1 cells ran under);
+            # the new plan goes to a file named after the new provenance_id.
+            old_id = manifest.get("provenance_id") or _provenance_id(manifest["provenance"])
             manifest.setdefault("provenance_history", []).append(
-                {"replaced_at": _now(), "provenance": manifest["provenance"]})
+                {"replaced_at": _now(), "provenance_id": old_id, "provenance": manifest["provenance"]})
             manifest["provenance"] = provenance
-            with (root / "planned_argv.jsonl").open("w") as handle:
+            manifest["provenance_id"] = provenance_id
+            new_plan_path = root / f"planned_argv.{provenance_id}.jsonl"
+            with new_plan_path.open("w") as handle:
                 for p in plans:
                     handle.write(json.dumps(p, sort_keys=True) + "\n")
-            append_jsonl(root / "events.jsonl", {"event": "PROVENANCE_CHANGE", "time": _now(), "diff": diffs})
-            print("provenance changed, accepted via --accept-provenance-change:\n" + "\n".join(diffs))
+            append_jsonl(root / "events.jsonl", {"event": "PROVENANCE_CHANGE", "time": _now(), "diff": diffs,
+                                                 "provenance_id": provenance_id,
+                                                 "planned_argv_file": new_plan_path.name})
+            print("provenance changed, accepted via --accept-provenance-change "
+                  f"(new plan recorded at {new_plan_path.name}):\n" + "\n".join(diffs))
         else:
             recorded = [json.loads(l) for l in (root / "planned_argv.jsonl").read_text().splitlines()]
             if [r["command"] for r in recorded] != [p["command"] for p in plans]:
@@ -265,7 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         manifest = {"schema": RUN_SCHEMA, "version": 1, "started_at": _now(), "state": "STARTED",
                     "mode": "paper", "dirty_allowed": bool(args.allow_dirty),
                     "platform": platform.platform(), "cpu_count": os.cpu_count(),
-                    "provenance": provenance, "cell_ids": list(TABLE9_CELL_IDS),
+                    "provenance": provenance, "provenance_id": provenance_id,
+                    "cell_ids": list(TABLE9_CELL_IDS),
                     "planned_processes": len(plans), "cells": []}
         with (root / "planned_argv.jsonl").open("w") as handle:
             for p in plans:
@@ -307,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     for p in plans:
         if p["cell_id"] in completed:
             continue
-        record = _run_one(p, root, sequence)
+        record = _run_one(p, root, sequence, provenance_id)
         sequence += 2
         manifest["cells"].append(record)
         ran += 1
@@ -320,8 +346,25 @@ def main(argv: list[str] | None = None) -> int:
     manifest["cells"].sort(key=lambda c: TABLE9_CELL_IDS.index(c["cell_id"]))
     manifest["finished_at"] = _now()
     manifest["state"] = "FAILED" if failed else "COMPLETED"
+
+    # A run whose cells were measured under more than one provenance (an
+    # accepted override mid-sweep) must say so loudly: nobody should read a
+    # mixed run as homogeneous without noticing.  The receipts remain the
+    # authoritative per-cell record; this is just the manifest-level index.
+    provenance_ids_seen = sorted({c["provenance_id"] for c in manifest["cells"] if c.get("provenance_id")})
+    state_label = manifest["state"]
+    if len(provenance_ids_seen) > 1:
+        manifest["mixed_provenance"] = True
+        provenance_cells: dict[str, list[str]] = {}
+        for c in manifest["cells"]:
+            pid = c.get("provenance_id")
+            if pid:
+                provenance_cells.setdefault(pid, []).append(c["cell_id"])
+        manifest["provenance_cells"] = provenance_cells
+        state_label = f"{manifest['state']} (MIXED PROVENANCE: {len(provenance_ids_seen)} ids)"
+
     write_json(manifest_path, manifest)
-    print(f"run {manifest['state']}: ran {ran}, skipped {len(completed)}, failed {failed}")
+    print(f"run {state_label}: ran {ran}, skipped {len(completed)}, failed {failed}")
     return 1 if failed else 0
 
 
