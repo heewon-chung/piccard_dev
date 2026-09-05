@@ -22,9 +22,9 @@ class RevisionMatrixTest(unittest.TestCase):
         cls.document = validate_revision_matrix.load_document(MATRIX)
         validate_revision_matrix.validate_document(cls.document, FIXTURES)
 
-    def test_exact_299_20_104_cardinalities_and_sorted_goldens(self):
+    def test_exact_301_20_104_cardinalities_and_sorted_goldens(self):
         cells = self.document["cells"]
-        self.assertEqual(len(cells), 299)
+        self.assertEqual(len(cells), 301)
         ids = [cell["cell_id"] for cell in cells]
         self.assertEqual(ids, sorted(ids))
         paper = (FIXTURES / "paper_cell_ids.txt").read_text().splitlines()
@@ -34,6 +34,47 @@ class RevisionMatrixTest(unittest.TestCase):
         self.assertEqual(len(toy), 20)
         self.assertEqual(len(executable), 104)
         self.assertEqual(executable, sorted(executable))
+
+    def test_deletion_d5_cells_are_registered_with_the_figure_grid(self):
+        grid = list(range(0, 521, 20))
+        self.assertEqual(validate_revision_matrix.DELETION_R_VALUES, tuple(grid))
+        by_id = {c["cell_id"]: c for c in self.document["cells"]}
+        exact = by_id["paper-v1::deletion_exact::d=5"]
+        mc = by_id["paper-v1::deletion_mc::d=5"]
+        for cell in (exact, mc):
+            self.assertEqual(cell["axis"], "d")
+            self.assertEqual(cell["axis_value"], 5)
+            self.assertEqual(cell["axes"], {"d": 5, "k": 128, "m": 64, "n": 1024, "u": 65536})
+            self.assertEqual(cell["r_values"], grid)
+            self.assertEqual(cell["expected_artifact_schema"], "deletion-survival-csv-v1")
+            self.assertEqual(cell["eligibility"], "DIAGNOSTIC_ONLY")
+            self.assertEqual(cell["timeout_class"], "standard")
+        self.assertEqual(exact["trials"], 0)
+        self.assertEqual(mc["trials"], 100000)
+        self.assertEqual(mc["paper_counts"], {"trials": 100000})
+        self.assertEqual(mc["toy_counts"], {"trials": 1})
+        self.assertEqual(mc["expected_rows"][0]["trials"], 100000)
+        self.assertEqual(mc["expected_rows"][0]["paper_measured_count"], 100000)
+        self.assertEqual(mc["expected_rows"][0]["toy_measured_count"], 1)
+        self.assertEqual(self.document["families"]["deletion_exact"], 2)
+        self.assertEqual(self.document["families"]["deletion_mc"], 2)
+        # the legacy control cells are untouched
+        control = by_id["paper-v1::deletion_mc::control=default"]
+        self.assertEqual(control["axes"], {"k": 128, "m": 64, "n": 1000, "u": 65536})
+        self.assertEqual(control["trials"], 1000)
+        self.assertNotIn("r_values", control)
+
+    def test_deletion_d5_r_grid_drift_is_rejected(self):
+        document = copy.deepcopy(self.document)
+        cell = next(c for c in document["cells"] if c["cell_id"] == "paper-v1::deletion_mc::d=5")
+        cell["r_values"] = list(range(0, 521, 40))
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(document, FIXTURES)
+        document = copy.deepcopy(self.document)
+        cell = next(c for c in document["cells"] if c["cell_id"] == "paper-v1::deletion_mc::d=5")
+        cell["trials"] = 1000
+        with self.assertRaises(ValueError):
+            validate_revision_matrix.validate_document(document, FIXTURES)
 
     def test_family_counts_and_required_contract_literals(self):
         counts = {}
@@ -51,9 +92,15 @@ class RevisionMatrixTest(unittest.TestCase):
 
         sj = next(c for c in self.document["cells"]
                   if c["cell_id"] == "paper-v1::sj16::u=262144")
-        self.assertEqual(sj["invocation_status"], "RUN")
-        self.assertEqual(sj["expected_rows"][0]["status"], "MEASURED")
-        self.assertEqual(sj["expected_rows"][0]["reason"], "")
+        self.assertEqual(sj["invocation_status"], "NO_SPAWN")
+        self.assertEqual(sj["expected_rows"][0]["status"], "EXTRAPOLATED")
+        self.assertEqual(
+            sj["expected_rows"][0]["reason"],
+            "sj16-paillier3072-calibration-bound-v1")
+        self.assertEqual(
+            sj["expected_rows"][0]["fit_authority"], "per_element")
+        # Threads stay 16 even on a cell that never runs: the 2026-08-20
+        # artifacts record omp_threads=16, so the old 2 was a fiction.
         self.assertEqual(sj["expected_rows"][0]["threads"], 16)
 
         sj_fit = next(c for c in self.document["cells"]
@@ -67,8 +114,14 @@ class RevisionMatrixTest(unittest.TestCase):
         # OMP_NUM_THREADS like the rest of the family).
         for sj_cell in self.document["cells"]:
             if sj_cell["family"] == "sj16":
-                self.assertEqual(sj_cell["invocation_status"], "RUN")
-                self.assertEqual(sj_cell["timeout_class"], "long")
+                # The two universes that are never measured cannot outrun any
+                # stop, so they keep the 600 s standard class and never spawn.
+                not_run = (sj_cell["axis"] == "u" and
+                           str(sj_cell["axis_value"]) in {"262144", "1048576"})
+                self.assertEqual(sj_cell["invocation_status"],
+                                 "NO_SPAWN" if not_run else "RUN")
+                self.assertEqual(sj_cell["timeout_class"],
+                                 "standard" if not_run else "long")
                 self.assertEqual(
                     sj_cell["threads"],
                     2 if sj_cell["axis"] == "fit" and
@@ -312,7 +365,7 @@ class RevisionMatrixTest(unittest.TestCase):
             elif family == "real_dataset" and cell["axes"].get("artifact") == "std128_timing":
                 raw = True
             elif family == "sj16":
-                raw = True
+                raw = not (axis == "u" and value in {"262144", "1048576"})
             elif family == "sqrt_comparison" and axis in {"timing_m", "crossover_m",
                                                           "timing_k", "timing_n",
                                                           "timing_u", "timing_km"}:
@@ -505,18 +558,38 @@ class RevisionMatrixTest(unittest.TestCase):
                lambda c: c.__setitem__("threads", 2))
         mutate("paper-v1::sj16::u=262144",
                lambda c: c["expected_rows"][0].__setitem__("threads", 2))
-        mutate("paper-v1::sj16::u=262144",
-               lambda c: c.__setitem__("invocation_status", "NO_SPAWN"))
-        # The calibration fit only ever backed the EXTRAPOLATED rows, so the
-        # two large-|U| cells that are now measured must not carry the fit's
-        # authority forward on their rows: that would be stale extrapolation
-        # provenance riding along on a directly measured number.
-        mutate("paper-v1::sj16::u=262144",
-               lambda c: c["expected_rows"][0].__setitem__(
-                   "fit_authority", "per_element"))
-        mutate("paper-v1::sj16::u=1048576",
-               lambda c: c["expected_rows"][0].__setitem__(
-                   "fit_authority", "per_element"))
+        # The calibration fit backs only the EXTRAPOLATED rows, so a row the
+        # matrix calls MEASURED must not carry the fit's authority: that would
+        # be stale extrapolation provenance riding along on a measured number.
+        # The two large-|U| cells are not measured and legitimately carry it,
+        # so the rule is exercised on cells that are -- including n=100000,
+        # which sits at |U|=2^18 but sweeps n, because the never-run rule keys
+        # on the u axis rather than on the universe value.
+        for measured_id in ("paper-v1::sj16::u=65536",
+                            "paper-v1::sj16::n=10000",
+                            "paper-v1::sj16::n=100000"):
+            mutate(measured_id,
+                   lambda c: c["expected_rows"][0].__setitem__(
+                       "fit_authority", "per_element"))
+        # The inverse: the two large-|U| cells will never be measured, so any
+        # shape claiming they were must be rejected by the matrix itself.
+        for not_run_id in ("paper-v1::sj16::u=262144",
+                           "paper-v1::sj16::u=1048576"):
+            mutate(not_run_id,
+                   lambda c: c.__setitem__("invocation_status", "RUN"))
+            mutate(not_run_id,
+                   lambda c: c.__setitem__("eligibility", "TABLE_ELIGIBLE"))
+            mutate(not_run_id,
+                   lambda c: c.__setitem__("table_eligible", True))
+            mutate(not_run_id, lambda c: c.__setitem__("paper_count", 30))
+            mutate(not_run_id,
+                   lambda c: c.__setitem__("timeout_class", "long"))
+            mutate(not_run_id,
+                   lambda c: c["expected_rows"][0].update(
+                       {"status": "MEASURED", "terminal_status": "MEASURED"}))
+            mutate(not_run_id,
+                   lambda c: c["expected_rows"][0].__setitem__(
+                       "fit_authority", ""))
         # fit=precomputed runs bench_review_comparison, which ignores
         # --threads and is governed by OMP_NUM_THREADS like the rest of the
         # family (F-6): its stale threads=2 claim is now rejected the same

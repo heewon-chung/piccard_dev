@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -176,15 +177,22 @@ class IntegrityTest(unittest.TestCase):
             _copy_cell_dir(FIX / "good" / "cells" / "paper_v1__piccard_std128__u_16384", dst)
             tsv = next(dst.glob("bench_piccard__*.tsv"))
             duplicate = dst / ("dup_" + tsv.name)
-            duplicate.write_bytes(tsv.read_bytes())
-            receipt = json.loads((dst / "receipt.json").read_text())
-            receipt["artifact_inventory"].append(
-                {"path": duplicate.name, "sha256": "0" * 64, "size": duplicate.stat().st_size})
-            (dst / "receipt.json").write_text(json.dumps(receipt))
+            duplicate.write_bytes(tsv.read_bytes())  # a second real sidecar in the same directory
             with self.assertRaises(summ.SweepError) as ctx:
                 summ.load_aggregates(root)
             self.assertIn(tsv.name, str(ctx.exception))
             self.assertIn(duplicate.name, str(ctx.exception))
+
+    def test_real_runner_receipt_schema_is_readable(self) -> None:
+        # scripts/run_table9_sweep.py's receipt has no artifact_inventory key
+        # (that belongs to the full orchestrator's receipt schema); this
+        # fixture is a real receipt.json copied verbatim from a finished AWS
+        # run so a future schema drift between the two scripts fails here,
+        # in CI, rather than silently on a finished run.
+        aggs = summ.load_aggregates(FIX / "real_receipt_schema")
+        self.assertIn(("paper-v1::piccard_std128::u=16384", "piccard"), aggs)
+        self.assertEqual(summ.format_cell(aggs[("paper-v1::piccard_std128::u=16384", "piccard")]),
+                          r"$139.5\pm0.5$")
 
     def test_receipt_not_completed_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,6 +269,184 @@ class ManifestGapTest(unittest.TestCase):
         self.assertEqual(summ._manifest_cell_gap(manifest), (set(), set()))
 
 
+def _write_matrix(root: Path, cell_id: str, producer: str) -> None:
+    (root).mkdir(parents=True, exist_ok=True)
+    (root / "matrix.json").write_text(json.dumps({"cells": [{"cell_id": cell_id, "producer": producer}]}))
+
+
+class ThreadProvenanceTest(unittest.TestCase):
+    """Q-1: --threads is inert for bench_review_comparison, so a run's
+    declared provenance.threads must be cross-checked against what a
+    producer actually recorded (omp_threads/omp_dynamic), wherever that
+    column shows up -- a real .csv, or (as on the AWS-synced results) a
+    CSV-formatted stdout.log.  Which cells MUST record it is derived from
+    the archived matrix.json's own `producer` field, not from whichever
+    cells happen to volunteer the column -- a cell that should record it
+    and doesn't is a failure, not a silent pass."""
+
+    SJ16_CELL = "paper-v1::sj16::u=16384"       # producer bench_review_comparison: MUST record
+    PICCARD_CELL = "paper-v1::piccard_std128::u=16384"  # producer bench_piccard: never records
+
+    def test_thread_mismatch_in_csv_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            cell_dir = root / "cells" / summ.slug(self.SJ16_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "stdout.log").write_text(
+                "suite,scenario,omp_threads,omp_dynamic\nrevision-x,y,8,false\n")
+            with self.assertRaises(summ.SweepError):
+                summ.check_thread_provenance(root, 16)
+
+    def test_omp_dynamic_true_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            cell_dir = root / "cells" / summ.slug(self.SJ16_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "stdout.log").write_text(
+                "suite,scenario,omp_threads,omp_dynamic\nrevision-x,y,16,true\n")
+            with self.assertRaises(summ.SweepError):
+                summ.check_thread_provenance(root, 16)
+
+    def test_matching_threads_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            cell_dir = root / "cells" / summ.slug(self.SJ16_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "stdout.log").write_text(
+                "suite,scenario,omp_threads,omp_dynamic\nrevision-x,y,16,false\n")
+            summ.check_thread_provenance(root, 16)  # must not raise
+
+    def test_non_recording_producer_with_no_column_is_not_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.PICCARD_CELL, "bench_piccard")
+            cell_dir = root / "cells" / summ.slug(self.PICCARD_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "identity.csv").write_text("schema,cell_id,universe_size\npiccard-table9-sweep-run-v1,x,16384\n")
+            summ.check_thread_provenance(root, 16)  # must not raise
+
+    def test_recording_producer_with_no_column_anywhere_is_rejected(self) -> None:
+        # A bench_review_comparison cell whose directory carries no
+        # omp_threads column at all -- e.g. a truncated/renamed/absent
+        # producer output -- must fail naming the cell, not pass silently
+        # because nothing volunteered the evidence.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            cell_dir = root / "cells" / summ.slug(self.SJ16_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "stderr.log").write_text("")  # no CSV content, no omp_threads column
+            with self.assertRaises(summ.SweepError) as ctx:
+                summ.check_thread_provenance(root, 16)
+            self.assertIn(self.SJ16_CELL, str(ctx.exception))
+
+    def test_header_only_column_with_no_data_rows_is_rejected(self) -> None:
+        # A file that carries the omp_threads *heading* but zero data rows
+        # (truncated stdout.log, a producer killed after printing its
+        # header, a trimmed fixture) must fail distinctly from "no file at
+        # all" -- the column existing is not the same as a value being
+        # verified.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            cell_dir = root / "cells" / summ.slug(self.SJ16_CELL)
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "stdout.log").write_text("suite,scenario,omp_threads,omp_dynamic\n")  # header only
+            with self.assertRaises(summ.SweepError) as ctx:
+                summ.check_thread_provenance(root, 16)
+            message = str(ctx.exception)
+            self.assertIn(self.SJ16_CELL, message)
+            self.assertIn("no data rows", message)
+
+    def test_missing_declared_threads_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root, self.SJ16_CELL, "bench_review_comparison")
+            with self.assertRaises(summ.SweepError):
+                summ.check_thread_provenance(root, None)
+
+
+class ExtrapolationIntegrityTest(unittest.TestCase):
+    """Q-2: EXTRAPOLATED_SJ16 may only be used when there is genuinely
+    nothing else -- if a real cell directory exists for either id it
+    stands in for, that is a drift that must fail loudly, not be
+    shadowed.  TABLE9_CELL_IDS excludes both ids by construction, so
+    `load_aggregates`'s `aggs` can never contain them -- the guard has to
+    look at the results tree instead.  This test proves the guard is
+    reachable (fails with the directory present, passes once it's gone),
+    not merely that it type-checks."""
+
+    def test_extrapolated_cell_directory_is_rejected_then_its_absence_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cell_dir = root / "cells" / "paper_v1__sj16__u_262144"
+            (cell_dir / "raw").mkdir(parents=True)
+            (cell_dir / "receipt.json").write_text(json.dumps({
+                "schema": "piccard-table9-sweep-cell-receipt-v1",
+                "cell_id": "paper-v1::sj16::u=262144", "execution_status": "COMPLETED", "exit_code": 0,
+            }))
+            (cell_dir / "raw" / "bench_review_comparison__paper-v1__sj16__u_262144__sj16__paper-v1.tsv").write_text(
+                "schema_version\tpiccard-paper-raw-timing-v1\n")
+            with self.assertRaises(summ.SweepError) as ctx:
+                summ.load_aggregates(root)
+            self.assertIn("paper-v1::sj16::u=262144", str(ctx.exception))
+
+            shutil.rmtree(cell_dir)
+            summ.load_aggregates(root)  # now must not raise -- proves the guard is reachable, not dead
+
+    def test_extrapolated_row_without_a_real_cell_directory_still_returns_the_constant(self) -> None:
+        agg = summ._lookup({}, ("u", 262144, 1000, 128, 64), "sj16")
+        self.assertEqual(agg.mean_ms, 285389.0)
+
+
+class MatrixProvenanceTest(unittest.TestCase):
+    """Q-3: a results root must carry the exact matrix it was planned
+    against (<root>/matrix.json), archived alongside the run -- never the
+    repository's present matrix, which keeps evolving after a run is
+    archived and would otherwise make an old, valid run unreproducible."""
+
+    def test_matrix_sha_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            (root / "cells").mkdir(parents=True)
+            shutil.copyfile(FIX / "good" / "matrix.json", root / "matrix.json")
+            manifest = {
+                "schema": "piccard-table9-sweep-run-v1", "state": "COMPLETED", "dirty_allowed": False,
+                "provenance": {"threads": 16, "seed": 20260729, "matrix_sha256": "0" * 64},  # deliberately wrong
+                "cells": [{"cell_id": c, "execution_status": "COMPLETED", "exit_code": 0}
+                          for c in summ.TABLE9_CELL_IDS],
+            }
+            (root / "run.json").write_text(json.dumps(manifest))
+            r = subprocess.run([sys.executable, str(SCRIPT), f"--results-root={root}",
+                                f"--out-dir={tmp}", "--partial"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("0" * 64, r.stderr)
+            self.assertIn(summ.sha256_file(root / "matrix.json"), r.stderr)
+
+    def test_missing_matrix_json_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            (root / "cells").mkdir(parents=True)
+            manifest = {
+                "schema": "piccard-table9-sweep-run-v1", "state": "COMPLETED", "dirty_allowed": False,
+                "provenance": {"threads": 16, "seed": 20260729, "matrix_sha256": "da2bdfa"},
+                "cells": [{"cell_id": c, "execution_status": "COMPLETED", "exit_code": 0}
+                          for c in summ.TABLE9_CELL_IDS],
+            }
+            (root / "run.json").write_text(json.dumps(manifest))  # no matrix.json written
+            r = subprocess.run([sys.executable, str(SCRIPT), f"--results-root={root}",
+                                f"--out-dir={tmp}", "--partial"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("matrix.json", r.stderr)
+
+    def test_archived_matrix_sha256_reads_the_results_root_copy(self) -> None:
+        self.assertEqual(summ._archived_matrix_sha256(FIX / "good"),
+                          summ.sha256_file(FIX / "good" / "matrix.json"))
+
+
 class CliTest(unittest.TestCase):
     def test_partial_renders_sixteen_rows_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,11 +477,13 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "root"
             (root / "cells").mkdir(parents=True)
+            shutil.copyfile(FIX / "good" / "matrix.json", root / "matrix.json")
+            good_matrix_sha = json.loads((FIX / "good" / "run.json").read_text())["provenance"]["matrix_sha256"]
             cell_ids = list(summ.TABLE9_CELL_IDS)
             missing_id = cell_ids.pop()
             manifest = {
                 "schema": "piccard-table9-sweep-run-v1", "state": "COMPLETED", "dirty_allowed": False,
-                "provenance": {"threads": 16, "seed": 20260729},
+                "provenance": {"threads": 16, "seed": 20260729, "matrix_sha256": good_matrix_sha},
                 "cells": [{"cell_id": c, "execution_status": "COMPLETED", "exit_code": 0} for c in cell_ids],
             }
             (root / "run.json").write_text(json.dumps(manifest))
@@ -309,6 +497,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "root"
             (root / "cells").mkdir(parents=True)
+            shutil.copyfile(FIX / "good" / "matrix.json", root / "matrix.json")
             (root / "run.json").write_text((FIX / "nonstandard_run.json").read_text())
             r = subprocess.run([sys.executable, str(SCRIPT), f"--results-root={root}",
                                 f"--out-dir={tmp}", "--partial"], capture_output=True, text=True)

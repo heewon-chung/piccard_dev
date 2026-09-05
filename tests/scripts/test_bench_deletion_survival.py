@@ -41,6 +41,41 @@ class BenchDeletionSurvivalTest(unittest.TestCase):
             ]))
         self.assertEqual(len(summaries), 1)
 
+    def test_revision_cell_d5_toy_emits_the_full_r_grid(self):
+        grid = ",".join(str(r) for r in range(0, 521, 20))
+        completed = subprocess.run(
+            [BENCH, "--revision-cell=paper-v1::deletion_mc::d=5",
+             "--profile=readiness-toy-v1", "--cell=monte-carlo", "--k=128", "--m=64",
+             "--d=5", "--set_size=1024", "--universe=65536", f"--r_values={grid}",
+             "--trials=1", "--seed=20260729"],
+            capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        reader = csv.DictReader(io.StringIO(completed.stdout))
+        self.assertEqual(reader.fieldnames, HEADER)
+        rows = list(reader)
+        self.assertEqual([row["r"] for row in rows], [str(r) for r in range(0, 521, 20)])
+        for row in rows:
+            self.assertEqual(row["n"], "1024")
+            self.assertEqual(row["d"], "5")
+            self.assertEqual(row["k"], "128")
+            self.assertEqual(row["trials"], "1")
+            self.assertEqual(row["maximum_safe_deletions"], "156")
+        self.assertAlmostEqual(float(rows[0]["exact_expected_first_failure"]), 357.745, places=2)
+        # r=520 for (1024,5,128): exact survival 0.01285
+        self.assertAlmostEqual(float(rows[-1]["exact_survival"]), 0.01285, places=4)
+
+    def test_revision_cell_control_argv_is_unchanged(self):
+        completed = subprocess.run(
+            [BENCH, "--revision-cell=paper-v1::deletion_mc::control=default",
+             "--profile=readiness-toy-v1", "--cell=monte-carlo", "--k=128", "--m=64",
+             "--set_size=1000", "--universe=65536", "--trials=1", "--seed=20260729"],
+            capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rows = list(csv.DictReader(io.StringIO(completed.stdout)))
+        self.assertEqual([row["r"] for row in rows], ["1", "4", "8"])
+        self.assertEqual(rows[0]["n"], "1000")
+        self.assertEqual(rows[0]["d"], "64")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

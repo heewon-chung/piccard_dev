@@ -30,8 +30,8 @@ FAMILY_COUNTS = {
     "dynamic_timing": 16,
     "dynamic_accuracy": 16,
     "dynamic_refresh": 1,
-    "deletion_exact": 1,
-    "deletion_mc": 1,
+    "deletion_exact": 2,
+    "deletion_mc": 2,
     "threshold_timing": 5,
     "threshold_spec": 5,
     "threshold_agreement": 5,
@@ -44,6 +44,15 @@ M_VALUES = ("16", "32", "64", "128", "256")
 N_VALUES = ("100", "1000", "10000", "100000")
 U_VALUES = ("16384", "65536", "262144", "1048576")
 SQRT_M = {"16", "64", "256"}
+# The two SJ16 universes this campaign will never measure.  The fit=precomputed
+# cell alone took 9.5 h at |U|=2^16 on the 2026-08-20 run, so 2^18 and 2^20 stay
+# bound to the calibration fit's extrapolation: they never spawn, and the paper
+# footnotes their values as extrapolated rather than measured.
+SJ16_NOT_RUN = frozenset({"262144", "1048576"})
+# The r grid of fig:del-survival (n=1024, d=5, k=128): exact curve at every
+# value, Monte-Carlo markers at the multiples of 40.  Both d=5 deletion cells
+# carry this list verbatim so the producer never hard-codes it.
+DELETION_R_VALUES: tuple[int, ...] = tuple(range(0, 521, 20))
 ID_RE = re.compile(r"^paper-v1::[a-z0-9_]+::[a-z0-9_]+=[A-Za-z0-9_.-]+$")
 STATUSES = {"MEASURED", "DIAGNOSTIC", "EXTRAPOLATED", "NOT_APPLICABLE"}
 REPRESENTATIVE_TOY_IDS = frozenset({
@@ -137,7 +146,9 @@ def expected_ids() -> set[str]:
         _add_expected(ids, family, "n", N_VALUES)
     ids.update({"paper-v1::dynamic_refresh::control=default",
                 "paper-v1::deletion_exact::control=default",
-                "paper-v1::deletion_mc::control=default"})
+                "paper-v1::deletion_mc::control=default",
+                "paper-v1::deletion_exact::d=5",
+                "paper-v1::deletion_mc::d=5"})
     for family in ("threshold_timing", "threshold_spec", "threshold_agreement"):
         ids.update(f"paper-v1::{family}::k={value}" for value in ("16", "32", "64", "128", "256"))
     for value_k in ("64", "128", "256", "512"):
@@ -165,6 +176,11 @@ def _text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _is_sj16_not_run(cell: dict[str, Any]) -> bool:
+    """Return whether one SJ16 cell is one of the two never-measured universes."""
+    return cell["axis"] == "u" and _text(cell["axis_value"]) in SJ16_NOT_RUN
 
 
 def _expected_universe(cell: dict[str, Any]) -> int:
@@ -214,6 +230,9 @@ def _expected_axes(cell: dict[str, Any]) -> dict[str, Any]:
     elif family == "threshold_synthetic_fpfn":
         axes["k"] = cell.get("point_k")
         axes["grid_index"] = cell.get("grid_index")
+    elif family in {"deletion_exact", "deletion_mc"} and axis == "d":
+        axes["d"] = int(value)
+        axes["n"] = 1024
     elif axis in {"k", "m", "n", "u"}:
         axes[axis] = int(value)
     return axes
@@ -295,7 +314,7 @@ def _requires_raw_timing(cell: dict[str, Any], row_id: str) -> bool:
                   "dynamic_timing", "dynamic_refresh", "threshold_timing"}:
         return True
     if family == "sj16":
-        return True
+        return not _is_sj16_not_run(cell)
     if family == "sqrt_comparison" and cell["axis"] in {
             "timing_m", "crossover_m", "timing_k", "timing_n", "timing_u",
             "timing_km"}:
@@ -347,6 +366,11 @@ def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
                               method="bench_review_comparison", k=128, m=64, n=1000,
                               u=65536, key_bits=3072, precomputed=True, threads=16,
                               warmup_calls=1)]
+        if _is_sj16_not_run(cell):
+            return [_row_spec("sj16", "EXTRAPOLATED",
+                              "sj16-paillier3072-calibration-bound-v1", 0, 0,
+                              method="sj16", fit_authority="per_element",
+                              key_bits=3072, threads=16)]
         return [_row_spec("sj16", "MEASURED", "", 30, 1,
                           method="sj16", key_bits=3072, threads=16)]
     if family == "estimator_accuracy":
@@ -381,8 +405,9 @@ def _expected_row_shape(cell: dict[str, Any]) -> list[dict[str, Any]]:
     if family == "deletion_exact":
         return [_row_spec("exact", "DIAGNOSTIC", "", 0, 0, method="exact")]
     if family == "deletion_mc":
-        return [_row_spec("monte_carlo", "DIAGNOSTIC", "", 1000, 1,
-                          method="monte_carlo", trials=1000)]
+        trials = 100000 if cell["axis"] == "d" else 1000
+        return [_row_spec("monte_carlo", "DIAGNOSTIC", "", trials, 1,
+                          method="monte_carlo", trials=trials)]
     if family == "threshold_timing":
         return [_row_spec("timing", "MEASURED", "", 30, 1, method="timing",
                           k=cell["axes"]["k"])]
@@ -446,6 +471,8 @@ def _expected_counts(cell: dict[str, Any]) -> tuple[int, int, int, int, dict[str
             return 30, 1, 30, 1, {"enc_iters": 30, "query_trials": 30}, {"enc_iters": 1, "query_trials": 1}
         if axis == "fit" and value == "precomputed":
             return 30, 1, 30, 1, {"timing": 30}, {"timing": 1}
+        if axis == "u" and value in SJ16_NOT_RUN:
+            return 0, 0, 0, 0, {"timing": 0}, {"timing": 0}
         if axis == "n" and value == "100000":
             return 30, 1, 30, 1, {"timing": 30}, {"timing": 1}
         return 30, 1, 30, 1, {"timing": 30}, {"timing": 1}
@@ -468,7 +495,8 @@ def _expected_counts(cell: dict[str, Any]) -> tuple[int, int, int, int, dict[str
     if family == "deletion_exact":
         return 0, 0, 0, 0, {"measured": 0}, {"measured": 0}
     if family == "deletion_mc":
-        return 1000, 1, 1000, 1, {"trials": 1000}, {"trials": 1}
+        trials = 100000 if cell["axis"] == "d" else 1000
+        return trials, 1, trials, 1, {"trials": trials}, {"trials": 1}
     if family == "threshold_timing":
         return 30, 1, 30, 1, {"timing": 30}, {"timing": 1}
     if family == "threshold_spec":
@@ -503,6 +531,8 @@ def _expected_eligibility(cell: dict[str, Any]) -> tuple[str, bool, bool, str]:
     if family == "sj16":
         if cell["axis"] == "fit":
             return "DIAGNOSTIC_ONLY", False, False, "RUN"
+        if _is_sj16_not_run(cell):
+            return "DIAGNOSTIC_ONLY", False, False, "NO_SPAWN"
         return "TABLE_ELIGIBLE", True, True, "RUN"
     if family == "dynamic_refresh" or family == "threshold_timing" or family == "threshold_agreement":
         return "TABLE_ELIGIBLE", True, True, "RUN"
@@ -545,7 +575,9 @@ def _expected_timeout_class(cell: dict[str, Any]) -> str:
     take ``long``.
     """
     if cell["family"] == "sj16":
-        return "long"
+        # A cell that never spawns cannot outrun any stop, so it keeps the
+        # 600 s standard class; every SJ16 cell that does run takes the 18 h one.
+        return "standard" if _is_sj16_not_run(cell) else "long"
     if cell["family"] == "bcg12_exact" and cell["axis"] == "n":
         # The exact baseline is the one family whose n sweep is costly below
         # its top point: 4.3/28.6/273.5/2739.5 s at n=100/1000/10000/100000.
@@ -635,8 +667,16 @@ def _validate_cell(cell: Any, index: int) -> None:
         _require(cell.get("refresh_axes") == {"k": 128, "m": 64, "n": 1000},
                  f"{label} dynamic refresh axes mismatch")
     if cell["family"] in {"deletion_exact", "deletion_mc"}:
-        _require(cell.get("trials") == (0 if cell["family"] == "deletion_exact" else 1000),
+        _require(cell["axis"] in {"control", "d"}, f"{label} deletion axis must be control or d")
+        mc_trials = 100000 if cell["axis"] == "d" else 1000
+        _require(cell.get("trials") == (0 if cell["family"] == "deletion_exact" else mc_trials),
                  f"{label} deletion trial contract mismatch")
+        if cell["axis"] == "d":
+            _require(_text(cell["axis_value"]) == "5", f"{label} deletion d axis value must be 5")
+            _require(cell.get("r_values") == list(DELETION_R_VALUES),
+                     f"{label} deletion r_values grid mismatch")
+        else:
+            _require("r_values" not in cell, f"{label} control deletion cell must not carry r_values")
     if cell["family"] == "estimator_accuracy":
         expected_trials = 50 if cell["axis"] == "j" else 500
         _require(cell.get("trials") == expected_trials, f"{label} estimator trial contract mismatch")
@@ -704,8 +744,8 @@ def validate_document(document: dict[str, Any], fixture_root: pathlib.Path | str
     _require(document.get("version") == 1, "matrix version mismatch")
     _require(document.get("id_grammar") == "paper-v1::<family>::<axis>=<value>", "matrix ID grammar mismatch")
     cells = document.get("cells")
-    _require(isinstance(cells, list) and len(cells) == 299, "matrix must contain exactly 299 cells")
-    _require(document.get("cell_count") == 299, "matrix cell_count mismatch")
+    _require(isinstance(cells, list) and len(cells) == 301, "matrix must contain exactly 301 cells")
+    _require(document.get("cell_count") == 301, "matrix cell_count mismatch")
     _require(document.get("families") == FAMILY_COUNTS, "matrix family count table mismatch")
     ids = [cell.get("cell_id") if isinstance(cell, dict) else None for cell in cells]
     _require(ids == sorted(ids), "matrix cell IDs must be sorted")
@@ -719,7 +759,7 @@ def validate_document(document: dict[str, Any], fixture_root: pathlib.Path | str
         paper = (fixture_root / "paper_cell_ids.txt").read_text(encoding="ascii").splitlines()
         toy = (fixture_root / "toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
         executable = (fixture_root / "executable_toy_cell_ids.txt").read_text(encoding="ascii").splitlines()
-        _require(ids == paper and len(paper) == 299, "paper ID golden mismatch")
+        _require(ids == paper and len(paper) == 301, "paper ID golden mismatch")
         expected_toy = sorted(REPRESENTATIVE_TOY_IDS)
         _require(toy == expected_toy and len(toy) == 20,
                  "toy ID golden representative selection mismatch")
@@ -740,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixtures", default="tests/fixtures/revision_matrix")
     args = parser.parse_args(argv)
     validate_file(args.matrix, args.fixtures)
-    print("revision matrix: valid (299 cells; 20 representative toy; 104 executable toy)")
+    print("revision matrix: valid (301 cells; 20 representative toy; 104 executable toy)")
     return 0
 
 

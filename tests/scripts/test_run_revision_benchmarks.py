@@ -43,7 +43,7 @@ class RevisionRunnerContractTest(unittest.TestCase):
             manifest = json.loads((root / "run.json").read_text())
             self.assertEqual(manifest["mode"], "dry-run")
             self.assertEqual(manifest["spawned_processes"], 0)
-            self.assertEqual(manifest["cell_count"], 299)
+            self.assertEqual(manifest["cell_count"], 301)
 
     def test_dry_run_binds_sj16_timeout_class_and_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -63,15 +63,25 @@ class RevisionRunnerContractTest(unittest.TestCase):
                      (root / "planned_argv.jsonl").read_text().splitlines()]
             sj16 = [plan for plan in plans if plan["family"] == "sj16"]
             self.assertEqual(len(sj16), 22)
-            # Every SJ16 cell is measured now, so the whole family takes the
-            # 18 h stop; nothing is left at the 600 s standard stop.
+            # The two universes this campaign never measures keep the 600 s
+            # standard stop and never spawn; every SJ16 cell that does run
+            # takes the 18 h one.
+            no_spawn_ids = {"paper-v1::sj16::u=262144",
+                            "paper-v1::sj16::u=1048576"}
             for plan in sj16:
-                self.assertEqual(plan["timeout_class"], "long",
+                no_spawn = plan["cell_id"] in no_spawn_ids
+                self.assertEqual(plan["timeout_class"],
+                                 "standard" if no_spawn else "long",
                                  plan["cell_id"])
-                self.assertEqual(plan["timeout_seconds"], 64800,
+                self.assertEqual(plan["timeout_seconds"],
+                                 600 if no_spawn else 64800,
                                  plan["cell_id"])
-                self.assertEqual(plan["invocation_status"], "RUN",
+                self.assertEqual(plan["invocation_status"],
+                                 "NO_SPAWN" if no_spawn else "RUN",
                                  plan["cell_id"])
+            self.assertEqual(
+                sum(1 for plan in sj16
+                    if plan["invocation_status"] == "NO_SPAWN"), 2)
 
     def test_dry_run_process_boundary_is_zero_child_including_metadata(self) -> None:
         """The complete in-process dry planner must not create any child.
@@ -102,7 +112,9 @@ class RevisionRunnerContractTest(unittest.TestCase):
                 self.assertEqual(runner.run(parsed), 0)
 
             manifest = json.loads((results / "run.json").read_text())
-            self.assertEqual(manifest["cell_count"], 299)
+            self.assertEqual(manifest["cell_count"], 301)
+            # 299 RUN cells plan a process; the two never-measured SJ16
+            # universes plan none.
             self.assertEqual(manifest["planned_processes"], 299)
             self.assertEqual(manifest["spawned_processes"], 0)
             self.assertEqual(manifest["source"]["schema"],
@@ -463,6 +475,34 @@ class RevisionRunnerContractTest(unittest.TestCase):
                     item["axis_value"] == "summary")
         self.assertEqual(cell["producer"], "summarize_real_datasets.py")
         self.assertEqual(executable_for_cell(cell), "summarize_real_datasets.py")
+
+
+    def test_deletion_d5_cells_plan_the_figure_argv(self) -> None:
+        sys.path.insert(0, str(ROOT))
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from scripts import revision_benchmark_common as common
+        document, _ = common.load_matrix(MATRIX)
+        by_id = {c["cell_id"]: c for c in document["cells"]}
+        grid = ",".join(str(r) for r in range(0, 521, 20))
+        self.assertEqual(
+            common.canonical_plan_argv(by_id["paper-v1::deletion_mc::d=5"], "paper"),
+            ["--revision-cell=paper-v1::deletion_mc::d=5", "--profile=paper-v1",
+             "--cell=monte-carlo", "--k=128", "--m=64", "--d=5", "--set_size=1024",
+             "--universe=65536", f"--r_values={grid}", "--trials=100000", "--seed={seed}"])
+        self.assertEqual(
+            common.canonical_plan_argv(by_id["paper-v1::deletion_exact::d=5"], "toy"),
+            ["--revision-cell=paper-v1::deletion_exact::d=5", "--profile=readiness-toy-v1",
+             "--cell=exact", "--k=128", "--m=64", "--d=5", "--set_size=1024",
+             "--universe=65536", f"--r_values={grid}", "--trials=0", "--seed={seed}"])
+        self.assertEqual(
+            common.canonical_plan_argv(by_id["paper-v1::deletion_mc::d=5"], "toy")[-2],
+            "--trials=1")
+        # the control cells are unchanged
+        self.assertEqual(
+            common.canonical_plan_argv(by_id["paper-v1::deletion_mc::control=default"], "paper"),
+            ["--revision-cell=paper-v1::deletion_mc::control=default", "--profile=paper-v1",
+             "--cell=monte-carlo", "--k=128", "--m=64", "--set_size=1000",
+             "--universe=65536", "--trials=1000", "--seed={seed}"])
 
 
 if __name__ == "__main__":

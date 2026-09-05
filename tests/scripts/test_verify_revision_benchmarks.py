@@ -3312,5 +3312,17 @@ class RevisionVerifierContractTest(unittest.TestCase):
         self.assertEqual(_raw_sample_sd(values), 2275430683.357378)
 
 
+class DeletionRGridTest(unittest.TestCase):
+    def test_r_grid_follows_the_cell_axis(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import verify_revision_benchmarks as verifier
+        control = {"cell_id": "paper-v1::deletion_mc::control=default", "axis": "control"}
+        figure = {"cell_id": "paper-v1::deletion_mc::d=5", "axis": "d",
+                  "r_values": list(range(0, 521, 20))}
+        self.assertEqual(verifier._expected_deletion_r_values(control), {"1", "4", "8"})
+        self.assertEqual(verifier._expected_deletion_r_values(figure),
+                         {str(r) for r in range(0, 521, 20)})
+
+
 if __name__ == "__main__":
     unittest.main()

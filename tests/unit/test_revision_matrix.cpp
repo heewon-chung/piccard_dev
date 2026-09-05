@@ -57,8 +57,8 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const RevisionMatrix matrix = Load();
     ASSERT_EQ(matrix.schema, "piccard-revision-matrix-v1");
     ASSERT_EQ(matrix.version, 1u);
-    ASSERT_EQ(matrix.cell_count, 299u);
-    ASSERT_EQ(matrix.cells.size(), 299u);
+    ASSERT_EQ(matrix.cell_count, 301u);
+    ASSERT_EQ(matrix.cells.size(), 301u);
 
     const std::map<std::string, size_t> expected = {
         {"piccard_std128", 20}, {"piccard_std192_encoding", 20},
@@ -66,7 +66,7 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
         {"sj16", 22}, {"estimator_accuracy", 17}, {"sqrt_comparison", 36},
         {"flooding", 3}, {"dynamic_timing", 16},
         {"dynamic_accuracy", 16}, {"dynamic_refresh", 1},
-        {"deletion_exact", 1}, {"deletion_mc", 1},
+        {"deletion_exact", 2}, {"deletion_mc", 2},
         {"threshold_timing", 5}, {"threshold_spec", 5},
         {"threshold_agreement", 5}, {"threshold_synthetic_fpfn", 84},
         {"threshold_dblp_fpfn", 1}, {"real_dataset", 12},
@@ -78,7 +78,7 @@ TEST(RevisionMatrix, CanonicalInventoryHasExactCardinalitiesAndSortedIds) {
     const auto ids = RevisionMatrixCellIds(matrix);
     EXPECT_TRUE(std::is_sorted(ids.begin(), ids.end()));
     EXPECT_EQ(ids, Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN));
-    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 299u);
+    EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_PAPER_GOLDEN).size(), 301u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_TOY_GOLDEN).size(), 20u);
     EXPECT_EQ(Lines(PICCARD_REVISION_MATRIX_EXECUTABLE_TOY_GOLDEN).size(),
               104u);
@@ -97,13 +97,16 @@ TEST(RevisionMatrix, RequiredTerminalRowsAndProducerBindingsAreLiteral) {
     EXPECT_EQ(sqrt_row->reason, "sqrt-m-not-perfect-square");
     EXPECT_EQ(sqrt_invalid.producer, "bench_onehot_sqrt");
 
-    const auto& large_universe = Find(
+    const auto& extrapolated = Find(
         matrix, "paper-v1::sj16::u=262144");
-    ASSERT_EQ(large_universe.invocation_status, "RUN");
-    ASSERT_EQ(large_universe.expected_rows.size(), 1u);
-    EXPECT_EQ(large_universe.expected_rows.front().status, "MEASURED");
-    EXPECT_TRUE(large_universe.expected_rows.front().reason.empty());
-    EXPECT_EQ(large_universe.expected_rows.front().attributes.at("threads"),
+    ASSERT_EQ(extrapolated.invocation_status, "NO_SPAWN");
+    ASSERT_EQ(extrapolated.expected_rows.size(), 1u);
+    EXPECT_EQ(extrapolated.expected_rows.front().status, "EXTRAPOLATED");
+    EXPECT_EQ(extrapolated.expected_rows.front().reason,
+              "sj16-paillier3072-calibration-bound-v1");
+    // Threads stay 16 even on a cell that never runs: the 2026-08-20
+    // artifacts record omp_threads=16, so the old "2" was a fiction.
+    EXPECT_EQ(extrapolated.expected_rows.front().attributes.at("threads"),
               "16");
 
     const auto& fhe_ind = Find(matrix, "paper-v1::fhe_ind::n=1000");
@@ -134,8 +137,16 @@ TEST(RevisionMatrix, Sj16TimeoutClassesBindFitAndRunStatus) {
     for (const auto& cell : matrix.cells) {
         if (cell.family != "sj16") continue;
         ++seen;
-        EXPECT_EQ(cell.timeout_class, "long") << cell.cell_id;
-        EXPECT_EQ(cell.invocation_status, "RUN") << cell.cell_id;
+        // A cell that never spawns cannot outrun any stop, so it keeps the
+        // 600 s standard class; every SJ16 cell that does run takes the 18 h
+        // one.
+        const bool no_spawn =
+            cell.axis == "u" && (cell.axis_value == "262144" ||
+                                 cell.axis_value == "1048576");
+        EXPECT_EQ(cell.timeout_class, no_spawn ? "standard" : "long")
+            << cell.cell_id;
+        EXPECT_EQ(cell.invocation_status, no_spawn ? "NO_SPAWN" : "RUN")
+            << cell.cell_id;
         // Only the serial per_element calibration fit is deliberately
         // single-threaded (bench_sj16_calibrate genuinely honors --threads
         // via omp_set_num_threads); every other cell -- including
@@ -349,7 +360,7 @@ TEST(RevisionMatrix, RequiredGeometryAndPaperCountsAreLiteral) {
     EXPECT_EQ(sj_terminal.paper_count, 30u);
 }
 
-TEST(RevisionMatrix, Sj16SweepIsMeasuredIncludingTheLargestUniverses) {
+TEST(RevisionMatrix, Sj16SweepIsMeasuredExceptTheTwoLargestUniverses) {
     const RevisionMatrix matrix = Load();
     const auto& n100000 = Find(matrix, "paper-v1::sj16::n=100000");
     ASSERT_EQ(n100000.axes.at("k"), "128");
@@ -368,7 +379,7 @@ TEST(RevisionMatrix, Sj16SweepIsMeasuredIncludingTheLargestUniverses) {
     EXPECT_EQ(n100000.expected_rows.front().paper_measured_count, 30u);
     EXPECT_EQ(n100000.expected_rows.front().toy_measured_count, 1u);
 
-    for (const auto& value : {"16384", "65536", "262144", "1048576"}) {
+    for (const auto& value : {"16384", "65536"}) {
         const auto& cell = Find(
             matrix, std::string("paper-v1::sj16::u=") + value);
         EXPECT_EQ(cell.invocation_status, "RUN") << cell.cell_id;
@@ -379,6 +390,28 @@ TEST(RevisionMatrix, Sj16SweepIsMeasuredIncludingTheLargestUniverses) {
         EXPECT_EQ(cell.expected_rows.front().paper_measured_count, 30u)
             << cell.cell_id;
         EXPECT_EQ(cell.paper_count, 30u) << cell.cell_id;
+    }
+
+    // The two largest universes are never measured: the paper prints the
+    // calibration fit's extrapolation for them, and the matrix says so.
+    for (const auto& value : {"262144", "1048576"}) {
+        const auto& cell = Find(
+            matrix, std::string("paper-v1::sj16::u=") + value);
+        EXPECT_EQ(cell.invocation_status, "NO_SPAWN") << cell.cell_id;
+        EXPECT_EQ(cell.eligibility, "DIAGNOSTIC_ONLY") << cell.cell_id;
+        EXPECT_FALSE(cell.table_eligible) << cell.cell_id;
+        EXPECT_FALSE(cell.comparison_eligible) << cell.cell_id;
+        ASSERT_EQ(cell.expected_rows.size(), 1u);
+        EXPECT_EQ(cell.expected_rows.front().status, "EXTRAPOLATED")
+            << cell.cell_id;
+        EXPECT_EQ(cell.expected_rows.front().reason,
+                  "sj16-paillier3072-calibration-bound-v1")
+            << cell.cell_id;
+        EXPECT_EQ(cell.expected_rows.front().fit_authority, "per_element")
+            << cell.cell_id;
+        EXPECT_EQ(cell.expected_rows.front().paper_measured_count, 0u)
+            << cell.cell_id;
+        EXPECT_EQ(cell.paper_count, 0u) << cell.cell_id;
     }
 }
 
@@ -510,18 +543,55 @@ TEST(RevisionMatrix, ValidationRejectsRunnerContractMutations) {
     matrix = Load();
     MutableFind(matrix, "paper-v1::sj16::u=262144").attributes["threads"] = "2";
     expect_rejected(matrix);
-    // The calibration fit only ever backed the EXTRAPOLATED rows, so the two
-    // large-|U| cells that are now measured must not carry the fit's
-    // authority forward on their rows: that would be stale extrapolation
-    // provenance riding along on a directly measured number.
+    // The calibration fit backs only the EXTRAPOLATED rows, so a row the
+    // matrix calls MEASURED must not carry the fit's authority: that would be
+    // stale extrapolation provenance riding along on a measured number.  The
+    // two large-|U| cells are not measured and legitimately carry it, so the
+    // rule is exercised on cells that are.
     matrix = Load();
-    MutableFind(matrix, "paper-v1::sj16::u=262144")
+    MutableFind(matrix, "paper-v1::sj16::u=65536")
         .expected_rows[0].fit_authority = "per_element";
     expect_rejected(matrix);
     matrix = Load();
-    MutableFind(matrix, "paper-v1::sj16::u=1048576")
+    MutableFind(matrix, "paper-v1::sj16::n=10000")
         .expected_rows[0].fit_authority = "per_element";
     expect_rejected(matrix);
+    // The n=100000 cell sits at |U|=2^18 but sweeps n, so it is measured like
+    // the rest of the n sweep: the never-run rule keys on the u axis, not on
+    // the universe value.
+    matrix = Load();
+    MutableFind(matrix, "paper-v1::sj16::n=100000")
+        .expected_rows[0].fit_authority = "per_element";
+    expect_rejected(matrix);
+
+    // The inverse: the two large-|U| cells will never be measured, so any
+    // shape claiming they were must be rejected by the matrix itself.
+    for (const auto& id : {std::string("paper-v1::sj16::u=262144"),
+                           std::string("paper-v1::sj16::u=1048576")}) {
+        matrix = Load();
+        MutableFind(matrix, id).invocation_status = "RUN";
+        expect_rejected(matrix);
+        matrix = Load();
+        auto& measured_row = MutableFind(matrix, id);
+        measured_row.expected_rows[0].status = "MEASURED";
+        measured_row.expected_rows[0].terminal_status = "MEASURED";
+        expect_rejected(matrix);
+        matrix = Load();
+        auto& promoted = MutableFind(matrix, id);
+        promoted.eligibility = "TABLE_ELIGIBLE";
+        promoted.table_eligible = true;
+        promoted.comparison_eligible = true;
+        expect_rejected(matrix);
+        matrix = Load();
+        MutableFind(matrix, id).paper_count = 30;
+        expect_rejected(matrix);
+        matrix = Load();
+        MutableFind(matrix, id).timeout_class = "long";
+        expect_rejected(matrix);
+        matrix = Load();
+        MutableFind(matrix, id).expected_rows[0].fit_authority.clear();
+        expect_rejected(matrix);
+    }
     // fit=precomputed runs bench_review_comparison, which ignores --threads
     // and is governed by OMP_NUM_THREADS like the rest of the family (F-6):
     // its stale threads=2 claim is now rejected the same as any other
@@ -577,4 +647,33 @@ TEST(RevisionMatrix, ValidationRejectsReciprocalFamilyPayloadSwaps) {
     std::swap(std128.object_attributes, std192.object_attributes);
     std::swap(std128.expected_rows, std192.expected_rows);
     EXPECT_THROW(ValidateRevisionMatrix(matrix), std::invalid_argument);
+}
+
+TEST(RevisionMatrix, DeletionD5CellsCarryTheFigureGridAndHundredThousandTrials) {
+    const RevisionMatrix matrix = Load();
+    const auto& exact = Find(matrix, "paper-v1::deletion_exact::d=5");
+    const auto& mc = Find(matrix, "paper-v1::deletion_mc::d=5");
+    const std::vector<std::string> grid = piccard::benchmark::DeletionFigureRValues();
+    ASSERT_EQ(grid.size(), 27u);
+    EXPECT_EQ(grid.front(), "0");
+    EXPECT_EQ(grid.back(), "520");
+    for (const RevisionCell* cell : {&exact, &mc}) {
+        EXPECT_EQ(cell->axis, "d");
+        EXPECT_EQ(cell->axis_value, "5");
+        EXPECT_EQ(cell->axes.at("n"), "1024");
+        EXPECT_EQ(cell->axes.at("d"), "5");
+        EXPECT_EQ(cell->list_attributes.at("r_values"), grid);
+        EXPECT_EQ(cell->expected_artifact_schema, "deletion-survival-csv-v1");
+    }
+    EXPECT_EQ(mc.attributes.at("trials"), "100000");
+    EXPECT_EQ(mc.paper_count, 100000u);
+    EXPECT_EQ(mc.expected_rows.front().attributes.at("trials"), "100000");
+    EXPECT_EQ(exact.attributes.at("trials"), "0");
+
+    RevisionMatrix drifted = Load();
+    MutableFind(drifted, "paper-v1::deletion_mc::d=5").list_attributes["r_values"] = {"0", "40"};
+    EXPECT_THROW(ValidateRevisionMatrix(drifted), std::invalid_argument);
+    drifted = Load();
+    MutableFind(drifted, "paper-v1::deletion_mc::d=5").attributes["trials"] = "1000";
+    EXPECT_THROW(ValidateRevisionMatrix(drifted), std::invalid_argument);
 }

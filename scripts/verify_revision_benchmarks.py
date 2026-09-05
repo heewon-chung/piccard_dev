@@ -249,7 +249,14 @@ def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
 def _expected_timeout_contract(cell: dict[str, Any]) -> tuple[str, int]:
     """Independently bind matrix timeout classes to lifecycle budgets."""
     if cell.get("family") == "sj16":
-        timeout_class = "long"
+        # The two universes this campaign never measures cannot outrun any
+        # stop, so they keep the 600 s standard class; every SJ16 cell that
+        # does run takes the 18 h one.
+        timeout_class = (
+            "standard"
+            if cell.get("axis") == "u" and
+            str(cell.get("axis_value")) in {"262144", "1048576"}
+            else "long")
     elif (cell.get("family") == "bcg12_exact" and cell.get("axis") == "n" and
           str(cell.get("axis_value")) in {"10000", "100000"}):
         # The exact baseline is costly below its top point too: measured on
@@ -595,6 +602,15 @@ _DELETION_HEADER = (
     "exact_expected_first_failure,exact_expected_safe_deletions,"
     "mc_mean_first_failure,mc_mean_safe_deletions,trials,seed\n"
 )
+
+
+def _expected_deletion_r_values(cell: dict) -> set[str]:
+    """Control cells print the fixed {1,4,8} probe; d=5 cells print the figure grid."""
+    if cell.get("axis") == "d":
+        return {str(r) for r in cell["r_values"]}
+    return {"1", "4", "8"}
+
+
 _ESTIMATOR_HEADER = (
     "estimator_model,k,m,set_size,target_jaccard,realized_jaccard,"
     "intersection_size,trials,seed,mean_raw_rank_estimate,raw_rank_bias,"
@@ -4353,7 +4369,8 @@ def _check_family_artifacts(root: Path, mode: str, cells: list[dict[str, Any]],
                     _int_field(rows[0], "trials", cid) != expected_counts[0]:
                 fail(f"dynamic aggregate row/trial topology mismatch for {cid}")
         elif schema == "deletion-survival-csv-v1":
-            if len(rows) != 3 or {row.get("r") for row in rows} != {"1", "4", "8"} or \
+            expected_r = _expected_deletion_r_values(cell)
+            if len(rows) != len(expected_r) or {row.get("r") for row in rows} != expected_r or \
                     any(_int_field(row, "trials", cid) != expected_counts[0] for row in rows):
                 fail(f"deletion survival topology mismatch for {cid}")
 

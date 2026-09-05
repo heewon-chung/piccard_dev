@@ -152,12 +152,20 @@ int RunRevisionCell(int argc, char** argv) {
         throw std::logic_error("deletion revision plan is not one-cell");
     }
 
+    // Control cells (2026-08-20 campaign) pass no --d: they keep the legacy
+    // binding of the bottom depth to m and the {1,4,8} grid so their argv
+    // and CSV stay byte-identical.  The d=5 figure cells carry both.
+    const uint64_t bottom_depth = request.d != 0 ? request.d : request.m;
     const piccard::DeletionSurvivalConfig config{
-        request.set_size, static_cast<uint32_t>(request.m),
+        request.set_size, static_cast<uint32_t>(bottom_depth),
         static_cast<uint32_t>(request.k)};
     constexpr long double kRequiredSurvival = 0.99L;
     constexpr const char* kRequiredSurvivalText = "0.99";
-    const std::vector<uint64_t> r_values = {1, 4, 8};
+    const std::vector<uint64_t> r_values =
+        request.r_values.empty() ? std::vector<uint64_t>{1, 4, 8} : request.r_values;
+    for (uint64_t r : r_values) {
+        if (r > request.set_size) throw std::invalid_argument("r must not exceed n");
+    }
     const auto exact = piccard::AnalyzeDeletionSurvival(
         config, kRequiredSurvival);
 
@@ -177,7 +185,7 @@ int RunRevisionCell(int argc, char** argv) {
                  "mc_mean_safe_deletions,trials,seed\n";
     for (uint64_t r : r_values) {
         std::cout << "ideal-independent-random-ranking-v1,"
-                  << request.set_size << ',' << request.m << ',' << request.k
+                  << config.set_size << ',' << config.bottom_depth << ',' << config.hash_count
                   << ',' << kRequiredSurvivalText << ',' << r
                   << ',' << piccard::ExactDeletionSurvival(config, r) << ','
                   << piccard::UnionBoundDeletionSurvival(config, r) << ','

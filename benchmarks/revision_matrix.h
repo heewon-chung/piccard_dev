@@ -108,5 +108,8 @@ RevisionMatrix LoadAndValidateRevisionMatrix(
 std::vector<std::string> RevisionMatrixCellIds(
     const RevisionMatrix& matrix);
 
+/** @brief The fig:del-survival r grid (0,20,...,520) carried by the d=5 deletion cells. */
+const std::vector<std::string>& DeletionFigureRValues();
+
 }  // namespace benchmark
 }  // namespace piccard

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 
 EXPECTED_FILES = (
+    "dblp_trigram_stats.py",
     "enron_preprocess.py",
     "giant_step_poc/AWS_RUNBOOK.md",
     "giant_step_poc/README.md",
@@ -25,10 +26,12 @@ EXPECTED_FILES = (
     "prepare_real_datasets.py",
     "revision_benchmark_common.py",
     "revision_flooding_adapter.py",
+    "run_deletion_survival.py",
     "run_noise_profiles.sh",
     "run_revision_benchmarks.py",
     "run_table9_sweep.py",
     "seal_revision_benchmarks.py",
+    "summarize_deletion_survival.py",
     "summarize_real_datasets.py",
     "summarize_table9_sweep.py",
     "templates/noise_calibration_wrapper.inc",

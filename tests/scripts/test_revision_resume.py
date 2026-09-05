@@ -71,11 +71,11 @@ class RevisionResumeContractTest(unittest.TestCase):
     def miniature_root(self, temporary: Path) -> dict[str, object]:
         """Build a faithful miniature of a crashed executable results root.
 
-        The canonical matrix is frozen at 299 cells, so a hermetic structural
+        The canonical matrix is frozen at 301 cells, so a hermetic structural
         test cannot shrink it.  It can, however, drive the resume machinery over
         a subset of real matrix cells: ``_prepare_resume`` reasons only about
         the plans and cells it is handed, which is exactly what makes a
-        four-cell miniature a faithful stand-in for a 299-cell crash.
+        four-cell miniature a faithful stand-in for a 301-cell crash.
         """
         document, matrix_sha = load_matrix(MATRIX)
         # The runner resolves both paths, and the verifier re-materializes argv
