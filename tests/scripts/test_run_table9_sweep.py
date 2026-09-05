@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -301,6 +302,85 @@ class RunModeTest(unittest.TestCase):
             self.assertIn("MIXED PROVENANCE", r3.stdout)
             self.assertEqual(set(manifest["provenance_cells"][old_id]), {c["cell_id"] for c in manifest["cells"]})
             self.assertNotIn(new_id, manifest["provenance_cells"])
+
+    def test_resume_refuses_when_validate_revision_matrix_changes(self) -> None:
+        # R-1: load_matrix() runs validate_document() from validate_revision_matrix.py
+        # on every invocation -- it decides whether the matrix is even acceptable --
+        # so it must be load-bearing in provenance, not just the runner and
+        # revision_benchmark_common.py.  The file is mutated in place (an inert
+        # trailing comment: no behavior change, safe for any concurrent reader) and
+        # always restored, even on assertion failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            validator_path = ROOT / "scripts" / "validate_revision_matrix.py"
+            original = validator_path.read_bytes()
+            try:
+                validator_path.write_bytes(original + b"\n# provenance-test-marker (removed automatically)\n")
+                r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+                self.assertNotEqual(r2.returncode, 0)
+                self.assertIn("provenance", r2.stderr)
+                # "scripts.validate_revision_matrix.py:" (the content-hash diff line) is the real
+                # signal -- a bare "validate_revision_matrix.py" substring would also match the git
+                # dirty-tree status text ("M scripts/validate_revision_matrix.py") and prove nothing.
+                self.assertIn("scripts.validate_revision_matrix.py:", r2.stderr, r2.stderr)
+            finally:
+                validator_path.write_bytes(original)
+
+    def test_fresh_run_archives_the_matrix(self) -> None:
+        # S-1: run.json's provenance.matrix_sha256 alone can detect drift but not
+        # reproduce it -- once benchmarks/revision_matrix.json evolves in the repo,
+        # nothing can reconstruct what this run's cells meant.  A fresh run must
+        # archive the matrix it was actually planned against, alongside run.json.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            archive = root / "matrix.json"
+            self.assertTrue(archive.is_file())
+            manifest = json.loads((root / "run.json").read_text())
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            self.assertEqual(digest, manifest["provenance"]["matrix_sha256"])
+            self.assertEqual(archive.read_bytes(), MATRIX.read_bytes())
+
+    def test_resume_refuses_when_matrix_archive_is_altered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            manifest = json.loads((root / "run.json").read_text())
+            recorded_sha = manifest["provenance"]["matrix_sha256"]
+            archive = root / "matrix.json"
+            archive.write_bytes(archive.read_bytes() + b"\n")          # simulate corruption/tampering
+            altered_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertNotEqual(r2.returncode, 0)
+            self.assertIn(recorded_sha, r2.stderr, r2.stderr)          # names both digests
+            self.assertIn(altered_sha, r2.stderr, r2.stderr)
+
+    def test_resume_with_intact_matrix_archive_proceeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            build = self.make_stub_build(t)
+            flag = t / "fail_once"
+            flag.write_text("")
+            (build / "bench_fhe_ind").write_text(f"#!/bin/sh\nif [ -e {flag} ]; then exit 3; fi\nexit 0\n")
+            root = t / "results"
+            r1 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r1.returncode, 1, r1.stderr)
+            archive_bytes_before = (root / "matrix.json").read_bytes()
+            flag.unlink()
+            r2 = run("--mode=run", f"--build-dir={build}", f"--results-root={root}", "--allow-dirty")
+            self.assertEqual(r2.returncode, 0, r2.stderr)          # proceeds as before -- not refused
+            # never overwritten on resume, matching the planned_argv.jsonl contract.
+            self.assertEqual((root / "matrix.json").read_bytes(), archive_bytes_before)
 
     def test_override_resume_attributes_provenance_per_cell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

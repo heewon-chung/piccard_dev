@@ -42,6 +42,8 @@ struct CpuRevisionRequest {
     uint64_t set_size = 0;
     uint64_t universe = 0;
     uint64_t trials = 0;
+    uint64_t d = 0;                    // deletion bottom depth; 0 = not given (control cells)
+    std::vector<uint64_t> r_values;    // deletion r grid; empty = producer default {1,4,8}
     uint64_t query_trials = 0;
     uint64_t enc_iters = 0;
     uint64_t key_bits = 0;

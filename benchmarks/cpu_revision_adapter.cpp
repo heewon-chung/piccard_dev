@@ -69,6 +69,22 @@ std::vector<uint32_t> ParseSizes(const std::string& value) {
     return result;
 }
 
+std::vector<uint64_t> ParseRValues(const std::string& value) {
+    std::vector<uint64_t> result;
+    size_t begin = 0;
+    while (begin <= value.size()) {
+        const size_t end = value.find(',', begin);
+        const std::string token = value.substr(
+            begin, end == std::string::npos ? std::string::npos : end - begin);
+        if (token.empty()) Reject("r_values contains an empty value");
+        result.push_back(ParseUnsigned(token, "r_values", /*allow_zero=*/true));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    if (result.empty()) Reject("r_values must not be empty");
+    return result;
+}
+
 void Require(const std::set<std::string>& seen,
              std::initializer_list<const char*> fields) {
     for (const char* field : fields) {
@@ -185,6 +201,7 @@ CpuRevisionRequest ParseCpuRevisionArgs(
         integer_option("--universe=", "universe", request.universe);
         integer_option("--trials=", "trials", request.trials,
                        producer == CpuRevisionProducer::DeletionSurvival);
+        integer_option("--d=", "d", request.d);
         integer_option("--query-trials=", "query-trials", request.query_trials);
         integer_option("--enc-iters=", "enc-iters", request.enc_iters);
         integer_option("--key-bits=", "key-bits", request.key_bits);
@@ -195,6 +212,10 @@ CpuRevisionRequest ParseCpuRevisionArgs(
         if (argument.rfind("--sizes=", 0) == 0) {
             recognized = true;
             request.sizes = ParseSizes(Value(argument, "--sizes=", seen));
+        }
+        if (argument.rfind("--r_values=", 0) == 0) {
+            recognized = true;
+            request.r_values = ParseRValues(Value(argument, "--r_values=", seen));
         }
         if (argument == "--precomputed=false" ||
             argument == "--precomputed=true") {
@@ -230,11 +251,14 @@ CpuRevisionRequest ParseCpuRevisionArgs(
             break;
         case CpuRevisionProducer::DeletionSurvival:
             RejectUnexpected(seen, {"--revision-cell", "--profile", "--cell",
-                                    "--k", "--m", "--set_size", "--universe",
-                                    "--trials", "--seed"});
+                                    "--k", "--m", "--d", "--set_size", "--universe",
+                                    "--r_values", "--trials", "--seed"});
             Require(seen, {"--revision-cell", "--profile", "--cell", "--k",
                            "--m", "--set_size", "--universe", "--trials",
                            "--seed"});
+            if ((seen.count("--d") != 0) != (seen.count("--r_values") != 0)) {
+                Reject("--d and --r_values must be given together");
+            }
             if (request.cell != "exact" && request.cell != "monte-carlo") {
                 Reject("invalid deletion --cell");
             }

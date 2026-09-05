@@ -526,14 +526,24 @@ void ValidateDeletionCell(const RevisionCell& cell) {
     if (cell.invocation_status != "RUN") {
         RejectDeletion("cell is not RUN");
     }
-    if (cell.axis != "control" || cell.axis_value != "default" ||
-        cell.axes.size() != 4u ||
-        cell.cell_id != "paper-v1::" + cell.family + "::control=default") {
-        RejectDeletion("deletion control identity mismatch");
+    const bool figure = cell.axis == "d";
+    if (figure) {
+        if (cell.axis_value != "5" || cell.axes.size() != 5u ||
+            cell.cell_id != "paper-v1::" + cell.family + "::d=5") {
+            RejectDeletion("deletion d=5 identity mismatch");
+        }
+        RequireAxisValue(cell, "d", 5);
+        RequireAxisValue(cell, "n", 1024);
+    } else {
+        if (cell.axis != "control" || cell.axis_value != "default" ||
+            cell.axes.size() != 4u ||
+            cell.cell_id != "paper-v1::" + cell.family + "::control=default") {
+            RejectDeletion("deletion control identity mismatch");
+        }
+        RequireAxisValue(cell, "n", 1000);
     }
     RequireAxisValue(cell, "k", 128);
     RequireAxisValue(cell, "m", 64);
-    RequireAxisValue(cell, "n", 1000);
     RequireAxisValue(cell, "u", 65536);
     if (cell.eligibility != "DIAGNOSTIC_ONLY" || cell.table_eligible ||
         cell.comparison_eligible) {
@@ -541,7 +551,7 @@ void ValidateDeletionCell(const RevisionCell& cell) {
     }
 
     const bool exact = cell.family == "deletion_exact";
-    const uint64_t paper_trials = exact ? 0 : 1000;
+    const uint64_t paper_trials = exact ? 0 : (figure ? 100000 : 1000);
     const uint64_t toy_trials = exact ? 0 : 1;
     const std::map<std::string, uint64_t> expected_paper_counts = {
         {exact ? "measured" : "trials", paper_trials}};
@@ -555,8 +565,12 @@ void ValidateDeletionCell(const RevisionCell& cell) {
     }
     const std::map<std::string, std::string> expected_attributes = {
         {"trials", std::to_string(paper_trials)}};
+    const std::map<std::string, std::vector<std::string>> expected_lists =
+        figure ? std::map<std::string, std::vector<std::string>>{
+                     {"r_values", DeletionFigureRValues()}}
+               : std::map<std::string, std::vector<std::string>>{};
     if (cell.attributes != expected_attributes ||
-        !cell.list_attributes.empty() || !cell.object_attributes.empty()) {
+        cell.list_attributes != expected_lists || !cell.object_attributes.empty()) {
         RejectDeletion("deletion cell attributes mismatch");
     }
 
@@ -567,7 +581,8 @@ void ValidateDeletionCell(const RevisionCell& cell) {
     const std::string expected_row_id = exact ? "exact" : "monte_carlo";
     const std::map<std::string, std::string> expected_row_attributes =
         exact ? std::map<std::string, std::string>{}
-              : std::map<std::string, std::string>{{"trials", "1000"}};
+              : std::map<std::string, std::string>{
+                    {"trials", std::to_string(paper_trials)}};
     if (row.row_id != expected_row_id || row.status != "DIAGNOSTIC" ||
         row.terminal_status != "DIAGNOSTIC" || row.method != expected_row_id ||
         !row.reason.empty() || !row.reason_code.empty() ||
@@ -1404,6 +1419,7 @@ std::string ThresholdProfileForMode(RevisionRunMode mode) {
 }  // namespace
 
 namespace {
+bool IsSj16NotRun(const RevisionCell& cell);
 std::string Sj16Threads(const RevisionCell& cell);
 void ValidateSj16Cell(const RevisionCell& cell);
 std::string Sj16ProfileForMode(RevisionRunMode mode);
@@ -1526,10 +1542,11 @@ RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
     ValidateDeletionCell(cell);
 
     const bool exact = cell.family == "deletion_exact";
+    const bool figure = cell.axis == "d";
     const bool toy = IsToyMode(mode);
     const std::string profile = DeletionProfileForMode(mode);
     const std::string trials =
-        exact ? "0" : (toy ? "1" : "1000");
+        exact ? "0" : (toy ? "1" : (figure ? "100000" : "1000"));
 
     RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
     plan.cell_id = cell.cell_id;
@@ -1542,11 +1559,20 @@ RevisionInvocationPlan PlanDeletionRevisionCell(const RevisionCell& cell,
         std::string("--cell=") + (exact ? "exact" : "monte-carlo"),
         "--k=128",
         "--m=64",
-        "--set_size=1000",
-        "--universe=65536",
-        "--trials=" + trials,
-        "--seed={seed}",
     };
+    if (figure) plan.argv.push_back("--d=5");
+    plan.argv.push_back(figure ? "--set_size=1024" : "--set_size=1000");
+    plan.argv.push_back("--universe=65536");
+    if (figure) {
+        std::string joined;
+        for (const auto& value : DeletionFigureRValues()) {
+            if (!joined.empty()) joined += ',';
+            joined += value;
+        }
+        plan.argv.push_back("--r_values=" + joined);
+    }
+    plan.argv.push_back("--trials=" + trials);
+    plan.argv.push_back("--seed={seed}");
     plan.expected_rows = cell.expected_rows;
     for (auto& row : plan.expected_rows) {
         row.measured_count = toy ? row.toy_measured_count
@@ -1674,6 +1700,7 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
     const bool fit = cell.axis == "fit";
     const bool per_element = fit && cell.axis_value == "per_element";
     const bool precomputed = fit && cell.axis_value == "precomputed";
+    const bool not_run = !fit && IsSj16NotRun(cell);
     const std::string profile = Sj16ProfileForMode(mode);
 
     RevisionInvocationPlan plan = MakePlan(cell, mode, profile);
@@ -1686,6 +1713,9 @@ RevisionInvocationPlan PlanSj16RevisionCell(const RevisionCell& cell,
         row.measured_count = toy ? row.toy_measured_count
                                  : row.paper_measured_count;
     }
+
+    // A never-measured universe plans no argv: there is nothing to invoke.
+    if (not_run) return plan;
 
     if (per_element) {
         plan.argv = {
@@ -1753,6 +1783,16 @@ namespace {
 [[noreturn]] void RejectSj16(const std::string& reason) {
     throw std::invalid_argument(
         "invalid SJ16 revision invocation cell: " + reason);
+}
+
+// The two SJ16 universes this campaign will never measure.  The
+// fit=precomputed cell alone took 9.5 h at |U|=2^16 on the 2026-08-20 run, so
+// 2^18 and 2^20 stay bound to the calibration fit's extrapolation: they never
+// spawn, and the paper footnotes their values as extrapolated, not measured.
+bool IsSj16NotRun(const RevisionCell& cell) {
+    const auto it = cell.axes.find("u");
+    return cell.axis == "u" && it != cell.axes.end() &&
+           (it->second == "262144" || it->second == "1048576");
 }
 
 // The calibration fit cells are deliberately serial; every measured SJ16 cell
@@ -1864,8 +1904,13 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (cell.dataset != "synthetic") {
         RejectSj16("dataset must be synthetic");
     }
-    if (cell.timeout_class != "long") {
-        RejectSj16("SJ16 timeout class must be long");
+    // A cell that never spawns cannot outrun any stop, so it keeps the 600 s
+    // standard class; every SJ16 cell that does run takes the 18 h one.
+    const bool not_run = cell.axis != "fit" && IsSj16NotRun(cell);
+    if (cell.timeout_class != (not_run ? "standard" : "long")) {
+        RejectSj16(not_run
+                       ? "extrapolated cell timeout class must be standard"
+                       : "executable SJ16 timeout class must be long");
     }
     ValidateSj16Geometry(cell);
 
@@ -1884,12 +1929,13 @@ void ValidateSj16Cell(const RevisionCell& cell) {
         RejectSj16("unexpected SJ16 artifact schema");
     }
 
+    const bool eligible = !fit && !not_run;
     const std::string expected_eligibility =
-        fit ? "DIAGNOSTIC_ONLY" : "TABLE_ELIGIBLE";
+        eligible ? "TABLE_ELIGIBLE" : "DIAGNOSTIC_ONLY";
     if (cell.eligibility != expected_eligibility ||
-        cell.table_eligible != !fit ||
-        cell.comparison_eligible != !fit ||
-        cell.invocation_status != "RUN") {
+        cell.table_eligible != eligible ||
+        cell.comparison_eligible != eligible ||
+        cell.invocation_status != (not_run ? "NO_SPAWN" : "RUN")) {
         RejectSj16("SJ16 eligibility/status contract mismatch");
     }
 
@@ -1930,6 +1976,11 @@ void ValidateSj16Cell(const RevisionCell& cell) {
     if (per_element) {
         paper_counts = {{"enc_iters", 30}, {"query_trials", 30}};
         toy_counts = {{"enc_iters", 1}, {"query_trials", 1}};
+    } else if (not_run) {
+        paper_count = 0;
+        toy_count = 0;
+        paper_counts = {{"timing", 0}};
+        toy_counts = {{"timing", 0}};
     } else {
         paper_counts = {{"timing", 30}};
         toy_counts = {{"timing", 1}};
@@ -1968,6 +2019,18 @@ void ValidateSj16Cell(const RevisionCell& cell) {
         if (row.attributes != row_attributes ||
             !row.list_attributes.empty() || !row.fit_authority.empty()) {
             RejectSj16("SJ16 precomputed row metadata mismatch");
+        }
+        return;
+    }
+
+    if (not_run) {
+        ValidateSj16RowBase(row, "sj16", "EXTRAPOLATED", "sj16",
+                             "sj16-paillier3072-calibration-bound-v1",
+                             0, 0, false);
+        if (row.fit_authority != "per_element" ||
+            row.attributes != regular_attributes ||
+            !row.list_attributes.empty()) {
+            RejectSj16("SJ16 extrapolated row metadata mismatch");
         }
         return;
     }

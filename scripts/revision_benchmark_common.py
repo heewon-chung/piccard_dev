@@ -543,12 +543,19 @@ def canonical_plan_argv(cell: dict[str, Any], mode: str) -> list[str]:
         ]
     if family in {"deletion_exact", "deletion_mc"}:
         exact = family == "deletion_exact"
-        return [
+        figure = cell["axis"] == "d"
+        argv = [
             f"--revision-cell={cid}", f"--profile={profile}",
             f"--cell={'exact' if exact else 'monte-carlo'}", "--k=128", "--m=64",
-            "--set_size=1000", "--universe=65536",
-            f"--trials={0 if exact else trials(1000)}", "--seed={seed}",
         ]
+        if figure:
+            argv.append("--d=5")
+        argv += [f"--set_size={n}", f"--universe={universe}"]
+        if figure:
+            argv.append("--r_values=" + ",".join(str(r) for r in cell["r_values"]))
+        argv += [f"--trials={0 if exact else trials(100000 if figure else 1000)}",
+                 "--seed={seed}"]
+        return argv
     if family == "sqrt_comparison":
         axis = cell["axis"]
         paper = 50 if axis == "accuracy_m" else (

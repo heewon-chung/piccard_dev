@@ -500,6 +500,8 @@ std::set<std::string> ExpectedIds() {
     ids.insert("paper-v1::dynamic_refresh::control=default");
     ids.insert("paper-v1::deletion_exact::control=default");
     ids.insert("paper-v1::deletion_mc::control=default");
+    ids.insert("paper-v1::deletion_exact::d=5");
+    ids.insert("paper-v1::deletion_mc::d=5");
     for (const auto& family : {"threshold_timing", "threshold_spec", "threshold_agreement"}) {
         for (const auto& value : {"16", "32", "64", "128", "256"}) ids.insert("paper-v1::" + std::string(family) + "::k=" + value);
     }
@@ -560,7 +562,7 @@ const std::map<std::string, size_t>& ExpectedFamilyCounts() {
         {"bcg12_minhash", 20}, {"bcg12_exact", 5}, {"sj16", 22},
         {"estimator_accuracy", 17}, {"sqrt_comparison", 36}, {"flooding", 3},
         {"dynamic_timing", 16}, {"dynamic_accuracy", 16}, {"dynamic_refresh", 1},
-        {"deletion_exact", 1}, {"deletion_mc", 1}, {"threshold_timing", 5},
+        {"deletion_exact", 2}, {"deletion_mc", 2}, {"threshold_timing", 5},
         {"threshold_spec", 5}, {"threshold_agreement", 5},
         {"threshold_synthetic_fpfn", 84}, {"threshold_dblp_fpfn", 1},
         {"real_dataset", 12},
@@ -718,6 +720,10 @@ std::map<std::string, std::string> ExpectedAxes(const RevisionCell& cell) {
     } else if (cell.family == "threshold_synthetic_fpfn") {
         axes["k"] = OptionalAttribute(cell.attributes, "point_k");
         axes["grid_index"] = OptionalAttribute(cell.attributes, "grid_index");
+    } else if ((cell.family == "deletion_exact" || cell.family == "deletion_mc") &&
+               cell.axis == "d") {
+        axes["d"] = cell.axis_value;
+        axes["n"] = "1024";
     } else if (cell.axis == "k" || cell.axis == "m" || cell.axis == "n" ||
                cell.axis == "u") {
         axes[cell.axis] = cell.axis_value;
@@ -757,6 +763,15 @@ bool IsSquareRootApplicable(const RevisionCell& cell) {
            (it->second == "16" || it->second == "64" || it->second == "256");
 }
 
+// The two SJ16 universes this campaign will never measure.  The
+// fit=precomputed cell alone took 9.5 h at |U|=2^16 on the 2026-08-20 run, so
+// 2^18 and 2^20 stay bound to the calibration fit's extrapolation: they never
+// spawn, and the paper footnotes their values as extrapolated, not measured.
+bool IsSj16NotRun(const RevisionCell& cell) {
+    return cell.family == "sj16" && cell.axis == "u" &&
+           (cell.axis_value == "262144" || cell.axis_value == "1048576");
+}
+
 bool RequiresRawTiming(const RevisionCell& cell, const RevisionRow& row) {
     if (cell.invocation_status != "RUN") return false;
     if (cell.family == "piccard_std128" && row.row_id == "onehot_timing") {
@@ -767,7 +782,7 @@ bool RequiresRawTiming(const RevisionCell& cell, const RevisionRow& row) {
         cell.family == "dynamic_refresh" || cell.family == "threshold_timing") {
         return true;
     }
-    if (cell.family == "sj16") return true;
+    if (cell.family == "sj16") return !IsSj16NotRun(cell);
     if (cell.family == "sqrt_comparison" &&
         (cell.axis == "timing_m" || cell.axis == "crossover_m" ||
          cell.axis == "timing_k" || cell.axis == "timing_n" ||
@@ -858,7 +873,9 @@ void RequireEligibility(const RevisionCell& cell, const char* eligibility,
 // family rather than per measured point -- at no less than `extended`, and the
 // two agreement cells whose measurements pass 3600/3 s take `long`.
 std::string ExpectedTimeoutClass(const RevisionCell& cell) {
-    if (cell.family == "sj16") return "long";
+    // A cell that never spawns cannot outrun any stop, so it keeps the 600 s
+    // standard class; every SJ16 cell that does run takes the 18 h one.
+    if (cell.family == "sj16") return IsSj16NotRun(cell) ? "standard" : "long";
     if (cell.family == "bcg12_exact" && cell.axis == "n") {
         // The exact baseline is the one family whose n sweep is costly below
         // its top point.  Measured on the c8i campaign host: 4.3 s at n=100,
@@ -1091,12 +1108,24 @@ void ValidateFamilyCell(const RevisionCell& cell) {
         if (cell.expected_rows.size() != 1) {
             throw std::invalid_argument("SJ16 row topology mismatch");
         }
-        RequireEligibility(cell, "TABLE_ELIGIBLE", true, true);
-        RequireRow(cell.expected_rows.front(), "sj16", "MEASURED", "", 30, 1,
-                   "sj16");
-        RequireCounts(cell, 30, 1, 30, 1, {{"timing", 30}}, {{"timing", 1}});
-        if (cell.invocation_status != "RUN") {
-            throw std::invalid_argument("SJ16 measured cell must run");
+        if (IsSj16NotRun(cell)) {
+            RequireEligibility(cell, "DIAGNOSTIC_ONLY", false, false, "NO_SPAWN");
+            RequireRow(cell.expected_rows.front(), "sj16", "EXTRAPOLATED",
+                       "sj16-paillier3072-calibration-bound-v1", 0, 0, "sj16");
+            RequireRowAttribute(cell.expected_rows.front(), "fit_authority",
+                                "per_element");
+            if (cell.expected_rows.front().measured_count != 0) {
+                throw std::invalid_argument("SJ16 extrapolation spawn/count mismatch");
+            }
+            RequireCounts(cell, 0, 0, 0, 0, {{"timing", 0}}, {{"timing", 0}});
+        } else {
+            RequireEligibility(cell, "TABLE_ELIGIBLE", true, true);
+            RequireRow(cell.expected_rows.front(), "sj16", "MEASURED", "", 30, 1,
+                       "sj16");
+            RequireCounts(cell, 30, 1, 30, 1, {{"timing", 30}}, {{"timing", 1}});
+            if (cell.invocation_status != "RUN") {
+                throw std::invalid_argument("SJ16 measured cell must run");
+            }
         }
         RequireRowAttribute(cell.expected_rows.front(), "key_bits", "3072");
         RequireRowAttribute(cell.expected_rows.front(), "threads", "16");
@@ -1208,19 +1237,31 @@ void ValidateFamilyCell(const RevisionCell& cell) {
     }
     if (cell.family == "deletion_exact" || cell.family == "deletion_mc") {
         const bool exact = cell.family == "deletion_exact";
-        const uint64_t trials = exact ? 0 : 1000;
+        const bool figure = cell.axis == "d";
+        if (!figure && cell.axis != "control") {
+            throw std::invalid_argument("deletion axis must be control or d");
+        }
+        const uint64_t trials = exact ? 0 : (figure ? 100000 : 1000);
         RequireEligibility(cell, "DIAGNOSTIC_ONLY", false, false);
         RequireCounts(cell, trials, exact ? 0 : 1, trials, exact ? 0 : 1,
                       {{exact ? "measured" : "trials", trials}},
                       {{exact ? "measured" : "trials", exact ? 0 : 1}});
         RequireAttribute(cell.attributes, "trials", std::to_string(trials));
+        if (figure) {
+            if (cell.axis_value != "5") {
+                throw std::invalid_argument("deletion d axis value must be 5");
+            }
+            RequireListAttribute(cell.list_attributes, "r_values", DeletionFigureRValues());
+        } else if (cell.list_attributes.count("r_values") != 0) {
+            throw std::invalid_argument("control deletion cell must not carry r_values");
+        }
         if (cell.expected_rows.size() != 1) {
             throw std::invalid_argument("deletion row topology mismatch");
         }
         const auto& row = cell.expected_rows.front();
         RequireRow(row, exact ? "exact" : "monte_carlo", "DIAGNOSTIC", "", trials,
                    exact ? 0 : 1, exact ? "exact" : "monte_carlo");
-        if (!exact) RequireRowAttribute(row, "trials", "1000");
+        if (!exact) RequireRowAttribute(row, "trials", std::to_string(trials));
         return;
     }
     if (cell.family == "threshold_timing" || cell.family == "threshold_spec" ||
@@ -1357,8 +1398,8 @@ void ValidateRevisionMatrix(const RevisionMatrix& matrix) {
         matrix.id_grammar != "paper-v1::<family>::<axis>=<value>") {
         throw std::invalid_argument("revision matrix schema/version/grammar mismatch");
     }
-    if (matrix.cell_count != 299 || matrix.cells.size() != 299) {
-        throw std::invalid_argument("revision matrix must contain exactly 299 cells");
+    if (matrix.cell_count != 301 || matrix.cells.size() != 301) {
+        throw std::invalid_argument("revision matrix must contain exactly 301 cells");
     }
     if (matrix.family_counts != std::map<std::string, uint64_t>(
             ExpectedFamilyCounts().begin(), ExpectedFamilyCounts().end())) {
@@ -1431,6 +1472,15 @@ std::vector<std::string> RevisionMatrixCellIds(const RevisionMatrix& matrix) {
     ids.reserve(matrix.cells.size());
     for (const auto& cell : matrix.cells) ids.push_back(cell.cell_id);
     return ids;
+}
+
+const std::vector<std::string>& DeletionFigureRValues() {
+    static const std::vector<std::string> values = [] {
+        std::vector<std::string> result;
+        for (int r = 0; r <= 520; r += 20) result.push_back(std::to_string(r));
+        return result;
+    }();
+    return values;
 }
 
 }  // namespace piccard::benchmark

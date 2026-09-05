@@ -15,9 +15,23 @@ that would only re-measure the same configuration:
     also referenced at 57); the benchmark harness's own Options struct additionally
     varies set_size (benchmarks/bench_fhe_ind.cpp:70,86-87) -- no k or m in either.
 
-SJ16 at |U| = 2^18 and 2^20 was never executed; those two cells have no
-sidecar at all, and the paper carries a calibrated extrapolation instead
-(EXTRAPOLATED_SJ16).
+SJ16 at |U| = 2^18 and 2^20 is `NO_SPAWN` in the matrix and will never be
+measured -- not merely unswept by this campaign. Those two cells have no
+sidecar at all, and the paper prints EXTRAPOLATED_SJ16 for both rows, but
+the name is only half accurate: the |U|=2^18 figure (285,388.74 ms) is not
+an extrapolation, it is the 2026-08-20 campaign's own sj16::n=100000
+measurement, reused for that row; only the |U|=2^20 figure is a calibrated
+extrapolation from it. See the comment above EXTRAPOLATED_SJ16.
+
+Every printed number is bound to evidence, not merely to intention: the
+run's declared thread count is cross-checked against what a producer
+actually recorded (check_thread_provenance); load_aggregates fails if a
+real cell directory exists for either EXTRAPOLATED_SJ16 id, since that
+would mean the constants are stale; and the run's own matrix_sha256 must
+match the sha256 of <results-root>/matrix.json -- the matrix the run was
+actually planned against, archived alongside it -- never the repository's
+present matrix, which keeps evolving after a run is archived
+(_archived_matrix_sha256).
 """
 from __future__ import annotations
 
@@ -32,7 +46,7 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-from scripts.revision_benchmark_common import slug  # noqa: E402
+from scripts.revision_benchmark_common import sha256_file, slug  # noqa: E402
 from scripts.run_table9_sweep import TABLE9_CELL_IDS  # noqa: E402
 
 PRINTED = ("piccard", "piccard_plus", "bcg12_ec", "sj16", "fhe_ind")
@@ -83,12 +97,18 @@ CONSUMED_AXES = {
     "sj16": {"u", "n"},
     "fhe_ind": {"u", "n"},
 }
-# SJ16 at these universes was never executed; the paper carries a calibrated
-# extrapolation from the per-element cost, rescaled to the same 16-thread
-# footing as the measured rows -- the old sj16::n=100000 receipt this value
-# derives from records "--threads=2" in its argv, but that flag is inert for
-# bench_review_comparison (only OMP_NUM_THREADS applies, and that artifact's
-# own omp_threads field records 16), so this is not a mix of thread counts.
+# SJ16 at these two universes is NO_SPAWN in the matrix: not measured in
+# this campaign, and not scheduled by any full run either.  Despite the
+# name, only one of the two values is actually extrapolated:
+#   - |U|=2^18 (285,389 ms) is NOT an extrapolation -- it is the 2026-08-20
+#     campaign's own sj16::n=100000 measurement (sidecar aggregate
+#     285,388.74 ms), reused as-is for this row.  That receipt's argv
+#     records "--threads=2", but that flag is inert for
+#     bench_review_comparison (only OMP_NUM_THREADS applies, and that
+#     artifact's own omp_threads field records 16), so this is a genuine
+#     16-thread measurement, not a mix of thread counts.
+#   - |U|=2^20 (1,141,500 ms) IS a calibrated extrapolation, derived from
+#     the |U|=2^18 measurement above.
 # (mean_ms, ci95_half_ms or None when there is no interval.)
 EXTRAPOLATED_SJ16 = {262144: (285389.0, None), 1048576: (1141500.0, None)}
 
@@ -108,6 +128,114 @@ def _manifest_cell_gap(manifest: dict) -> tuple[set[str], set[str]]:
     return expected - completed, completed - expected
 
 
+def _archived_matrix_sha256(root: Path) -> str:
+    """sha256 of `<root>/matrix.json` -- the exact matrix this run was
+    planned against, archived alongside the run itself.
+
+    Deliberately never the repository's present matrix: a summary
+    describes a run, not the repository's current state, and the matrix
+    keeps evolving after a run is archived. Comparing against the repo's
+    copy would make an old, valid run permanently unreproducible the
+    moment the matrix next changes for unrelated reasons (Q-3 v2 -- the
+    v1 design compared against the repo's matrix and was wrong for exactly
+    this reason). If a results root predates archiving its own matrix,
+    that is a missing prerequisite, not something to silently substitute
+    the repo's copy for -- so this raises rather than falling back.
+    """
+    matrix_path = root / "matrix.json"
+    if not matrix_path.is_file():
+        raise SweepError(f"{root}: no matrix.json -- a results root must archive the exact matrix it "
+                         f"was planned against; the repository's current matrix is not a substitute")
+    return sha256_file(matrix_path)
+
+
+# The one producer that actually records omp_threads/omp_dynamic in its
+# output.  Measured directly against the real archived run: all 11
+# bench_review_comparison cells (7 bcg12_minhash + 4 sj16) record it (value
+# {'16'}); all 31 cells from the other three producers (bench_piccard,
+# bench_onehot_sqrt, bench_fhe_ind) record nothing of the kind.  Hard-coded
+# here as a single producer name -- rather than a family list -- because
+# check_thread_provenance derives the actual per-cell "must record" set from
+# <results-root>/matrix.json's own `producer` field below, so this constant
+# only has to name what that field's value looks like when it should record;
+# it does not need to be kept in sync with which families exist.
+_THREAD_RECORDING_PRODUCER = "bench_review_comparison"
+
+
+def check_thread_provenance(root: Path, declared_threads: int | None) -> None:
+    """Cross-check every `--threads` claim against what a producer actually
+    recorded, for every `TABLE9_CELL_IDS` cell directory present under
+    `root`.
+
+    `--threads` is inert for `bench_review_comparison` (only
+    `OMP_NUM_THREADS` applies at runtime) -- Task 1 established this is
+    exactly how the old matrix could claim `threads: 2` while its own
+    artifacts recorded `omp_threads=16`. So `run.json`'s declared
+    `provenance.threads` is an intention, not a fact, unless it is checked
+    against a producer's own record -- and a missing declaration is not an
+    exemption from that either.
+
+    A cell whose `<results-root>/matrix.json` entry names
+    `_THREAD_RECORDING_PRODUCER` as its producer MUST have a direct-child
+    file (non-recursive) that parses as CSV with an `omp_threads` column
+    *and at least one data row under it* (in practice: that producer's
+    comparison output, whether written to its `--output` CSV or only
+    captured in `stdout.log`); a missing file, or a file with the column
+    heading but zero rows (a truncated/killed-after-header producer, or a
+    trimmed fixture) is a missing-evidence failure either way, named and
+    distinguished from each other, not a silent pass -- the entire point of
+    this check is to verify the claim against fact, not merely against
+    whichever cells happen to volunteer a heading. Any row that is actually
+    present, in a must-record cell or not, still gets checked: the thread
+    count must equal `declared_threads` and `omp_dynamic` (if present) must
+    be `'false'` (Q-1).
+    """
+    if declared_threads is None:
+        raise SweepError("run.json has no provenance.threads -- every run this summarizer accepts "
+                         "records one")
+    matrix = json.loads((root / "matrix.json").read_text())
+    producer_by_cell = {c["cell_id"]: c.get("producer") for c in matrix["cells"]}
+    for cell_id in TABLE9_CELL_IDS:
+        cell_dir = root / "cells" / slug(cell_id)
+        if not cell_dir.is_dir():
+            continue
+        must_record = producer_by_cell.get(cell_id) == _THREAD_RECORDING_PRODUCER
+        checked = 0            # rows actually compared against declared_threads
+        header_only_file = None  # first file seen with the column but zero rows
+        for path in sorted(cell_dir.iterdir()):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            reader = csv.DictReader(text.splitlines())
+            if not reader.fieldnames or "omp_threads" not in reader.fieldnames:
+                continue
+            rows_in_file = 0
+            for row in reader:
+                rows_in_file += 1
+                checked += 1
+                recorded = row.get("omp_threads")
+                if recorded != str(declared_threads):
+                    raise SweepError(f"{cell_dir}: {path.name} records omp_threads={recorded!r} for cell "
+                                     f"{cell_id!r}, but run.json's provenance.threads is {declared_threads}")
+                dynamic = row.get("omp_dynamic")
+                if dynamic is not None and dynamic != "false":
+                    raise SweepError(f"{cell_dir}: {path.name} records omp_dynamic={dynamic!r} for cell "
+                                     f"{cell_id!r}, expected 'false'")
+            if rows_in_file == 0 and header_only_file is None:
+                header_only_file = path.name
+        if must_record and checked == 0:
+            if header_only_file is not None:
+                raise SweepError(f"{cell_dir}: {header_only_file} carries the omp_threads column but has "
+                                 f"no data rows -- the thread claim for cell {cell_id!r} "
+                                 f"(producer {_THREAD_RECORDING_PRODUCER!r}) is unverified, not exempt")
+            raise SweepError(f"{cell_dir}: cell {cell_id!r} (producer {_THREAD_RECORDING_PRODUCER!r}) "
+                             f"records no omp_threads anywhere in its directory -- the thread claim for "
+                             f"this cell is unverified, not exempt")
+
+
 def _load_receipt(cell_dir: Path, expected_cell_id: str) -> dict:
     receipt_path = cell_dir / "receipt.json"
     if not receipt_path.is_file():
@@ -121,26 +249,34 @@ def _load_receipt(cell_dir: Path, expected_cell_id: str) -> dict:
     return receipt
 
 
-def _select_sidecar(cell_dir: Path, receipt: dict, needle: str) -> Path:
-    """Pick the one sidecar the cell's own RECEIPT says it produced.
+def _select_sidecar(cell_dir: Path, needle: str) -> Path:
+    """Pick the one sidecar this cell's own directory holds for a family source.
 
-    This is never a filesystem glob or recursive search: a stale file left
-    over from an earlier attempt, or an archived `cells/<slug>.attempt-N/`
-    sibling (never even looked at -- selection only ever reads inside the
-    exact `cell_dir` passed in, and inventory entries under an ".attempt-"
-    path segment are excluded defensively), can't be mistaken for this run's
-    own evidence.
+    `scripts/run_table9_sweep.py`'s receipt schema (argv, canonical_argv,
+    cell_id, duration_s, execution_status, exit_code, expected_rows, family,
+    finished_at, producer, provenance_id, schema, started_at,
+    stderr_sha256, stdout_sha256, timeout_class, timeout_seconds, version)
+    carries no artifact inventory -- that field belongs to the full
+    orchestrator's receipt schema (`run_revision_benchmarks.py`'s
+    `file_inventory`), not the sweep runner's. So this is a plain,
+    *non-recursive* scan of exactly `cell_dir` and its immediate `raw/`
+    subdirectory: `bench_piccard`/`bench_fhe_ind` write their .tsv at
+    either location depending on the run, while `bench_review_comparison`
+    and `bench_onehot_sqrt` always write into `raw/`. Nothing deeper is
+    ever walked, so a Task 2 archived `cells/<slug>.attempt-N/` sibling is
+    never in scope (selection only ever reads inside the exact `cell_dir`
+    passed in), and any path under an ".attempt-" segment is excluded
+    defensively. One deterministic rule -- no inventory-first fallback.
     """
-    candidates = [entry["path"] for entry in receipt.get("artifact_inventory", [])
-                  if entry.get("path", "").endswith(".tsv") and needle in Path(entry["path"]).name
-                  and ".attempt-" not in entry["path"]]
-    if len(candidates) != 1:
-        raise SweepError(f"{cell_dir}: expected one receipted sidecar containing {needle!r}, "
-                         f"found {len(candidates)}: {candidates}")
-    path = cell_dir / candidates[0]
-    if not path.is_file():
-        raise SweepError(f"{cell_dir}: receipted sidecar {candidates[0]} is missing on disk")
-    return path
+    search_dirs = [cell_dir] + ([cell_dir / "raw"] if (cell_dir / "raw").is_dir() else [])
+    candidates = [p for d in search_dirs for p in d.glob("*.tsv") if ".attempt-" not in p.parts]
+    matches = [p for p in candidates if needle in p.name]
+    if len(matches) != 1:
+        raise SweepError(f"{cell_dir}: expected exactly one sidecar containing {needle!r} under "
+                         f"{cell_dir.name}/ or {cell_dir.name}/raw/, found {len(matches)}: "
+                         f"{[p.name for p in matches]}"
+                         + ("" if matches else f" (tsvs present: {[p.name for p in candidates]})"))
+    return matches[0]
 
 
 def cell_for(block: str, u: int, n: int, k: int, m: int, column: str) -> str | None:
@@ -264,11 +400,28 @@ def load_aggregates(root: Path) -> dict[tuple[str, str], Aggregate]:
         cell_dir = root / "cells" / slug(cell_id)
         if not cell_dir.is_dir():
             continue
-        receipt = _load_receipt(cell_dir, cell_id)
-        family = cell_id.split("::")[1]
+        _load_receipt(cell_dir, cell_id)  # validates execution_status/cell_id; the sidecar itself is
+        family = cell_id.split("::")[1]   # located by exact scan (_select_sidecar), not by receipt content
         for needle, phase, column, suffix in SOURCES[family]:
-            path = _select_sidecar(cell_dir, receipt, needle)
+            path = _select_sidecar(cell_dir, needle)
             out[(cell_id, column)] = _parse_sidecar(path, phase, cell_id + suffix)
+    # EXTRAPOLATED_SJ16 may only be used when there is genuinely nothing
+    # else to use: if a real cell directory exists for either id it stands
+    # in for, that is a drift between the constant and the matrix/sweep
+    # that must be caught, not silently shadowed (Q-2).  This has to check
+    # the results tree, not `out`: TABLE9_CELL_IDS deliberately excludes
+    # both ids, so `out` can never contain them by construction, and a
+    # guard that only looked there could never fire.  `cell_dir` here is
+    # always the exact canonical `cells/<slug>/` path (never a glob over
+    # `cells/`), so a `cells/<slug>.attempt-N/` sibling -- a failed
+    # attempt, not a measurement -- is never mistaken for one.
+    for u in EXTRAPOLATED_SJ16:
+        natural_id = f"paper-v1::sj16::u={u}"
+        natural_dir = root / "cells" / slug(natural_id)
+        if natural_dir.is_dir():
+            raise SweepError(f"{natural_dir}: a real cell directory exists for {natural_id!r}, which "
+                             f"EXTRAPOLATED_SJ16 assumes was never measured -- update the constant (and "
+                             f"cell_for) instead of silently using the stale value")
     return out
 
 
@@ -381,6 +534,17 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.results_root)
     manifest = json.loads((root / "run.json").read_text())
     prov = manifest.get("provenance", {})
+    recorded_matrix_sha = prov.get("matrix_sha256")
+    try:
+        archived_matrix_sha = _archived_matrix_sha256(root)
+    except SweepError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if recorded_matrix_sha != archived_matrix_sha:
+        print(f"matrix mismatch: run.json provenance.matrix_sha256={recorded_matrix_sha!r} but "
+              f"{root}/matrix.json hashes to {archived_matrix_sha!r} -- the archive is inconsistent "
+              f"with its own record (no override)", file=sys.stderr)
+        return 1
     nonstandard = (manifest.get("state") != "COMPLETED" or manifest.get("dirty_allowed")
                    or manifest.get("mixed_provenance")
                    or prov.get("threads") != 16 or prov.get("seed") != 20260729
@@ -396,19 +560,20 @@ def main(argv: list[str] | None = None) -> int:
               + (", ".join(sorted(unexpected_ids)) or "(none)"), file=sys.stderr)
         return 1
     try:
+        check_thread_provenance(root, prov.get("threads"))
         aggs = load_aggregates(root)
+        gaps = missing_cells(aggs)
+        if gaps and not args.partial:
+            print("missing cells: " + ", ".join(gaps), file=sys.stderr)
+            return 1
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        write_csv(aggs, out / "table9.csv")
+        (out / "table9_rows.tex").write_text(render_rows(aggs))
+        (out / "flatness.md").write_text(flatness(aggs))
     except SweepError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    gaps = missing_cells(aggs)
-    if gaps and not args.partial:
-        print("missing cells: " + ", ".join(gaps), file=sys.stderr)
-        return 1
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    write_csv(aggs, out / "table9.csv")
-    (out / "table9_rows.tex").write_text(render_rows(aggs))
-    (out / "flatness.md").write_text(flatness(aggs))
     print(f"wrote {out}: {len(aggs)} aggregates, {len(gaps)} missing")
     return 0
 

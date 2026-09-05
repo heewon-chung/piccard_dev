@@ -51,7 +51,9 @@ TEST(CpuRevisionAdapter, SeparatesExactDeletionFromMonteCarloTrials) {
     const RevisionMatrix matrix = Load();
     for (const std::string id : {
              "paper-v1::deletion_exact::control=default",
-             "paper-v1::deletion_mc::control=default"}) {
+             "paper-v1::deletion_mc::control=default",
+             "paper-v1::deletion_exact::d=5",
+             "paper-v1::deletion_mc::d=5"}) {
         const RevisionCell* cell = Find(matrix, id);
         ASSERT_NE(cell, nullptr);
         const auto plan = PlanDeletionRevisionCell(*cell, RevisionRunMode::Toy);
@@ -62,6 +64,14 @@ TEST(CpuRevisionAdapter, SeparatesExactDeletionFromMonteCarloTrials) {
                                                                    : "monte-carlo");
         EXPECT_EQ(request.trials,
                   id.find("deletion_exact") != std::string::npos ? 0u : 1u);
+        const bool figure = id.find("::d=5") != std::string::npos;
+        EXPECT_EQ(request.d, figure ? 5u : 0u);
+        EXPECT_EQ(request.set_size, figure ? 1024u : 1000u);
+        EXPECT_EQ(request.r_values.size(), figure ? 27u : 0u);
+        if (figure) {
+            EXPECT_EQ(request.r_values.front(), 0u);
+            EXPECT_EQ(request.r_values.back(), 520u);
+        }
         const auto spy = PlanCpuRevisionExecutionSpy(
             matrix, plan.argv, CpuRevisionProducer::DeletionSurvival,
             RevisionRunMode::Toy);

@@ -1600,6 +1600,18 @@ if(BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_run_table9_sweep
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME RunDeletionSurvival
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_run_deletion_survival
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME SummarizeDeletionSurvival
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_summarize_deletion_survival
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME DblpTrigramStats
+             COMMAND ${Python3_EXECUTABLE} -m unittest -v
+                     tests.scripts.test_dblp_trigram_stats
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME SummarizeTable9Sweep
              COMMAND ${Python3_EXECUTABLE} -m unittest -v
                      tests.scripts.test_summarize_table9_sweep

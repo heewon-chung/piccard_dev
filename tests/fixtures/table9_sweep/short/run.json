@@ -4,7 +4,8 @@
  "dirty_allowed": false,
  "provenance": {
   "threads": 16,
-  "seed": 20260729
+  "seed": 20260729,
+  "matrix_sha256": "da2bdfacd38829d01aa51994e5a0205cdc859126a587094f8d3a03d689d62c60"
  },
  "cells": [
   {

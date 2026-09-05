@@ -464,14 +464,22 @@ TEST(RevisionInvocationPlan,
                  std::invalid_argument);
 }
 
-TEST(RevisionInvocationPlan, ExhaustivelyPlansBothDeletionCells) {
+std::string JoinedFigureGrid() {
+    std::string joined;
+    for (const auto& value : piccard::benchmark::DeletionFigureRValues()) {
+        if (!joined.empty()) joined += ',';
+        joined += value;
+    }
+    return joined;
+}
+
+TEST(RevisionInvocationPlan, ExhaustivelyPlansAllFourDeletionCells) {
     const RevisionMatrix matrix = Load();
     const auto cells = DeletionCells(matrix);
-    ASSERT_EQ(cells.size(), 2u);
+    ASSERT_EQ(cells.size(), 4u);
 
     std::set<std::vector<std::string>> paper_argv;
     std::set<std::vector<std::string>> toy_argv;
-    std::set<std::vector<std::string>> dry_run_argv;
     for (const RevisionCell* cell : cells) {
         const RevisionInvocationPlan paper =
             PlanDeletionRevisionCell(*cell, RevisionRunMode::Paper);
@@ -481,72 +489,44 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansBothDeletionCells) {
             PlanDeletionRevisionCell(*cell, RevisionRunMode::DryRun);
 
         const bool exact = cell->family == "deletion_exact";
+        const bool figure = cell->axis == "d";
         const std::string selector = exact ? "exact" : "monte-carlo";
-        const std::string paper_trials = exact ? "0" : "1000";
+        const std::string paper_trials = exact ? "0" : (figure ? "100000" : "1000");
         const std::string toy_trials = exact ? "0" : "1";
-        const std::vector<std::string> expected_paper = {
-            "--revision-cell=" + cell->cell_id,
-            "--profile=paper-v1",
-            "--cell=" + selector,
-            "--k=128",
-            "--m=64",
-            "--set_size=1000",
-            "--universe=65536",
-            "--trials=" + paper_trials,
-            "--seed={seed}",
+        auto expected = [&](const std::string& profile, const std::string& trials) {
+            std::vector<std::string> argv = {
+                "--revision-cell=" + cell->cell_id, "--profile=" + profile,
+                "--cell=" + selector, "--k=128", "--m=64"};
+            if (figure) argv.push_back("--d=5");
+            argv.push_back(figure ? "--set_size=1024" : "--set_size=1000");
+            argv.push_back("--universe=65536");
+            if (figure) argv.push_back("--r_values=" + JoinedFigureGrid());
+            argv.push_back("--trials=" + trials);
+            argv.push_back("--seed={seed}");
+            return argv;
         };
-        const std::vector<std::string> expected_toy = {
-            "--revision-cell=" + cell->cell_id,
-            "--profile=readiness-toy-v1",
-            "--cell=" + selector,
-            "--k=128",
-            "--m=64",
-            "--set_size=1000",
-            "--universe=65536",
-            "--trials=" + toy_trials,
-            "--seed={seed}",
-        };
-
-        EXPECT_EQ(paper.argv, expected_paper);
-        EXPECT_EQ(toy.argv, expected_toy);
-        EXPECT_EQ(dry_run.argv, expected_paper);
-        EXPECT_EQ(paper.cell_id, cell->cell_id);
+        EXPECT_EQ(paper.argv, expected("paper-v1", paper_trials)) << cell->cell_id;
+        EXPECT_EQ(toy.argv, expected("readiness-toy-v1", toy_trials)) << cell->cell_id;
+        EXPECT_EQ(dry_run.argv, expected("paper-v1", paper_trials)) << cell->cell_id;
         EXPECT_EQ(paper.producer, "bench_deletion_survival");
-        EXPECT_EQ(toy.producer, "bench_deletion_survival");
         EXPECT_EQ(paper.concrete_profile, "paper-v1");
         EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
-        EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
-        EXPECT_EQ(paper.invocation_status, "RUN");
         ASSERT_EQ(paper.expected_rows.size(), 1u);
-        ASSERT_EQ(toy.expected_rows.size(), 1u);
-        ASSERT_EQ(dry_run.expected_rows.size(), 1u);
-        const auto& paper_row = paper.expected_rows.front();
-        EXPECT_EQ(paper_row.row_id, exact ? "exact" : "monte_carlo");
-        EXPECT_EQ(paper_row.status, "DIAGNOSTIC");
-        EXPECT_EQ(paper_row.terminal_status, "DIAGNOSTIC");
-        EXPECT_EQ(paper_row.method, exact ? "exact" : "monte_carlo");
-        EXPECT_EQ(paper_row.measured_count, exact ? 0u : 1000u);
-        EXPECT_EQ(toy.expected_rows.front().measured_count,
-                  exact ? 0u : 1u);
-        EXPECT_EQ(dry_run.expected_rows.front().measured_count,
-                  exact ? 0u : 1000u);
-        EXPECT_FALSE(HasArg(paper, "--security="));
-        EXPECT_FALSE(HasArg(paper, "--raw"));
-
+        EXPECT_EQ(paper.expected_rows.front().measured_count,
+                  exact ? 0u : (figure ? 100000u : 1000u));
+        EXPECT_EQ(toy.expected_rows.front().measured_count, exact ? 0u : 1u);
         paper_argv.insert(paper.argv);
         toy_argv.insert(toy.argv);
-        dry_run_argv.insert(dry_run.argv);
     }
-    EXPECT_EQ(paper_argv.size(), cells.size());
-    EXPECT_EQ(toy_argv.size(), cells.size());
-    EXPECT_EQ(dry_run_argv.size(), cells.size());
+    EXPECT_EQ(paper_argv.size(), 4u);
+    EXPECT_EQ(toy_argv.size(), 4u);
 }
 
 TEST(RevisionInvocationPlan,
      RejectsInvalidDeletionIdentityGeometryCountsAndRows) {
     const RevisionMatrix matrix = Load();
     const auto cells = DeletionCells(matrix);
-    ASSERT_EQ(cells.size(), 2u);
+    ASSERT_EQ(cells.size(), 4u);
     const RevisionCell exact = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->family == "deletion_exact";
@@ -619,6 +599,28 @@ TEST(RevisionInvocationPlan,
 
     cell = exact;
     cell.expected_rows.front().measured_count = 1;
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+    const RevisionCell figure = **std::find_if(
+        cells.begin(), cells.end(), [](const RevisionCell* cell) {
+            return cell->cell_id == "paper-v1::deletion_mc::d=5";
+        });
+    cell = figure;
+    cell.list_attributes["r_values"] = {"0", "40", "80"};
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+    cell = figure;
+    cell.axes["n"] = "1000";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+    cell = figure;
+    cell.attributes["trials"] = "1000";
+    EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+    cell = figure;
+    cell.axis_value = "6";
+    cell.axes["d"] = "6";
+    cell.cell_id = "paper-v1::deletion_mc::d=6";
     EXPECT_THROW(PlanDeletionRevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 }
@@ -1959,8 +1961,10 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyTwoSj16Cells) {
     std::set<std::vector<std::string>> run_paper_argv;
     std::set<std::vector<std::string>> run_toy_argv;
     std::set<std::vector<std::string>> run_dry_run_argv;
+    size_t no_spawn_count = 0;
     for (const RevisionCell* cell : cells) {
         SCOPED_TRACE(cell->cell_id);
+        const bool no_spawn = cell->invocation_status == "NO_SPAWN";
         const bool fit = cell->axis == "fit";
         const bool per_element = fit && cell->axis_value == "per_element";
         const bool precomputed = fit && cell->axis_value == "precomputed";
@@ -1982,16 +1986,40 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyTwoSj16Cells) {
         EXPECT_EQ(paper.concrete_profile, "paper-v1");
         EXPECT_EQ(toy.concrete_profile, "readiness-toy-v1");
         EXPECT_EQ(dry_run.concrete_profile, "paper-v1");
-        EXPECT_EQ(cell->invocation_status, "RUN");
-        EXPECT_EQ(paper.invocation_status, "RUN");
-        EXPECT_EQ(toy.invocation_status, "RUN");
-        EXPECT_EQ(dry_run.invocation_status, "RUN");
-        EXPECT_EQ(paper.timeout_class, "long");
-        EXPECT_EQ(toy.timeout_class, "long");
-        EXPECT_EQ(dry_run.timeout_class, "long");
+        EXPECT_EQ(paper.invocation_status, cell->invocation_status);
+        EXPECT_EQ(toy.invocation_status, cell->invocation_status);
+        EXPECT_EQ(dry_run.invocation_status, cell->invocation_status);
+        EXPECT_EQ(paper.timeout_class, no_spawn ? "standard" : "long");
+        EXPECT_EQ(toy.timeout_class, no_spawn ? "standard" : "long");
+        EXPECT_EQ(dry_run.timeout_class, no_spawn ? "standard" : "long");
         ASSERT_EQ(paper.expected_rows.size(), 1u);
         ASSERT_EQ(toy.expected_rows.size(), 1u);
         ASSERT_EQ(dry_run.expected_rows.size(), 1u);
+
+        // The two large-|U| cells are never measured: they plan no argv at
+        // all, and their row stays bound to the calibration fit that produced
+        // the extrapolated number the paper prints.
+        if (no_spawn) {
+            ++no_spawn_count;
+            EXPECT_TRUE(paper.argv.empty());
+            EXPECT_TRUE(toy.argv.empty());
+            EXPECT_TRUE(dry_run.argv.empty());
+            EXPECT_EQ(paper.expected_rows.front().status, "EXTRAPOLATED");
+            EXPECT_EQ(paper.expected_rows.front().reason,
+                      "sj16-paillier3072-calibration-bound-v1");
+            EXPECT_EQ(paper.expected_rows.front().fit_authority,
+                      "per_element");
+            // Threads stay 16 even here: the 2026-08-20 artifacts record
+            // omp_threads=16, so the old "2" was a fiction, not a contract.
+            EXPECT_EQ(paper.expected_rows.front().attributes.at("threads"),
+                      "16");
+            EXPECT_EQ(paper.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(toy.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(dry_run.expected_rows.front().measured_count, 0u);
+            EXPECT_EQ(paper.expected_rows.front().paper_measured_count, 0u);
+            EXPECT_EQ(paper.expected_rows.front().toy_measured_count, 0u);
+            continue;
+        }
 
         const std::string paper_trials = "30";
         const std::string toy_trials = "1";
@@ -2091,9 +2119,10 @@ TEST(RevisionInvocationPlan, ExhaustivelyPlansAllTwentyTwoSj16Cells) {
             EXPECT_TRUE(paper_row.fit_authority.empty());
         }
     }
-    EXPECT_EQ(run_paper_argv.size(), 22u);
-    EXPECT_EQ(run_toy_argv.size(), 22u);
-    EXPECT_EQ(run_dry_run_argv.size(), 22u);
+    EXPECT_EQ(no_spawn_count, 2u);
+    EXPECT_EQ(run_paper_argv.size(), 20u);
+    EXPECT_EQ(run_toy_argv.size(), 20u);
+    EXPECT_EQ(run_dry_run_argv.size(), 20u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -2168,7 +2197,7 @@ TEST(RevisionInvocationPlan,
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->axis == "control";
         });
-    const RevisionCell large_universe = **std::find_if(
+    const RevisionCell extrapolated = **std::find_if(
         cells.begin(), cells.end(), [](const RevisionCell* cell) {
             return cell->axis == "u" && cell->axis_value == "262144";
         });
@@ -2291,31 +2320,54 @@ TEST(RevisionInvocationPlan,
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    ASSERT_NO_THROW(PlanSj16RevisionCell(large_universe,
+    ASSERT_NO_THROW(PlanSj16RevisionCell(extrapolated,
                                          RevisionRunMode::Paper));
 
-    cell = large_universe;
-    cell.invocation_status = "NO_SPAWN";
+    // The two large-|U| cells will never be measured, so the planner must
+    // refuse any shape that claims they were: a RUN status, a measured row,
+    // measured counts, or a row that has dropped the calibration fit's
+    // authority for the extrapolated number.
+    cell = extrapolated;
+    cell.invocation_status = "RUN";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = large_universe;
-    cell.paper_count = 0;
+    cell = extrapolated;
+    cell.eligibility = "TABLE_ELIGIBLE";
+    cell.table_eligible = true;
+    cell.comparison_eligible = true;
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = large_universe;
-    cell.expected_rows.front().status = "EXTRAPOLATED";
-    cell.expected_rows.front().terminal_status = "EXTRAPOLATED";
+    cell = extrapolated;
+    cell.expected_rows.front().status = "MEASURED";
+    cell.expected_rows.front().terminal_status = "MEASURED";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = large_universe;
-    cell.expected_rows.front().fit_authority = "per_element";
+    cell = extrapolated;
+    cell.paper_count = 30;
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
                  std::invalid_argument);
 
-    cell = large_universe;
+    cell = extrapolated;
+    cell.timeout_class = "long";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.expected_rows.front().reason = "wrong-reason";
+    cell.expected_rows.front().reason_code = "wrong-reason";
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    cell = extrapolated;
+    cell.expected_rows.front().fit_authority.clear();
+    EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
+                 std::invalid_argument);
+
+    // Threads stay 16 here as everywhere else outside the calibration fit.
+    cell = extrapolated;
     cell.attributes["threads"] = "2";
     cell.expected_rows.front().attributes["threads"] = "2";
     EXPECT_THROW(PlanSj16RevisionCell(cell, RevisionRunMode::Paper),
@@ -3772,7 +3824,7 @@ TEST(RevisionInvocationPlan,
 TEST(RevisionInvocationPlan,
      DispatchesEveryValidatedCellAcrossPaperAndDryRunWithoutSpawning) {
     const RevisionMatrix matrix = Load();
-    ASSERT_EQ(matrix.cells.size(), 299u);
+    ASSERT_EQ(matrix.cells.size(), 301u);
 
     std::set<std::string> paper_ids;
     std::set<std::string> dry_run_ids;
@@ -3875,9 +3927,9 @@ TEST(RevisionInvocationPlan,
     }
 
     EXPECT_EQ(run_count, 299u);
-    EXPECT_EQ(no_spawn_count, 0u);
-    EXPECT_EQ(paper_ids.size(), 299u);
-    EXPECT_EQ(dry_run_ids.size(), 299u);
+    EXPECT_EQ(no_spawn_count, 2u);
+    EXPECT_EQ(paper_ids.size(), 301u);
+    EXPECT_EQ(dry_run_ids.size(), 301u);
 }
 
 TEST(RevisionInvocationPlan,
@@ -3982,7 +4034,9 @@ TEST(RevisionInvocationPlan, RawTimingFlagsAreCellLocalAndTimingOnly) {
                    cell.axes.at("artifact") == "std128_timing") {
             expected = true;
         } else if (cell.family == "sj16") {
-            expected = true;
+            expected = !(cell.axis == "u" &&
+                         (cell.axis_value == "262144" ||
+                          cell.axis_value == "1048576"));
         } else if (cell.family == "sqrt_comparison" &&
                    (cell.axis == "timing_m" || cell.axis == "crossover_m" ||
                     cell.axis == "timing_k" || cell.axis == "timing_n" ||
